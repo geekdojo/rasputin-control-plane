@@ -3,18 +3,20 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
-// Key-bound transfer from the run's side: which route each node is handed,
-// what the credential says, and what the feed says about it.
+// Node-listener transfer from the run's side: which destination each node is
+// handed, which node is refused, and what the feed says about it.
 
 // ledgerLines is the job's feed: every Log line, level and message.
 func (h *runHarness) ledgerLines(t *testing.T, jobID string) []proto.LogEventData {
@@ -73,60 +75,103 @@ func twoNodeApps() ([]*apps.App, fakeTiles) {
 	return list, tiles
 }
 
-// TC-514-11: the fan-out routes each node by its own answer, asked once.
+// TC-514-11: the fan-out routes each node by its own answer, asked once,
+// and every node it routes is handed the node listener.
 func TestFanOutRoutesEachNode(t *testing.T) {
 	list, tiles := twoNodeApps()
-	reader := (&fakeRouteNodes{}).capable(runNodeID, agentKeys()) // computeNodeID predates the capability
+	reader := &fakeRouteNodes{} // both nodes capable with an agent key
 	r := runWithApps(t, runHarnessOpts{apps: list, tiles: tiles, computeAgent: true, routeNodes: reader})
 	if r.job.Status != jobs.StatusSucceeded {
 		t.Fatalf("job failed: %s", r.job.Error)
 	}
 	auth := r.h.ingest.Authority()
-	check := func(a *fakeBackupAgent, wantDest string, wantBound bool) {
-		t.Helper()
+	for _, a := range []*fakeBackupAgent{r.h.agent, r.h.compute} {
 		recs := a.transferRecords()
 		if len(recs) != 2 {
 			t.Fatalf("%s: %d transfer commands, want 2", a.nodeID, len(recs))
 		}
 		for _, tr := range recs {
-			if tr.cmd.Destination != wantDest {
-				t.Errorf("%s: destination %s, want %s", a.nodeID, tr.cmd.Destination, wantDest)
+			if want := r.h.nodeURL + backupxfer.IngestPathPrefix; tr.cmd.Destination != want {
+				t.Errorf("%s: destination %s, want %s", a.nodeID, tr.cmd.Destination, want)
 			}
 			g, err := auth.Verify(tr.cmd.Credential)
 			if err != nil {
 				t.Fatalf("%s: credential: %v", a.nodeID, err)
 			}
-			if g.KeyBound != wantBound {
-				t.Errorf("%s: credential KeyBound = %v, want %v", a.nodeID, g.KeyBound, wantBound)
+			if g.NodeID != a.nodeID {
+				t.Errorf("%s: credential issued to %s", a.nodeID, g.NodeID)
 			}
 			if !tr.ack.OK {
 				t.Errorf("%s: %s did not land: %+v", a.nodeID, tr.cmd.Member, tr.ack)
 			}
 		}
 	}
-	check(r.h.agent, r.h.nodeURL+backupxfer.IngestPathPrefix, true)
-	check(r.h.compute, r.h.baseURL+backupxfer.IngestPathPrefix, false)
-
 	for _, n := range []string{runNodeID, computeNodeID} {
 		if c := reader.getCalls(n); c != 1 {
 			t.Errorf("the router read %s %d times in the pass, want 1", n, c)
 		}
+		if c := countLines(r.h.ledgerLines(t, r.jobID), "info", "node "+n+" uploads over its node key"); c != 1 {
+			t.Errorf("node-key route lines for %s: %d, want 1", n, c)
+		}
 	}
+}
+
+// TC-516-05: a mixed fleet. The capable, keyed node lands its volume over its
+// key; the node whose agent predates key-bound transfer has its volume FAILED
+// by name before anything is asked of it, so its app is never stopped.
+func TestFanOutRefusesANodeThatPredatesKeyBoundTransfer(t *testing.T) {
+	list := []*apps.App{
+		testApp("app-vw", "vaultwarden", runNodeID, "vaultwarden"),
+		testApp("app-im", "immich", computeNodeID, "immich"),
+	}
+	tiles := fakeTiles{
+		"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop)),
+		"immich":      testTile("immich", vol("immich-upload", tileschema.BackupState, tileschema.QuiesceStop)),
+	}
+	reader := (&fakeRouteNodes{}).predates(computeNodeID, "2026.09.5")
+	logger, records := logkittest.New()
+	r := runWithApps(t, runHarnessOpts{apps: list, tiles: tiles, computeAgent: true, routeNodes: reader, ingestLog: logger})
+
+	// B: FAILED with the cause, and nothing sent to it.
+	rec := r.record(t, "immich", "immich-upload")
+	if rec.Captured || !rec.Failed || !strings.Contains(rec.Reason, "predates key-bound transfer") ||
+		!strings.Contains(rec.Reason, computeNodeID) || !strings.Contains(rec.Reason, "update the node") {
+		t.Errorf("immich-upload: %+v; want FAILED naming %s, the cause and the remedy", rec, computeNodeID)
+	}
+	r.h.compute.mu.Lock()
+	staged := len(r.h.compute.staged)
+	r.h.compute.mu.Unlock()
+	if staged != 0 {
+		t.Errorf("%d stage command(s) reached %s; its app must not be stopped", staged, computeNodeID)
+	}
+	if n := len(r.h.compute.transferRecords()); n != 0 {
+		t.Errorf("%d transfer command(s) reached %s", n, computeNodeID)
+	}
+
+	// A: landed, presented by its own key.
+	if rec := r.record(t, "vaultwarden", "vaultwarden-data"); !rec.Captured || rec.Failed {
+		t.Errorf("vaultwarden-data did not land: %+v", rec)
+	}
+	landed := records.Matching(slog.LevelInfo, "landed")
+	if len(landed) != 1 {
+		t.Fatalf("landing records = %d, want 1:\n%s", len(landed), records.Text())
+	}
+	if v, _ := logkittest.Attr(landed[0], "presenting_node"); v != runNodeID {
+		t.Errorf("presenting_node = %q, want %s", v, runNodeID)
+	}
+
+	// The feed: one error for B, one node-key line for A, no bearer line.
 	lines := r.h.ledgerLines(t, r.jobID)
+	if c := countLines(lines, "error", "node "+computeNodeID+" has no upload route", "predates key-bound transfer"); c != 1 {
+		t.Errorf("no-route error lines for %s: %d, want 1", computeNodeID, c)
+	}
 	if c := countLines(lines, "info", "node "+runNodeID+" uploads over its node key"); c != 1 {
 		t.Errorf("node-key route lines for %s: %d, want 1", runNodeID, c)
 	}
-	if c := countLines(lines, "info", "node "+computeNodeID+" uploads by bearer credential"); c != 1 {
-		t.Errorf("bearer route lines for %s: %d, want 1", computeNodeID, c)
-	}
-	if c := countLines(lines, "info", "uploads by bearer credential"); c != 1 {
-		t.Errorf("bearer route lines: %d, want 1", c)
-	}
-	if c := countLines(lines, "warn", "is not on the node-key route"); c != 1 {
-		t.Errorf("bearer warn lines: %d, want exactly 1", c)
-	}
-	if c := countLines(lines, "warn", computeNodeID, "agent predates key-bound transfer"); c != 1 {
-		t.Errorf("bearer warn line for %s naming why: %d, want 1", computeNodeID, c)
+	for _, l := range lines {
+		if strings.Contains(strings.ToLower(l.Message), "bearer") {
+			t.Errorf("a feed line mentions a bearer route: %s %q", l.Level, l.Message)
+		}
 	}
 }
 
@@ -188,9 +233,17 @@ func TestRunRefusesWithoutATransferRouter(t *testing.T) {
 
 // TC-514-14: an app restore takes its node's route, and a node with none is
 // refused before any restore verb is sent.
+// TC-516-06: that includes a node whose agent predates key-bound transfer and
+// an api with no node listener: refused with "nothing was touched" and the
+// cause, no session armed, no stop, restore or fetch sent.
 func TestRestoreAppUsesTheRoute(t *testing.T) {
-	verified := func(t *testing.T, c *restoreCase) (proto.BackupRestoreVolumeCmd, backupxfer.Grant) {
-		t.Helper()
+	t.Run("capable and keyed: the node listener", func(t *testing.T) {
+		c := newRestoreCase(t, runHarnessOpts{})
+		c.corrupt(t)
+		j, jobID := c.restore(t, c.spec())
+		if j.Status != jobs.StatusSucceeded {
+			t.Fatalf("restore job %s: %s", j.Status, j.Error)
+		}
 		calls := c.h.agent.restoreCalls()
 		if len(calls) != 1 || !calls[0].ack.OK {
 			t.Fatalf("restore calls: %+v", calls)
@@ -199,61 +252,58 @@ func TestRestoreAppUsesTheRoute(t *testing.T) {
 		if err != nil {
 			t.Fatalf("credential: %v", err)
 		}
-		return calls[0].cmd, g
-	}
-
-	t.Run("capable and keyed: the node listener, key-bound", func(t *testing.T) {
-		reader := (&fakeRouteNodes{}).capable(runNodeID, agentKeys())
-		c := newRestoreCase(t, runHarnessOpts{routeNodes: reader})
-		c.corrupt(t)
-		if j, _ := c.restore(t, c.spec()); j.Status != jobs.StatusSucceeded {
-			t.Fatalf("restore job %s: %s", j.Status, j.Error)
+		if want := c.h.nodeURL + backupxfer.EgressPathPrefix; calls[0].cmd.Source != want || g.NodeID != runNodeID {
+			t.Fatalf("source %s, grant node %s; want %s, %s", calls[0].cmd.Source, g.NodeID, want, runNodeID)
 		}
-		cmd, g := verified(t, c)
-		if cmd.Source != c.h.nodeURL+backupxfer.EgressPathPrefix || !g.KeyBound {
-			t.Fatalf("source %s, KeyBound %v; want %s, true", cmd.Source, g.KeyBound, c.h.nodeURL+backupxfer.EgressPathPrefix)
-		}
-	})
-	t.Run("not capable: the public base, unbound", func(t *testing.T) {
-		c := newRestoreCase(t, runHarnessOpts{})
-		c.corrupt(t)
-		if j, _ := c.restore(t, c.spec()); j.Status != jobs.StatusSucceeded {
-			t.Fatalf("restore job %s: %s", j.Status, j.Error)
-		}
-		cmd, g := verified(t, c)
-		if cmd.Source != c.h.baseURL+backupxfer.EgressPathPrefix || g.KeyBound {
-			t.Fatalf("source %s, KeyBound %v; want %s, false", cmd.Source, g.KeyBound, c.h.baseURL+backupxfer.EgressPathPrefix)
+		if n := countLines(c.h.ledgerLines(t, jobID), "info", "node "+runNodeID+" fetches the restore stream over its node key"); n != 1 {
+			t.Errorf("node-key fetch lines: %d, want 1", n)
 		}
 	})
 	for _, tc := range []struct {
 		name    string
-		breakIt func(*fakeRouteNodes)
+		breakIt func(*runHarness, *fakeRouteNodes)
 		want    []string
 	}{
-		{"capable with no agent key", func(f *fakeRouteNodes) {
+		{"capable with no agent key", func(_ *runHarness, f *fakeRouteNodes) {
 			f.capable(runNodeID, proto.NodeKeys{proto.NodeKeyCollector: "spki-collector"})
 		}, []string{"node " + runNodeID, "no registered agent key"}},
-		{"absent", func(f *fakeRouteNodes) {
+		{"absent", func(_ *runHarness, f *fakeRouteNodes) {
 			f.mu.Lock()
 			f.absent = map[string]bool{runNodeID: true}
 			f.mu.Unlock()
 		}, []string{"node " + runNodeID, "not in inventory"}},
+		{"agent predates key-bound transfer", func(_ *runHarness, f *fakeRouteNodes) {
+			f.predates(runNodeID, "2026.09.5")
+		}, []string{"node " + runNodeID, "2026.09.5", "predates key-bound transfer", "update the node"}},
+		{"api with no node listener", func(h *runHarness, f *fakeRouteNodes) {
+			none, err := NewTransferRouter(f, "")
+			if err != nil {
+				panic(err)
+			}
+			*h.router = *none // the router the restore was wired with
+		}, []string{"node " + runNodeID, "RASPUTIN_HTTPS_ADDR"}},
 	} {
 		t.Run("refused: "+tc.name, func(t *testing.T) {
 			reader := &fakeRouteNodes{}
-			c := newRestoreCase(t, runHarnessOpts{routeNodes: reader}) // backed up by bearer
-			tc.breakIt(reader)
-			j, _ := c.restore(t, c.spec())
+			c := newRestoreCase(t, runHarnessOpts{routeNodes: reader}) // backed up over the node key
+			tc.breakIt(c.h, reader)
+			j, jobID := c.restore(t, c.spec())
 			if j.Status != jobs.StatusFailed {
 				t.Fatalf("job: %s %s", j.Status, j.Error)
 			}
-			for _, sub := range tc.want {
+			for _, sub := range append([]string{"nothing was touched"}, tc.want...) {
 				if !strings.Contains(j.Error, sub) {
 					t.Errorf("error %q lacks %q", j.Error, sub)
 				}
 			}
 			if n := len(c.h.agent.restoreCalls()); n != 0 {
 				t.Fatalf("%d restore verb(s) were sent", n)
+			}
+			if stops, starts := c.h.agent.quiesceCounts(); stops != 0 || starts != 0 {
+				t.Errorf("stops=%d starts=%d; the app must not be touched", stops, starts)
+			}
+			if _, armed := c.h.sessions.Lookup(jobID, c.genID, proto.BackupMemberPath("vaultwarden", "vaultwarden-data")); armed {
+				t.Error("a restore session was armed for the refused job")
 			}
 		})
 	}

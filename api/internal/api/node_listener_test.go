@@ -2,17 +2,29 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"log/slog"
+	"math/big"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -155,14 +167,102 @@ func TestNodeListener_IdentityIsTheKeysOwner(t *testing.T) {
 	}
 }
 
-// A collector deployed before node keys existed keeps working: its mesh chain
-// is verified explicitly, since RequireAnyClientCert verifies nothing.
-func TestNodeListener_StillAdmitsAMeshChainClient(t *testing.T) {
-	s := newKeyIngestServer(t, "c02")
-	inv, _ := realRegistry(t, s, "c02")
-	it := startIngress(t, s, inv.Registry(), "c02")
-	if code, err := postIngest(it.keepAliveClient("c02"), it.srv.URL); err != nil || code != http.StatusServiceUnavailable {
-		t.Fatalf("a mesh-chain collector = (%d, %v), want 503 backend-not-ready", code, err)
+// meshChainClient is a client certificate the Mesh CA signed, for node, with
+// a fresh key nobody registered: the shape of a collector leaf the api minted
+// before node keys. Built with crypto/x509 directly; nothing in the product
+// mints one any more.
+func meshChainClient(t *testing.T, ca *mesh.MeshCA, node string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: node},
+		DNSNames:     []string{node},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der, ca.Cert.Raw}, PrivateKey: key, Leaf: leaf}
+}
+
+// TC-516-09: the node listener admits registered keys only. A client
+// certificate the Mesh CA signed, naming an admitted node, is refused at the
+// handshake with a structured WARN; that node's registered collector key, on
+// the same listener, pushes metrics that reach the backend as that node.
+func TestNodeListener_RefusesAMeshChainClient(t *testing.T) {
+	var gotExtraLabel atomic.Value
+	stubVM := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotExtraLabel.Store(r.URL.Query().Get("extra_label"))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(stubVM.Close)
+	s := newIngestServer(t, obs.NewStatus(fakeVMSup{vmBase: stubVM.URL}, nil, nil), "c02")
+	logger, records := logkittest.New()
+	s.log = logger
+	it := startIngress(t, s, s.inv.Registry(), "c02")
+
+	// The Mesh-chain client: refused at the handshake.
+	chain := meshChainClient(t, it.ca, "c02")
+	raw, err := net.Dial("tcp", strings.TrimPrefix(it.srv.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = raw.Close() })
+	conn := tls.Client(raw, it.keyClientTLS(chain))
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	err = conn.Handshake()
+	if err == nil {
+		// TLS 1.3 reports the server's refusal of a client certificate on
+		// the first read, not in the handshake.
+		_, err = conn.Read(make([]byte, 1))
+	}
+	if err == nil {
+		t.Fatal("a Mesh-CA-signed client certificate with an unregistered key was admitted")
+	}
+	warns := records.Matching(slog.LevelWarn, "refusing a handshake")
+	if len(warns) != 1 {
+		t.Fatalf("handshake refusal records = %d, want 1:\n%s", len(warns), records.Text())
+	}
+	hash, err := proto.NodeKeySPKIHash(chain.Leaf.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFields(t, warns[0], map[string]string{
+		"cause":       "the presented key is not registered to any node",
+		"spki":        proto.ShortFingerprint(strings.TrimPrefix(hash, proto.BusPinPrefix)),
+		"remote_addr": raw.LocalAddr().String(),
+	})
+
+	// The node's registered collector key: admitted, and served as its owner.
+	req, err := http.NewRequest(http.MethodPost, it.srv.URL+"/api/obs/ingest",
+		bytes.NewReader(remoteWriteBody(series("container_cpu_usage_seconds_total", "name", "web"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	req.Header.Set("Content-Encoding", "snappy")
+	resp, err := (&http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{TLSClientConfig: it.clientTLS("c02")}}).Do(req)
+	if err != nil {
+		t.Fatalf("the registered collector key: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("the registered collector key's push = %d, want 204 from the backend", resp.StatusCode)
+	}
+	if got, _ := gotExtraLabel.Load().(string); got != "node_id=c02" {
+		t.Errorf("the backend saw extra_label %q, want node_id=c02", got)
 	}
 }
 
@@ -229,14 +329,13 @@ func TestNodeListener_KeyPurposeIsCheckedPerRoute(t *testing.T) {
 	}
 }
 
-// With no mesh pool — the state after the legacy collectors are gone — only a
-// registered key is admitted.
-func TestIdentify_WithoutAMeshPoolOnlyKeysAreAdmitted(t *testing.T) {
+// Only a registered key is admitted.
+func TestIdentify_OnlyARegisteredKeyIsAdmitted(t *testing.T) {
 	gate := &countingLiveness{
 		live: map[string]bool{"c02": true},
 		keys: map[string]inventory.KeyOwner{},
 	}
-	c := newIngestConns(gate, nil)
+	c := newIngestConns(gate, slog.New(slog.DiscardHandler))
 	cert, hash := selfSignedClient(t, "c02")
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
@@ -244,7 +343,7 @@ func TestIdentify_WithoutAMeshPoolOnlyKeysAreAdmitted(t *testing.T) {
 	}
 	cs := &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
 	if _, err := c.identify(cs); err == nil {
-		t.Error("an unregistered key was admitted with no mesh pool")
+		t.Error("an unregistered key was admitted")
 	}
 	gate.keys[hash] = inventory.KeyOwner{NodeID: "c02", Purpose: proto.NodeKeyCollector}
 	id, err := c.identify(cs)
@@ -257,7 +356,7 @@ func TestIdentify_WithoutAMeshPoolOnlyKeysAreAdmitted(t *testing.T) {
 }
 
 func TestIdentify_RefusesWithoutACertificate(t *testing.T) {
-	c := newIngestConns(&countingLiveness{}, nil)
+	c := newIngestConns(&countingLiveness{}, slog.New(slog.DiscardHandler))
 	if _, err := c.identify(nil); err == nil {
 		t.Error("no TLS state was admitted")
 	}

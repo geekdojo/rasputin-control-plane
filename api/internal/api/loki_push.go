@@ -19,7 +19,7 @@ import (
 // whatever the payload carried, so handleObsIngest forwards the body unread
 // apart from the reserved-name check. Loki has no extra_label equivalent, so
 // the logs half is done here instead: each stream's label set is parsed,
-// node_id is replaced with the verified client leaf's CommonName, and the
+// node_id is replaced with the owner of the presented collector key, and the
 // request is re-encoded. A reserved job label is refused outright rather than
 // rewritten, because there is no node it could correctly belong to — those
 // streams come from the controlplane's own Alloy, which writes straight to

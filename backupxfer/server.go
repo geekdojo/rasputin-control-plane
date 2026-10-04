@@ -56,14 +56,12 @@ import (
 // the client dies mid-body. Connection lifetime is the lease. No grant, no
 // TTL, no renewal.
 //
-// # Two entries, one handler
+// # One entry
 //
-// ServeNode is the node listener's entry: the api authenticated the request
-// by the presenting node's registered agent key, and passes that node in.
-// ServeHTTP is the legacy bearer-only entry on the api's public listener, kept
-// for agents that predate key-bound transfer (register row E12) and deleted
-// with it. Both run serve, and CheckPresenter decides between the credential
-// and whoever presents it.
+// ServeNode is the only entry, mounted on the api's node listener: the api
+// authenticated the request by the presenting node's registered agent key,
+// and passes that node in. CheckPresenter decides between the credential and
+// the node that presents it.
 type Ingest struct {
 	auth *Authority
 	sem  chan struct{}
@@ -255,28 +253,11 @@ func (i *Ingest) OpenGeneration() (generationID, jobID string, open bool) {
 	return i.gen.id, i.gen.jobID, true
 }
 
-// PathNodeKey and PathBearer name, in every record, how the request was
-// authenticated: by the presenting node's registered agent key on the node
-// listener, or by the credential alone on the legacy route.
-const (
-	PathNodeKey = "node-key"
-	PathBearer  = "bearer"
-)
-
-// pathOf is the record's path for a key owner.
-func pathOf(keyOwner string) string {
-	if keyOwner == "" {
-		return PathBearer
-	}
-	return PathNodeKey
-}
-
 // LogGrant writes one record about grant g as presented by keyOwner. It is
 // the one place a record carries a grant's fields, so the ingest and the
 // api's restore endpoint write the same ones: which grant (its nonce, never
-// the credential), which run, which member, the node it was issued to, how
-// the request was authenticated (path) and whose key presented it ("" on the
-// bearer path) — then extra.
+// the credential), which run, which member, the node it was issued to and
+// the node whose registered agent key presented it — then extra.
 //
 // The grant's fields are the api's own: Verify checks the signature before
 // it decodes them, and Mint refuses any that are not their shape, so a
@@ -296,26 +277,19 @@ func LogGrant(ctx context.Context, l *slog.Logger, level slog.Level, msg string,
 	attrs := []any{
 		"grant_id", g.ID(), "job_id", g.JobID, "generation", g.Generation,
 		"member", g.Member, "grant_node", g.NodeID,
-		"path", pathOf(keyOwner), "presenting_node", keyOwner,
+		"presenting_node", keyOwner,
 	}
 	l.Log(ctx, level, msg, append(attrs, extra...)...)
-}
-
-// ServeHTTP lands one member on the legacy bearer-only route: nothing but the
-// credential is presented, so a key-bound credential is refused here.
-func (i *Ingest) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	i.serve(w, r, "")
 }
 
 // ServeNode lands one member on the node listener. keyOwner is the node whose
 // registered agent key the caller authenticated the request with; the
 // credential must have been issued to that node. An empty owner is a wiring
-// fault in the caller — it would turn this entry into the bearer route — and
-// is refused before a slot is taken: fail closed.
+// fault in the caller and is refused before a slot is taken: fail closed.
 func (i *Ingest) ServeNode(w http.ResponseWriter, r *http.Request, keyOwner string) {
 	if strings.TrimSpace(keyOwner) == "" {
 		i.log.ErrorContext(r.Context(), "backup ingest: the node listener passed no key owner; refusing (an api wiring fault)",
-			"path", PathNodeKey, "code", CodeCredentialInvalid)
+			"code", CodeCredentialInvalid)
 		refuse(w, http.StatusInternalServerError, CodeCredentialInvalid, "the api could not tell which node presented this request")
 		return
 	}

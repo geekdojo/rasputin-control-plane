@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -290,7 +289,6 @@ type egressRig struct {
 	auth     *backupxfer.Authority
 	sessions *RestoreSessions
 	egress   *RestoreEgress
-	srv      *httptest.Server
 	mount    string
 	key      testKeypair
 	genID    string
@@ -312,10 +310,6 @@ func newEgressRig(t *testing.T) *egressRig {
 	sessions := NewRestoreSessions()
 	logger, logs := logkittest.New()
 	egress := NewRestoreEgress(auth, sessions, logger)
-	mux := http.NewServeMux()
-	mux.Handle("GET "+backupxfer.EgressPathPrefix, egress)
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
 	nodeSrv := httptest.NewServer(standInNodeListener(nil, egress))
 	t.Cleanup(nodeSrv.Close)
 	key := newTestKeypair(t)
@@ -334,7 +328,7 @@ func newEgressRig(t *testing.T) *egressRig {
 	if err := os.WriteFile(p, sealed.Bytes(), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return &egressRig{t: t, auth: auth, sessions: sessions, egress: egress, srv: srv, mount: mount, key: key,
+	return &egressRig{t: t, auth: auth, sessions: sessions, egress: egress, mount: mount, key: key,
 		genID: genID, member: member, plain: plain, sealed: sealed.Bytes(), logs: logs, nodeSrv: nodeSrv}
 }
 
@@ -357,9 +351,11 @@ func (r *egressRig) arm(sealedDigest string) string {
 	return id
 }
 
+// fetch fetches on the node-listener entry as the node every grant in these
+// tests is issued to (n-compute, the node arm binds).
 func (r *egressRig) fetch(cred string) ([]byte, *backupxfer.Stream, error) {
 	r.t.Helper()
-	return r.fetchFrom(r.srv.URL, backupxfer.HTTPOptions{}, cred)
+	return r.fetchAs("n-compute", cred)
 }
 
 // fetchAs fetches on the node-listener entry, presented by owner's key.

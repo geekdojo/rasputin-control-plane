@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"slices"
 	"strings"
 	"time"
@@ -21,9 +20,9 @@ import (
 //   - obs.collectors.reconcile  — periodic (scheduler). Decides which nodes
 //     should gain or lose a collector and submits per-node jobs. Modeled on
 //     mesh.reconcile's converge_enrollment: fast, idempotent, job-history-driven.
-//   - obs.collectors.deploy_node   — render the node's collector compose (minting
-//     a client leaf only for a legacy node with no registered collector key)
-//     and docker.deploy it via the existing agent command.
+//   - obs.collectors.deploy_node   — render the node's collector compose,
+//     presenting its registered collector key, and docker.deploy it via the
+//     existing agent command.
 //   - obs.collectors.teardown_node — docker.stop the collector.
 //
 // The reconcile runs whether obs is on or off: on ⇒ converge collectors ONTO
@@ -78,28 +77,19 @@ const (
 // The firewall (OpenWrt, no Docker) is deliberately excluded (§3.7 / §3.10).
 var collectorRoles = []proto.NodeRole{proto.RoleCompute, proto.RoleStorage}
 
-// MintCollectorLeafFn mints (idempotently, with near-expiry renewal) the
-// per-node client-auth leaf under the mesh CA and returns the leaf cert + key
-// PEM. Used only for a legacy node. Injected so the obs package stays
-// decoupled from mesh — main wires this to mesh.MintLeafToDisk. The CA the
-// collector trusts is not part of it: that is CollectorDeployDeps.MeshCAPEM,
-// one value for every shape.
-type MintCollectorLeafFn func(nodeID string) (leafCertPEM, leafKeyPEM string, err error)
-
 // CollectorNodeSpec is the spec body for the per-node deploy/teardown jobs.
 type CollectorNodeSpec struct {
 	NodeID string `json:"nodeId"`
 	// CollectorKey and TrustFingerprint record what the collector this job
 	// deploys is meant to carry: the SPKI hash of the node's registered
-	// collector key (empty for the legacy mesh-leaf shape) and a fingerprint
-	// of what it trusts the api by.
+	// collector key and a fingerprint of what it trusts the api by.
 	//
 	// They are in the SPEC rather than the result because the reconcile reads
 	// them back on every tick, and a job's spec is already in hand there while
 	// its step results are separate rows. A succeeded job therefore says what
 	// the node is carrying, without a query per job.
 	//
-	// The deploy step derives the shape itself, from inventory, rather than
+	// The deploy step derives the key itself, from inventory, rather than
 	// taking it from here: a key that changed between submit and run must not
 	// be deployed stale. When it does differ, the next reconcile sees the
 	// recorded pair is no longer current and redeploys — one tick later, not
@@ -122,19 +112,22 @@ type CollectorReconcileDeps struct {
 	Deploy CollectorDeployDeps
 }
 
+// errNoInventory is wantFor's answer when the reconcile was given no
+// inventory to read a node's keys from.
+var errNoInventory = errors.New("no inventory to read its registered keys from")
+
 // wantFor is what node nodeID's collector should be carrying now. A node whose
-// keys cannot be read reads as legacy, which is the shape that needs no key.
-func (d CollectorReconcileDeps) wantFor(ctx context.Context, nodeID string) collectorWant {
-	var keys proto.NodeKeys
-	if d.Inv != nil {
-		k, err := d.Inv.NodeKeys(ctx, nodeID)
-		if err != nil {
-			log.Printf("obs collectors: read node keys for %s: %v (treating it as a legacy collector)", nodeID, err)
-		} else {
-			keys = k
-		}
+// keys cannot be read has no answer — an error, never a guess — and the
+// reconcile leaves that node as it is for the pass (ARCH-FACTS).
+func (d CollectorReconcileDeps) wantFor(ctx context.Context, nodeID string) (collectorWant, error) {
+	if d.Inv == nil {
+		return collectorWant{}, errNoInventory
 	}
-	return d.Deploy.wantFor(keys)
+	keys, err := d.Inv.NodeKeys(ctx, nodeID)
+	if err != nil {
+		return collectorWant{}, err
+	}
+	return d.Deploy.wantFor(keys), nil
 }
 
 // CollectorReconcileWorkflow converges the collector fleet to match the
@@ -223,17 +216,20 @@ type collectorActions struct {
 //
 // want is what the node's collector should present and trust; a deploy whose
 // record no longer matches it is redeployed at once rather than waiting out
-// the self-heal interval (geekdojo-brain#515).
+// the self-heal interval (geekdojo-brain#515). When want has no answer for a
+// node (ok false: its keys could not be read), obs-on leaves that node alone
+// for the pass, counted under keys_unreadable: deciding a deploy without
+// knowing which key the collector presents would act on a guess.
 //
 // admitted is inventory.Registry.Admitted: a collector is the node's HTTPS
 // credential, so it follows the node's join token, not merely its inventory
 // row. A node whose token was revoked keeps its row (the revoke cascade
 // leaves it in inventory, geekdojo-brain#575) but is no longer admitted by
-// the ingress, so minting it a fresh leaf and deploying a collector it cannot
-// push through would be work with no possible outcome. Deciding it from the
+// the ingress, so deploying a collector it cannot push through would be work
+// with no possible outcome. Deciding it from the
 // registry is the same fact the ingress enforces, read from the same place
 // (geekdojo-brain#585).
-func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[string]*nodeJobState, on bool, now time.Time, admitted func(nodeID string) bool, want func(nodeID string) collectorWant) collectorActions {
+func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[string]*nodeJobState, on bool, now time.Time, admitted func(nodeID string) bool, want func(nodeID string) (collectorWant, bool)) collectorActions {
 	act := collectorActions{skipped: map[string]int{}}
 	for _, n := range nodes {
 		if !slices.Contains(collectorRoles, n.Role) {
@@ -255,12 +251,15 @@ func decideCollectorActions(nodes []*proto.Node, deployState, teardownState map[
 			(tear == nil || dep.lastSuccess.After(tear.lastSuccess))
 
 		if on {
+			w, known := want(n.ID)
 			switch {
+			case !known:
+				act.skipped["keys_unreadable"]++
 			case !online:
 				act.skipped["offline"]++
 			case dep != nil && dep.inflight:
 				act.skipped["inflight"]++
-			case hasCollector && !dep.deployed.matches(want(n.ID)):
+			case hasCollector && !dep.deployed.matches(w):
 				// The node's collector is carrying a key or a trust anchor
 				// that is no longer the current one — it registered a new key
 				// after a reflash, or the control plane's anchor changed.
@@ -324,15 +323,32 @@ func collectorConverge(d CollectorReconcileDeps) jobs.DoFn {
 		if err != nil {
 			return nil, fmt.Errorf("list teardown jobs: %w", err)
 		}
+		// Each node's want is read once per pass; a node whose keys cannot
+		// be read gets one warn line naming it and the error, and is left
+		// alone.
+		wants := map[string]collectorWant{}
+		want := func(nodeID string) (collectorWant, bool) {
+			if w, ok := wants[nodeID]; ok {
+				return w, true
+			}
+			w, err := d.wantFor(sc.Ctx, nodeID)
+			if err != nil {
+				sc.Log("warn", fmt.Sprintf("converge: cannot read node %s's registered keys, so its collector is left as it is this pass: %v", nodeID, err))
+				return collectorWant{}, false
+			}
+			wants[nodeID] = w
+			return w, true
+		}
 		act := decideCollectorActions(nodes,
 			scanNodeJobs(deploys), scanNodeJobs(teardowns), on, time.Now().UTC(),
-			d.Inv.Registry().Admitted,
-			func(nodeID string) collectorWant { return d.wantFor(sc.Ctx, nodeID) })
+			d.Inv.Registry().Admitted, want)
 
 		submit := func(kind, nodeID string) bool {
 			body := CollectorNodeSpec{NodeID: nodeID}
 			if kind == CollectorDeployKind {
-				w := d.wantFor(sc.Ctx, nodeID)
+				// decideCollectorActions deploys only a node whose want it
+				// read, so this is the answer it decided on.
+				w := wants[nodeID]
 				body.CollectorKey, body.TrustFingerprint = w.key, w.trust
 			}
 			spec, _ := json.Marshal(body)
@@ -372,13 +388,12 @@ func collectorConverge(d CollectorReconcileDeps) jobs.DoFn {
 // CollectorDeployDeps is what the per-node deploy workflow needs.
 type CollectorDeployDeps struct {
 	Inv            *inventory.Store
-	Mint           MintCollectorLeafFn
 	IngressBaseURL string // from DeriveIngressEndpoint (canonical hostname, not hardcoded)
 	ServerName     string
 	AlloyImage     string // optional; defaults to the pinned collector image
 	// MeshCAPEM is the CA every collector verifies the api's leaf against,
 	// by chain and under ServerName — the one source of what a collector
-	// trusts, for both shapes. Empty refuses every deploy (fail closed).
+	// trusts. Empty refuses every deploy (fail closed).
 	MeshCAPEM string
 }
 
@@ -389,17 +404,18 @@ type collectorWant struct {
 }
 
 // wantFor decides what a node's collector should be carrying right now: its
-// registered collector key (empty for a legacy node) and the Mesh CA it
-// trusts the api by. A collector recorded with any other trust fingerprint —
+// registered collector key (empty when it has none, which no deploy accepts)
+// and the Mesh CA it trusts the api by. A collector recorded with any other trust fingerprint —
 // one deployed by a release that pinned the bus certificate — no longer
 // matches, and the reconcile redeploys it.
 func (d CollectorDeployDeps) wantFor(keys proto.NodeKeys) collectorWant {
 	return collectorWant{key: keys[proto.NodeKeyCollector], trust: proto.MeshCAFingerprint([]byte(d.MeshCAPEM))}
 }
 
-// CollectorDeployWorkflow renders the node's collector compose (minting a
-// client leaf for a legacy node only) and deploys it via the existing
-// docker.deploy agent command.
+// CollectorDeployWorkflow renders the node's collector compose, presenting
+// the node's registered collector key, and deploys it via the existing
+// docker.deploy agent command. A node with no registered collector key is
+// refused by name.
 func CollectorDeployWorkflow(d CollectorDeployDeps) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: CollectorDeployKind,
@@ -419,9 +435,9 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 		// reconcile and now. Admission is the node registry's answer — a
 		// current inventory member holding a live join token — read from
 		// memory, which is the same fact the collector ingress will apply to
-		// the connection this deploy is about to create. Minting a leaf for a
-		// node the ingress would refuse is work with no possible outcome, and
-		// a no-op success beats burning the deploy timeout on an RPC that
+		// the connection this deploy is about to create. Deploying to a node
+		// the ingress would refuse is work with no possible outcome, and a
+		// no-op success beats burning the deploy timeout on an RPC that
 		// will time out.
 		if !d.Inv.Registry().Admitted(spec.NodeID) {
 			sc.Log("info", fmt.Sprintf("collector deploy: node %s is not admitted (removed from inventory, or its join tokens revoked); skipping", spec.NodeID))
@@ -440,38 +456,30 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 			return nil, jobs.ErrStopWorkflow
 		}
 
-		// Which shape this node gets. A node that registered a collector key
-		// presents that key; anything else — an agent that predates the keys
-		// — keeps the mesh leaf it has always had. Both trust the api the
-		// same way: by chain to the Mesh CA, under the cluster name.
+		// The collector presents the node's registered collector key and
+		// trusts the api by chain to the Mesh CA, under the cluster name. A
+		// node with no registered collector key gets no collector: there is
+		// no other credential to give it.
 		keys, err := d.Inv.NodeKeys(sc.Ctx, spec.NodeID)
 		if err != nil {
 			return nil, fmt.Errorf("collector deploy: read node keys for %s: %w", spec.NodeID, err)
 		}
-		cSpec := CollectorSpec{
-			NodeID:         spec.NodeID,
-			IngressBaseURL: d.IngressBaseURL,
-			ServerName:     d.ServerName,
-			AlloyImage:     d.AlloyImage,
-			MeshCAPEM:      d.MeshCAPEM,
-		}
 		want := d.wantFor(keys)
-		if want.key != "" {
-			cSpec.NodeKeyCertPath = proto.NodeCertPath(proto.NodeKeyCollector)
-			cSpec.NodeKeyPath = proto.NodeKeyPath(proto.NodeKeyCollector)
-			sc.Log("info", fmt.Sprintf("collector deploy: %s presents its registered key %s, trust=mesh-ca %s",
-				spec.NodeID, proto.ShortFingerprint(strings.TrimPrefix(want.key, proto.BusPinPrefix)),
-				proto.ShortFingerprint(want.trust)))
-		} else {
-			// The mesh leaf is minted only for the legacy shape, so a node on
-			// its own key stops having one minted, renewed or written at all.
-			leafCert, leafKey, mErr := d.Mint(spec.NodeID)
-			if mErr != nil {
-				return nil, fmt.Errorf("collector deploy: mint leaf for %s: %w", spec.NodeID, mErr)
-			}
-			cSpec.LeafCertPEM, cSpec.LeafKeyPEM = leafCert, leafKey
+		if want.key == "" {
+			return nil, fmt.Errorf("collector deploy: node %s has no registered collector key (its agent predates node keys, or its key report was refused: see the inventory log); not deployed", spec.NodeID)
 		}
-		compose, err := BuildCollectorCompose(cSpec)
+		sc.Log("info", fmt.Sprintf("collector deploy: %s presents its registered key %s, trust=mesh-ca %s",
+			spec.NodeID, proto.ShortFingerprint(strings.TrimPrefix(want.key, proto.BusPinPrefix)),
+			proto.ShortFingerprint(want.trust)))
+		compose, err := BuildCollectorCompose(CollectorSpec{
+			NodeID:          spec.NodeID,
+			IngressBaseURL:  d.IngressBaseURL,
+			ServerName:      d.ServerName,
+			AlloyImage:      d.AlloyImage,
+			MeshCAPEM:       d.MeshCAPEM,
+			NodeKeyCertPath: proto.NodeCertPath(proto.NodeKeyCollector),
+			NodeKeyPath:     proto.NodeKeyPath(proto.NodeKeyCollector),
+		})
 		if err != nil {
 			return nil, fmt.Errorf("collector deploy: build compose for %s: %w", spec.NodeID, err)
 		}

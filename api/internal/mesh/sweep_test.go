@@ -198,67 +198,6 @@ func TestLeafSweep_OneFailureDoesNotStopTheRest(t *testing.T) {
 	}
 }
 
-// Sources are re-read on every sweep, so a consumer that stops being listed
-// simply stops being renewed.
-func TestLeafSweep_SourcesAreReReadEachSweep(t *testing.T) {
-	ca := sweepTestCA(t)
-	dir := t.TempDir()
-	mintWithLifetime(t, ca, dir, "node-a", time.Hour)
-
-	listed := true
-	s := NewLeafSweeper(ca)
-	s.RegisterSource(func(context.Context) ([]LeafConsumer, error) {
-		if !listed {
-			return nil, nil
-		}
-		return []LeafConsumer{{
-			Name: "collector/node-a", Dir: dir,
-			Spec: func() (LeafSpec, error) { return LeafSpec{CommonName: "node-a", DNSNames: []string{"node-a"}}, nil },
-		}}, nil
-	})
-	if rep := s.Sweep(context.Background(), nil); !slices.Equal(rep.Renewed, []string{"collector/node-a"}) {
-		t.Fatalf("renewed = %v, want the listed consumer", rep.Renewed)
-	}
-	// Put it back inside the window and stop listing it.
-	mintWithLifetime(t, ca, dir, "node-a", time.Hour)
-	listed = false
-	rep := s.Sweep(context.Background(), nil)
-	if rep.Checked != 0 || len(rep.Renewed) != 0 {
-		t.Errorf("checked=%d renewed=%v, want an unlisted consumer to be left alone", rep.Checked, rep.Renewed)
-	}
-}
-
-// A source that cannot answer is logged and skipped, not fatal: the leaves it
-// would have named keep the certificates they have, which is where a missed
-// tick leaves them anyway.
-func TestLeafSweep_SourceErrorIsNotFatal(t *testing.T) {
-	ca := sweepTestCA(t)
-	dir := t.TempDir()
-	mintWithLifetime(t, ca, dir, "fixed.local", time.Hour)
-	s := NewLeafSweeper(ca)
-	s.RegisterSource(func(context.Context) ([]LeafConsumer, error) { return nil, errors.New("db down") })
-	if err := s.Register(LeafConsumer{
-		Name: "fixed", Dir: dir,
-		Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: "fixed.local", DNSNames: []string{"fixed.local"}}, nil
-		},
-	}); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	var warned int
-	rep := s.Sweep(context.Background(), func(level, _ string) {
-		if level == "warn" {
-			warned++
-		}
-	})
-	if !slices.Equal(rep.Renewed, []string{"fixed"}) {
-		t.Errorf("renewed = %v, want the registered consumer still swept", rep.Renewed)
-	}
-	if warned == 0 {
-		t.Error("a source error must be logged")
-	}
-}
-
 func TestLeafSweep_RegisterRejectsDuplicatesAndIncompleteConsumers(t *testing.T) {
 	s := NewLeafSweeper(sweepTestCA(t))
 	ok := LeafConsumer{Name: "api", Dir: t.TempDir(), Spec: func() (LeafSpec, error) { return LeafSpec{}, nil }}

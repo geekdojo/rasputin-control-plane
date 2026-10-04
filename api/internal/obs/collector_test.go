@@ -10,20 +10,16 @@ import (
 // Multi-line PEM-shaped blobs — the point is to prove the inline-content
 // indentation round-trips a multi-line value byte-for-byte through the YAML
 // block scalar, which is the whole risk of the inline-configs approach.
-const (
-	testLeafCert = "-----BEGIN CERTIFICATE-----\nMIIBkTCB+2FByte\nc2Vjb25kbGluZQ==\n-----END CERTIFICATE-----"
-	testLeafKey  = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIByteKey\n-----END EC PRIVATE KEY-----"
-	testMeshCA   = "-----BEGIN CERTIFICATE-----\nMIICAcaByteBlob\n-----END CERTIFICATE-----"
-)
+const testMeshCA = "-----BEGIN CERTIFICATE-----\nMIICAcaByteBlob\n-----END CERTIFICATE-----"
 
 func validCollectorSpec() CollectorSpec {
 	return CollectorSpec{
-		NodeID:         "c02",
-		IngressBaseURL: "https://rasputin.local:8443",
-		ServerName:     "rasputin.local",
-		LeafCertPEM:    testLeafCert,
-		LeafKeyPEM:     testLeafKey,
-		MeshCAPEM:      testMeshCA,
+		NodeID:          "c02",
+		IngressBaseURL:  "https://rasputin.local:8443",
+		ServerName:      "rasputin.local",
+		MeshCAPEM:       testMeshCA,
+		NodeKeyCertPath: "/var/lib/rasputin/keys/collector.crt",
+		NodeKeyPath:     "/var/lib/rasputin/keys/collector.key",
 	}
 }
 
@@ -73,6 +69,8 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 		"/var/run/docker.sock:/var/run/docker.sock:ro",
 		"/sys:/sys:ro",
 		collectorDataRoot + ":" + collectorDataRoot + ":ro",
+		"/var/lib/rasputin/keys/collector.crt:" + collectorNodeKeyCertPath + ":ro",
+		"/var/lib/rasputin/keys/collector.key:" + collectorNodeKeyPath + ":ro",
 	}
 	for _, v := range wantVols {
 		if !containsStr(svc.Volumes, v) {
@@ -80,11 +78,9 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 		}
 	}
 
-	// The four inline configs map to their in-container targets.
+	// The two inline configs map to their in-container targets.
 	wantTargets := map[string]string{
 		"alloy_config": collectorConfigPath,
-		"leaf_cert":    collectorLeafCertPath,
-		"leaf_key":     collectorLeafKeyPath,
 		"mesh_ca":      collectorMeshCAPath,
 	}
 	for src, target := range wantTargets {
@@ -102,12 +98,10 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 		}
 	}
 
-	// The cert blobs must survive the block scalar byte-for-byte (clip
+	// The cert blob must survive the block scalar byte-for-byte (clip
 	// chomping leaves a single trailing newline, hence TrimRight).
 	certChecks := map[string]string{
-		"leaf_cert": testLeafCert,
-		"leaf_key":  testLeafKey,
-		"mesh_ca":   testMeshCA,
+		"mesh_ca": testMeshCA,
 	}
 	for name, want := range certChecks {
 		got := strings.TrimRight(cf.Configs[name].Content, "\n")
@@ -126,8 +120,8 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 		// logs loki.write endpoint (base + logs path) — Slice 1.2c
 		`url = "https://rasputin.local:8443/api/obs/logs/ingest"`,
 		`server_name = "rasputin.local"`,
-		`cert_file   = "` + collectorLeafCertPath + `"`,
-		`key_file    = "` + collectorLeafKeyPath + `"`,
+		`cert_file   = "` + collectorNodeKeyCertPath + `"`,
+		`key_file    = "` + collectorNodeKeyPath + `"`,
 		`ca_file     = "` + collectorMeshCAPath + `"`,
 		"docker_only = true",
 		// the log-shipping block
@@ -149,8 +143,8 @@ func TestBuildCollectorCompose_Validation(t *testing.T) {
 		{"missing NodeID", func(s *CollectorSpec) { s.NodeID = "" }},
 		{"missing IngressBaseURL", func(s *CollectorSpec) { s.IngressBaseURL = "" }},
 		{"missing ServerName", func(s *CollectorSpec) { s.ServerName = "" }},
-		{"missing LeafCertPEM", func(s *CollectorSpec) { s.LeafCertPEM = "" }},
-		{"missing LeafKeyPEM", func(s *CollectorSpec) { s.LeafKeyPEM = "" }},
+		{"missing NodeKeyCertPath", func(s *CollectorSpec) { s.NodeKeyCertPath = "" }},
+		{"missing NodeKeyPath", func(s *CollectorSpec) { s.NodeKeyPath = "" }},
 		{"missing MeshCAPEM", func(s *CollectorSpec) { s.MeshCAPEM = "" }},
 	}
 	for _, tt := range tests {

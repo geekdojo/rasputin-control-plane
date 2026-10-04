@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -383,12 +382,11 @@ type runHarness struct {
 	targetJobID string
 	// The app-volume restore surface (#291 phase 2), wired when
 	// opts.restore is set: the session registry, the egress endpoint served
-	// on the SAME socket as the ingest, and the config the workflow was
+	// on the SAME stand-in node listener as the ingest, and the config the workflow was
 	// registered with.
 	sessions   *RestoreSessions
 	egress     *RestoreEgress
 	restoreCfg RestoreAppConfig
-	baseURL    string
 	inv        *inventory.Store
 	// nodeURL is the stand-in node listener's base, and router the transfer
 	// router the run and the restore were wired with.
@@ -491,11 +489,13 @@ type runHarnessOpts struct {
 	// restoreOutcomes decides what the fake agents do with each restore,
 	// keyed by volume name.
 	restoreOutcomes map[string]restoreOutcome
-	// routeNodes is the transfer router's view of inventory. Nil routes
-	// every node by bearer credential, as an agent that predates key-bound
-	// transfer; a node marked capable routes to the harness's stand-in node
-	// listener with key-bound credentials.
+	// routeNodes is the transfer router's view of inventory. Nil reads every
+	// node as capable with an agent key, so every node routes to the
+	// harness's stand-in node listener; a node marked by predates is refused.
 	routeNodes *fakeRouteNodes
+	// ingestLog, when set, is the logger the ingest endpoint writes its
+	// records through. Nil discards them.
+	ingestLog *slog.Logger
 	// noRouter leaves RunConfig.Router nil, for the step-1 refusal.
 	noRouter bool
 }
@@ -563,23 +563,22 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 	if err != nil {
 		t.Fatal(err)
 	}
-	ingest := backupxfer.New(auth, 1, slog.New(slog.DiscardHandler))
+	ingestLog := opts.ingestLog
+	if ingestLog == nil {
+		ingestLog = slog.New(slog.DiscardHandler)
+	}
+	ingest := backupxfer.New(auth, 1, ingestLog)
 	sessions := NewRestoreSessions()
 	egress := NewRestoreEgress(auth, sessions, slog.New(slog.DiscardHandler))
-	mux := http.NewServeMux()
-	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ingest)
-	mux.Handle("GET "+backupxfer.EgressPathPrefix, egress)
-	ingestSrv := httptest.NewServer(mux)
-	t.Cleanup(ingestSrv.Close)
-	// The node listener's entries, on their own socket, so a key-bound route
-	// is a different URL from the bearer one.
+	// The node listener's entries: the only place a member lands or is
+	// fetched.
 	nodeSrv := httptest.NewServer(standInNodeListener(ingest, egress))
 	t.Cleanup(nodeSrv.Close)
 	routeNodes := opts.routeNodes
 	if routeNodes == nil {
 		routeNodes = &fakeRouteNodes{}
 	}
-	router, err := NewTransferRouter(routeNodes, ingestSrv.URL, nodeSrv.URL)
+	router, err := NewTransferRouter(routeNodes, nodeSrv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +601,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		nc: nc, store: st, jobStore: js, agent: agent, key: key,
 		stagingDir: stagingDir, trustDir: trustDir, meshDir: meshDir,
 		dbPath: dbPath, mountDir: mountDir, ingest: ingest, settings: newMemorySettings(),
-		sessions: sessions, egress: egress, baseURL: ingestSrv.URL, nodeURL: nodeSrv.URL, router: router,
+		sessions: sessions, egress: egress, nodeURL: nodeSrv.URL, router: router,
 	}
 	if opts.computeAgent {
 		computeStaging := filepath.Join(dir, "compute-state", "backup-staging")

@@ -17,9 +17,10 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
-// TC-514-08: the restore egress mirrors the ingest — key-bound credentials
-// only from their own node's key on the node listener, the same records.
-func TestRestoreEgressKeyBoundCredentials(t *testing.T) {
+// TC-514-08, TC-516-02: the restore egress mirrors the ingest — a credential
+// only from its own node's key on the node listener, the same records, and no
+// path attribute in any of them.
+func TestRestoreEgressNodeEntry(t *testing.T) {
 	var global bytes.Buffer
 	prev := log.Writer()
 	log.SetOutput(&global)
@@ -29,7 +30,7 @@ func TestRestoreEgressKeyBoundCredentials(t *testing.T) {
 	r.arm(mustSHA(r.sealed))
 	const nodeA, nodeB = "n-compute", "n-other"
 	g := backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: nodeA, JobID: "job-restore",
-		MaxBytes: uint64(len(r.plain)), Use: backupxfer.UseRestore, KeyBound: true}
+		MaxBytes: uint64(len(r.plain)), Use: backupxfer.UseRestore}
 	cred, err := r.egress.Mint(g, time.Minute)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
@@ -42,18 +43,11 @@ func TestRestoreEgressKeyBoundCredentials(t *testing.T) {
 		}
 	}
 	warnsBefore := func() int { return len(r.logs.AtLevel(slog.LevelWarn)) }
-
-	// (a) the legacy bearer-only entry.
-	w0 := warnsBefore()
-	got, _, err := r.fetch(cred)
-	refusedAs(t, err, http.StatusForbidden, backupxfer.CodeKeyRequired)
-	if len(got) != 0 {
-		t.Errorf("(a) %d body bytes on a refusal", len(got))
-	}
-	if warns := r.logs.AtLevel(slog.LevelWarn); len(warns)-w0 != 1 {
-		t.Fatalf("(a) WARN records:\n%s", r.logs.Text())
-	} else if v, _ := logkittest.Attr(warns[len(warns)-1], "path"); v != backupxfer.PathBearer {
-		t.Errorf("(a) path = %q", v)
+	noPath := func(t *testing.T, rec slog.Record) {
+		t.Helper()
+		if v, ok := logkittest.Attr(rec, "path"); ok {
+			t.Errorf("record %q carries path=%q", rec.Message, v)
+		}
 	}
 
 	// (b) the node entry with no owner: refused before the one slot. Called
@@ -74,18 +68,19 @@ func TestRestoreEgressKeyBoundCredentials(t *testing.T) {
 	}
 
 	// (c) another node's key.
-	w0 = warnsBefore()
+	w0 := warnsBefore()
 	_, _, err = r.fetchAs(nodeB, cred)
 	refusedAs(t, err, http.StatusForbidden, backupxfer.CodeCredentialScope)
 	if warns := r.logs.AtLevel(slog.LevelWarn); len(warns)-w0 != 1 {
 		t.Fatalf("(c) WARN records:\n%s", r.logs.Text())
 	} else {
 		last := warns[len(warns)-1]
-		for k, want := range map[string]string{"path": backupxfer.PathNodeKey, "presenting_node": nodeB, "grant_node": nodeA, "job_id": "job-restore"} {
+		for k, want := range map[string]string{"presenting_node": nodeB, "grant_node": nodeA, "job_id": "job-restore"} {
 			if v, _ := logkittest.Attr(last, k); v != want {
 				t.Errorf("(c) %s = %q, want %q", k, v, want)
 			}
 		}
+		noPath(t, last)
 	}
 
 	// (d) its own node's key: the plaintext, and the stream-served record.
@@ -101,11 +96,12 @@ func TestRestoreEgressKeyBoundCredentials(t *testing.T) {
 	if len(served) != 1 {
 		t.Fatalf("(d) INFO stream-served records:\n%s", r.logs.Text())
 	}
-	for k, want := range map[string]string{"path": backupxfer.PathNodeKey, "presenting_node": nodeA, "job_id": "job-restore"} {
+	for k, want := range map[string]string{"presenting_node": nodeA, "grant_node": nodeA, "job_id": "job-restore"} {
 		if v, _ := logkittest.Attr(served[0], k); v != want {
 			t.Errorf("(d) %s = %q, want %q", k, v, want)
 		}
 	}
+	noPath(t, served[0])
 
 	if strings.Contains(r.logs.Text(), cred) {
 		t.Error("the credential appears in a record")

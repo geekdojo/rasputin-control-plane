@@ -2,12 +2,11 @@ package api
 
 import (
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
-	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -19,22 +18,16 @@ import (
 // api's one in-memory node registry (inventory.Registry) — no database read on
 // the connection or the request path.
 //
-// Two ways to be admitted, for as long as both kinds of client are in the
-// fleet (geekdojo/geekdojo-brain#513):
+// One way to be admitted: a REGISTERED KEY. The node generated it, reported
+// its SPKI hash over a pinned bus connection, and the api recorded it (#514).
+// The listener runs ClientAuth=RequireAnyClientCert and compares the peer's
+// SubjectPublicKeyInfo against the registry: no chain, no name, no dates, for
+// the same reasons the bus pins a key rather than trusting a CA
+// (proto.BusPinPrefix). The certificate around the key is the node's own,
+// self-signed, and nothing issues it — so a certificate the mesh CA signed is
+// worth nothing here unless its key is registered.
 //
-//   - A REGISTERED KEY. The node generated it, reported its SPKI hash over a
-//     pinned bus connection, and the api recorded it (#514). The listener runs
-//     ClientAuth=RequireAnyClientCert and compares the peer's SubjectPublicKeyInfo
-//     against the registry: no chain, no name, no dates, for the same reasons
-//     the bus pins a key rather than trusting a CA (proto.BusPinPrefix). The
-//     certificate around the key is the node's own, self-signed, and nothing
-//     issues it.
-//   - THE MESH CHAIN, for a collector deployed before the keys existed. Because
-//     RequireAnyClientCert does not verify anything, the chain is verified here,
-//     explicitly, against the mesh CA, and the identity is the leaf's
-//     CommonName — which is what this listener has always done.
-//
-// Either way the node must also be a current inventory member holding a live
+// The key's owner must also be a current inventory member holding a live
 // join token, and a node that stops qualifying has its open connections closed
 // at once, the same way a revoke drops its bus sessions. A key that stops being
 // registered — replaced after a reflash, or cleared by a removal — closes the
@@ -62,11 +55,10 @@ type IngestRegistry interface {
 // nodeIdentity is who the handshake decided the peer is.
 type nodeIdentity struct {
 	nodeID string
-	// purpose is what the presented key is registered for, empty for a
-	// client admitted by the mesh chain. A route that is only for one
-	// purpose checks it; a legacy client has none to check.
+	// purpose is what the presented key is registered for. A route that is
+	// only for one purpose checks it.
 	purpose proto.NodeKeyPurpose
-	// spki is the presented key's hash, empty for a mesh-chain client.
+	// spki is the presented key's hash.
 	spki string
 }
 
@@ -74,9 +66,8 @@ type nodeIdentity struct {
 // key they were admitted under.
 type ingestConns struct {
 	gate IngestRegistry
-	// meshClients verifies a legacy collector's chain; nil once there are
-	// no legacy clients left, which refuses everything but a registered key.
-	meshClients *x509.CertPool
+	// log is the process logger every refusal and close is recorded through.
+	log *slog.Logger
 
 	mu     sync.Mutex
 	byNode map[string]map[net.Conn]struct{}
@@ -91,19 +82,18 @@ type ingestConns struct {
 // forgets closed connections, and hooks that close a node's connections when it
 // stops being admitted or when a key it held stops being registered.
 //
-// meshClients is the pool a legacy collector's chain is verified against — the
-// mesh CA. Passing nil admits registered keys only.
+// Refusals and closes are recorded through the server's injected logger.
 //
 // hs.TLSConfig must already carry the listener's certificate selection; call
 // before the server starts.
-func (s *Server) WireObsIngest(hs *http.Server, gate IngestRegistry, meshClients *x509.CertPool) error {
+func (s *Server) WireObsIngest(hs *http.Server, gate IngestRegistry) error {
 	if hs == nil || hs.TLSConfig == nil {
 		return errors.New("obs ingress: no TLS config to install the admission gate on")
 	}
 	if gate == nil {
 		return errors.New("obs ingress: no node registry to check admission against")
 	}
-	c := newIngestConns(gate, meshClients)
+	c := newIngestConns(gate, s.log)
 	base := hs.TLSConfig.Clone()
 	hs.TLSConfig.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		cfg := base.Clone()
@@ -127,16 +117,23 @@ func (s *Server) WireObsIngest(hs *http.Server, gate IngestRegistry, meshClients
 }
 
 // newIngestConns builds the gate. Separate from WireObsIngest so the handler
-// tests can build one without a listener.
-func newIngestConns(gate IngestRegistry, meshClients *x509.CertPool) *ingestConns {
+// tests can build one without a listener. A nil logger is a wiring fault and
+// panics here, at construction.
+func newIngestConns(gate IngestRegistry, log *slog.Logger) *ingestConns {
+	if log == nil {
+		panic("api: newIngestConns needs a logger; nil was passed")
+	}
 	return &ingestConns{
-		gate:        gate,
-		meshClients: meshClients,
-		byNode:      map[string]map[net.Conn]struct{}{},
-		byKey:       map[string]map[net.Conn]struct{}{},
-		nodeOf:      map[net.Conn]nodeIdentity{},
+		gate:   gate,
+		log:    log,
+		byNode: map[string]map[net.Conn]struct{}{},
+		byKey:  map[string]map[net.Conn]struct{}{},
+		nodeOf: map[net.Conn]nodeIdentity{},
 	}
 }
+
+// errKeyNotRegistered is the refusal of a key no admitted node registered.
+var errKeyNotRegistered = errors.New("the presented key is not registered to any node")
 
 // identify decides who a peer is, from memory. It is the whole admission rule,
 // and it is the same function the handshake and every request run, so the two
@@ -150,39 +147,15 @@ func (c *ingestConns) identify(cs *tls.ConnectionState) (nodeIdentity, error) {
 	}
 	leaf := cs.PeerCertificates[0]
 
-	// A registered key first. The certificate around it is not examined at
-	// all: this is a key check, and a node's own self-signed wrapper has
-	// nothing else worth reading.
+	// A registered key, and nothing else. The certificate around it is not
+	// examined at all: this is a key check, and a node's own self-signed
+	// wrapper has nothing else worth reading.
 	spki := proto.NodeKeySPKIHashForDER(leaf.RawSubjectPublicKeyInfo)
-	if owner, ok := c.gate.AdmitKey(spki); ok {
-		return nodeIdentity{nodeID: owner.NodeID, purpose: owner.Purpose, spki: spki}, nil
+	owner, ok := c.gate.AdmitKey(spki)
+	if !ok {
+		return nodeIdentity{}, errKeyNotRegistered
 	}
-
-	// Otherwise the legacy path: a mesh-CA-signed client leaf whose
-	// CommonName is the node id. RequireAnyClientCert verified nothing, so
-	// the chain is verified here or not at all.
-	if c.meshClients == nil {
-		return nodeIdentity{}, errors.New("the presented key is not registered to any node")
-	}
-	inter := x509.NewCertPool()
-	for _, cert := range cs.PeerCertificates[1:] {
-		inter.AddCert(cert)
-	}
-	if _, err := leaf.Verify(x509.VerifyOptions{
-		Roots:         c.meshClients,
-		Intermediates: inter,
-		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-	}); err != nil {
-		return nodeIdentity{}, fmt.Errorf("the presented key is not registered, and its certificate does not chain to the mesh CA: %w", err)
-	}
-	nodeID, err := nodeIDFromClientCert(cs)
-	if err != nil {
-		return nodeIdentity{}, err
-	}
-	if !c.gate.Admitted(nodeID) {
-		return nodeIdentity{}, fmt.Errorf("node %q is not admitted", nodeID)
-	}
-	return nodeIdentity{nodeID: nodeID}, nil
+	return nodeIdentity{nodeID: owner.NodeID, purpose: owner.Purpose, spki: spki}, nil
 }
 
 // admit runs once per handshake. The check and the record happen under one
@@ -194,19 +167,18 @@ func (c *ingestConns) admit(raw net.Conn, cs tls.ConnectionState) error {
 	defer c.mu.Unlock()
 	id, err := c.identify(&cs)
 	if err != nil {
-		log.Printf("obs ingest: refusing a handshake: %v", err)
+		c.log.Warn("node listener: refusing a handshake",
+			"cause", err.Error(), "spki", presentedSPKI(&cs), "remote_addr", raw.RemoteAddr().String())
 		return err
 	}
 	if c.byNode[id.nodeID] == nil {
 		c.byNode[id.nodeID] = map[net.Conn]struct{}{}
 	}
 	c.byNode[id.nodeID][raw] = struct{}{}
-	if id.spki != "" {
-		if c.byKey[id.spki] == nil {
-			c.byKey[id.spki] = map[net.Conn]struct{}{}
-		}
-		c.byKey[id.spki][raw] = struct{}{}
+	if c.byKey[id.spki] == nil {
+		c.byKey[id.spki] = map[net.Conn]struct{}{}
 	}
+	c.byKey[id.spki][raw] = struct{}{}
 	c.nodeOf[raw] = id
 	return nil
 }
@@ -229,9 +201,6 @@ func (c *ingestConns) forget(conn net.Conn) {
 	if len(c.byNode[id.nodeID]) == 0 {
 		delete(c.byNode, id.nodeID)
 	}
-	if id.spki == "" {
-		return
-	}
 	delete(c.byKey[id.spki], conn)
 	if len(c.byKey[id.spki]) == 0 {
 		delete(c.byKey, id.spki)
@@ -249,7 +218,8 @@ func (c *ingestConns) closeNode(nodeID string) {
 	c.mu.Unlock()
 	closeAll(conns)
 	if len(conns) > 0 {
-		log.Printf("obs ingest: closed %d connection(s) of %q — it was removed or its join token revoked", len(conns), nodeID)
+		c.log.Info("node listener: closed a node's connections; it was removed or its join token revoked",
+			"node_id", nodeID, "closed", len(conns))
 	}
 }
 
@@ -268,8 +238,20 @@ func (c *ingestConns) closeKeys(nodeID string, retired []string) {
 	c.mu.Unlock()
 	closeAll(conns)
 	if len(conns) > 0 {
-		log.Printf("obs ingest: closed %d connection(s) held under %d retired key(s) of %q", len(conns), len(retired), nodeID)
+		c.log.Info("node listener: closed the connections held under a node's retired keys",
+			"node_id", nodeID, "closed", len(conns), "retired_keys", len(retired))
 	}
+}
+
+// presentedSPKI is the short form of the key the peer presented, for a log
+// record: the leading characters of its SPKI hash, without the "sha256/"
+// prefix every hash shares. "" when it presented none.
+func presentedSPKI(cs *tls.ConnectionState) string {
+	if cs == nil || len(cs.PeerCertificates) == 0 {
+		return ""
+	}
+	h := proto.NodeKeySPKIHashForDER(cs.PeerCertificates[0].RawSubjectPublicKeyInfo)
+	return proto.ShortFingerprint(strings.TrimPrefix(h, proto.BusPinPrefix))
 }
 
 func closeAll(conns []net.Conn) {

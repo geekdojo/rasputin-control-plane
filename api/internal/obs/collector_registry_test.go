@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -19,8 +20,15 @@ import (
 
 func admittedStore(t *testing.T, nodes ...string) *inventory.Store {
 	t.Helper()
+	return admittedStoreAt(t, filepath.Join(t.TempDir(), "inv.db"), nodes...)
+}
+
+// admittedStoreAt is admittedStore over the database at path, for a test that
+// reaches into the file (breakNodeKeys).
+func admittedStoreAt(t *testing.T, path string, nodes ...string) *inventory.Store {
+	t.Helper()
 	ctx := context.Background()
-	inv, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
+	inv, err := inventory.OpenStore(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,18 +65,25 @@ func TestDecideCollectorActions_SkipsANodeThatIsNotAdmitted(t *testing.T) {
 	}
 }
 
-// The per-node deploy refuses before it mints a leaf: a node that stopped
-// being admitted between the reconcile and the job is a no-op success, and
-// the mint is never called.
+// breakNodeKeys drops the node_keys table from the inventory database at
+// path, through a second connection, so the store still lists and gets nodes
+// but every NodeKeys read fails.
+func breakNodeKeys(t *testing.T, path string) {
+	t.Helper()
+	db, err := dbutil.Open(context.Background(), path, "DROP TABLE node_keys", "test")
+	if err != nil {
+		t.Fatalf("drop node_keys: %v", err)
+	}
+	_ = db.Close()
+}
+
+// The per-node deploy refuses before it reads anything else: a node that
+// stopped being admitted between the reconcile and the job is a no-op
+// success, and no RPC is attempted (the step has no bus to send one on).
 func TestCollectorDeploy_StopsWhenTheNodeIsNotAdmitted(t *testing.T) {
 	inv := admittedStore(t, "n1")
-	minted := 0
 	deps := CollectorDeployDeps{
-		Inv: inv,
-		Mint: func(string) (string, string, error) {
-			minted++
-			return "", "", errors.New("should not be reached")
-		},
+		Inv:            inv,
 		IngressBaseURL: "https://cluster.local:8443",
 		ServerName:     "cluster.local",
 	}
@@ -84,8 +99,5 @@ func TestCollectorDeploy_StopsWhenTheNodeIsNotAdmitted(t *testing.T) {
 	inv.Registry().ReplaceLiveTokens(map[string][]string{})
 	if err := run(); !errors.Is(err, jobs.ErrStopWorkflow) {
 		t.Errorf("deploy for a node that is not admitted = %v, want ErrStopWorkflow", err)
-	}
-	if minted != 0 {
-		t.Errorf("a leaf was minted for a node the ingress would refuse (%d mints)", minted)
 	}
 }

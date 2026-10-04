@@ -218,13 +218,3 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 		Detail: "the restore is running as a job; the app is stopped while each volume is swapped and the previous contents are kept beside it on " + node,
 	})
 }
-
-// GET /api/backup/egress/{generation}/{member} — the restore stream. The
-// whole handler lives in storage beside Unseal.
-func (s *Server) handleRestoreEgress(w http.ResponseWriter, r *http.Request) {
-	if s.restoreEgress == nil {
-		writeError(w, http.StatusServiceUnavailable, "app-volume restore is not configured on this api")
-		return
-	}
-	s.restoreEgress.ServeHTTP(w, r)
-}

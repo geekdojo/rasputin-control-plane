@@ -47,12 +47,9 @@
 //
 // # Who may present it
 //
-// A credential minted for a node the api routes to its node listener is
-// KEY-BOUND (Grant.KeyBound): it is honoured only from a connection
-// authenticated by that node's registered agent key, and the bearer-only
-// route refuses it (CheckPresenter, presenter.go). A credential minted for an
-// agent that predates key-bound transfer is a bearer: not bound to the
-// presenting connection, so its holder need not be the node it names — that
-// is the whole reason its scope is this narrow. The bearer route is
-// transitional (register row E12) and goes once every node presents its key.
+// Only the node it names. The endpoint is mounted on the api's node listener
+// alone, which authenticates every connection by a registered agent key, and
+// a credential is honoured only from its own node's key (CheckPresenter,
+// presenter.go). The credential is scope, not identity: holding one is not
+// enough to use it.
 package backupxfer

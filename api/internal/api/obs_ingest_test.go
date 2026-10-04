@@ -25,26 +25,25 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// certState fabricates a *tls.ConnectionState carrying a single client leaf
-// with the given CommonName. nodeIDFromClientCert only reads
-// Subject.CommonName, so a bare x509.Certificate (no signing) is enough —
-// these tests exercise identity extraction, not the TLS stack.
-func certState(cn string) *tls.ConnectionState {
-	return &tls.ConnectionState{
-		PeerCertificates: []*x509.Certificate{{Subject: pkix.Name{CommonName: cn}}},
-	}
-}
-
 // nodeKeyCerts hands out one stable key per node id, and the connection state
 // a client presenting it produces. The node listener identifies a caller by
 // its key's SPKI, so a handler test needs a real key rather than a bare
 // Subject — the key IS the identity now.
 var nodeKeyCerts = struct {
 	mu    sync.Mutex
-	certs map[string]*x509.Certificate
-}{certs: map[string]*x509.Certificate{}}
+	certs map[string]tls.Certificate
+}{certs: map[string]tls.Certificate{}}
 
+// nodeKeyCert is node's stable key, in the self-signed certificate it
+// presents.
 func nodeKeyCert(t *testing.T, node string) *x509.Certificate {
+	t.Helper()
+	return nodeKeyTLS(t, node).Leaf
+}
+
+// nodeKeyTLS is node's stable key and its certificate, as a TLS client
+// presents them: the same key nodeKeyCert and registerCollectorKey use.
+func nodeKeyTLS(t *testing.T, node string) tls.Certificate {
 	t.Helper()
 	nodeKeyCerts.mu.Lock()
 	defer nodeKeyCerts.mu.Unlock()
@@ -66,10 +65,11 @@ func nodeKeyCert(t *testing.T, node string) *x509.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert, err := x509.ParseCertificate(der)
+	leaf, err := x509.ParseCertificate(der)
 	if err != nil {
 		t.Fatal(err)
 	}
+	cert := tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 	nodeKeyCerts.certs[node] = cert
 	return cert
 }
@@ -92,38 +92,6 @@ func registerCollectorKey(t *testing.T, inv *inventory.Store, node string) {
 	inv.Registry().SetLiveTokens(node, []string{"tok-" + node})
 	if _, err := inv.SetNodeKeys(context.Background(), node, proto.NodeKeys{proto.NodeKeyCollector: hash}); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestNodeIDFromClientCert(t *testing.T) {
-	tests := []struct {
-		name    string
-		cs      *tls.ConnectionState
-		want    string
-		wantErr bool
-	}{
-		{"nil state (non-TLS request)", nil, "", true},
-		{"no peer certificates", &tls.ConnectionState{}, "", true},
-		{"empty CommonName", certState("   "), "", true},
-		{"valid CN", certState("c02"), "c02", false},
-		{"trims surrounding whitespace", certState("  c02\n"), "c02", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := nodeIDFromClientCert(tt.cs)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatalf("expected an error, got nil (value=%q)", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if got != tt.want {
-				t.Fatalf("node id: got %q, want %q", got, tt.want)
-			}
-		})
 	}
 }
 
@@ -207,7 +175,7 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 	}
 	// The logger and correlation ids a refusal goes through; a test that reads
 	// the records swaps in a recording logger.
-	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), nil),
+	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), slog.New(slog.DiscardHandler)),
 		log: slog.New(slog.DiscardHandler), newCorrelationID: sequentialIDs()}
 }
 

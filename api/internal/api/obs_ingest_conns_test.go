@@ -2,10 +2,13 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -57,9 +61,27 @@ func (f *countingLiveness) OnNodeExcluded(fn func(string)) {
 
 func (f *countingLiveness) OnKeysRetired(func(string, []string)) {}
 
-// ingressTLS is a real mTLS ingress: a Mesh CA, the api's server leaf and a
-// collector client leaf per node, served by the real ObsIngestHandler behind
-// the same RequireAndVerifyClientCert config main.go builds.
+// collectorKeysOf is the fake registry's key table for nodes: each node's
+// stable key (nodeKeyTLS) registered as its collector key — the same key
+// startIngress's clients present.
+func collectorKeysOf(t *testing.T, nodes ...string) map[string]inventory.KeyOwner {
+	t.Helper()
+	keys := map[string]inventory.KeyOwner{}
+	for _, n := range nodes {
+		hash, err := proto.NodeKeySPKIHash(nodeKeyCert(t, n).PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys[hash] = inventory.KeyOwner{NodeID: n, Purpose: proto.NodeKeyCollector}
+	}
+	return keys
+}
+
+// ingressTLS is a real mTLS node listener: a Mesh CA and the api's server
+// leaf, and per node a client presenting that node's stable key (nodeKeyTLS),
+// served by the real ObsIngestHandler behind the same RequireAnyClientCert
+// config main.go builds. The keys are registered by the caller: newIngestServer
+// does it for its seeded nodes, collectorKeysOf for the fake registry.
 type ingressTLS struct {
 	srv     *httptest.Server
 	ca      *mesh.MeshCA
@@ -85,26 +107,19 @@ func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string)
 	pool.AddCert(ca.Cert)
 	it := &ingressTLS{ca: ca, roots: pool, clients: map[string]tls.Certificate{}}
 	for _, n := range nodes {
-		c, k, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: n, DNSNames: []string{n}, ClientAuth: true})
-		if err != nil {
-			t.Fatalf("client leaf %s: %v", n, err)
-		}
-		if it.clients[n], err = tls.X509KeyPair(c, k); err != nil {
-			t.Fatal(err)
-		}
+		it.clients[n] = nodeKeyTLS(t, n)
 	}
 	it.srv = httptest.NewUnstartedServer(s.ObsIngestHandler())
 	// The production shape: the stack verifies nothing (a node's own key is
 	// wrapped in a certificate no CA issued), and admission is decided in
-	// VerifyConnection against the registry. A legacy collector's mesh chain
-	// is verified explicitly, against this pool.
+	// VerifyConnection against the registry, by the key alone.
 	it.srv.TLS = &tls.Config{
 		MinVersion:   tls.VersionTLS13,
 		ClientAuth:   tls.RequireAnyClientCert,
 		Certificates: []tls.Certificate{serverCert},
 	}
 	it.srv.Config.TLSConfig = it.srv.TLS
-	if err := s.WireObsIngest(it.srv.Config, gate, pool); err != nil {
+	if err := s.WireObsIngest(it.srv.Config, gate); err != nil {
 		t.Fatalf("WireObsIngest: %v", err)
 	}
 	it.srv.TLS = it.srv.Config.TLSConfig
@@ -145,7 +160,7 @@ func postIngest(c *http.Client, base string) (int, error) {
 // observability is off in the fixture).
 func TestObsIngress_AdmissionIsRecheckedPerRequest(t *testing.T) {
 	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02")
-	gate := &countingLiveness{live: map[string]bool{"c02": true}}
+	gate := &countingLiveness{live: map[string]bool{"c02": true}, keys: collectorKeysOf(t, "c02")}
 	it := startIngress(t, s, gate, "c02")
 
 	c := it.keepAliveClient("c02")
@@ -156,10 +171,10 @@ func TestObsIngress_AdmissionIsRecheckedPerRequest(t *testing.T) {
 			t.Fatalf("request %d = (%d, %v), want 503 backend-not-ready", i, code, err)
 		}
 	}
-	// One handshake and one re-check per request. A mesh-chain client has no
-	// registered key, so identify misses AdmitKey and then calls Admitted;
-	// the request path calls Admitted once more after that.
-	if want, n := int64(3*requests+2), gate.calls.Load(); n != want {
+	// One handshake and one re-check per request. The handshake's identify
+	// asks AdmitKey once; each request's re-check asks AdmitKey (identify)
+	// and then Admitted (authenticateNode).
+	if want, n := int64(2*requests+1), gate.calls.Load(); n != want {
 		t.Errorf("the registry was consulted %d times for one connection and %d requests; want %d", n, requests, want)
 	}
 
@@ -176,7 +191,7 @@ func TestObsIngress_AdmissionIsRecheckedPerRequest(t *testing.T) {
 // A node the registry does not admit cannot complete a handshake.
 func TestObsIngress_RevokedNodeHandshakeIsRefused(t *testing.T) {
 	s := newIngestServer(t, obs.NewStatus(obs.NewNoopSupervisor(), nil, nil), "c02", "c03")
-	gate := &countingLiveness{live: map[string]bool{"c02": true}}
+	gate := &countingLiveness{live: map[string]bool{"c02": true}, keys: collectorKeysOf(t, "c02", "c03")}
 	it := startIngress(t, s, gate, "c02", "c03")
 
 	if _, err := postIngest(it.keepAliveClient("c03"), it.srv.URL); err == nil {
@@ -346,10 +361,129 @@ func send(t *testing.T, conn *tls.Conn, br *bufio.Reader, node string) {
 
 func TestWireObsIngest_RefusesWithoutAGate(t *testing.T) {
 	s := &Server{}
-	if err := s.WireObsIngest(&http.Server{TLSConfig: &tls.Config{}}, nil, nil); err == nil {
+	if err := s.WireObsIngest(&http.Server{TLSConfig: &tls.Config{}}, nil); err == nil {
 		t.Error("no gate: want an error")
 	}
-	if err := s.WireObsIngest(&http.Server{}, &countingLiveness{}, nil); err == nil {
+	if err := s.WireObsIngest(&http.Server{}, &countingLiveness{}); err == nil {
 		t.Error("no TLS config: want an error")
+	}
+}
+
+// TC-516-10: the gate records through the logger it was built with. A node
+// excluded, and a key retired, while connections are open each close those
+// connections and write one INFO record naming the node and the count; and
+// nothing goes to the standard log package.
+func TestIngestConns_ClosesAreStructuredRecords(t *testing.T) {
+	var global bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&global)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	gate := &countingLiveness{live: map[string]bool{"c02": true, "c03": true}, keys: collectorKeysOf(t, "c02", "c03")}
+	logger, records := logkittest.New()
+	c := newIngestConns(gate, logger)
+	admitted := func(node string) net.Conn {
+		t.Helper()
+		server, client := net.Pipe()
+		t.Cleanup(func() { _ = server.Close(); _ = client.Close() })
+		cs := tls.ConnectionState{PeerCertificates: []*x509.Certificate{nodeKeyCert(t, node)}}
+		if err := c.admit(server, cs); err != nil {
+			t.Fatalf("%s: %v", node, err)
+		}
+		return client
+	}
+	closed := func(t *testing.T, client net.Conn) {
+		t.Helper()
+		_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := client.Read(make([]byte, 1)); err == nil {
+			t.Fatal("the connection is still open")
+		} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			t.Fatal("the connection was not closed")
+		}
+	}
+
+	c02a, c02b := admitted("c02"), admitted("c02")
+	c.closeNode("c02")
+	closed(t, c02a)
+	closed(t, c02b)
+	recs := records.Matching(slog.LevelInfo, "removed or its join token revoked")
+	if len(recs) != 1 {
+		t.Fatalf("exclusion close records = %d, want 1:\n%s", len(recs), records.Text())
+	}
+	wantFields(t, recs[0], map[string]string{"node_id": "c02", "closed": "2"})
+
+	c03 := admitted("c03")
+	hash, err := proto.NodeKeySPKIHash(nodeKeyCert(t, "c03").PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.closeKeys("c03", []string{hash})
+	closed(t, c03)
+	recs = records.Matching(slog.LevelInfo, "retired keys")
+	if len(recs) != 1 {
+		t.Fatalf("key-retirement close records = %d, want 1:\n%s", len(recs), records.Text())
+	}
+	wantFields(t, recs[0], map[string]string{"node_id": "c03", "closed": "1"})
+
+	if global.Len() != 0 {
+		t.Errorf("the global log was written: %q", global.String())
+	}
+}
+
+// TC-516-10: a collector push the ingress refuses — reserved metric names on
+// the metrics route, a reserved job on the logs route — writes one WARN
+// through the server's logger naming the node and the reason, and nothing to
+// the standard log package.
+func TestObsIngress_RefusalsAreStructuredRecords(t *testing.T) {
+	var global bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&global)
+	t.Cleanup(func() { log.SetOutput(prev) })
+
+	var backendCalls atomic.Int32
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		backendCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(stub.Close)
+	s := newIngestServer(t, obs.NewStatus(fakeVMSup{vmBase: stub.URL, lokiBase: stub.URL}, nil, nil), "c02")
+	logger, records := logkittest.New()
+	s.log = logger
+
+	push := func(path string, body []byte, handle func(http.ResponseWriter, *http.Request)) int {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req.TLS = nodeKeyState(t, "c02")
+		req.Header.Set("Content-Type", "application/x-protobuf")
+		req.Header.Set("Content-Encoding", "snappy")
+		rec := httptest.NewRecorder()
+		handle(rec, req)
+		return rec.Code
+	}
+	if code := push("/api/obs/ingest", remoteWriteBody(series("rasputin_cpu_percent", "nodeId", "c01")), s.handleObsIngest); code != http.StatusBadRequest {
+		t.Fatalf("reserved metric: %d, want 400", code)
+	}
+	if code := push("/api/obs/logs/ingest", lokiPushBody(lokiStream(`{job="`+obs.IDSLogJob+`"}`, "forged")), s.handleObsLogsIngest); code != http.StatusBadRequest {
+		t.Fatalf("reserved job: %d, want 400", code)
+	}
+	if n := backendCalls.Load(); n != 0 {
+		t.Fatalf("a refused push reached the backend %d time(s)", n)
+	}
+	for msg, reason := range map[string]string{
+		"obs ingest: refusing a push":      "a series carries a metric name reserved for the controlplane",
+		"obs logs ingest: refusing a push": "a stream carries a job label reserved for the controlplane",
+	} {
+		var hits []slog.Record
+		for _, r := range records.AtLevel(slog.LevelWarn) {
+			if r.Message == msg {
+				hits = append(hits, r)
+			}
+		}
+		if len(hits) != 1 {
+			t.Fatalf("%q records = %d, want 1:\n%s", msg, len(hits), records.Text())
+		}
+		wantFields(t, hits[0], map[string]string{"node_id": "c02", "reason": reason})
+	}
+	if global.Len() != 0 {
+		t.Errorf("the global log was written: %q", global.String())
 	}
 }

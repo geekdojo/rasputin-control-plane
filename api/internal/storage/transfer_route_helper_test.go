@@ -10,16 +10,19 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// Test doubles for key-bound transfer in this package's harnesses.
+// Test doubles for node-listener transfer in this package's harnesses.
 
 // fakeRouteNodes is the router's view of inventory. A node it was not told
-// about reads as a registered node whose agent predates key-bound transfer,
-// so every harness that is not about routing routes by bearer, as before.
-// getErr and keysErr inject read errors; calls counts Get per node.
+// about reads as a registered node that advertises key-bound transfer and
+// holds an agent key (agentKeys), so every harness that is not about routing
+// routes to the node listener. predates marks a node whose agent lacks the
+// capability. getErr and keysErr inject read errors; calls counts Get per
+// node.
 type fakeRouteNodes struct {
 	mu      sync.Mutex
 	nodes   map[string]*proto.Node
 	absent  map[string]bool
+	predate map[string]string // node → its agent version, no capability
 	keys    map[string]proto.NodeKeys
 	getErr  error
 	keysErr error
@@ -54,7 +57,22 @@ func (f *fakeRouteNodes) Get(_ context.Context, id string) (*proto.Node, error) 
 	if n, ok := f.nodes[id]; ok {
 		return n, nil
 	}
-	return &proto.Node{ID: id}, nil
+	if v, ok := f.predate[id]; ok {
+		return &proto.Node{ID: id, AgentVersion: v}, nil
+	}
+	return &proto.Node{ID: id, Capabilities: []string{proto.CapabilityKeyBoundTransfer}}, nil
+}
+
+// predates marks id as a registered node whose agent, at version, lacks the
+// key-bound-transfer capability.
+func (f *fakeRouteNodes) predates(id, version string) *fakeRouteNodes {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.predate == nil {
+		f.predate = map[string]string{}
+	}
+	f.predate[id] = version
+	return f
 }
 
 func (f *fakeRouteNodes) NodeKeys(_ context.Context, id string) (proto.NodeKeys, error) {
@@ -63,7 +81,10 @@ func (f *fakeRouteNodes) NodeKeys(_ context.Context, id string) (proto.NodeKeys,
 	if f.keysErr != nil {
 		return nil, f.keysErr
 	}
-	return f.keys[id], nil
+	if k, ok := f.keys[id]; ok {
+		return k, nil
+	}
+	return agentKeys(), nil
 }
 
 func (f *fakeRouteNodes) getCalls(id string) int {

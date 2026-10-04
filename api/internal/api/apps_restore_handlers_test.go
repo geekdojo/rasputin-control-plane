@@ -109,7 +109,7 @@ func newAppRestoreFixture(t *testing.T) *appRestoreFixture {
 	}
 	sessions := storage.NewRestoreSessions()
 	egress := storage.NewRestoreEgress(auth, sessions, slog.New(slog.DiscardHandler))
-	router, err := storage.NewTransferRouter(f.inv, "https://cp.test", "")
+	router, err := storage.NewTransferRouter(f.inv, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,17 +319,5 @@ func TestAppRestoreSubmitsAJobWithASessionHandleAndNeverTheKey(t *testing.T) {
 	_ = af.sessions.Bind(sid, "job-elsewhere")
 	if w := af.post(t, af.goodBody()); w.Code != http.StatusConflict {
 		t.Fatalf("concurrent restore: %d %s", w.Code, w.Body.String())
-	}
-}
-
-func TestRestoreEgressRouteIsUnauthenticatedButCredentialed(t *testing.T) {
-	f := newAPIFixture(t)
-	path := backupxfer.EgressPathPrefix + "20260904T000000Z-x-full/volumes/vaultwarden/vaultwarden-data.rasputin-archive"
-	if w := f.do(t, http.MethodGet, path, "", nil); w.Code != http.StatusServiceUnavailable {
-		t.Fatalf("unconfigured: %d", w.Code)
-	}
-	af := newAppRestoreFixture(t)
-	if w := af.do(t, http.MethodGet, path, "", nil); w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), backupxfer.CodeCredentialInvalid) {
-		t.Fatalf("no credential: %d %s", w.Code, w.Body.String())
 	}
 }

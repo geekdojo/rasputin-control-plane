@@ -260,46 +260,11 @@ func TestLogCollectorWiring(t *testing.T) {
 	}
 }
 
-// collectorLeafMinter writes a legacy node's client leaf under the Mesh CA
-// and hands back its PEMs; a second call returns the same leaf.
-func TestCollectorLeafMinter(t *testing.T) {
-	ca := testMeshCA(t)
-	dataDir := t.TempDir()
-	mint := collectorLeafMinter(ca, dataDir)
-	certPEM, keyPEM, err := mint("c03")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.X509KeyPair([]byte(certPEM), []byte(keyPEM))
-	if err != nil {
-		t.Fatalf("minted pair does not load: %v", err)
-	}
-	roots := x509.NewCertPool()
-	roots.AddCert(ca.Cert)
-	if _, err := pair.Leaf.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
-		t.Errorf("minted leaf is not a Mesh-CA client leaf: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(dataDir, "tls", "collectors", "c03")); err != nil {
-		t.Errorf("leaf not written under tls/collectors/c03: %v", err)
-	}
-	again, _, err := mint("c03")
-	if err != nil || again != certPEM {
-		t.Errorf("second mint = (%d bytes, %v), want the same leaf", len(again), err)
-	}
-
-	// A data dir the leaf cannot be written under is an error, not a leaf.
-	blocked := t.TempDir()
-	if err := os.WriteFile(filepath.Join(blocked, "tls"), nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := collectorLeafMinter(ca, blocked)("c03"); err == nil {
-		t.Error("mint into an unwritable data dir succeeded")
-	}
-}
-
 // TC-514-27: the node-listener base main derives once for the backup router
 // and the collectors, the WARN when there is none, and an error — never a
 // silent "" — when a wired listener yields no URL (F-514-08).
+// TC-516-15: with either address empty, exactly one WARN, naming both
+// addresses and saying backup transfer and collectors are unavailable.
 func TestNodeListenerBaseURL(t *testing.T) {
 	logger, rec := logkittest.New()
 	base, serverName, err := nodeListenerBaseURL(logger, "https://c.local", ":8443", ":443")
@@ -311,18 +276,24 @@ func TestNodeListenerBaseURL(t *testing.T) {
 		t.Errorf("wired: server name %q, want c.local", serverName)
 	}
 
-	logger, rec = logkittest.New()
-	base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", ":8443", "")
-	if err != nil || base != "" || serverName != "" {
-		t.Fatalf("HTTPS off: %q, %q, %v", base, serverName, err)
-	}
-	warns := rec.Matching(slog.LevelWarn, "backup transfer: no node listener")
-	if len(warns) != 1 || len(rec.Records()) != 1 {
-		t.Fatalf("HTTPS off records:\n%s", rec.Text())
-	}
-	for k, want := range map[string]string{"obs_ingest_addr": ":8443", "https_addr": ""} {
-		if v, ok := logkittest.Attr(warns[0], k); !ok || v != want {
-			t.Errorf("%s = %q (present %v), want %q", k, v, ok, want)
+	for name, addrs := range map[string][2]string{
+		"HTTPS off":         {":8443", ""},
+		"node listener off": {"", ":443"},
+	} {
+		logger, rec = logkittest.New()
+		base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", addrs[0], addrs[1])
+		if err != nil || base != "" || serverName != "" {
+			t.Fatalf("%s: %q, %q, %v", name, base, serverName, err)
+		}
+		warns := rec.AtLevel(slog.LevelWarn)
+		if len(warns) != 1 || len(rec.Records()) != 1 ||
+			warns[0].Message != "no node listener; backup transfer and per-node collectors are unavailable" {
+			t.Fatalf("%s records:\n%s", name, rec.Text())
+		}
+		for k, want := range map[string]string{"obs_ingest_addr": addrs[0], "https_addr": addrs[1]} {
+			if v, ok := logkittest.Attr(warns[0], k); !ok || v != want {
+				t.Errorf("%s: %s = %q (present %v), want %q", name, k, v, ok, want)
+			}
 		}
 	}
 

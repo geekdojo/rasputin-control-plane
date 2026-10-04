@@ -42,7 +42,9 @@ func TestIngestDropsAStalledUploadAndFreesTheSlot(t *testing.T) {
 	ing := New(auth, 1, slog.New(slog.DiscardHandler))
 	ing.idle = 300 * time.Millisecond
 	mux := http.NewServeMux()
-	mux.Handle("PUT "+IngestPathPrefix, ing)
+	// The node listener's stand-in: the request authenticated by the key of
+	// node "n", the node every credential below is issued to.
+	mux.Handle("PUT "+IngestPathPrefix, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { ing.ServeNode(w, r, "n") }))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	gens := filepath.Join(t.TempDir(), "generations")
