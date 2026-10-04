@@ -86,12 +86,14 @@ type Client struct {
 	// It is asked on EVERY connect and reconnect, so a token file the
 	// controlplane's api re-mints reaches this client on its next attempt.
 	token TokenSource
-	// pin is the bus key pin (proto.ParseBusPin form) every conn is dialed
-	// with, and pinDigest its parsed digest. Fixed at New: nothing on a node
-	// can change the pin a running agent trusts.
-	pin       string
-	pinDigest [sha256.Size]byte
-	log       *slog.Logger
+	// pinSrc yields the bus key pin (proto.ParseBusPin form) for each TLS
+	// handshake (Config.Pin). It is asked on EVERY handshake, the first and
+	// each reconnect, so on the controlplane's own agent a pin file the api
+	// rewrites after an identity restore reaches this client on its next
+	// handshake (PinSourceFor). On every other node it is a StaticPin: nothing
+	// on a remote node can change the pin a running agent trusts.
+	pinSrc PinSource
+	log    *slog.Logger
 	// onConn runs on every NEW conn — the first Dial and each re-dial from
 	// the closed state — before onConnected. Subscriptions live on the conn,
 	// so this is where the agent (re-)registers every handler. A non-nil
@@ -126,6 +128,10 @@ type Client struct {
 	// keeps failing the pin the same way is one entry, not one per attempt.
 	// A successful connect or reconnect clears it.
 	lastRefusal string
+	// pin is the last pin a handshake was verified against (New's, until the
+	// first handshake). It is what the logs report and what a change of pin
+	// is detected against.
+	pin string
 
 	// redials counts successful re-dials from the closed state.
 	redials atomic.Int64
@@ -143,10 +149,12 @@ type Config struct {
 	URL string
 	// NodeID is presented as the NATS username.
 	NodeID string
-	// Pin is the bus key pin (proto.ParseBusPin form). Required: the bus
-	// accepts only TLS, and the pin is the one check on the server's key
+	// Pin yields the bus key pin (proto.ParseBusPin form) for each TLS
+	// handshake: StaticPin for a pin fixed at start, or PinSourceFor's choice.
+	// Required, and it must yield a usable pin when New asks: the bus accepts
+	// only TLS, and the pin is the one check on the server's key
 	// (geekdojo/geekdojo-brain#517).
-	Pin string
+	Pin PinSource
 	// Token yields the node's bus join credential for each connection
 	// attempt. It is presented as NATS username=NodeID, password=token, which
 	// the api's auth-callout responder validates to mint a per-node scoped
@@ -169,14 +177,17 @@ type Config struct {
 }
 
 // New builds a Client that is not yet connected; call Dial. It dials nothing.
-// It refuses a Config with no usable pin — there is no plaintext bus to fall
-// back to — and one with no logger.
+// It refuses a Config with no usable pin — no source, a source that fails, or
+// a value that does not parse; there is no plaintext bus to fall back to — and
+// one with no logger.
 func New(cfg Config) (*Client, error) {
 	if cfg.Log == nil {
 		return nil, errors.New("agent/bus: Config.Log is required")
 	}
-	pin := strings.TrimSpace(cfg.Pin)
-	digest, err := proto.ParseBusPin(pin)
+	if cfg.Pin == nil {
+		return nil, errors.New("agent/bus: the bus accepts only TLS, so a bus pin is required: Config.Pin is nil")
+	}
+	pin, _, err := usablePin(cfg.Pin)
 	if err != nil {
 		return nil, fmt.Errorf("agent/bus: the bus accepts only TLS, so a bus pin is required: %w", err)
 	}
@@ -201,8 +212,8 @@ func New(cfg Config) (*Client, error) {
 		url:           url,
 		nodeID:        cfg.NodeID,
 		token:         token,
+		pinSrc:        cfg.Pin,
 		pin:           pin,
-		pinDigest:     digest,
 		log:           cfg.Log,
 		onConn:        cfg.OnConn,
 		onConnected:   cfg.OnConnected,
@@ -348,7 +359,7 @@ func (c *Client) dial() (*nats.Conn, error) {
 	connOpts = append(connOpts, c.extraOpts...)
 	nc, err := nats.Connect(c.url, connOpts...)
 	if err != nil {
-		return nil, fmt.Errorf("agent/bus: connect %s (TLS, pinned %s): %w", c.url, c.pin, err)
+		return nil, fmt.Errorf("agent/bus: connect %s (TLS, pinned %s): %w", c.url, c.lastPin(), err)
 	}
 	if c.onConn != nil {
 		if err := c.onConn(nc); err != nil {
@@ -373,12 +384,21 @@ var errPinMismatch = errors.New("the bus server's key does not match RASPUTIN_BU
 // insecure: the chain check it skips would accept any certificate a trusted
 // CA signed, while VerifyConnection accepts exactly one public key.
 //
+// pin yields the digest to compare with, asked on every handshake so a
+// running agent can follow a pin that changes (Client.handshakePin). An error
+// from it fails the handshake: no pin, no connection.
+//
+// This is the config every Client connection is dialed with: Client.tlsConfig
+// wraps the VerifyConnection built here only to log a refusal, and returns
+// its error unchanged.
+//
 // TRIP-WIRE: the safety of the InsecureSkipVerify line lives in the
 // VerifyConnection assignment beside it. VerifyConnection — not
 // VerifyPeerCertificate — because it runs on EVERY handshake, resumed ones
-// included; if it is removed, made conditional, or swapped for a check that
-// does not compare the full digest, this config accepts any server at all.
-func pinnedTLSConfig(want [sha256.Size]byte) *tls.Config {
+// included; if it is removed, made conditional, swapped for a check that does
+// not compare the full digest, or lets a handshake through when pin fails,
+// this config accepts any server at all.
+func pinnedTLSConfig(pin func() ([sha256.Size]byte, error)) *tls.Config {
 	return &tls.Config{
 		MinVersion:         tls.VersionTLS13,
 		InsecureSkipVerify: true, // verified by pin in VerifyConnection, below — see the doc comment
@@ -386,12 +406,61 @@ func pinnedTLSConfig(want [sha256.Size]byte) *tls.Config {
 			if len(cs.PeerCertificates) == 0 {
 				return errors.New("the bus server presented no certificate")
 			}
+			want, err := pin()
+			if err != nil {
+				return err
+			}
 			if !proto.BusPinMatchesSPKI(want, cs.PeerCertificates[0].RawSubjectPublicKeyInfo) {
 				return errPinMismatch
 			}
 			return nil
 		},
 	}
+}
+
+// usablePin asks src for a pin and parses it, returning the pin and its
+// digest. Every route to "no usable pin" is an error: the source failing, and
+// a value that does not parse.
+func usablePin(src PinSource) (string, [sha256.Size]byte, error) {
+	raw, err := src()
+	if err != nil {
+		return "", [sha256.Size]byte{}, err
+	}
+	pin := strings.TrimSpace(raw)
+	digest, err := proto.ParseBusPin(pin)
+	if err != nil {
+		return "", [sha256.Size]byte{}, err
+	}
+	return pin, digest, nil
+}
+
+// handshakePin is the pin source pinnedTLSConfig asks on each of this
+// Client's handshakes. It asks pinSrc again, so a rewritten controlplane pin
+// file is followed by the same Client with no restart and no re-dial. A pin
+// that differs from the last one used is logged at INFO, once, with both
+// values; pins are public, so the log carries them. A source that fails
+// refuses the handshake, and the last pin used stays what the logs report.
+func (c *Client) handshakePin() ([sha256.Size]byte, error) {
+	pin, digest, err := usablePin(c.pinSrc)
+	if err != nil {
+		return [sha256.Size]byte{}, fmt.Errorf("no usable bus pin for this handshake: %w", err)
+	}
+	c.mu.Lock()
+	old := c.pin
+	c.pin = pin
+	c.mu.Unlock()
+	if pin != old {
+		c.log.Info("agent/bus: the bus pin changed; verifying the bus server against the new pin",
+			"node_id", c.nodeID, "old_pin", old, "new_pin", pin)
+	}
+	return digest, nil
+}
+
+// lastPin is the last pin a handshake was verified against.
+func (c *Client) lastPin() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.pin
 }
 
 // install makes nc the current conn, announces it, and runs onConnected.
@@ -442,14 +511,14 @@ func (c *Client) onClosed(nc *nats.Conn) {
 	go c.redial()
 }
 
-// tlsConfig is pinnedTLSConfig for this Client's pin, with every handshake the
-// pin check refuses reported through handshakeRefused. nats.go reports no
+// tlsConfig is pinnedTLSConfig for this Client's pin source (handshakePin),
+// with every handshake the pin check refuses reported through handshakeRefused. nats.go reports no
 // error for a nats-level reconnect whose TLS handshake fails, so without this
 // a running node refused by a controlplane restored onto a different key would
 // sit off the bus with nothing in its journal saying why
 // (docs/bus-tls-contract.md).
 func (c *Client) tlsConfig() *tls.Config {
-	cfg := pinnedTLSConfig(c.pinDigest)
+	cfg := pinnedTLSConfig(c.handshakePin)
 	check := cfg.VerifyConnection
 	cfg.VerifyConnection = func(cs tls.ConnectionState) error {
 		err := check(cs)
@@ -468,11 +537,12 @@ func (c *Client) handshakeRefused(err error) {
 	c.mu.Lock()
 	same := msg == c.lastRefusal
 	c.lastRefusal = msg
+	pin := c.pin
 	c.mu.Unlock()
 	if same {
 		return
 	}
-	c.log.Warn("agent/bus: refused the bus server's key; retrying", "node_id", c.nodeID, "url", c.url, "pin", c.pin, "err", msg)
+	c.log.Warn("agent/bus: refused the bus server's key; retrying", "node_id", c.nodeID, "url", c.url, "pin", pin, "err", msg)
 }
 
 // lost runs the OnLost hook unless the Client itself is closing: the agent's

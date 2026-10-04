@@ -290,7 +290,7 @@ func dialWithPin(t *testing.T, cert tls.Certificate, pin string) (*Client, *nats
 		TLSConfig:  &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}},
 		TLSTimeout: 5,
 	})
-	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: pin, Token: StaticToken("tok-A")})
+	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(pin), Token: StaticToken("tok-A")})
 	t.Cleanup(c.Close)
 	return c, s, c.Dial()
 }

@@ -140,7 +140,7 @@ func stubListener(t *testing.T) net.Listener {
 // TC-517-01: New refuses an empty pin and opens no socket.
 func TestNew_RefusesAnEmptyPin(t *testing.T) {
 	l := stubListener(t)
-	c, err := New(Config{URL: "nats://" + l.Addr().String(), NodeID: testNode, Pin: "", Log: discard()})
+	c, err := New(Config{URL: "nats://" + l.Addr().String(), NodeID: testNode, Pin: StaticPin(""), Log: discard()})
 	if err == nil || c != nil {
 		t.Fatalf("New with no pin = (%v, %v), want an error and no Client", c, err)
 	}
@@ -161,7 +161,7 @@ func TestNew_RefusesAMalformedPin(t *testing.T) {
 		"curl's sha256//": "sha256//" + body,
 	} {
 		t.Run(name, func(t *testing.T) {
-			c, err := New(Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: pin, Log: discard()})
+			c, err := New(Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: StaticPin(pin), Log: discard()})
 			if c != nil || !errors.Is(err, proto.ErrBusPinFormat) {
 				t.Fatalf("New(%q) = (%v, %v), want no Client and ErrBusPinFormat", pin, c, err)
 			}
@@ -172,7 +172,7 @@ func TestNew_RefusesAMalformedPin(t *testing.T) {
 // TC-517-56: New refuses a nil logger and opens no socket.
 func TestNew_RefusesANilLogger(t *testing.T) {
 	l := stubListener(t)
-	c, err := New(Config{URL: "nats://" + l.Addr().String(), NodeID: testNode, Pin: testPin(t)})
+	c, err := New(Config{URL: "nats://" + l.Addr().String(), NodeID: testNode, Pin: StaticPin(testPin(t))})
 	if err == nil || c != nil {
 		t.Fatalf("New with no logger = (%v, %v), want an error and no Client", c, err)
 	}
@@ -183,7 +183,7 @@ func TestNew_RefusesANilLogger(t *testing.T) {
 // are what the Client actually uses — ReconnectWait on the nats connection,
 // Backoff in the re-dial schedule it logs.
 func TestNew_ConfigDefaultsAndOverrides(t *testing.T) {
-	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: StaticPin(testPin(t))})
 	if c.reconnectWait != 2*time.Second {
 		t.Errorf("default reconnectWait = %s, want 2s", c.reconnectWait)
 	}
@@ -195,7 +195,7 @@ func TestNew_ConfigDefaultsAndOverrides(t *testing.T) {
 	cp, logger := newCapture()
 	want := Backoff{Min: 30 * time.Millisecond, Max: 30 * time.Millisecond}
 	c = mustNew(t, Config{
-		URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-A"),
+		URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: StaticToken("tok-A"),
 		Backoff: want, ReconnectWait: 70 * time.Millisecond, Log: logger,
 	})
 	t.Cleanup(c.Close)
@@ -223,7 +223,7 @@ func TestNew_ConfigDefaultsAndOverrides(t *testing.T) {
 func TestNew_NilTokenPresentsNoPassword(t *testing.T) {
 	seen := &recordingAuth{}
 	s := startBusWith(t, &natsserver.Options{CustomClientAuthentication: seen})
-	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(testPin(t))})
 	t.Cleanup(c.Close)
 	err := c.Dial()
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "authorization") {
@@ -267,7 +267,7 @@ func (a *recordingAuth) last() (string, string, int) {
 // that nobody is listening on must fail quickly and return a wrapped error.
 func TestDial_ReturnsErrorOnUnreachableURL(t *testing.T) {
 	done := make(chan error, 1)
-	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: StaticPin(testPin(t))})
 	go func() { done <- c.Dial() }()
 	select {
 	case err := <-done:
@@ -282,7 +282,7 @@ func TestDial_ReturnsErrorOnUnreachableURL(t *testing.T) {
 // TestNew_EmptyURLAttemptsDefault: when URL == "" New substitutes
 // nats.DefaultURL, and Dial attempts it rather than rejecting the empty url.
 func TestNew_EmptyURLAttemptsDefault(t *testing.T) {
-	c := mustNew(t, Config{NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{NodeID: testNode, Pin: StaticPin(testPin(t))})
 	if c.url != nats.DefaultURL {
 		t.Fatalf("url = %q, want nats.DefaultURL %q", c.url, nats.DefaultURL)
 	}
@@ -306,7 +306,7 @@ func TestNew_EmptyURLAttemptsDefault(t *testing.T) {
 // (4222) proves which URL was used.
 func TestDial_NonEmptyURLIsNotReplacedWithDefault(t *testing.T) {
 	const url = "nats://127.0.0.1:1" // unreachable, and deliberately not :4222
-	c := mustNew(t, Config{URL: url, NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: url, NodeID: testNode, Pin: StaticPin(testPin(t))})
 	done := make(chan error, 1)
 	go func() { done <- c.Dial() }()
 	select {
@@ -413,11 +413,17 @@ type testClient struct {
 
 func newTestClient(t *testing.T, url, token string, opts ...nats.Option) *testClient {
 	t.Helper()
+	return newTestClientWithPin(t, url, token, StaticPin(testPin(t)), opts...)
+}
+
+// newTestClientWithPin is newTestClient with the pin source given.
+func newTestClientWithPin(t *testing.T, url, token string, pin PinSource, opts ...nats.Option) *testClient {
+	t.Helper()
 	tc := &testClient{}
 	var logger *slog.Logger
 	tc.logs, logger = newCapture()
 	tc.Client = mustNew(t, Config{
-		URL: url, NodeID: testNode, Pin: testPin(t), Token: StaticToken(token),
+		URL: url, NodeID: testNode, Pin: pin, Token: StaticToken(token),
 		OnConn: func(nc *nats.Conn) error {
 			tc.conns.Add(1)
 			_, err := nc.Subscribe(testSubj, func(m *nats.Msg) { _ = m.Respond([]byte("pong")) })
@@ -453,7 +459,7 @@ type connHolder interface{ Conn() *nats.Conn }
 // verified by the same pin the Client uses.
 func probeTLS(t *testing.T) nats.Option {
 	t.Helper()
-	return nats.Secure(pinnedTLSConfig(pinDigest(t, testKey())))
+	return nats.Secure(pinnedTLSConfig(fixedPin(pinDigest(t, testKey()))))
 }
 
 // ping asks the agent's handler for a reply through a separate client
@@ -726,7 +732,7 @@ func TestClient_RejectsConnWhoseSetupFails(t *testing.T) {
 	s := startBus(t, -1, testNode, "tok-A")
 	var seen *nats.Conn
 	c := mustNew(t, Config{
-		URL: natsURL(t, s), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-A"),
+		URL: natsURL(t, s), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: StaticToken("tok-A"),
 		OnConn: func(nc *nats.Conn) error {
 			seen = nc
 			_, err := nc.Subscribe("bad subject with spaces", func(*nats.Msg) {})
@@ -746,7 +752,7 @@ func TestClient_RejectsConnWhoseSetupFails(t *testing.T) {
 }
 
 func TestClient_PublishBeforeDial(t *testing.T) {
-	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: "nats://127.0.0.1:1", NodeID: testNode, Pin: StaticPin(testPin(t))})
 	if err := c.Publish("x", nil); err != ErrNotConnected {
 		t.Fatalf("Publish before Dial = %v, want ErrNotConnected", err)
 	}
@@ -874,7 +880,7 @@ func TestDial_CustomDialerReceivesHostnameNotResolvedIP(t *testing.T) {
 		t.Skipf("this machine does not resolve %q (%v) — the assertion would pass vacuously", host, err)
 	}
 	rec := &recordingDialer{}
-	c := mustNew(t, Config{URL: "nats://" + host + ":4222", NodeID: testNode, Pin: testPin(t)})
+	c := mustNew(t, Config{URL: "nats://" + host + ":4222", NodeID: testNode, Pin: StaticPin(testPin(t))})
 	// extraOpts are appended after the client's own options, so this replaces
 	// the mdnsDialer while leaving every other option — SkipHostLookup among
 	// them — exactly as the agent sets it.
@@ -973,7 +979,7 @@ func startPlainStub(t *testing.T) *plainStub {
 // join token never crosses the wire.
 func TestClient_RefusesAServerThatOffersNoTLS(t *testing.T) {
 	p := startPlainStub(t)
-	c := mustNew(t, Config{URL: "nats://" + p.l.Addr().String(), NodeID: testNode, Pin: testPin(t), Token: StaticToken("tok-SECRET")})
+	c := mustNew(t, Config{URL: "nats://" + p.l.Addr().String(), NodeID: testNode, Pin: StaticPin(testPin(t)), Token: StaticToken("tok-SECRET")})
 	t.Cleanup(c.Close)
 	err := c.Dial()
 	if !errors.Is(err, nats.ErrSecureConnWanted) {
@@ -992,11 +998,11 @@ func TestClient_RefusesAServerThatOffersNoTLS(t *testing.T) {
 	}
 }
 
-// A controlplane that comes back with a different bus key — an identity
-// restore onto a controlplane that had generated its own — is refused on every
-// nats-level reconnect, and the refusal is in the log once, naming the pin
-// mismatch, however many attempts fail the same way (TC-517-33's agent half;
-// docs/bus-tls-contract.md).
+// A node on a fixed pin whose controlplane comes back with a different bus
+// key is refused on every nats-level reconnect, and the refusal is in the log
+// once, naming the pin mismatch, however many attempts fail the same way
+// (docs/bus-tls-contract.md). The controlplane's own agent, which follows its
+// pin file, is TestClient_FollowsARewrittenPinFileWithNoRedial.
 func TestClient_LogsAReconnectPinMismatchOnce(t *testing.T) {
 	s1 := startBus(t, -1, testNode, "tok-A")
 	port := portOf(t, s1)
