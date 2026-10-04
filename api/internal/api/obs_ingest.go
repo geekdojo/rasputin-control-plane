@@ -7,17 +7,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // Routes served on the api's dedicated mTLS ingress listener. Per-node Alloy
-// collectors push here — metrics (§3.10) and, since Slice 1.2c, logs (§3.11).
+// collectors push here — metrics (§3.10) and, since Slice 1.2c, logs (§3.11) —
+// and node agents move backup members here, each by its registered key.
 const (
 	obsIngestPattern     = "POST /api/obs/ingest"      // metrics remote-write
 	obsLogsIngestPattern = "POST /api/obs/logs/ingest" // Loki log push
@@ -37,11 +40,14 @@ const (
 )
 
 // ObsIngestHandler builds the http.Handler served on the api's dedicated node
-// listener (wired in main.go). Every route here has NO session middleware: the
-// TLS handshake IS the authentication — the peer presents a key the node
-// registered, or, while legacy collectors remain, a mesh-CA-signed client leaf
-// — and the key's owner is the authorization identity. Everything reachable on
-// this listener must be safe to expose to an admitted node and nothing else.
+// listener (wired in main.go): the collectors' metrics and log pushes, and the
+// agents' backup upload and restore fetch. Every route here has NO session
+// middleware: the TLS handshake IS the authentication — the peer presents a
+// key the node registered, or, while legacy collectors remain, a
+// mesh-CA-signed client leaf on the collector routes — and the key's owner is
+// the authorization identity, with each route's key purpose checked per
+// request (authenticateNode). Everything reachable on this listener must be
+// safe to expose to an admitted node and nothing else.
 //
 // ⚠️ ALPN does NOT keep an ordinary HTTPS client off this listener: Go adds
 // http/1.1 to whatever protocols are offered, so a browser or curl negotiates
@@ -63,10 +69,16 @@ func (s *Server) obsIngestRoutes() *routeMux {
 	mux := newRouteMux()
 	mux.HandleFunc(obsIngestPattern, s.handleObsIngest)
 	mux.HandleFunc(obsLogsIngestPattern, s.handleObsLogsIngest)
+	// Backup transfer, authenticated by the node's agent key: the routes an
+	// agent that advertises proto.CapabilityKeyBoundTransfer is sent to
+	// (storage.TransferRouter). Their bearer-only twins on the public
+	// listener remain for older agents (register row E12).
+	mux.HandleFunc("PUT "+backupxfer.IngestPathPrefix, s.handleNodeBackupIngest)
+	mux.HandleFunc("GET "+backupxfer.EgressPathPrefix, s.handleNodeRestoreEgress)
 	return mux
 }
 
-// authenticateCollector is the per-request half of node authentication, and it
+// authenticateNode is the per-request half of node authentication, and it
 // reads nothing but the request's own TLS state and the in-memory node
 // registry. The identity is the key the peer presented — or, for a legacy
 // client, its verified mesh leaf's CommonName — never anything in the request,
@@ -79,41 +91,92 @@ func (s *Server) obsIngestRoutes() *routeMux {
 // on the strength of a decision the registry has since reversed. The re-check
 // is three map lookups against memory — no request does a database lookup.
 //
-// The route's purpose is checked here too: a key registered as the node's
-// AGENT key is not the collector, so it cannot push the collector's metrics
-// and logs even though both belong to the same node. A legacy mesh-chain
-// client has no purpose to check and keeps the access it has always had.
+// The route's purpose is checked here too: want is the one key purpose the
+// route serves, so a node's AGENT key cannot push its collector's metrics and
+// its COLLECTOR key cannot move its backups, though both belong to the same
+// node. allowMeshChain says whether a legacy mesh-chain client, which has no
+// purpose to check, keeps the access it has always had: the collector routes
+// allow it; the backup routes, which no legacy client ever reached, do not.
 //
 // A server whose listener was not given the gate (WireObsIngest) refuses every
 // request: fail closed.
 //
-// On any failure it writes the response and returns ok=false. `label` prefixes
-// the log lines and error bodies so the two routes are distinguishable.
-func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, label string) (nodeID string, ok bool) {
+// On any failure it writes a coded refusal (writeCodedError: a correlation id
+// in the body and in the WARN record, with the node, the purpose of the key
+// it presented — empty for a mesh-chain client — the purpose the route
+// serves, and the cause) and returns ok=false. `label` prefixes the error bodies so the
+// routes are distinguishable.
+func (s *Server) authenticateNode(w http.ResponseWriter, r *http.Request, label string, want proto.NodeKeyPurpose, allowMeshChain bool) (nodeID string, ok bool) {
 	if s.nodeGate == nil {
-		log.Printf("%s: refusing: the listener has no node admission gate", label)
-		writeError(w, http.StatusServiceUnavailable, label+": node admission is not configured")
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeNodeAdmissionUnconfigured, label+": node admission is not configured",
+			slog.String("route_purpose", string(want)), slog.String("cause", "the listener has no node admission gate"))
 		return "", false
 	}
 	id, err := s.nodeGate.identify(r.TLS)
 	if err != nil {
 		// The handshake should make this unreachable; fail closed rather
-		// than proxy anonymously if it ever is not.
-		log.Printf("%s: rejecting a request whose client certificate is not admitted: %v", label, err)
-		writeError(w, http.StatusUnauthorized, label+": a registered node key is required")
+		// than serve anonymously if it ever is not.
+		s.writeCodedError(w, r, http.StatusUnauthorized, codeNodeKeyRequired, label+": a registered node key is required",
+			slog.String("route_purpose", string(want)), slog.String("cause", "client certificate not admitted: "+err.Error()))
+		return "", false
+	}
+	refuse := func(code, msg, cause string) (string, bool) {
+		s.writeCodedError(w, r, http.StatusForbidden, code, label+": "+msg,
+			slog.String("node_id", id.nodeID), slog.String("purpose", string(id.purpose)),
+			slog.String("route_purpose", string(want)), slog.String("cause", cause))
 		return "", false
 	}
 	if !s.nodeGate.gate.Admitted(id.nodeID) {
-		log.Printf("%s: rejecting a request from %q — it is no longer a member holding a live join token", label, id.nodeID)
-		writeError(w, http.StatusForbidden, label+": this node is not admitted")
-		return "", false
+		return refuse(codeNodeNotAdmitted, "this node is not admitted", "the node is no longer a member holding a live join token")
 	}
-	if id.purpose != "" && id.purpose != proto.NodeKeyCollector {
-		log.Printf("%s: rejecting a request from %q — it presented its %q key, which this route is not for", label, id.nodeID, id.purpose)
-		writeError(w, http.StatusForbidden, label+": this key is not the node's collector key")
-		return "", false
+	switch {
+	case id.purpose == "" && !allowMeshChain:
+		return refuse(codeNodeKeyPurpose, wrongKeyMessage(want), "a legacy mesh-chain client; this route takes a registered key only")
+	case id.purpose != "" && id.purpose != want:
+		return refuse(codeNodeKeyPurpose, wrongKeyMessage(want), fmt.Sprintf("presented its %s key; this route is for the %s key", id.purpose, want))
 	}
 	return id.nodeID, true
+}
+
+// wrongKeyMessage is the refusal body for a key this route is not for.
+func wrongKeyMessage(want proto.NodeKeyPurpose) string {
+	if want == proto.NodeKeyAgent {
+		return "a registered agent key is required"
+	}
+	return "this key is not the node's " + string(want) + " key"
+}
+
+// handleNodeBackupIngest is PUT /api/backup/ingest/{generation}/{member} on
+// the node listener: the request is authenticated by the presenting node's
+// registered agent key, and the endpoint is told which node that is, so a
+// key-bound credential is honoured only from its own node
+// (backupxfer.CheckPresenter).
+func (s *Server) handleNodeBackupIngest(w http.ResponseWriter, r *http.Request) {
+	nodeID, ok := s.authenticateNode(w, r, "backup ingest", proto.NodeKeyAgent, false)
+	if !ok {
+		return
+	}
+	if s.backupIngest == nil {
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeBackupTransferUnconfigured, "backup ingest is not configured on this api",
+			slog.String("node_id", nodeID), slog.String("cause", "the server has no backup ingest wired"))
+		return
+	}
+	s.backupIngest.ServeNode(w, r, nodeID)
+}
+
+// handleNodeRestoreEgress is GET /api/backup/egress/{generation}/{member} on
+// the node listener, the restore stream's keyed entry; as the ingest.
+func (s *Server) handleNodeRestoreEgress(w http.ResponseWriter, r *http.Request) {
+	nodeID, ok := s.authenticateNode(w, r, "restore egress", proto.NodeKeyAgent, false)
+	if !ok {
+		return
+	}
+	if s.restoreEgress == nil {
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeBackupTransferUnconfigured, "app-volume restore is not configured on this api",
+			slog.String("node_id", nodeID), slog.String("cause", "the server has no restore egress wired"))
+		return
+	}
+	s.restoreEgress.ServeNode(w, r, nodeID)
 }
 
 // handleObsIngest reverse-proxies a per-node collector's Prometheus remote-write
@@ -124,7 +187,7 @@ func (s *Server) authenticateCollector(w http.ResponseWriter, r *http.Request, l
 // does read each series' metric name, to refuse reserved ones
 // (refuseReservedMetrics); the body it forwards is the one it received.
 func (s *Server) handleObsIngest(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateCollector(w, r, "obs ingest")
+	nodeID, ok := s.authenticateNode(w, r, "obs ingest", proto.NodeKeyCollector, true)
 	if !ok {
 		return
 	}
@@ -193,7 +256,7 @@ func refuseReservedMetrics(w http.ResponseWriter, r *http.Request) (refused stri
 // into every stream of the body (stampLogStreams) and refuses a job label
 // reserved for the controlplane.
 func (s *Server) handleObsLogsIngest(w http.ResponseWriter, r *http.Request) {
-	nodeID, ok := s.authenticateCollector(w, r, "obs logs ingest")
+	nodeID, ok := s.authenticateNode(w, r, "obs logs ingest", proto.NodeKeyCollector, true)
 	if !ok {
 		return
 	}

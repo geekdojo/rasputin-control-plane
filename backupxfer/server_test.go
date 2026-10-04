@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,13 +46,22 @@ type rig struct {
 
 func newRig(t *testing.T, concurrency int) *rig {
 	t.Helper()
+	return newRigServing(t, concurrency, slog.New(slog.DiscardHandler),
+		func(ing *backupxfer.Ingest) http.Handler { return ing })
+}
+
+// newRigServing is newRig with the logger the endpoint writes through and the
+// entry the mux mounts: the legacy ServeHTTP, or a ServeNode wrapper standing
+// in for the node listener's authenticated handler.
+func newRigServing(t *testing.T, concurrency int, logger *slog.Logger, entry func(*backupxfer.Ingest) http.Handler) *rig {
+	t.Helper()
 	auth, err := backupxfer.NewAuthority()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ing := backupxfer.New(auth, concurrency)
+	ing := backupxfer.New(auth, concurrency, logger)
 	mux := http.NewServeMux()
-	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ing)
+	mux.Handle("PUT "+backupxfer.IngestPathPrefix, entry(ing))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	gens := filepath.Join(t.TempDir(), "mnt", "generations")

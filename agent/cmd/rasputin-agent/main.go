@@ -161,6 +161,16 @@ func main() {
 			"a later change to it raises a control-plane alert", freshKeys, nodekeys.Dir(stateDir))
 	}
 	log.Printf("rasputin-agent: node keys %s", nodeKeySet.Hashes())
+	// The agent key as a TLS client certificate, presented by the backup
+	// transfer and restore clients (quiesce.New) so the api's node listener
+	// admits them by it. Fatal for the same reason as the keys: this agent
+	// advertises key-bound transfer (publishRegistered), and a node that says
+	// so but cannot present its key would have every backup refused.
+	agentCert, err := nodeKeySet.ClientCertificate(proto.NodeKeyAgent)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-agent: node agent certificate", "err", err.Error())
+		os.Exit(1)
+	}
 
 	// Update-path fault injection (updater/fault.go). Resolved once, here.
 	// updater.Arm cannot fail and cannot exit — an unrecognised value, or any
@@ -485,8 +495,9 @@ func main() {
 			}
 			// The transfer verb uploads sealed volumes to the api's ingest
 			// endpoint over the api's mesh-CA HTTPS leaf; the same trust the
-			// updater's download client has.
-			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir), meshTrust.ClientTLSConfig)
+			// updater's download client has. It presents the node's agent
+			// key, which the api's node listener admits it by.
+			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir), meshTrust.ClientTLSConfig, agentCert)
 			// The restore verb (#291 phase 2) stages beside each volume and
 			// records where, so a tree a dying process left is swept here —
 			// the previous contents a restore keeps aside are never touched.
@@ -1068,7 +1079,10 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 			meta[proto.MetadataConfigFaults] = fs
 		}
 	}
-	var caps []string
+	// Every agent of this build presents its agent key on backup transfer
+	// (quiesce.New), on every role: the api routes such a node to its node
+	// listener and mints it key-bound credentials (storage.TransferRouter).
+	caps := []string{proto.CapabilityKeyBoundTransfer}
 	if bmcAdv != nil {
 		// This node hosts an active BMC backend: advertise the reachable
 		// targets so the api/UI gate power + console per-node (bmc.md

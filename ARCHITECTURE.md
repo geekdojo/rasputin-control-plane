@@ -107,6 +107,12 @@ SAN and never the Common Name. Nothing pins its bytes. The node listener
 (`:8443`) does not serve it: it serves the api's Mesh-CA-signed HTTPS leaf, and
 every observability collector verifies that leaf by chain to the Mesh CA under
 the cluster name (geekdojo/geekdojo-brain#672).
+The node listener also carries backup transfer: an agent that advertises
+`key-bound-transfer` uploads backup members and fetches restore streams there,
+admitted by its registered **agent** key, on a grant the api marked key-bound
+and honours only from that node's key (geekdojo/geekdojo-brain#514). An older
+agent still uses the bearer-only routes on the public listener until every
+node advertises the capability (geekdojo/geekdojo-brain#516).
 A bus key or certificate that will not load leaves the api running with no bus
 listener at all and a standing crit alert naming the file. The plaintext
 migration ladder that took existing clusters to TLS was deleted once every

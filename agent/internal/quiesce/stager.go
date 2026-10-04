@@ -42,7 +42,11 @@ type Stager struct {
 	// the api with: the node's mesh CA bundle and nothing else. Called once
 	// per transfer and per restore fetch. transportFor is a test's
 	// replacement for the transport itself.
-	trust        TrustSource
+	trust TrustSource
+	// clientCert is the node's agent key, presented on every transfer and
+	// restore fetch so the api's node listener can admit it. Nil refuses
+	// both (errNoNodeKey).
+	clientCert   *tls.Certificate
 	transportFor func(destination string) (backupxfer.Transport, error)
 	// The restore verb's seams (restore.go): the fetcher for a source, the
 	// directory in-flight staging trees are recorded in for the boot sweep,
@@ -66,15 +70,25 @@ type TrustSource func() (*tls.Config, error)
 // roots.
 var errNoTrustSource = errors.New("quiesce: no mesh trust source wired")
 
+// errNoNodeKey is a Stager built without the node's agent key. Every transfer
+// and every restore fetch refuses with it: the api routes a node that
+// advertises key-bound transfer to its node listener, which admits nothing
+// but a registered key, so sending without one could only fail later and
+// less clearly.
+var errNoNodeKey = errors.New("quiesce: no node key wired")
+
 // New builds a Stager over the runtime. stagingRoot is the agent's one
-// staging root (storage.StagingRoot), markerDir is MarkerDir(stateDir), and
-// trust is the node's mesh CA trust.
-func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource) *Stager {
+// staging root (storage.StagingRoot), markerDir is MarkerDir(stateDir), trust
+// is the node's mesh CA trust, and clientCert is the node's agent key as a
+// TLS client certificate (nodekeys.Keys.ClientCertificate), presented on every
+// transfer and restore fetch.
+func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource, clientCert *tls.Certificate) *Stager {
 	return &Stager{
 		rt:          rt,
 		stagingRoot: stagingRoot,
 		markerDir:   markerDir,
 		trust:       trust,
+		clientCert:  clientCert,
 		freeBytes: func(dir string) (uint64, error) {
 			du, err := disk.Usage(dir)
 			if err != nil {
@@ -92,17 +106,25 @@ func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource) *Stager {
 	}
 }
 
-// clientTLS resolves the trust for one transfer or restore fetch. A nil
-// source and a trust error are both refusals.
+// clientTLS resolves the TLS config for one transfer or restore fetch: the
+// trust, cloned, presenting the node's agent key. A nil source, a trust error
+// and a missing key are all refusals. The key is offered, never forced: Go
+// sends a client certificate only when the server asks for one, so the api's
+// public listener, which asks for none, sees exactly what it saw before.
 func (s *Stager) clientTLS() (*tls.Config, error) {
 	if s.trust == nil {
 		return nil, errNoTrustSource
+	}
+	if s.clientCert == nil {
+		return nil, errNoNodeKey
 	}
 	cfg, err := s.trust()
 	if err != nil {
 		return nil, fmt.Errorf("quiesce: %w", err)
 	}
-	return cfg, nil
+	out := cfg.Clone()
+	out.Certificates = []tls.Certificate{*s.clientCert}
+	return out, nil
 }
 
 // Stage carries out one BackupStageVolumeCmd. It ALWAYS returns an ack — a

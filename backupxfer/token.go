@@ -98,6 +98,13 @@ type Grant struct {
 	// endpoint refuses the other's, so a leaked credential of either kind
 	// cannot be turned into the other capability. Signed with the rest.
 	Use string `json:"use,omitempty"`
+	// KeyBound says the credential is honoured only from the node it names,
+	// presenting its registered agent key on the api's node listener: the api
+	// sets it when it routes the node to that listener (storage.TransferRouter),
+	// and the bearer-only routes refuse it (CheckPresenter). Absent on a grant
+	// for an agent that predates key-bound transfer. Signed with the rest, so
+	// a holder cannot clear it.
+	KeyBound bool `json:"nk,omitempty"`
 }
 
 // ForUpload reports whether the grant is an upload credential.

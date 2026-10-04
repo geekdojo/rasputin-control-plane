@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -65,7 +66,7 @@ func newXferRigOn(t *testing.T, start func(http.Handler) *httptest.Server) *xfer
 	if err != nil {
 		t.Fatal(err)
 	}
-	ing := backupxfer.New(auth, 1)
+	ing := backupxfer.New(auth, 1, slog.New(slog.DiscardHandler))
 	mux := http.NewServeMux()
 	mux.Handle("PUT "+backupxfer.IngestPathPrefix, ing)
 	hits := &atomic.Int32{}

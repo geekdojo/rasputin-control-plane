@@ -28,6 +28,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -174,19 +175,51 @@ func ensureCert(path string, signer crypto.Signer, cn string) error {
 // certWraps reports whether the PEM certificate in blob carries signer's
 // public key. A certificate that wraps a different key is not this node's.
 func certWraps(blob []byte, signer crypto.Signer) bool {
+	cert, err := parseCert(blob)
+	return err == nil && wraps(cert, signer)
+}
+
+// parseCert reads the one PEM CERTIFICATE block ensureCert writes.
+func parseCert(blob []byte) (*x509.Certificate, error) {
 	block, _ := pem.Decode(blob)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return false
+		return nil, errors.New("no PEM CERTIFICATE block")
 	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return false
-	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// wraps reports whether cert carries signer's public key.
+func wraps(cert *x509.Certificate, signer crypto.Signer) bool {
 	want, err := x509.MarshalPKIXPublicKey(signer.Public())
 	if err != nil {
 		return false
 	}
 	return bytes.Equal(cert.RawSubjectPublicKeyInfo, want)
+}
+
+// ClientCertificate is the purpose's key as a TLS client certificate: the
+// self-signed wrapper Ensure wrote, read from its file, and the key. A missing
+// or unreadable file, or one that no longer wraps this key, is an error —
+// never a reason to present nothing, which the api's node listener would
+// refuse anyway, or a different key.
+func (k *Keys) ClientCertificate(p proto.NodeKeyPurpose) (*tls.Certificate, error) {
+	signer := k.Signer(p)
+	if signer == nil {
+		return nil, fmt.Errorf("nodekeys: no %s key is loaded", p)
+	}
+	path := CertPath(k.stateDir, p)
+	blob, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("nodekeys: read %s: %w", path, err)
+	}
+	cert, err := parseCert(blob)
+	if err != nil {
+		return nil, fmt.Errorf("nodekeys: %s is not a usable certificate: %w", path, err)
+	}
+	if !wraps(cert, signer) {
+		return nil, fmt.Errorf("nodekeys: %s does not wrap the %s key", path, p)
+	}
+	return &tls.Certificate{Certificate: [][]byte{cert.Raw}, PrivateKey: signer, Leaf: cert}, nil
 }
 
 // ensureOne loads path, or generates and persists a key when there is none.

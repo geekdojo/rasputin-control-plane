@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -204,7 +205,10 @@ func newIngestServer(t *testing.T, obsStatus *obs.Status, seedNodes ...string) *
 	for _, id := range seedNodes {
 		invStore.Registry().SetLiveTokens(id, []string{"tok-" + id})
 	}
-	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), nil)}
+	// The logger and correlation ids a refusal goes through; a test that reads
+	// the records swaps in a recording logger.
+	return &Server{inv: invStore, obs: obsStatus, nodeGate: newIngestConns(invStore.Registry(), nil),
+		log: slog.New(slog.DiscardHandler), newCorrelationID: sequentialIDs()}
 }
 
 func ingestReq(t *testing.T, node string) *http.Request {

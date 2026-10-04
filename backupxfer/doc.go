@@ -43,7 +43,16 @@
 // ability to replace ITS OWN not-yet-landed volume with different sealed
 // bytes for a few minutes — and the manifest records the plaintext digest the
 // stage verb reported, so a substituted member shows up on restore day as a
-// digest the manifest does not vouch for. The credential is a bearer: it is
-// not bound to the presenting connection, so its holder need not be the node
-// it names — that is the whole reason its scope is this narrow.
+// digest the manifest does not vouch for.
+//
+// # Who may present it
+//
+// A credential minted for a node the api routes to its node listener is
+// KEY-BOUND (Grant.KeyBound): it is honoured only from a connection
+// authenticated by that node's registered agent key, and the bearer-only
+// route refuses it (CheckPresenter, presenter.go). A credential minted for an
+// agent that predates key-bound transfer is a bearer: not bound to the
+// presenting connection, so its holder need not be the node it names — that
+// is the whole reason its scope is this narrow. The bearer route is
+// transitional (register row E12) and goes once every node presents its key.
 package backupxfer

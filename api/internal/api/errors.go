@@ -12,6 +12,19 @@ const (
 	// codeBusUnavailable: the node bus has no usable key or certificate, so
 	// there is no pin to serve and no seed to mint.
 	codeBusUnavailable = "bus_unavailable"
+	// codeNodeAdmissionUnconfigured: the node listener has no admission gate,
+	// so it admits nobody.
+	codeNodeAdmissionUnconfigured = "node_admission_unconfigured"
+	// codeNodeKeyRequired: the request was not made with a registered node
+	// key (or, where allowed, a mesh-chain leaf).
+	codeNodeKeyRequired = "node_key_required"
+	// codeNodeNotAdmitted: the key's node is no longer a member.
+	codeNodeNotAdmitted = "node_not_admitted"
+	// codeNodeKeyPurpose: the node presented a key this route is not for.
+	codeNodeKeyPurpose = "node_key_wrong_purpose"
+	// codeBackupTransferUnconfigured: the node listener admitted the node,
+	// but this api has no backup ingest or restore egress wired behind it.
+	codeBackupTransferUnconfigured = "backup_transfer_unconfigured"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

@@ -18,6 +18,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"log/slog"
 )
 
 // The node listener serves the api's Mesh-CA-signed leaf for every name, and a
@@ -292,5 +294,41 @@ func TestCollectorLeafMinter(t *testing.T) {
 	}
 	if _, _, err := collectorLeafMinter(ca, blocked)("c03"); err == nil {
 		t.Error("mint into an unwritable data dir succeeded")
+	}
+}
+
+// TC-514-27: the node-listener base main derives once for the backup router
+// and the collectors, the WARN when there is none, and an error — never a
+// silent "" — when a wired listener yields no URL (F-514-08).
+func TestNodeListenerBaseURL(t *testing.T) {
+	logger, rec := logkittest.New()
+	base, serverName, err := nodeListenerBaseURL(logger, "https://c.local", ":8443", ":443")
+	if err != nil || base != "https://c.local:8443" || len(rec.Records()) != 0 {
+		t.Errorf("wired: %q, %v, records:\n%s", base, err, rec.Text())
+	}
+	// The collectors' server name comes back with the base: the cluster name.
+	if serverName != "c.local" {
+		t.Errorf("wired: server name %q, want c.local", serverName)
+	}
+
+	logger, rec = logkittest.New()
+	base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", ":8443", "")
+	if err != nil || base != "" || serverName != "" {
+		t.Fatalf("HTTPS off: %q, %q, %v", base, serverName, err)
+	}
+	warns := rec.Matching(slog.LevelWarn, "backup transfer: no node listener")
+	if len(warns) != 1 || len(rec.Records()) != 1 {
+		t.Fatalf("HTTPS off records:\n%s", rec.Text())
+	}
+	for k, want := range map[string]string{"obs_ingest_addr": ":8443", "https_addr": ""} {
+		if v, ok := logkittest.Attr(warns[0], k); !ok || v != want {
+			t.Errorf("%s = %q (present %v), want %q", k, v, ok, want)
+		}
+	}
+
+	logger, _ = logkittest.New()
+	base, serverName, err = nodeListenerBaseURL(logger, "https://c.local", "0.0.0.0:", ":443")
+	if err == nil || base != "" || serverName != "" || !strings.Contains(err.Error(), "0.0.0.0:") {
+		t.Fatalf("no port: %q, %q, %v; want an error naming the ingest address", base, serverName, err)
 	}
 }

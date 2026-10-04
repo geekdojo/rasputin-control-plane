@@ -46,9 +46,10 @@ import (
 // the slot. No grant, no TTL, no renewal — that design was tabled (§4.7) and
 // this is the alternative it was tabled for.
 
-// IngestPathPrefix is where the api mounts the endpoint. The destination URI
-// the api hands an agent is the public base plus this prefix; the agent
-// appends the generation and the member.
+// IngestPathPrefix is where the api mounts the endpoint, on its node listener
+// and, for agents that predate key-bound transfer, on its public listener. The
+// destination URI the api hands an agent is one of those bases plus this
+// prefix; the agent appends the generation and the member.
 const IngestPathPrefix = "/api/backup/ingest/"
 
 // ContentType names the body: a sealed archive, and nothing else is accepted.
@@ -76,6 +77,7 @@ const (
 	CodeWriteFailed       = "write-failed"       // 500/507: the target could not take it
 	CodeOverBound         = "over-bound"         // 413: more bytes than the credential authorises
 	CodeUnsupported       = "unsupported"        // 501: this build cannot ingest here
+	CodeKeyRequired       = "key-required"       // 403: a key-bound credential on the bearer-only route
 )
 
 // Receipt is the endpoint's answer to a landed member: the facts the manifest
@@ -105,8 +107,11 @@ type Receipt struct {
 	GrantID string `json:"grantId,omitempty"`
 }
 
-// Problem is the endpoint's error body.
+// Problem is the endpoint's error body. Status is the HTTP status the
+// endpoint answers it with; it is the response's status line, never a body
+// field.
 type Problem struct {
+	Status int    `json:"-"`
 	Code   string `json:"code"`
 	Detail string `json:"detail"`
 }
