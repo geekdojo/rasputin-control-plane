@@ -54,7 +54,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/cutover"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -157,10 +156,16 @@ type agentProc struct {
 }
 
 type agentOpts struct {
-	id    string
-	role  proto.NodeRole
-	url   string
+	id   string
+	role proto.NodeRole
+	url  string
+	// token is the node's join token. startAgent writes it to a 0600 file
+	// and names that file in RASPUTIN_CP_JOIN_TOKEN_FILE, the only form the
+	// agent reads (geekdojo/geekdojo-brain#539). Exclusive with tokenFile.
 	token string
+	// legacyToken sets the retired RASPUTIN_CP_JOIN_TOKEN, which the agent
+	// must never present (TC-539-10).
+	legacyToken string
 	// tokenFile is RASPUTIN_CP_JOIN_TOKEN_FILE: how the controlplane's own
 	// agent reads the token its api mints (cp.agentTokenFile).
 	tokenFile string
@@ -207,11 +212,20 @@ func startAgent(t *testing.T, o agentOpts) *agentProc {
 		"RASPUTIN_RESOLVED_DROPIN_DIR=" + filepath.Join(o.stateDir, "resolved"),
 		"RASPUTIN_CP_MDNS_NAME=bustls-functional-" + o.id,
 	}
+	if o.token != "" && o.tokenFile != "" {
+		t.Fatalf("agent %s: token and tokenFile are exclusive", o.id)
+	}
 	if o.token != "" {
-		env = append(env, "RASPUTIN_CP_JOIN_TOKEN="+o.token)
+		o.tokenFile = filepath.Join(t.TempDir(), "join.token")
+		if err := os.WriteFile(o.tokenFile, []byte(o.token+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if o.tokenFile != "" {
 		env = append(env, "RASPUTIN_CP_JOIN_TOKEN_FILE="+o.tokenFile)
+	}
+	if o.legacyToken != "" {
+		env = append(env, "RASPUTIN_CP_JOIN_TOKEN="+o.legacyToken)
 	}
 	if o.pin != "" {
 		env = append(env, "RASPUTIN_BUS_PIN="+o.pin)
@@ -572,18 +586,6 @@ func (c *cp) waitRegistered(t *testing.T, id string) proto.NodeRegisteredEvt {
 		return false
 	}, c.describeRegs)
 	return got
-}
-
-// waitRecorded blocks until id's registration has been written to the node
-// row, which is the fact inventory's post-write hook reports.
-func (c *cp) waitRecorded(t *testing.T, id string) {
-	t.Helper()
-	waitFact(t, "the node row for "+id, &c.changed, func() bool {
-		c.recordedMu.Lock()
-		defer c.recordedMu.Unlock()
-		_, ok := c.recorded[id]
-		return ok
-	}, c.describeRegs)
 }
 
 // lastRegistration is the most recent registration this controlplane received
@@ -1046,70 +1048,31 @@ func mustParsePEM(t *testing.T, b []byte) *x509.Certificate {
 	return leaf
 }
 
-// THE FUNCTIONAL CHECK for the §7 4.0 token-source emitter
-// (geekdojo/geekdojo-brain#536): the REAL rasputin-agent binary, over the REAL
-// bus to the REAL inventory service, reports where it read its join token, and
-// the api records it on the node row, where the cutover reads it.
-func TestFunctional_CutoverFactsReportedAndRecorded(t *testing.T) {
+// TC-539-10: a valid join token left in the retired RASPUTIN_CP_JOIN_TOKEN
+// does not join (geekdojo/geekdojo-brain#539). The REAL rasputin-agent binary,
+// over the REAL bus with the auth callout enforced, holding a correct pin and a
+// token minted for its own id — but only in the retired variable — is refused,
+// never registers, and stays up. The control proves the token itself was good:
+// the same id with the same token, delivered as a file, registers.
+func TestFunctional_RetiredTokenVariableDoesNotJoin(t *testing.T) {
 	skipShort(t)
-	ctx := context.Background()
 	c := startCP(t, cpOpts{})
+	tok := c.mint(t, "n-env-only")
 
-	// A node whose token is in a file — the canonical source (§7 4.1).
-	fileTok := c.mint(t, "n-file")
-	tokenFile := filepath.Join(t.TempDir(), "join.token")
-	if err := os.WriteFile(tokenFile, []byte(fileTok+"\n"), 0o600); err != nil {
-		t.Fatal(err)
+	envOnly := startAgent(t, agentOpts{id: "n-env-only", url: c.url(), legacyToken: tok, pin: c.key.Pin()})
+	envOnly.waitLog(t, "the refusal of an agent holding its token only in the retired variable", "NATS connect", "Authorization Violation")
+	if c.registeredAtAll("n-env-only") {
+		t.Fatal("an agent holding its token only in RASPUTIN_CP_JOIN_TOKEN registered")
 	}
-	startAgent(t, agentOpts{id: "n-file", url: c.url(), tokenFile: tokenFile, pin: c.key.Pin()})
-	// A node still carrying the seeded variable.
-	startAgent(t, agentOpts{id: "n-env", url: c.url(), token: c.mint(t, "n-env"), pin: c.key.Pin()})
+	if envOnly.exited() {
+		t.Fatalf("the refused agent exited; it must stay up and reachable\n%s", envOnly.log())
+	}
+	if l := envOnly.log(); !strings.Contains(l, "level=ERROR") || !strings.Contains(l, "no longer read") || strings.Contains(l, tok) {
+		t.Errorf("want the startup ERROR naming the retired variable, and never the token:\n%s", l)
+	}
+	envOnly.stop(t)
 
-	c.waitRegistered(t, "n-file")
-	c.waitRegistered(t, "n-env")
-	c.waitRecorded(t, "n-file")
-	c.waitRecorded(t, "n-env")
-
-	for _, tc := range []struct {
-		id   string
-		want string
-	}{
-		{"n-file", proto.TokenSourceFile},
-		{"n-env", proto.TokenSourceEnv},
-	} {
-		ev, ok := c.lastRegistration(tc.id)
-		if !ok {
-			t.Fatalf("no registration from %s\n%s", tc.id, c.describeRegs())
-		}
-		if src, reported := proto.TokenSourceOf(ev.Metadata); !reported || src != tc.want {
-			t.Errorf("%s reported %s = (%q, %v), want %q", tc.id, proto.MetadataTokenSource, src, reported, tc.want)
-		}
-		assertNoLadderMetadata(t, ev)
-		n, err := c.inv.Get(ctx, tc.id)
-		if err != nil || n == nil {
-			t.Fatalf("inventory Get(%s) = (%v, %v)", tc.id, n, err)
-		}
-		if src, reported := proto.TokenSourceOf(n.Metadata); !reported || src != tc.want {
-			t.Errorf("node row %s: %s = (%q, %v), want (%q, true)", tc.id, proto.MetadataTokenSource, src, reported, tc.want)
-		}
-	}
-
-	nodes, err := c.inv.List(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := cutover.TokenOnFile(nodes)
-	if st.Satisfied {
-		t.Fatalf("the token-on-file cutover read as satisfied while n-env is on the variable: %+v", st)
-	}
-	var named bool
-	for _, b := range st.Blockers {
-		named = named || strings.Contains(b, "n-env")
-		if strings.Contains(b, "n-file") {
-			t.Errorf("blocker names the migrated node: %q", b)
-		}
-	}
-	if !named {
-		t.Errorf("blockers = %v, want one naming n-env", st.Blockers)
-	}
+	// Control: the same id and the same token, as a file.
+	startAgent(t, agentOpts{id: "n-env-only", url: c.url(), token: tok, pin: c.key.Pin()})
+	c.waitRegistered(t, "n-env-only")
 }

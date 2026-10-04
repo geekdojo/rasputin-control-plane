@@ -285,7 +285,7 @@ func main() {
 	// (geekdojo/geekdojo-brain#140). Mint it here, before the bus admits
 	// anyone and long before READY=1, so the agent — ordered After= this unit —
 	// finds the file on its first connect. Zero-touch: nobody provisions it.
-	ensureSelfAgentToken(ctx, busTokenStore, filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName), selfNodeID)
+	ensureSelfAgentToken(ctx, logger, busTokenStore, filepath.Join(dataDir, "bus", proto.BusAgentTokenFileName), selfNodeID)
 
 	// The node registry (inventory.Registry) is the api's one in-memory node
 	// list: membership and last-seen loaded from the nodes table by OpenStore,
@@ -2181,23 +2181,31 @@ func logRolelessBusTokens(ctx context.Context, store *busauth.Store) {
 // used to fix anything (#89). Its own agent then stays off the bus — refused
 // for want of a token, and reported offline in the UI — until a restart
 // succeeds; every other node is unaffected.
-func ensureSelfAgentToken(ctx context.Context, store *busauth.Store, path, selfNodeID string) {
+//
+// Every outcome is one structured record through the injected logger, at a
+// level: INFO for a dev skip, a mint or a live token; WARN for a mint that
+// also hit an error; ERROR when the agent cannot join until a restart
+// succeeds. The token itself is never logged.
+func ensureSelfAgentToken(ctx context.Context, logger *slog.Logger, store *busauth.Store, path, selfNodeID string) {
 	if selfNodeID == "" {
-		log.Printf("rasputin-api: no RASPUTIN_SELF_NODE_ID — not minting a bus token for a co-located agent (dev); a local agent needs RASPUTIN_CP_JOIN_TOKEN, or RASPUTIN_BUS_AUTH=off on this api")
+		logger.Info("rasputin-api: no RASPUTIN_SELF_NODE_ID, not minting a bus token for a co-located agent (dev)",
+			"fix", "a local agent needs its token in a 0600 file named by RASPUTIN_CP_JOIN_TOKEN_FILE, or RASPUTIN_BUS_AUTH=off on this api")
 		return
 	}
 	reason, err := store.EnsureAgentToken(ctx, path, selfNodeID)
-	// Every value is %q-formatted: the node id and path come from this
-	// process's own environment, and reason and err are built from them.
 	switch {
 	case err != nil && reason != "":
-		log.Printf("rasputin-api: minted a bus token for this controlplane's agent %q at %q (%q), but: %q", selfNodeID, path, reason, err.Error())
+		logger.Warn("rasputin-api: minted a bus token for this controlplane's agent, with an error",
+			"node_id", selfNodeID, "path", path, "reason", reason, "err", err.Error())
 	case err != nil:
-		log.Printf("rasputin-api: ⚠️  bus token for this controlplane's agent %q at %q: %q — its agent cannot join the bus until the api starts successfully", selfNodeID, path, err.Error())
+		logger.Error("rasputin-api: no bus token for this controlplane's agent; it cannot join the bus until the api starts successfully",
+			"node_id", selfNodeID, "path", path, "err", err.Error())
 	case reason != "":
-		log.Printf("rasputin-api: minted a bus token for this controlplane's agent %q at %q: %q", selfNodeID, path, reason)
+		logger.Info("rasputin-api: minted a bus token for this controlplane's agent",
+			"node_id", selfNodeID, "path", path, "reason", reason)
 	default:
-		log.Printf("rasputin-api: bus token for this controlplane's agent %q at %q is live", selfNodeID, path)
+		logger.Info("rasputin-api: bus token for this controlplane's agent is live",
+			"node_id", selfNodeID, "path", path)
 	}
 }
 

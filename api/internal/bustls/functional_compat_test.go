@@ -128,3 +128,17 @@ func httpPortOf(a *apiProc) int {
 	n, _ := strconv.Atoi(port)
 	return n
 }
+
+// waitRecorded blocks until id's registration has been written to the node
+// row, which is the fact inventory's post-write hook reports. It lives here,
+// beside its only caller, because a helper in an untagged file that only a
+// buscompat test calls reads as dead code to the untagged build.
+func (c *cp) waitRecorded(t *testing.T, id string) {
+	t.Helper()
+	waitFact(t, "the node row for "+id, &c.changed, func() bool {
+		c.recordedMu.Lock()
+		defer c.recordedMu.Unlock()
+		_, ok := c.recorded[id]
+		return ok
+	}, c.describeRegs)
+}

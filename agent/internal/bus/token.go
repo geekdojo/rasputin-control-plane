@@ -17,44 +17,39 @@ import (
 // controlplane claim any node's id (geekdojo/geekdojo-brain#140, decided
 // 2026-09-17).
 //
+// A token has exactly one storage form: a file. The order is
+//
 //  1. RASPUTIN_CP_JOIN_TOKEN_FILE — a file holding the token, read again on
-//     EVERY connect attempt. This is the canonical source on every node and
-//     every role (geekdojo/geekdojo-brain#537, methodology §5.2 and §7 4.1).
-//     The token is a secret, so it belongs in one file the owner alone can
-//     read, not in an environment block that every child process inherits and
-//     that /proc exposes to anything that can read the process. Re-reading is
-//     the other half: the controlplane's api mints its own agent's token into
-//     such a file at start (proto.BusAgentTokenFileName) and re-mints it when
-//     it stops validating (an identity restore, a revoke), and a node's token
-//     can be replaced under a running agent the same way, so the agent must
-//     pick a new one up on its next reconnect rather than at its next
-//     restart. An environment variable cannot change under a running process,
-//     which is why this is a file.
-//  2. Otherwise RASPUTIN_CP_JOIN_TOKEN — the token itself, from the node's
-//     seed. The legacy source, still honoured so that a NEW agent on an OLD
-//     image — whose firstboot or init.d writes only this variable — keeps
-//     joining. Read once: nothing rewrites a seeded token while the agent
-//     runs. It is deleted once every node reports tokenSource=file (§7 4.1).
-//  3. Otherwise, on a controlplane, proto.BusAgentTokenPath. A controlplane
-//     whose node.env was written before the file existed has neither
-//     variable, and firstboot never runs again to add one; this default is
-//     what keeps an updated controlplane's agent on the bus.
-//  4. Otherwise no token. The bus refuses the connection, as it always has
+//     EVERY connect attempt. This is the source on every node and every role
+//     (geekdojo/geekdojo-brain#537, methodology §5.2 and §7 4.1). The token
+//     is a secret, so it belongs in one file the owner alone can read, not in
+//     an environment block that every child process inherits and that /proc
+//     exposes to anything that can read the process. Re-reading is the other
+//     half: the controlplane's api mints its own agent's token into such a
+//     file at start (proto.BusAgentTokenFileName) and re-mints it when it
+//     stops validating (an identity restore, a revoke), and a node's token
+//     can be replaced under a running agent the same way, so the agent picks
+//     a new one up on its next reconnect rather than at its next restart.
+//  2. Otherwise, on a controlplane, proto.BusAgentTokenPath. A controlplane
+//     whose node.env was written before the file variable existed names no
+//     file, and firstboot never runs again to add one; this default is what
+//     keeps an updated controlplane's agent on the bus.
+//  3. Otherwise no token. The bus refuses the connection, as it always has
 //     for a node that carries none.
 //
-// The FILE wins when both are set. That is the direction of the migration:
-// whatever wrote the file wrote it later than the seed did, and it is the only
-// one of the two that can be re-read. The reverse order (env first, which is
-// what shipped in 2026.09.4-dev.167) meant that a node carrying a seeded token
-// could never be moved to the file without an agent restart, because the file
-// was never read while the variable was set.
+// RASPUTIN_CP_JOIN_TOKEN, the inline form older images wrote, is retired
+// (geekdojo/geekdojo-brain#539): it is never read as a credential. Its
+// presence is diagnosed, so a node still carrying only it is told why it is
+// refused rather than going offline unexplained. The deletion waited on every
+// node in the field reporting that it read its token from a file.
 
-// EnvJoinToken is the node's seeded join token. Legacy: superseded by
-// EnvJoinTokenFile, and honoured only while older images are in the fleet.
+// EnvJoinToken is retired; never read as a credential; its presence is
+// diagnosed. The agent's main only asks whether it is set, and passes that to
+// ResolveTokenSource, so its value cannot reach a log line.
 const EnvJoinToken = "RASPUTIN_CP_JOIN_TOKEN"
 
 // EnvJoinTokenFile names a file holding the join token, read on every connect.
-// This is the canonical source; it wins over EnvJoinToken.
+// It is the only place a node's token is read from.
 const EnvJoinTokenFile = "RASPUTIN_CP_JOIN_TOKEN_FILE"
 
 // TokenSource returns the join token for one connection attempt. An error
@@ -86,34 +81,29 @@ func TokenFile(path string) TokenSource {
 	}
 }
 
-// ResolveTokenSource picks the token source from the agent's environment
-// values and role, in the order documented above. It returns three things: the
+// ResolveTokenSource picks the token source from the agent's role and the
+// file its environment names, in the order documented above. It returns the
 // source itself; a sentence describing the choice for the startup log (never
-// the token itself); and kind, the same choice as one of the three
-// proto.TokenSource* values, which the agent reports in its registration
-// metadata under proto.MetadataTokenSource. defaultFile is the controlplane
-// default, proto.BusAgentTokenPath outside tests.
+// the token itself); and none, true when this node presents no token at all.
 //
-// kind comes from HERE, and not from a second look at the environment beside
-// the emitter, for one reason: the deletion of the environment fallback waits
-// on every node reporting proto.TokenSourceFile (§7 4.1), so a node that
-// reported "file" while actually reading the variable would be counted as
-// migrated and then stop joining when the fallback goes. One function decides
-// the source, so one function names it.
-func ResolveTokenSource(token, tokenFile string, role proto.NodeRole, defaultFile string) (src TokenSource, describe, kind string) {
-	// The token is used exactly as given, as it always has been; only the
-	// file path is trimmed.
+// legacySet says whether the retired EnvJoinToken is set. It changes only the
+// description, never the source: the function takes no token value, so the
+// retired variable cannot become a credential here. defaultFile is the
+// controlplane default, proto.BusAgentTokenPath outside tests.
+func ResolveTokenSource(tokenFile string, legacySet bool, role proto.NodeRole, defaultFile string) (src TokenSource, describe string, none bool) {
 	tokenFile = strings.TrimSpace(tokenFile)
+	var retired string
+	if legacySet {
+		retired = fmt.Sprintf("; %s is set and not read", EnvJoinToken)
+	}
 	switch {
-	case tokenFile != "" && token != "":
-		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect (%s is set too, and ignored)", tokenFile, EnvJoinTokenFile, EnvJoinToken), proto.TokenSourceFile
 	case tokenFile != "":
-		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect", tokenFile, EnvJoinTokenFile), proto.TokenSourceFile
-	case token != "":
-		return StaticToken(token), EnvJoinToken, proto.TokenSourceEnv
+		return TokenFile(tokenFile), fmt.Sprintf("the file %s (%s), read on every connect%s", tokenFile, EnvJoinTokenFile, retired), false
 	case role == proto.RoleControlPlane:
-		return TokenFile(defaultFile), fmt.Sprintf("the file %s (the controlplane default; the api mints it), read on every connect", defaultFile), proto.TokenSourceFile
+		return TokenFile(defaultFile), fmt.Sprintf("the file %s (the controlplane default; the api mints it), read on every connect%s", defaultFile, retired), false
+	case legacySet:
+		return StaticToken(""), fmt.Sprintf("none — %s is set but is no longer read (geekdojo/geekdojo-brain#539), and %s is not set", EnvJoinToken, EnvJoinTokenFile), true
 	default:
-		return StaticToken(""), fmt.Sprintf("none — neither %s nor %s is set, and a bus that enforces auth refuses a node without one", EnvJoinToken, EnvJoinTokenFile), proto.TokenSourceNone
+		return StaticToken(""), fmt.Sprintf("none — %s is not set", EnvJoinTokenFile), true
 	}
 }
