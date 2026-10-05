@@ -193,6 +193,11 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 // refuseUnreadableCredential answers a BMC request whose stored credential
 // could not be read. The store's error goes to the log under the correlation
 // id, never to the client.
+//
+// kind is never the requester's text: callers pass it only after
+// bmc.CredentialFor has accepted it (an exact match against the backend
+// table) or as a literal, and err wraps the store's error with that kind.
+// The go/log-injection register row for writeCodedError rests on this.
 func (s *Server) refuseUnreadableCredential(w http.ResponseWriter, r *http.Request, kind string, err error) {
 	s.writeCodedError(w, r, http.StatusInternalServerError, codeCredentialUnreadable,
 		"the stored BMC credential could not be read",

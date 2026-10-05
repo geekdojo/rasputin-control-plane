@@ -45,6 +45,13 @@ type codedError struct {
 //
 // The route is the pattern the request matched ("GET /api/bus/tls"), never
 // the path the client sent, so nothing a caller types reaches the log.
+//
+// CodeQL reports go/log-injection at the LogAttrs call below; the register
+// (.github/codeql-register.tsv) records it as a false positive. Every value a
+// caller passes in cause is written through s.log, which the composition root
+// builds with logkit.New: its slog.TextHandler quotes any value that needs it
+// and escapes control characters, so no attribute can forge a record. The
+// verdict holds while s.log is logkit.New's.
 func (s *Server) writeCodedError(w http.ResponseWriter, r *http.Request, status int, code, msg string, cause ...slog.Attr) {
 	id := s.newCorrelationID()
 	attrs := append([]slog.Attr{
