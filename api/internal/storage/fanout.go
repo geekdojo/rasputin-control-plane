@@ -334,35 +334,20 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 			o.log("warn", fmt.Sprintf("retrying the upload of %s/%s from %s (attempt %d of %d) — the staged copy is reused; the app is NOT stopped again",
 				pv.AppName, pv.Volume, node, attempt, transferAttempts))
 		}
-		// The credential: one member, one generation, one run, one node,
-		// bounded in bytes, minted now and dead by the time the verb's
-		// budget is. Never logged and never in a step result — it goes into
-		// the command and nowhere else.
-		cred, err := mintUploadCredential(o.Ingest, backupxfer.Grant{
+		tcmd, err := o.transferCommand(backupxfer.Grant{
 			Generation: o.GenerationID, Member: member, NodeID: node, JobID: o.JobID,
 			// Bounded to the member it is for: the stage verb reported the
 			// tar's size, and a seal of it cannot be larger than this.
 			MaxBytes: backupxfer.SealedSizeBound(ack.SizeBytes),
-		}, transferRPCBudget)
-		if err != nil {
-			rec.Reason = fmt.Sprintf("could not mint an upload credential for %s: %v", member, err)
-			return rec
-		}
-		if o.heldCredential != nil {
-			o.heldCredential(cred)
-		}
-		tcmd, err := uploadCommand(proto.BackupTransferCmd{
+		}, proto.BackupTransferCmd{
 			StagingName: name, Destination: dest,
 			PublicKey: o.PublicKey, KeyID: o.KeyID, Scope: o.Scope,
 			GenerationID: o.GenerationID, Member: member,
 			AppID: pv.AppID, AppName: pv.AppName, Volume: pv.Volume,
 			PlaintextDigest: ack.Digest, PlaintextBytes: ack.SizeBytes,
-		}, cred)
-		// The credential's life is this attempt's command: destroyed here, on
-		// both outcomes, not when captureOne returns — a retry mints its own.
-		cred.Destroy()
+		})
 		if err != nil {
-			rec.Reason = fmt.Sprintf("internal: %v", err)
+			rec.Reason = err.Error()
 			return rec
 		}
 		xferCtx, cancel := context.WithTimeout(ctx, transferRPCBudget)
@@ -402,6 +387,29 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 	}
 	rec.Reason = fmt.Sprintf("the upload did not land after %d attempt(s); last: %s", transferAttempts, last)
 	return rec
+}
+
+// transferCommand mints one transfer attempt's upload credential and builds
+// the command that carries it. The credential: one member, one generation,
+// one run, one node, bounded in bytes, minted now and dead by the time the
+// verb's budget is. Never logged and never in a step result — it goes into
+// the command and nowhere else. Its life is this attempt's command: it is
+// destroyed when this returns, on every outcome, not when captureOne does — a
+// retry mints its own. The error is the record's reason as it stands.
+func (o fanOutOpts) transferCommand(g backupxfer.Grant, base proto.BackupTransferCmd) ([]byte, error) {
+	cred, err := mintUploadCredential(o.Ingest, g, transferRPCBudget)
+	if err != nil {
+		return nil, fmt.Errorf("could not mint an upload credential for %s: %v", g.Member, err)
+	}
+	defer cred.Destroy()
+	if o.heldCredential != nil {
+		o.heldCredential(cred)
+	}
+	cmd, err := uploadCommand(base, cred)
+	if err != nil {
+		return nil, fmt.Errorf("internal: %v", err)
+	}
+	return cmd, nil
 }
 
 // mintUploadCredential mints one upload credential through the ingest

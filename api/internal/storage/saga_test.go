@@ -978,6 +978,41 @@ func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
 	}
 }
 
+// A staged key claimKey refuses is destroyed there: the caller gets no key
+// back, so nothing else could destroy it (F-825-18). One it accepts is handed
+// back intact for the caller to destroy.
+func TestMatchStagedKey_DestroysARefusedKey(t *testing.T) {
+	cases := []struct {
+		name, specID string
+		wantErr      bool
+	}{
+		{name: "staged but not named", specID: "", wantErr: true},
+		{name: "different ids", specID: "k2", wantErr: true},
+		{name: "agree", specID: "k1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
+			got, err := matchStagedKey(&ClaimSpec{ArchiveKeyID: tc.specID}, k)
+			if tc.wantErr {
+				if err == nil || got != nil {
+					t.Fatalf("got (%v, %v), want a refusal and no key", got, err)
+				}
+				if n, m := k.WrappedByPassphrase.Len(), k.WrappedByRecoveryCode.Len(); n != 0 || m != 0 {
+					t.Errorf("refused key's wrappings Len() = %d, %d, want 0, 0", n, m)
+				}
+				return
+			}
+			if err != nil || got != k {
+				t.Fatalf("got (%v, %v), want the staged key back", got, err)
+			}
+			if string(got.WrappedByPassphrase.Reveal()) != "a" || string(got.WrappedByRecoveryCode.Reveal()) != "b" {
+				t.Error("an accepted key came back destroyed")
+			}
+		})
+	}
+}
+
 // claimKey refuses a job whose staged key and spec disagree, in either
 // direction, and passes a keyless claim with nothing staged.
 func TestClaimKey_SpecAndStagedKeyMustAgree(t *testing.T) {

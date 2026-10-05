@@ -186,12 +186,24 @@ func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec Cl
 // claimKey returns the key staged for this claim job, or nil when the spec
 // refers to none. A spec that names a key which is not staged, or a staged key
 // with a different id, is refused: the claim would otherwise record, or write
-// to the disk's marker, a key other than the one the operator submitted.
+// to the disk's marker, a key other than the one the operator submitted. A
+// refused staged key is destroyed before claimKey returns.
 func claimKey(sc *jobs.StepCtx, store *Store, spec *ClaimSpec) (*ArchiveKey, error) {
 	k, err := store.StagedClaimKey(sc.Ctx, sc.JobID)
 	if err != nil {
 		return nil, fmt.Errorf("read staged archive key: %w", err)
 	}
+	return matchStagedKey(spec, k)
+}
+
+// matchStagedKey is claimKey's check of the staged key k against the spec. On
+// a refusal it destroys k: the caller gets no key back, so nothing else could.
+func matchStagedKey(spec *ClaimSpec, k *ArchiveKey) (_ *ArchiveKey, err error) {
+	defer func() {
+		if err != nil {
+			k.Destroy()
+		}
+	}()
 	switch {
 	case spec.ArchiveKeyID == "" && k == nil:
 		return nil, nil
@@ -249,7 +261,7 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		key.Destroy()
+		defer key.Destroy()
 		now := time.Now().UTC()
 		if err := store.CreatePending(sc.Ctx, sc.JobID, spec.NodeID, spec.DevicePath, spec.Label, now); err != nil {
 			return nil, fmt.Errorf("record claim attempt: %w", err)
