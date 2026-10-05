@@ -107,16 +107,17 @@ func (s *Server) handlePutConsoleRootPassword(w http.ResponseWriter, r *http.Req
 	}
 	// One record per stored password, carrying the job applying it so the
 	// journal leads from the change to its per-node outcomes. Never the
-	// password: only its id. The attributes are passed directly, not
-	// collected in a []any: push comes from the request body, and a bare
-	// bool argument is a simple type the log-injection analysis clears,
-	// whereas a slice holding it is tainted as a whole.
-	if resp.JobID != "" {
-		s.log.InfoContext(r.Context(), "console: console root password set",
-			"hash_id", hashID, "push", push, "job_id", resp.JobID)
-	} else {
-		s.log.InfoContext(r.Context(), "console: console root password set",
-			"hash_id", hashID, "push", push)
+	// password: only its id. push is logged as a literal chosen by the
+	// branch, never the decoded request value itself, so no request data
+	// reaches the log line.
+	const msg = "console: console root password set"
+	switch {
+	case resp.JobID != "":
+		s.log.InfoContext(r.Context(), msg, "hash_id", hashID, "push", true, "job_id", resp.JobID)
+	case push:
+		s.log.InfoContext(r.Context(), msg, "hash_id", hashID, "push", true)
+	default:
+		s.log.InfoContext(r.Context(), msg, "hash_id", hashID, "push", false)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
