@@ -379,10 +379,16 @@ func (r *egressRig) fetchFrom(base string, opts backupxfer.HTTPOptions, cred str
 	return b, st, err
 }
 
+// credString reads a RestoreEgress.Mint result as the bearer string the
+// stream is fetched with.
+func credString(v secret.Value, err error) (string, error) {
+	return string(v.Reveal()), err
+}
+
 func TestRestoreEgressStreamsAPlannedMemberUnsealed(t *testing.T) {
 	r := newEgressRig(t)
 	r.arm(mustSHA(r.sealed))
-	cred, err := r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: uint64(len(r.plain)), Use: backupxfer.UseRestore}, backupxfer.RestoreCredentialTTL)
+	cred, err := credString(r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: uint64(len(r.plain)), Use: backupxfer.UseRestore}, backupxfer.RestoreCredentialTTL))
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
@@ -453,7 +459,7 @@ func TestRestoreEgressRefusesWhatItMust(t *testing.T) {
 		t.Fatalf("forged: %v", err)
 	}
 	// After the session closes, a still-valid credential is dead.
-	cred, _ := r.egress.Mint(grant, time.Minute)
+	cred, _ := credString(r.egress.Mint(grant, time.Minute))
 	r.sessions.CloseJob("job-restore")
 	if _, _, err := r.fetch(cred); code(err) != backupxfer.CodeNoRestore {
 		t.Fatalf("after close: %v", err)
@@ -464,7 +470,7 @@ func TestRestoreEgressRefusesWhatItMust(t *testing.T) {
 func TestRestoreEgressRefusesAMemberTheManifestDoesNotVouchFor(t *testing.T) {
 	r := newEgressRig(t)
 	r.arm(strings.Repeat("00", 32))
-	cred, _ := r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: 1 << 20, Use: backupxfer.UseRestore}, time.Minute)
+	cred, _ := credString(r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: 1 << 20, Use: backupxfer.UseRestore}, time.Minute))
 	_, _, err := r.fetch(cred)
 	var refused *backupxfer.RefusedError
 	if !errors.As(err, &refused) || refused.Problem.Code != backupxfer.CodeDigestMismatch {
@@ -492,7 +498,7 @@ func TestRestoreEgressAbortsTheStreamWhenTheKeyDoesNotOpenTheMember(t *testing.T
 	_ = r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", []RestoreVolumePlan{
 		{Member: r.member, SealedSHA256: mustSHA(r.sealed), SHA256: mustSHA(r.plain), SizeBytes: uint64(len(r.plain))},
 	})
-	cred, _ := r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: 1 << 20, Use: backupxfer.UseRestore}, time.Minute)
+	cred, _ := credString(r.egress.Mint(backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: "n-compute", JobID: "job-restore", MaxBytes: 1 << 20, Use: backupxfer.UseRestore}, time.Minute))
 	got, _, err := r.fetch(cred)
 	if err == nil {
 		t.Fatalf("a stream under the wrong key ended cleanly with %d bytes", len(got))

@@ -601,7 +601,8 @@ func TestRealClient_ListPreAuthKeys_FiltersByUserClientSide(t *testing.T) {
 	if err := c.EnsureUser(ctx, "bob"); err != nil {
 		t.Fatalf("EnsureUser bob: %v", err)
 	}
-	if _, _, err := c.CreatePreAuthKey(ctx, CreatePreAuthKeyInput{User: "alice", Expiry: time.Now().Add(time.Hour)}); err != nil {
+	_, alicePlain, err := c.CreatePreAuthKey(ctx, CreatePreAuthKeyInput{User: "alice", Expiry: time.Now().Add(time.Hour)})
+	if err != nil {
 		t.Fatalf("create alice key: %v", err)
 	}
 	if _, _, err := c.CreatePreAuthKey(ctx, CreatePreAuthKeyInput{User: "bob", Expiry: time.Now().Add(time.Hour)}); err != nil {
@@ -622,9 +623,10 @@ func TestRealClient_ListPreAuthKeys_FiltersByUserClientSide(t *testing.T) {
 	if len(aliceOnly) != 1 || aliceOnly[0].User != "alice" {
 		t.Errorf("want 1 alice key, got %+v", aliceOnly)
 	}
-	// Real Headscale strips plaintext on List; we should faithfully forward.
-	if aliceOnly[0].Plaintext != "" {
-		t.Errorf("expected empty plaintext on List, got %q", aliceOnly[0].Plaintext)
+	// A listed key never carries the key itself: HSPreAuthKey has no field
+	// for it, so not even the fake's unredacted List can put it there.
+	if b, _ := json.Marshal(aliceOnly[0]); strings.Contains(string(b), alicePlain) {
+		t.Errorf("a listed key carries the minted key material: %s", b)
 	}
 }
 

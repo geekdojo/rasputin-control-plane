@@ -1,6 +1,7 @@
 package ledgertest_test
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -260,8 +261,8 @@ func TestLedgerRegisterCoversEveryWorkflow(t *testing.T) {
 		t.Errorf("%d workflow(s) are not in %s:\n  %s\n"+
 			"Every workflow records whether its ledger can carry a credential, and "+
 			"the test that proves it does not. Add a row: `covered` naming that test, "+
-			"`pending` citing the issue that will add it, or `no-secret` with a note "+
-			"saying why this workflow handles none.",
+			"`typed` naming the tests and saying where the credential is a secret.Value, "+
+			"or `no-secret` with a note saying why this workflow handles none.",
 			len(missing), registerPath, strings.Join(missing, "\n  "))
 	}
 
@@ -279,59 +280,159 @@ func TestLedgerRegisterCoversEveryWorkflow(t *testing.T) {
 	}
 }
 
+// rowProblems is every way one register row breaks its own contract. tests is
+// the set of test names that exist.
+func rowProblems(r map[string]string, tests map[string]bool) []string {
+	kind := r["kind"]
+	var out []string
+	namesExisting := func() {
+		if r["test"] == "" {
+			out = append(out, fmt.Sprintf("%s is %s but names no test", kind, r["status"]))
+		}
+		for _, name := range strings.Fields(r["test"]) {
+			if !tests[name] {
+				out = append(out, fmt.Sprintf("%s names the test %s, which does not exist. A register "+
+					"that names a test nobody wrote reads as coverage and is not.", kind, name))
+			}
+		}
+	}
+	switch r["status"] {
+	case "covered":
+		namesExisting()
+	case "typed":
+		namesExisting()
+		if strings.TrimSpace(r["note"]) == "" {
+			out = append(out, fmt.Sprintf("%s is typed and says nothing about where the credential "+
+				"is a secret.Value or what is still open. The note is the claim, so it is written "+
+				"down or it is not made.", kind))
+		}
+	case "pending":
+		if r["cite"] == "" {
+			out = append(out, fmt.Sprintf("%s is pending with no issue cited, so nobody will pick it up", kind))
+		}
+		if r["test"] != "" {
+			out = append(out, fmt.Sprintf("%s is pending but names a test; mark it covered or typed", kind))
+		}
+	case "no-secret":
+		if strings.TrimSpace(r["note"]) == "" {
+			out = append(out, fmt.Sprintf("%s claims to handle no credential and says nothing about why. "+
+				"That claim is the whole assertion for this workflow, so it is written "+
+				"down or it is not made.", kind))
+		}
+	default:
+		out = append(out, fmt.Sprintf("%s has status %q; want covered, typed, pending or no-secret",
+			kind, r["status"]))
+	}
+	return out
+}
+
 func TestLedgerRegisterRowsHoldTheirOwnContract(t *testing.T) {
 	root := repoRoot(t)
 	rows := readRegister(t, root)
 	tests := testNames(t, root)
 	workflows := discoverWorkflows(t, root)
 
-	covered, pending, none := 0, 0, 0
+	count := map[string]int{}
 	for _, r := range rows {
 		kind := r["kind"]
 		if src, ok := workflows[kind]; ok && r["source"] != src {
 			t.Errorf("%s: %s says it is declared in %q; it is declared in %q",
 				registerPath, kind, r["source"], src)
 		}
-		switch r["status"] {
-		case "covered":
-			covered++
-			if r["test"] == "" {
-				t.Errorf("%s: %s is covered but names no test", registerPath, kind)
-			}
-			for _, name := range strings.Fields(r["test"]) {
-				if !tests[name] {
-					t.Errorf("%s: %s names the test %s, which does not exist. A register "+
-						"that names a test nobody wrote reads as coverage and is not.",
-						registerPath, kind, name)
-				}
-			}
-		case "pending":
-			pending++
-			if r["cite"] == "" {
-				t.Errorf("%s: %s is pending with no issue cited, so nobody will pick it up",
-					registerPath, kind)
-			}
-			if r["test"] != "" {
-				t.Errorf("%s: %s is pending but names a test; mark it covered", registerPath, kind)
-			}
-		case "no-secret":
-			none++
-			if strings.TrimSpace(r["note"]) == "" {
-				t.Errorf("%s: %s claims to handle no credential and says nothing about why. "+
-					"That claim is the whole assertion for this workflow, so it is written "+
-					"down or it is not made.", registerPath, kind)
-			}
-		default:
-			t.Errorf("%s: %s has status %q; want covered, pending or no-secret",
-				registerPath, kind, r["status"])
+		count[r["status"]]++
+		for _, p := range rowProblems(r, tests) {
+			t.Errorf("%s: %s", registerPath, p)
 		}
 	}
 
 	// The posture, always — a green run that printed nothing would read as
-	// "every workflow is covered", and today most are not.
-	t.Logf("job ledger: %d workflows · %d asserted · %d handle no credential · %d owed",
-		len(rows), covered, none, pending)
-	if covered == 0 {
+	// "every workflow is covered".
+	t.Logf("job ledger: %d workflows · %d asserted · %d typed · %d handle no credential · %d owed",
+		len(rows), count["covered"], count["typed"], count["no-secret"], count["pending"])
+	if count["covered"] == 0 {
 		t.Error("no workflow has a ledger assertion at all; the register is describing nothing")
+	}
+}
+
+// TC-825-15: a typed row needs a note and names tests that exist; each other
+// shape is refused.
+func TestLedgerRegisterTypedRowContract(t *testing.T) {
+	tests := map[string]bool{"TestRealOne": true}
+	for _, c := range []struct {
+		why  string
+		row  map[string]string
+		pass bool
+	}{
+		{"a typed row with an existing test and a note",
+			map[string]string{"kind": "k", "status": "typed", "test": "TestRealOne", "note": "typed from the reader to the bus"}, true},
+		{"a typed row with no test",
+			map[string]string{"kind": "k", "status": "typed", "test": "", "note": "typed"}, false},
+		{"a typed row naming a test that does not exist",
+			map[string]string{"kind": "k", "status": "typed", "test": "TestNobodyWrote", "note": "typed"}, false},
+		{"a typed row with no note",
+			map[string]string{"kind": "k", "status": "typed", "test": "TestRealOne", "note": " "}, false},
+	} {
+		problems := rowProblems(c.row, tests)
+		if c.pass && len(problems) != 0 {
+			t.Errorf("%s was refused: %v", c.why, problems)
+		}
+		if !c.pass && len(problems) == 0 {
+			t.Errorf("%s was accepted", c.why)
+		}
+	}
+}
+
+// TC-825-15: every workflow the register lists has a decided status: none is
+// still pending (geekdojo/geekdojo-brain#825 decided the last of them).
+func TestLedgerRegisterHasNoPendingRows(t *testing.T) {
+	var pending []string
+	for _, r := range readRegister(t, repoRoot(t)) {
+		if r["status"] == "pending" {
+			pending = append(pending, r["kind"])
+		}
+	}
+	if len(pending) != 0 {
+		t.Errorf("%s still has %d pending row(s): %s", registerPath, len(pending), strings.Join(pending, ", "))
+	}
+}
+
+// bareIssueRef is an issue number with no repository before it. In this repo
+// a bare #N names one of ITS issues or PRs, never the brain issue a note means.
+var bareIssueRef = regexp.MustCompile(`(^|[^\w/.-])#[0-9]+`)
+
+// TC-825-16: a row whose workflow still has an open residual cites it, in the
+// cross-repo form, and no note cites an issue by a bare number.
+func TestLedgerRegisterNotesCiteTheirOpenResiduals(t *testing.T) {
+	const (
+		ackText = "geekdojo/geekdojo-brain#749" // the deploy ack text
+		hashes  = "geekdojo/geekdojo-brain#827" // the credential-derived hashes
+	)
+	want := map[string]string{
+		"app.deploy":         ackText,
+		"app.upgrade":        ackText,
+		"app.edit":           ackText,
+		"app.revert":         ackText,
+		"bmc.configure":      hashes,
+		"firewall.reconcile": hashes,
+		"firewall.apply":     hashes,
+	}
+	seen := map[string]bool{}
+	for _, r := range readRegister(t, repoRoot(t)) {
+		if m := bareIssueRef.FindString(r["note"]); m != "" {
+			t.Errorf("%s: %s cites %q with no repository; write geekdojo/geekdojo-brain#N", registerPath, r["kind"], strings.TrimSpace(m))
+		}
+		cite, ok := want[r["kind"]]
+		if !ok {
+			continue
+		}
+		seen[r["kind"]] = true
+		if !strings.Contains(r["note"], cite) {
+			t.Errorf("%s: %s's note does not cite its open residual %s: %q", registerPath, r["kind"], cite, r["note"])
+		}
+	}
+	for kind := range want {
+		if !seen[kind] {
+			t.Errorf("%s: no row for %s", registerPath, kind)
+		}
 	}
 }

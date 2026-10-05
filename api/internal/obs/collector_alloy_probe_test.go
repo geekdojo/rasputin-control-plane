@@ -167,7 +167,7 @@ func probeLeaf(t *testing.T, ca *mesh.MeshCA, dnsName string) tls.Certificate {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c, err := tls.X509KeyPair(certPEM, keyPEM)
+	c, err := tls.X509KeyPair(certPEM, keyPEM.Reveal())
 	if err != nil {
 		t.Fatal(err)
 	}

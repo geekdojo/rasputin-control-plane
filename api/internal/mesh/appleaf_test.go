@@ -57,7 +57,7 @@ func TestPrepareAppLeaf_SANsAreExposureIndependent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PrepareAppLeaf: %v", err)
 	}
-	if len(keyPEM) == 0 {
+	if keyPEM.Len() == 0 {
 		t.Error("empty key PEM")
 	}
 	cert := parseLeaf(t, certPEM)
@@ -92,7 +92,7 @@ func TestPrepareAppLeaf_RenewsUntilCommitted(t *testing.T) {
 	if !renewed {
 		t.Fatal("first prepare (no disk leaf) must mint fresh: renewed=true")
 	}
-	if len(certPEM) == 0 || len(keyPEM) == 0 {
+	if len(certPEM) == 0 || keyPEM.Len() == 0 {
 		t.Fatal("empty PEM from fresh mint")
 	}
 

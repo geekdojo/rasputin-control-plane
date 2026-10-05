@@ -3,6 +3,7 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -35,10 +37,10 @@ func insertNode(t *testing.T, f *fixture, inv *inventory.Store, id string) {
 }
 
 func TestConfigHash_Deterministic(t *testing.T) {
-	a := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), "")
-	b := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), "")
-	c := ConfigHash("mock", json.RawMessage(`{"targets":["b"]}`), "")
-	d := ConfigHash("bitscope", json.RawMessage(`{"targets":["a"]}`), "")
+	a := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
+	b := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
+	c := ConfigHash("mock", json.RawMessage(`{"targets":["b"]}`), secret.Value{})
+	d := ConfigHash("bitscope", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
 	if a != b {
 		t.Error("same input must hash equal")
 	}
@@ -219,7 +221,7 @@ func TestConfigurePush_InjectsUnlockBusSideOnly(t *testing.T) {
 }
 
 func TestInjectJSONField(t *testing.T) {
-	out, err := injectJSONField(json.RawMessage(`{"a":1}`), "unlock", "x")
+	out, err := injectJSONField(json.RawMessage(`{"a":1}`), "unlock", secret.New([]byte("x")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +232,7 @@ func TestInjectJSONField(t *testing.T) {
 	if m["unlock"] != "x" || m["a"] != float64(1) {
 		t.Errorf("inject: %v", m)
 	}
-	if _, err := injectJSONField(json.RawMessage(`not-json`), "unlock", "x"); err == nil {
+	if _, err := injectJSONField(json.RawMessage(`not-json`), "unlock", secret.New([]byte("x"))); err == nil {
 		t.Error("bad json must error")
 	}
 }
@@ -247,7 +249,7 @@ func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
 		func(_ context.Context, kind string, _ json.RawMessage, _ string) error {
 			submitted <- kind
 			return nil
-		})
+		}, slog.New(slog.DiscardHandler))
 	if err != nil || stop == nil {
 		t.Fatalf("StartReconcile: stop-nil=%t err=%v", stop == nil, err)
 	}

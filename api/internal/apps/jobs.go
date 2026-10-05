@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -140,13 +141,16 @@ func provisionAppLeaf(ctx context.Context, nc *nats.Conn, rotate LeafRotator, ap
 	if rotate == nil || app.PublishedPort == 0 {
 		return false, "no published port or leaf delivery disabled — nothing to route"
 	}
-	cmd, renewed, commit, err := rotate(app)
+	leaf, renewed, commit, err := rotate(app)
+	// The leaf key is destroyed on every outcome, committed or not
+	// (ADR-0009). commit has run by the time this fires.
+	defer leaf.Key.Destroy()
 	if err != nil {
 		return false, "mint leaf failed: " + err.Error()
 	}
 	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	accepted, rejectDetail, err := deliverLeaf(dctx, nc, app.TargetNode, cmd)
+	accepted, rejectDetail, err := deliverLeaf(dctx, nc, app.TargetNode, leaf)
 	if err != nil {
 		return false, "deliver leaf failed: " + err.Error()
 	}
@@ -167,7 +171,13 @@ func provisionAppLeaf(ctx context.Context, nc *nats.Conn, rotate LeafRotator, ap
 // deliverLeaf ships an AppLeafCmd to nodeID over the bus and reports whether the
 // node accepted it (ack.OK) plus any rejection detail. Shared by the deploy saga
 // and the rotation sweep so mint-and-ship lives in one place.
-func deliverLeaf(ctx context.Context, nc *nats.Conn, nodeID string, cmd proto.AppLeafCmd) (ok bool, detail string, err error) {
+//
+// It is where the leaf key leaves its secret.Value: revealed into the command's
+// KeyPEM immediately before marshalling, and into nothing else. The caller
+// owns the Value and destroys it.
+func deliverLeaf(ctx context.Context, nc *nats.Conn, nodeID string, leaf Leaf) (ok bool, detail string, err error) {
+	cmd := leaf.Cmd
+	cmd.KeyPEM = leaf.Key.Reveal()
 	payload, err := json.Marshal(cmd)
 	if err != nil {
 		return false, "", err
@@ -304,14 +314,25 @@ func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate
 	}
 }
 
+// Leaf is a per-app TLS leaf ready for delivery: the command with its KeyPEM
+// left empty, and the private key beside it as a secret.Value. deliverLeaf
+// joins the two at the bus and nowhere earlier (ADR-0009).
+type Leaf struct {
+	Cmd proto.AppLeafCmd
+	Key secret.Value
+}
+
 // LeafRotator re-mints an app's per-app TLS leaf against its on-disk copy. It
-// returns the delivery command, whether a fresh leaf was minted this sweep
+// returns the leaf to deliver, whether a fresh leaf was minted this sweep
 // (renewed==true → the leaf entered its renew window or its SANs drifted and
 // must be re-shipped), and a commit closure the caller invokes ONLY after the
 // node accepts the fresh leaf — so an offline node retries on the next sweep
 // instead of the on-disk leaf silently advancing past what the node holds. nil
 // disables rotation (no CA / dev).
-type LeafRotator func(app *App) (cmd proto.AppLeafCmd, renewed bool, commit func() error, err error)
+//
+// The caller owns the returned Leaf's Key and destroys it on every outcome,
+// after commit when there is one.
+type LeafRotator func(app *App) (leaf Leaf, renewed bool, commit func() error, err error)
 
 // RotateLeavesWorkflow is the timer half of the per-app leaf lifecycle
 // (ADR-0004 §6): it periodically re-mints per-app TLS leaves before they expire
@@ -460,7 +481,9 @@ func RotateAppLeaf(ctx context.Context, inv *inventory.Store, nc *nats.Conn, rot
 	if rotate == nil || app.PublishedPort == 0 {
 		return LeafResult{Outcome: LeafSkipped}
 	}
-	cmd, renewed, commit, err := rotate(app)
+	leaf, renewed, commit, err := rotate(app)
+	// Destroyed on every outcome: offline, refused, delivered, committed.
+	defer leaf.Key.Destroy()
 	if err != nil {
 		return LeafResult{Outcome: LeafFailed, Err: fmt.Errorf("re-mint leaf: %w", err),
 			Log: []LeafLog{{"warn", fmt.Sprintf("%s: re-mint leaf: %v", app.Name, err)}}}
@@ -473,7 +496,7 @@ func RotateAppLeaf(ctx context.Context, inv *inventory.Store, nc *nats.Conn, rot
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	ok, detail, derr := deliverLeaf(dctx, nc, app.TargetNode, cmd)
+	ok, detail, derr := deliverLeaf(dctx, nc, app.TargetNode, leaf)
 	cancel()
 	if derr != nil {
 		return LeafResult{Outcome: LeafFailed, Renewed: renewed, Err: fmt.Errorf("deliver leaf: %w", derr),
@@ -810,6 +833,22 @@ func deployLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 	}
 }
 
+// deployCommand builds the AppDeployCmd bytes for app with its resolved
+// compose. It is where the resolved compose leaves its secret.Value, into the
+// bus command to the target agent and nothing else (ADR-0006 D11a, ADR-0009).
+func deployCommand(app *App, compose secret.Value) ([]byte, error) {
+	cmd, err := json.Marshal(proto.AppDeployCmd{
+		AppID:             app.ID,
+		Name:              app.Name,
+		ComposeYAML:       string(compose.Reveal()),
+		WorkBudgetSeconds: app.DeployBudgetSeconds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("encode deploy command: %w", err)
+	}
+	return cmd, nil
+}
+
 func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets *appsecret.Seed) jobs.DoFn {
 	return pushStep(store, inv, nc, deploySpecAppID, secrets)
 }
@@ -836,7 +875,12 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		//
 		// Rotation always derives at InitialVersion for now — nothing stores a
 		// per-app counter yet (see appsecret.InitialVersion).
-		composeYAML, err := appsecret.Resolve(app.ComposeYAML, app.ID, secrets, appsecret.InitialVersion)
+		compose, err := appsecret.Resolve(app.ComposeYAML, app.ID, secrets, appsecret.InitialVersion)
+		if err != nil {
+			return nil, err
+		}
+		defer compose.Destroy()
+		cmd, err := deployCommand(app, compose)
 		if err != nil {
 			return nil, err
 		}
@@ -847,13 +891,6 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		now := time.Now().UTC()
 		_ = store.RecordStatus(sc.Ctx, app.ID, proto.AppStatusDeploying, "", now)
 		emitChange(nc, app.ID, proto.AppDeploying, proto.AppStatusDeploying, "", now)
-
-		cmd, _ := json.Marshal(proto.AppDeployCmd{
-			AppID:             app.ID,
-			Name:              app.Name,
-			ComposeYAML:       composeYAML,
-			WorkBudgetSeconds: app.DeployBudgetSeconds,
-		})
 
 		// The deadline is this app's, not the catalog's. The agent gets the same
 		// budget in the command and answers first; we wait the slack longer so

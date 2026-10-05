@@ -31,7 +31,7 @@ func TestRestoreEgressNodeEntry(t *testing.T) {
 	const nodeA, nodeB = "n-compute", "n-other"
 	g := backupxfer.Grant{Generation: r.genID, Member: r.member, NodeID: nodeA, JobID: "job-restore",
 		MaxBytes: uint64(len(r.plain)), Use: backupxfer.UseRestore}
-	cred, err := r.egress.Mint(g, time.Minute)
+	cred, err := credString(r.egress.Mint(g, time.Minute))
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}

@@ -25,6 +25,9 @@ const (
 	// codeBackupTransferUnconfigured: the node listener admitted the node,
 	// but this api has no backup ingest or restore egress wired behind it.
 	codeBackupTransferUnconfigured = "backup_transfer_unconfigured"
+	// codeCredentialUnreadable: a stored credential the request needs could
+	// not be read, so the request was refused rather than sent without it.
+	codeCredentialUnreadable = "credential_unreadable"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

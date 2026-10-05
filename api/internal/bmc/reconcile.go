@@ -3,8 +3,10 @@ package bmc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -35,8 +37,14 @@ type BusyFn func(ctx context.Context) (bool, error)
 // disagree — a deconfigure looked like drift and got resurrected.
 // While any bmc.configure job is in flight the reconciler stands down;
 // the running job is already converging the cluster.
-func StartReconcile(nc *nats.Conn, st *setup.Store, busy BusyFn, submit SubmitFn) (unsubscribe func(), err error) {
-	r := &reconciler{st: st, busy: busy, submit: submit}
+//
+// logger records the failures that stop a re-push (an unreadable
+// credential); a nil one is refused.
+func StartReconcile(nc *nats.Conn, st *setup.Store, busy BusyFn, submit SubmitFn, logger *slog.Logger) (unsubscribe func(), err error) {
+	if logger == nil {
+		return nil, errors.New("bmc: StartReconcile needs a logger; nil was passed")
+	}
+	r := &reconciler{st: st, busy: busy, submit: submit, log: logger}
 	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { r.onRegistered(m.Subject, m.Data) })
 	if err != nil {
 		return nil, err
@@ -48,6 +56,7 @@ type reconciler struct {
 	st     *setup.Store
 	busy   BusyFn
 	submit SubmitFn
+	log    *slog.Logger
 
 	mu            sync.Mutex
 	lastHash      string
@@ -88,7 +97,8 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 	// the stripped config back.
 	cfg, err := moveLegacyCredential(ctx, r.st, kind, json.RawMessage(stored))
 	if err != nil {
-		log.Printf("bmc: reconcile: %v", err)
+		r.log.ErrorContext(ctx, "bmc: reconcile: could not move the stored credential; not re-pushing",
+			"host", hostID, "kind", kind, "err", err)
 		return
 	}
 	// A stored selection that predates the pinned-TLS rule is NOT re-pushed:
@@ -100,7 +110,16 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 		log.Printf("bmc: host %s registered, but its stored %s selection is not dispatchable: %s", hostID, kind, reason)
 		return
 	}
-	desired := ConfigHash(kind, cfg, StoredCredential(ctx, r.st, kind))
+	// An unreadable credential refuses the re-push: hashing an empty one
+	// would push a selection without it.
+	cred, err := StoredCredential(ctx, r.st, kind)
+	if err != nil {
+		r.log.ErrorContext(ctx, "bmc: reconcile: credential unreadable; not re-pushing",
+			"host", hostID, "kind", kind, "err", err)
+		return
+	}
+	defer cred.Destroy()
+	desired := ConfigHash(kind, cfg, cred)
 	var advertised string
 	if ev.Metadata != nil {
 		advertised, _ = ev.Metadata[proto.MetadataBMCConfigHash].(string)
@@ -154,7 +173,12 @@ func moveLegacyCredential(ctx context.Context, st *setup.Store, kind string, con
 	}
 	var inline string
 	_ = json.Unmarshal(raw, &inline)
-	if inline != "" && StoredCredential(ctx, st, kind) == "" {
+	existing, err := StoredCredential(ctx, st, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer existing.Destroy()
+	if inline != "" && existing.Len() == 0 {
 		if err := st.Set(ctx, cred.SettingsKey, inline); err != nil {
 			return nil, fmt.Errorf("move stored %s credential to its own key: %w", kind, err)
 		}

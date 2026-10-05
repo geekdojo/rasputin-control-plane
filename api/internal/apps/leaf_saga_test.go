@@ -8,6 +8,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -56,12 +57,12 @@ func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	// Stub minter returns a known delivery command; the step must publish it.
-	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
-		return proto.AppLeafCmd{
-			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"), KeyPEM: []byte("K"),
+	mint := func(app *App) (Leaf, bool, func() error, error) {
+		return Leaf{Cmd: proto.AppLeafCmd{
+			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"),
 			TailnetFQDN: "jellyfin.home1.internal", LANFQDN: "jellyfin.lan.home1.internal",
 			UpstreamPort: app.PublishedPort,
-		}, false, nil, nil
+		}, Key: secret.New([]byte("K"))}, false, nil, nil
 	}
 
 	if _, err := deployLeaf(store, inv, nc, mint)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
@@ -79,9 +80,9 @@ func TestDeployLeaf_MintsAndDelivers(t *testing.T) {
 
 func TestDeployLeaf_SkipsWhenNoPortOrNilMinter(t *testing.T) {
 	nc := startNATS(t)
-	mint := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+	mint := func(app *App) (Leaf, bool, func() error, error) {
 		t.Fatal("rotator should not be called")
-		return proto.AppLeafCmd{}, false, nil, nil
+		return Leaf{Cmd: proto.AppLeafCmd{}}, false, nil, nil
 	}
 
 	// Headless app (port 0): minter not called, no delivery.

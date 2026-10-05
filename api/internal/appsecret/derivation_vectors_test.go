@@ -78,7 +78,7 @@ func TestDerivationMatchesTheFrozenVectors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: NewSeed: %v", c.Why, err)
 		}
-		got, err := seed.Derive(c.AppID, c.Name, c.Version)
+		got, err := str(seed.Derive(c.AppID, c.Name, c.Version))
 		if err != nil {
 			t.Fatalf("%s: Derive: %v", c.Why, err)
 		}
@@ -118,11 +118,11 @@ func TestLengthPrefixingKeepsTheTupleInjective(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	one, err := seed.Derive("a", "bc", InitialVersion)
+	one, err := str(seed.Derive("a", "bc", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	two, err := seed.Derive("ab", "c", InitialVersion)
+	two, err := str(seed.Derive("ab", "c", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestEveryComponentOfTheTupleChangesTheValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base, err := seedA.Derive("app-one", "db-password", 1)
+	base, err := str(seedA.Derive("app-one", "db-password", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +161,7 @@ func TestEveryComponentOfTheTupleChangesTheValue(t *testing.T) {
 		{"a different name", seedA, "app-one", "session-key", 1},
 		{"a different rotation version", seedA, "app-one", "db-password", 2},
 	} {
-		got, derr := c.seed.Derive(c.app, c.name, c.ver)
+		got, derr := str(c.seed.Derive(c.app, c.name, c.ver))
 		if derr != nil {
 			t.Fatalf("%s: %v", c.why, derr)
 		}
@@ -243,14 +243,14 @@ func TestNewSeedCopiesItsKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, err := seed.Derive("app-one", "db-password", InitialVersion)
+	before, err := str(seed.Derive("app-one", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range key {
 		key[i] = 0xaa
 	}
-	after, err := seed.Derive("app-one", "db-password", InitialVersion)
+	after, err := str(seed.Derive("app-one", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -15,7 +16,7 @@ import (
 // the control plane. gopkg.in/yaml.v3 is in api/go.mod and is imported by test
 // files only; this path keeps it that way.
 //
-// A compose with no token is returned unchanged — the same string, not a
+// A compose with no token is returned unchanged — the same bytes, not a
 // re-rendered copy — because the install path's contract is that what the
 // database holds is what a node gets, byte for byte, and every app in the field
 // today has no tokens. A rewriter that normalised whitespace on the way past
@@ -27,36 +28,40 @@ import (
 // in the install handler, in the store — writes plaintext credentials into a
 // database with no encryption at rest, permanently, and shows them in the UI's
 // compose preview.
-func Resolve(compose, appID string, seed *Seed, version uint32) (string, error) {
+//
+// The result is a secret.Value whether or not the compose had a token: the
+// caller cannot tell which, so it handles every resolved compose as the
+// credential it may be (ADR-0009). A failure returns the zero Value.
+func Resolve(compose, appID string, seed *Seed, version uint32) (secret.Value, error) {
 	tokens, err := tileschema.ScanSecretTokens(compose)
 	if err != nil {
-		return "", fmt.Errorf("appsecret: resolve %s: %w", appID, err)
+		return secret.Value{}, fmt.Errorf("appsecret: resolve %s: %w", appID, err)
 	}
 	if len(tokens) == 0 {
-		return compose, nil
+		return secret.New([]byte(compose)), nil
 	}
 	if seed == nil {
 		// Refused, not skipped. Passing the token through would deploy the
 		// literal string `${secret:db-password}` as a credential, which is
 		// precisely the failure this channel exists to remove — and it would do
 		// it silently, with a container that came up and a job that succeeded.
-		return "", fmt.Errorf("appsecret: %s declares %d ${secret:} token(s) but no app-secret seed is loaded, so the deploy is refused rather than sending the literal placeholder as a credential", appID, len(tokens))
+		return secret.Value{}, fmt.Errorf("appsecret: %s declares %d ${secret:} token(s) but no app-secret seed is loaded, so the deploy is refused rather than sending the literal placeholder as a credential", appID, len(tokens))
 	}
 
 	var b strings.Builder
 	b.Grow(len(compose))
 	at := 0
 	for _, tok := range tokens {
-		value, derr := seed.Derive(appID, tok.Name, version)
+		value, derr := seed.derive(appID, tok.Name, version)
 		if derr != nil {
-			return "", derr
+			return secret.Value{}, derr
 		}
 		b.WriteString(compose[at:tok.Start])
 		b.WriteString(value)
 		at = tok.End
 	}
 	b.WriteString(compose[at:])
-	return b.String(), nil
+	return secret.New([]byte(b.String())), nil
 }
 
 // Escape rewrites every ${secret:<name>} token to $${secret:<name>} so Docker

@@ -42,7 +42,7 @@ func tlsServerSignedBy(t *testing.T, ca *MeshCA, name string) *httptest.Server {
 	if err != nil {
 		t.Fatalf("MintLeaf(%s): %v", name, err)
 	}
-	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM.Reveal())
 	if err != nil {
 		t.Fatalf("X509KeyPair(%s): %v", name, err)
 	}

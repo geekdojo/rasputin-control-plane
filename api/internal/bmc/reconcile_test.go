@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 func desiredMock(t *testing.T, st *setup.Store) string {
@@ -25,7 +27,7 @@ func desiredMock(t *testing.T, st *setup.Store) string {
 	if err := st.Set(ctx, setup.KeyBMCConfig, cfg); err != nil {
 		t.Fatal(err)
 	}
-	return ConfigHash("mock", json.RawMessage(cfg), "")
+	return ConfigHash("mock", json.RawMessage(cfg), secret.Value{})
 }
 
 func regEvt(t *testing.T, nodeID string, meta map[string]any) []byte {
@@ -51,6 +53,7 @@ func newReconciler(t *testing.T, st *setup.Store, busy bool) (*reconciler, *int)
 		st:     st,
 		busy:   func(context.Context) (bool, error) { return busy, nil },
 		submit: func(context.Context, string, json.RawMessage, string) error { submitted++; return nil },
+		log:    slog.New(slog.DiscardHandler),
 	}
 	return r, &submitted
 }
@@ -156,13 +159,13 @@ func TestStatusSeed_IgnoresMismatchedPayloadNodeID(t *testing.T) {
 // credential moves to its key and the spec goes without it
 // (geekdojo/geekdojo-brain#493, gate 6).
 func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
-	const secret = "SENTINEL-LEGACY-UNLOCK"
+	const legacy = "SENTINEL-LEGACY-UNLOCK"
 	ctx := context.Background()
 	st := newSetupStore(t)
 	for k, v := range map[string]string{
 		setup.KeyBMCBackend:  "bitscope",
 		setup.KeyBMCHostNode: "host-1",
-		setup.KeyBMCConfig:   `{"targets":[{"pos":"A-0","node_id":"node-1"}],"unlock":"` + secret + `"}`,
+		setup.KeyBMCConfig:   `{"targets":[{"pos":"A-0","node_id":"node-1"}],"unlock":"` + legacy + `"}`,
 	} {
 		if err := st.Set(ctx, k, v); err != nil {
 			t.Fatal(err)
@@ -171,6 +174,7 @@ func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
 	var spec json.RawMessage
 	r := &reconciler{
 		st:   st,
+		log:  slog.New(slog.DiscardHandler),
 		busy: func(context.Context) (bool, error) { return false, nil },
 		submit: func(_ context.Context, _ string, s json.RawMessage, _ string) error {
 			spec = s
@@ -181,11 +185,15 @@ func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
 	if spec == nil {
 		t.Fatal("no re-push submitted")
 	}
-	if strings.Contains(string(spec), secret) {
+	if strings.Contains(string(spec), legacy) {
 		t.Errorf("re-push spec carries the credential: %s", spec)
 	}
-	if got := StoredCredential(ctx, st, "bitscope"); got != secret {
-		t.Errorf("credential key = %q, want the legacy inline value moved there", got)
+	got, err := StoredCredential(ctx, st, "bitscope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got.Reveal()) != legacy {
+		t.Errorf("credential key = %q, want the legacy inline value moved there", got.Reveal())
 	}
 	var cs ConfigureSpec
 	if err := json.Unmarshal(spec, &cs); err != nil {

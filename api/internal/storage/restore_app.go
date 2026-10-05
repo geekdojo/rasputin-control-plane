@@ -138,6 +138,12 @@ type RestoreAppConfig struct {
 	// Store is the backup ledger: claimed targets, in-flight runs, and the
 	// restore_reports table the record step writes.
 	Store *Store
+
+	// heldCredential, when set, is handed each restore credential
+	// sendRestoreVolume mints, before the send. Unset in production; it is
+	// how a test observes that the credential is destroyed once the send
+	// returns, which nothing outside the function can otherwise see.
+	heldCredential func(secret.Value)
 }
 
 // RestoreAppSpec is the spec body of a backup.restore_app job. NO KEY: the
@@ -978,8 +984,10 @@ var (
 // sendRestoreVolume mints the credential, builds the command and sends it,
 // bounded by the RPC budget. Every send mints afresh: one member, one
 // generation, one node, this restore, bounded to the plaintext's length,
-// dead by the time the verb's budget is. Into the command and nowhere else.
-// The RestoreID is the job's and is the same on every send.
+// dead by the time the verb's budget is. Into the command and nowhere else:
+// this is where the credential leaves its secret.Value, and it is destroyed
+// when the send returns. The RestoreID is the job's and is the same on every
+// send.
 func sendRestoreVolume(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTarget, p RestoreVolumePlan, subject string) (*nats.Msg, error) {
 	cred, err := cfg.Egress.Mint(backupxfer.Grant{
 		Generation: tgt.GenerationID, Member: p.Member, NodeID: tgt.NodeID, JobID: sc.JobID, MaxBytes: p.SizeBytes, Use: backupxfer.UseRestore,
@@ -987,9 +995,13 @@ func sendRestoreVolume(sc *jobs.StepCtx, cfg RestoreAppConfig, tgt restoreAppTar
 	if err != nil {
 		return nil, fmt.Errorf("%w for %s: %v", errRestoreMint, p.Member, err)
 	}
+	defer cred.Destroy()
+	if cfg.heldCredential != nil {
+		cfg.heldCredential(cred)
+	}
 	cmd, err := json.Marshal(proto.BackupRestoreVolumeCmd{
 		AppID: tgt.AppID, AppName: tgt.AppName, Volume: p.Volume, Class: p.Class,
-		Source: tgt.Source, Credential: cred, GenerationID: tgt.GenerationID, Member: p.Member, RestoreID: tgt.RestoreID,
+		Source: tgt.Source, Credential: string(cred.Reveal()), GenerationID: tgt.GenerationID, Member: p.Member, RestoreID: tgt.RestoreID,
 		PlaintextDigest: p.SHA256, PlaintextBytes: p.SizeBytes, FileCount: p.FileCount,
 	})
 	if err != nil {

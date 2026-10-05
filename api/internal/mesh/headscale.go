@@ -75,9 +75,6 @@ type HSPreAuthKey struct {
 	Expiration time.Time `json:"expiration"`
 	CreatedAt  time.Time `json:"createdAt"`
 	Tags       []string  `json:"tags"`
-	// Plaintext is only set on the response from Create; subsequent List
-	// calls leave it empty.
-	Plaintext string `json:"plaintext,omitempty"`
 }
 
 // HSNode is the Headscale-side view of a registered device.
