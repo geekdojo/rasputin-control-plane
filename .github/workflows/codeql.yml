@@ -20,14 +20,18 @@ name: codeql
 #   NO high or critical finding that is real — or that nobody has reviewed —
 #   may exist on a release. Such code is never built into an image.
 #
-# ⚠ PR runs and release runs do not have the same COVERAGE, and the gate says
-# so on every run. github/codeql-action performs DIFF-INFORMED analysis on
-# pull_request events — it computes alerts only for lines the PR changed. So a
-# green check here means "nothing new in what you changed", not "the repo is
-# clean". The whole-repo verdict is the run on main and the one release.yml
-# gates on, where no diff range is applied. This is the right trade for PR
-# feedback and the wrong thing to be silent about, which is why the gate prints
-# its coverage rather than letting a partial pass read like a clean one.
+# PR runs and release runs have the SAME coverage: a full analysis, gated
+# against the register exactly as main is. github/codeql-action would otherwise
+# run DIFF-INFORMED analysis on pull_request events, computing alerts only for
+# lines the PR changed. That let PR #439 merge green while main's full scan of
+# the merged code went red: it added a dataflow step whose source and sink
+# lines it never touched, so its PR scan dropped the go/log-injection result at
+# api/internal/api/errors.go (geekdojo/geekdojo-brain#825, F-825-25). A PR gate
+# must see every finding the merged code would produce, so diff-informed
+# analysis is switched off below (CODEQL_ACTION_DIFF_INFORMED_QUERIES), and
+# the gate fails a SARIF that was diff-limited anyway rather than pass it.
+# Speed was the only thing given up, and there was little to give: PR #439's
+# diff-limited Go job took 2m24s, main's full one 2m35s.
 #
 # That is stricter than the gosec gate, which tolerates known `real` findings,
 # and it is deliberate: the two sit at different boundaries. gosec's asks "is
@@ -82,6 +86,19 @@ env:
   # manifest, which lags go.dev.
   GOTOOLCHAIN: go1.26.6
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # Full analysis on pull_request events too (see the header). There is no
+  # action input for this: diff-informed analysis is the action's feature
+  # flag diff_informed_queries, and the action turns a feature off when its
+  # environment variable is set to "false" (codeql-action v4.38.2,
+  # src/feature-flags.ts: Feature.DiffInformedQueries, envVar
+  # CODEQL_ACTION_DIFF_INFORMED_QUERIES; getOfflineValue returns false when it
+  # is "false", before the GitHub API is asked). The action's own
+  # codescanning-config-cli.yml sets it the same way. If a future action
+  # version ignores it, the gate notices only as long as the action still
+  # restricts alerts through the codeql-action/pr-diff-range extension pack:
+  # the SARIF then names that pack, and scripts/codeql-register.sh fails. A
+  # renamed pack or a different restriction mechanism would not be caught.
+  CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
 
 jobs:
   analyze:
@@ -98,6 +115,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # The gate's own tests, before any analysis. Every real run here is a
+      # full scan, so the branch of the gate that fails a diff-limited SARIF is
+      # never exercised by CI otherwise. Once, on the go leg: the tests are
+      # python3 and the tree, not language-specific. Here rather than in
+      # ci.yml so that release.yml, which calls this workflow, runs them too.
+      - name: tests for the gate itself
+        if: matrix.language == 'go'
+        run: ./scripts/test-codeql-register.sh
 
       - uses: actions/setup-go@v7
         if: matrix.language == 'go'

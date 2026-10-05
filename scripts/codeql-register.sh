@@ -218,8 +218,16 @@ def fingerprint(rule, path, line_hash):
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+# The pack github/codeql-action adds to run-queries when it performs
+# DIFF-INFORMED analysis. A run that used it lists it in tool.extensions, so the
+# SARIF itself records whether its scan was diff-limited. Seen in the uploaded
+# SARIF of PR #439's Go analysis, and absent from main's full scan of the merge.
+DIFF_RANGE_PACK = "codeql-action/pr-diff-range"
+
+
 def load_sarif(directory):
-    """Every finding in every .sarif under `directory`, keyed by fingerprint."""
+    """Every finding in every .sarif under `directory`, keyed by fingerprint,
+    and whether any run in them was diff-limited."""
     files = sorted(glob.glob(os.path.join(directory, "**", "*.sarif"),
                              recursive=True))
     if not files:
@@ -228,12 +236,16 @@ def load_sarif(directory):
         sys.exit(1)
 
     findings = {}
+    diff_limited = False
     for path in files:
         with open(path, encoding="utf-8") as handle:
             sarif = json.load(handle)
         for run in sarif.get("runs", []):
             rules = {}
             tool = run.get("tool", {})
+            if any(ext.get("name") == DIFF_RANGE_PACK
+                   for ext in tool.get("extensions", []) or []):
+                diff_limited = True
             for component in [tool.get("driver", {})] + list(
                     tool.get("extensions", []) or []):
                 for rule in component.get("rules", []) or []:
@@ -273,7 +285,7 @@ def load_sarif(directory):
                     "path": uri,
                     "line": str(line),
                 }
-    return findings
+    return findings, diff_limited
 
 
 def read_register():
@@ -318,21 +330,24 @@ def open_issues(rows):
 
 # Is this SARIF a whole-repo verdict, or only a verdict on what changed?
 #
-# github/codeql-action runs DIFF-INFORMED analysis on pull_request events — the
-# log says "Computing PR diff ranges" and it passes a pr-diff-range extension
-# pack to run-queries — so alerts are computed only for lines the PR touched.
-# Observed on rasputin-control-plane#144: the same tree that produces 5 Go and
-# 1 TS finding on a full scan produced 2 and 0 on the PR, because comments were
-# added ABOVE the flagged lines and the flagged lines themselves were unchanged.
+# github/codeql-action runs DIFF-INFORMED analysis on pull_request events unless
+# told not to — the log says "Computing PR diff ranges" and it passes the
+# pr-diff-range extension pack to run-queries — so alerts are computed only for
+# lines the PR touched. Observed on rasputin-control-plane#144: the same tree
+# that produces 5 Go and 1 TS finding on a full scan produced 2 and 0 on the PR,
+# because comments were added ABOVE the flagged lines and the flagged lines
+# themselves were unchanged. And on #439: it merged green, and main's full scan
+# of the merge then failed on a finding whose source and sink lines the PR
+# never changed (geekdojo/geekdojo-brain#825, F-825-25).
 #
-# That is good behaviour for fast feedback and bad behaviour to be silent about,
-# because a green check on a partial scan reads exactly like a green check on a
-# clean repo. So it is stated on every run, and it disables the destructive half
-# of --refresh above.
+# So codeql.yml turns diff-informed analysis off, and this gate no longer
+# infers coverage from the event name: load_sarif reads it from the SARIF,
+# which names DIFF_RANGE_PACK when the scan was diff-limited. --gate FAILS such
+# a SARIF, because a PR gate that cannot see the whole merged tree is how #439
+# got through; --refresh refuses to drop rows from one.
 #
 # ALLOW_DROP=1 overrides the refresh guard for the case where a full scan
 # genuinely did resolve a lot of findings at once.
-diff_limited = os.environ.get("GITHUB_EVENT_NAME") == "pull_request"
 allow_drop = bool(os.environ.get("ALLOW_DROP"))
 
 
@@ -344,12 +359,12 @@ def main():
             print(f"  open, tracked: {issue}")
         return 0
 
-    found = load_sarif(SARIF_DIR)
+    found, diff_limited = load_sarif(SARIF_DIR)
     rows = read_register()
 
     if MODE == "--refresh":
-        # A pull_request SARIF is DIFF-LIMITED (see diff_limited below): it
-        # contains only findings on lines the PR touched. Refreshing from one
+        # A DIFF-LIMITED SARIF (see DIFF_RANGE_PACK above) contains only
+        # findings on lines the PR touched. Refreshing from one
         # would drop every row outside the diff and report them as "resolved",
         # silently deleting the register. Refuse rather than warn — the whole
         # value of this file is that it cannot quietly lose a verdict.
@@ -359,8 +374,8 @@ def main():
             print(f"::error::refusing to refresh: this would remove "
                   f"{len(dropped_rows)} row(s) that the scan did not report.")
             if diff_limited:
-                print("::error::the SARIF is diff-limited (a pull_request "
-                      "analysis covers only changed lines), so absence from it "
+                print("::error::the SARIF is diff-limited (its analysis used "
+                      f"{DIFF_RANGE_PACK}, so it covers only changed lines), so absence from it "
                       "does NOT mean a finding is resolved. Refresh from a "
                       "full scan — a push/main or workflow_dispatch run.")
             else:
@@ -397,6 +412,14 @@ def main():
 
     # --gate
     failures = []
+
+    if diff_limited:
+        failures.append(
+            f"the SARIF is DIFF-LIMITED: its analysis used {DIFF_RANGE_PACK}, "
+            f"so it holds findings only for lines this PR changed.\n"
+            f"    This gate needs a full scan of the merged tree. codeql.yml "
+            f"sets CODEQL_ACTION_DIFF_INFORMED_QUERIES=false for that; find "
+            f"out why the action ignored it.")
 
     unregistered = [f for fpr, f in sorted(found.items()) if fpr not in rows]
     for finding in unregistered:
@@ -457,12 +480,8 @@ def main():
     print(f"this scan: {len(found)} findings · "
           + " · ".join(f"{k} {counts[k]}" for k in sorted(counts)))
     if diff_limited:
-        print("scan COVERAGE: diff-limited — a pull_request analysis computes "
-              "alerts only for lines this PR changed.")
-        print("               Passing here means 'nothing new in what you "
-              "changed', NOT 'the repo is clean'.")
-        print("               The whole-repo verdict is the run on main and "
-              "the one release.yml gates on.")
+        print("scan COVERAGE: diff-limited — alerts only for lines this PR "
+              "changed. Not a verdict on the merged tree; this gate fails it.")
     else:
         print("scan COVERAGE: full — every analysed line, not just changed "
               "ones. This is the verdict a release is gated on.")
