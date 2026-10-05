@@ -788,17 +788,6 @@ func attrs(rec slog.Record) map[string]any {
 	return out
 }
 
-// forJob keeps the records carrying job_id == jobID.
-func forJob(recs []slog.Record, jobID string) []slog.Record {
-	var out []slog.Record
-	for _, r := range recs {
-		if attrs(r)["job_id"] == jobID {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
 const (
 	msgPlan     = "console: pushing the console root password"
 	msgNodeOK   = "console: console root password delivered to a node"

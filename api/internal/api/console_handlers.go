@@ -107,12 +107,17 @@ func (s *Server) handlePutConsoleRootPassword(w http.ResponseWriter, r *http.Req
 	}
 	// One record per stored password, carrying the job applying it so the
 	// journal leads from the change to its per-node outcomes. Never the
-	// password: only its id.
-	attrs := []any{"hash_id", hashID, "push", push}
+	// password: only its id. The attributes are passed directly, not
+	// collected in a []any: push comes from the request body, and a bare
+	// bool argument is a simple type the log-injection analysis clears,
+	// whereas a slice holding it is tainted as a whole.
 	if resp.JobID != "" {
-		attrs = append(attrs, "job_id", resp.JobID)
+		s.log.InfoContext(r.Context(), "console: console root password set",
+			"hash_id", hashID, "push", push, "job_id", resp.JobID)
+	} else {
+		s.log.InfoContext(r.Context(), "console: console root password set",
+			"hash_id", hashID, "push", push)
 	}
-	s.log.InfoContext(r.Context(), "console: console root password set", attrs...)
 	writeJSON(w, http.StatusOK, resp)
 }
 
