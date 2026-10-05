@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // RestoreEgress is the restore-stream endpoint: GET one member of the
@@ -72,19 +73,25 @@ func NewRestoreEgress(auth *backupxfer.Authority, sessions *RestoreSessions, log
 }
 
 // Mint issues a restore credential for one member of an armed session's
-// generation. Refused for a job with no armed session or a member the plan
-// does not name — an endpoint must not hand out credentials it would refuse.
-func (e *RestoreEgress) Mint(g backupxfer.Grant, ttl time.Duration) (string, error) {
+// generation, as a secret.Value the caller destroys (ADR-0009). Refused for a
+// job with no armed session or a member the plan does not name — an endpoint
+// must not hand out credentials it would refuse. A refusal returns the zero
+// Value.
+func (e *RestoreEgress) Mint(g backupxfer.Grant, ttl time.Duration) (secret.Value, error) {
 	if e == nil || e.auth == nil || e.sessions == nil {
-		return "", errors.New("restore egress is not configured")
+		return secret.Value{}, errors.New("restore egress is not configured")
 	}
 	if !g.ForRestore() {
-		return "", errors.New("the restore endpoint mints restore credentials only")
+		return secret.Value{}, errors.New("the restore endpoint mints restore credentials only")
 	}
 	if ok, why := e.sessions.MemberPlanned(g.JobID, g.Generation, g.Member, g.NodeID); !ok {
-		return "", errors.New(why)
+		return secret.Value{}, errors.New(why)
 	}
-	return e.auth.Mint(g, ttl)
+	cred, err := e.auth.Mint(g, ttl)
+	if err != nil {
+		return secret.Value{}, err
+	}
+	return secret.New([]byte(cred)), nil
 }
 
 // ServeNode streams one member on the node listener. keyOwner is the node

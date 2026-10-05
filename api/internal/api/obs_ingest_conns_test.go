@@ -99,7 +99,7 @@ func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string)
 	if err != nil {
 		t.Fatalf("server leaf: %v", err)
 	}
-	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
+	serverCert, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM.Reveal())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // rotateCounts decodes the sweep step's result JSON.
@@ -30,12 +31,12 @@ func TestRotateLeaves_ShipsAndCommitsWhenRenewed(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	committed := 0
-	rotate := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+	rotate := func(app *App) (Leaf, bool, func() error, error) {
 		cmd := proto.AppLeafCmd{
-			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"), KeyPEM: []byte("K"),
+			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"),
 			TailnetFQDN: "jellyfin.home1.internal", UpstreamPort: app.PublishedPort,
 		}
-		return cmd, true, func() error { committed++; return nil }, nil
+		return Leaf{Cmd: cmd, Key: secret.New([]byte("K"))}, true, func() error { committed++; return nil }, nil
 	}
 
 	res, err := rotateLeavesSweep(store, inv, nc, rotate)(newStepCtxNATS(`{}`, nc))
@@ -79,12 +80,12 @@ func TestRotateLeaves_DeliversWithoutCommittingWhenNotRenewed(t *testing.T) {
 	defer sub.Unsubscribe()
 
 	committed := 0
-	rotate := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+	rotate := func(app *App) (Leaf, bool, func() error, error) {
 		cmd := proto.AppLeafCmd{
-			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"), KeyPEM: []byte("K"),
+			AppID: app.ID, Name: app.Name, CertPEM: []byte("C"),
 			TailnetFQDN: "jellyfin.home1.internal", UpstreamPort: app.PublishedPort,
 		}
-		return cmd, false, func() error { committed++; return nil }, nil
+		return Leaf{Cmd: cmd, Key: secret.New([]byte("K"))}, false, func() error { committed++; return nil }, nil
 	}
 
 	res, err := rotateLeavesSweep(store, inv, nc, rotate)(newStepCtxNATS(`{}`, nc))
@@ -131,8 +132,8 @@ func TestRotateLeaves_OfflineNodeDefersNoCommit(t *testing.T) {
 	}
 
 	committed := 0
-	rotate := func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
-		return proto.AppLeafCmd{AppID: app.ID}, true, func() error { committed++; return nil }, nil
+	rotate := func(app *App) (Leaf, bool, func() error, error) {
+		return Leaf{Cmd: proto.AppLeafCmd{AppID: app.ID}}, true, func() error { committed++; return nil }, nil
 	}
 
 	res, err := rotateLeavesSweep(store, inv, nc, rotate)(newStepCtxNATS(`{}`, nc))

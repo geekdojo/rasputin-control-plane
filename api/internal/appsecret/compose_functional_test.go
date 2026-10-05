@@ -49,11 +49,11 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := seed.Derive("01K5R6P8Q9ZJ7V2XW4YB3D5EFG", "session-key", InitialVersion)
+	want, err := str(seed.Derive("01K5R6P8Q9ZJ7V2XW4YB3D5EFG", "session-key", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := Resolve(tile, "01K5R6P8Q9ZJ7V2XW4YB3D5EFG", seed, InitialVersion)
+	resolved, err := str(Resolve(tile, "01K5R6P8Q9ZJ7V2XW4YB3D5EFG", seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}

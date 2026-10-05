@@ -111,7 +111,9 @@ func (r *nodeBackupRig) mint(node string, use string) string {
 	var tok string
 	var err error
 	if use == backupxfer.UseRestore {
-		tok, err = r.egress.Mint(g, time.Minute)
+		var cred secret.Value
+		cred, err = r.egress.Mint(g, time.Minute)
+		tok = string(cred.Reveal())
 	} else {
 		tok, err = r.ingest.Mint(g, time.Minute)
 	}

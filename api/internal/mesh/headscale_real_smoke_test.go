@@ -21,6 +21,7 @@ package mesh
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
@@ -149,8 +150,10 @@ func TestSmoke_RealClient_AgainstLiveHeadscale(t *testing.T) {
 			if k.User != "rasputin-operator" {
 				t.Errorf("filter leak: user=%q in rasputin-operator slice", k.User)
 			}
-			if k.Plaintext != "" {
-				t.Errorf("list returned plaintext (real Headscale should strip): %q", k.Plaintext)
+			// HSPreAuthKey has no field for the key; its encoding must not
+			// carry the minted one either.
+			if b, _ := json.Marshal(k); plaintext != "" && strings.Contains(string(b), plaintext) {
+				t.Errorf("a listed key carries the minted key material: %s", b)
 			}
 		}
 	})

@@ -120,7 +120,7 @@ func TestMintLeaf_HappyPath(t *testing.T) {
 	if !strings.HasPrefix(string(certPEM), "-----BEGIN CERTIFICATE-----") {
 		t.Error("cert PEM not well-formed")
 	}
-	if !strings.HasPrefix(string(keyPEM), "-----BEGIN EC PRIVATE KEY-----") {
+	if !strings.HasPrefix(string(keyPEM.Reveal()), "-----BEGIN EC PRIVATE KEY-----") {
 		t.Error("key PEM not well-formed")
 	}
 	cert := mustParseCert(t, certPEM)

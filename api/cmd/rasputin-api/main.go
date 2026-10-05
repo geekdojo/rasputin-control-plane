@@ -733,42 +733,7 @@ func main() {
 	if meshCA != nil {
 		clusterID := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID"))
 		appLeafDir := filepath.Join(dataDir, "tls", "apps")
-		// buildAppLeafCmd fills the delivery command from freshly-minted PEMs —
-		// shared by every caller of the rotator so the wire shape (FQDNs,
-		// upstream port) is built in exactly one place.
-		//
-		// The cert and the route come from different places on purpose. The leaf
-		// carries BOTH of the app's names whatever its exposure (a cert is an
-		// identity, not an access control), so the route hosts — and only they —
-		// decide what the node's proxy will answer for. AppRouteHosts leaves
-		// LANFQDN empty for a tailnet-only app, and RenderCaddyConfig drops any
-		// app with no LAN host from the LAN listener.
-		buildAppLeafCmd := func(app *apps.App, certPEM, keyPEM []byte) proto.AppLeafCmd {
-			tailnetFQDN, lanFQDN := mesh.AppRouteHosts(clusterID, app.Name, app.ExposeLAN)
-			return proto.AppLeafCmd{
-				AppID:        app.ID,
-				Name:         app.Name,
-				CertPEM:      certPEM,
-				KeyPEM:       keyPEM,
-				TailnetFQDN:  tailnetFQDN,
-				LANFQDN:      lanFQDN,
-				UpstreamPort: app.PublishedPort,
-				UpstreamTLS:  app.WebTLS,
-			}
-		}
-		// rotateAppLeaf is the one disk-backed leaf path. It always returns the
-		// app's CURRENT desired state — every caller delivers it either way — and
-		// renewed reports only whether the cert in it is new, which is what
-		// decides the commit (apps.LeafRotator).
-		rotateAppLeaf = func(app *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
-			dir := filepath.Join(appLeafDir, app.ID)
-			certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name)
-			if err != nil {
-				return proto.AppLeafCmd{}, false, nil, err
-			}
-			commit := func() error { return mesh.CommitAppLeaf(dir, certPEM, keyPEM) }
-			return buildAppLeafCmd(app, certPEM, keyPEM), renewed, commit, nil
-		}
+		rotateAppLeaf = newAppLeafRotator(meshCA, appLeafDir, clusterID)
 		removeAppLeaf = func(appID string) error {
 			return removeAppLeafDir(appLeafDir, appID)
 		}
@@ -1470,7 +1435,7 @@ func main() {
 	}, func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error {
 		_, serr := runner.Submit(ctx, kind, spec, createdBy)
 		return serr
-	})
+	}, logger)
 	if err != nil {
 		log.Fatalf("rasputin-api: bmc reconcile: %v", err)
 	}

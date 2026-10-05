@@ -69,7 +69,7 @@ func TestLeafMintProceedsWhenTheClockNeverSyncs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MintLeaf: %v", err)
 	}
-	if len(certPEM) == 0 || len(keyPEM) == 0 {
+	if len(certPEM) == 0 || keyPEM.Len() == 0 {
 		t.Fatal("no leaf was minted")
 	}
 	if calls.Load() != 1 {

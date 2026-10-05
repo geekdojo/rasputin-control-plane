@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Mesh TLS PKI ("TLS-A" per design/control-plane/certificates.md).
@@ -185,7 +186,12 @@ func createMeshCA(certPath, keyPath, installName string) (*MeshCA, error) {
 		return nil, fmt.Errorf("mesh: marshal CA key: %w", err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	if err := writeKey(keyPath, keyPEM); err != nil {
+	caKey := secret.New(keyPEM)
+	clear(keyPEM)
+	clear(keyDER)
+	err = writeKey(keyPath, caKey)
+	caKey.Destroy()
+	if err != nil {
 		return nil, err
 	}
 	cert, err := x509.ParseCertificate(der)
@@ -309,31 +315,33 @@ func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error)
 	if existing := loadLeafIfUsable(paths, ca, spec); existing != nil {
 		return paths, nil
 	}
-	certPEM, keyPEM, err := MintLeaf(ca, spec)
+	certPEM, key, err := MintLeaf(ca, spec)
 	if err != nil {
 		return LeafPaths{}, err
 	}
+	defer key.Destroy()
 	if err := writeCert(paths.CertPath, certPEM); err != nil {
 		return LeafPaths{}, err
 	}
-	if err := writeKey(paths.KeyPath, keyPEM); err != nil {
+	if err := writeKey(paths.KeyPath, key); err != nil {
 		return LeafPaths{}, err
 	}
 	return paths, nil
 }
 
-// MintLeaf creates a fresh leaf cert + key under ca, returning them as
-// PEM bytes. Pure function: no disk I/O. Use MintLeafToDisk for the
-// idempotent-with-on-disk-state path.
-func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
+// MintLeaf creates a fresh leaf cert + key under ca: the certificate as PEM
+// bytes, and the private key's PEM as a secret.Value the caller owns and
+// destroys (ADR-0009). Pure function: no disk I/O. Use MintLeafToDisk for the
+// idempotent-with-on-disk-state path. A failure returns the zero Value.
+func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM []byte, key secret.Value, err error) {
 	if ca == nil {
-		return nil, nil, errors.New("mesh: MintLeaf: nil CA")
+		return nil, secret.Value{}, errors.New("mesh: MintLeaf: nil CA")
 	}
 	if spec.CommonName == "" {
-		return nil, nil, errors.New("mesh: MintLeaf: CommonName required")
+		return nil, secret.Value{}, errors.New("mesh: MintLeaf: CommonName required")
 	}
 	if len(spec.DNSNames) == 0 && len(spec.IPAddresses) == 0 {
-		return nil, nil, errors.New("mesh: MintLeaf: at least one DNS or IP SAN required")
+		return nil, secret.Value{}, errors.New("mesh: MintLeaf: at least one DNS or IP SAN required")
 	}
 	lifetime := spec.Lifetime
 	if lifetime <= 0 {
@@ -350,11 +358,11 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
 	}
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("mesh: generate leaf key: %w", err)
+		return nil, secret.Value{}, fmt.Errorf("mesh: generate leaf key: %w", err)
 	}
 	serial, err := randomSerial()
 	if err != nil {
-		return nil, nil, err
+		return nil, secret.Value{}, err
 	}
 	now := time.Now().UTC()
 	tmpl := &x509.Certificate{
@@ -372,15 +380,18 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM, keyPEM []byte, err error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &leafKey.PublicKey, ca.Key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("mesh: sign leaf: %w", err)
+		return nil, secret.Value{}, fmt.Errorf("mesh: sign leaf: %w", err)
 	}
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(leafKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("mesh: marshal leaf key: %w", err)
+		return nil, secret.Value{}, fmt.Errorf("mesh: marshal leaf key: %w", err)
 	}
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return certPEM, keyPEM, nil
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	key = secret.New(keyPEM)
+	clear(keyPEM)
+	clear(keyDER)
+	return certPEM, key, nil
 }
 
 // loadLeafIfUsable returns a non-nil cert when the on-disk leaf matches
@@ -480,8 +491,10 @@ func writeCert(path string, certPEM []byte) error {
 	return nil
 }
 
-func writeKey(path string, keyPEM []byte) error {
-	if err := atrest.WriteSecretFile(path, keyPEM); err != nil {
+// writeKey is the one place a key file's bytes leave their secret.Value: into
+// the owner-only file they are read back from. The caller owns key.
+func writeKey(path string, key secret.Value) error {
+	if err := atrest.WriteSecretFile(path, key.Reveal()); err != nil {
 		return fmt.Errorf("mesh: %w", err)
 	}
 	return nil

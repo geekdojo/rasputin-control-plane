@@ -27,18 +27,18 @@ func TestResolveReplacesEveryTokenWithItsDerivedValue(t *testing.T) {
 		"      SESSION_KEY: ${secret:session-key}\n" +
 		"      ALSO_DB: ${secret:db-password}\n"
 
-	got, err := Resolve(compose, appID, seed, InitialVersion)
+	got, err := str(Resolve(compose, appID, seed, InitialVersion))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
 	if strings.Contains(got, "${secret:") {
 		t.Fatalf("a token survived resolution:\n%s", got)
 	}
-	dbValue, err := seed.Derive(appID, "db-password", InitialVersion)
+	dbValue, err := str(seed.Derive(appID, "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	sessionValue, err := seed.Derive(appID, "session-key", InitialVersion)
+	sessionValue, err := str(seed.Derive(appID, "session-key", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestResolveReplacesEveryTokenWithItsDerivedValue(t *testing.T) {
 // compose hash.
 func TestResolveLeavesAComposeWithNoTokensVerbatim(t *testing.T) {
 	compose := "services:\n  web:\n    image: x@sha256:" + strings.Repeat("a", 64) + "\n    environment:\n      A: ${OTHER}\n      B: $$LITERAL\n"
-	got, err := Resolve(compose, appID, testSeed(t), InitialVersion)
+	got, err := str(Resolve(compose, appID, testSeed(t), InitialVersion))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestResolveLeavesAComposeWithNoTokensVerbatim(t *testing.T) {
 	}
 	// And with no seed either: a cluster with no seed loaded must still be able
 	// to deploy every app that does not ask for a secret.
-	got, err = Resolve(compose, appID, nil, InitialVersion)
+	got, err = str(Resolve(compose, appID, nil, InitialVersion))
 	if err != nil || got != compose {
 		t.Errorf("no-token, no-seed: got %q, %v", got, err)
 	}
@@ -86,7 +86,7 @@ func TestResolveLeavesAComposeWithNoTokensVerbatim(t *testing.T) {
 // password — the exact failure this channel closes, and silently, with a
 // container that came up and a job that succeeded.
 func TestResolveRefusesATokenWithNoSeed(t *testing.T) {
-	_, err := Resolve("environment:\n  P: ${secret:db-password}\n", appID, nil, InitialVersion)
+	_, err := str(Resolve("environment:\n  P: ${secret:db-password}\n", appID, nil, InitialVersion))
 	if err == nil {
 		t.Fatal("resolved a token with no seed loaded")
 	}
@@ -114,15 +114,15 @@ func TestResolveRefusesAMalformedToken(t *testing.T) {
 func TestResolveIsBoundToTheAppAndTheVersion(t *testing.T) {
 	seed := testSeed(t)
 	compose := "P: ${secret:db-password}\n"
-	one, err := Resolve(compose, appID, seed, InitialVersion)
+	one, err := str(Resolve(compose, appID, seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := Resolve(compose, "01OTHERAPP0000000000000000", seed, InitialVersion)
+	other, err := str(Resolve(compose, "01OTHERAPP0000000000000000", seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := Resolve(compose, appID, seed, InitialVersion+1)
+	rotated, err := str(Resolve(compose, appID, seed, InitialVersion+1))
 	if err != nil {
 		t.Fatal(err)
 	}

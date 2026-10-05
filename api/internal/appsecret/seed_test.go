@@ -20,7 +20,7 @@ func TestEnsureSeedCreatesOnceAndAdoptsWhatItFinds(t *testing.T) {
 	if first.DerivationVersion() != DerivationVersion {
 		t.Errorf("derivation version %d, want %d", first.DerivationVersion(), DerivationVersion)
 	}
-	one, err := first.Derive("app", "db-password", InitialVersion)
+	one, err := str(first.Derive("app", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestEnsureSeedCreatesOnceAndAdoptsWhatItFinds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second EnsureSeed: %v", err)
 	}
-	two, err := second.Derive("app", "db-password", InitialVersion)
+	two, err := str(second.Derive("app", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestEnsureSeedSurvivesAConcurrentFirstStart(t *testing.T) {
 				errs[i] = err
 				return
 			}
-			values[i], errs[i] = seed.Derive("app", "db-password", InitialVersion)
+			values[i], errs[i] = str(seed.Derive("app", "db-password", InitialVersion))
 		}()
 	}
 	wg.Wait()
@@ -117,11 +117,11 @@ func TestSeedFileRoundTripsTheDerivationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromFile, err := seed.Derive("app", "db-password", InitialVersion)
+	fromFile, err := str(seed.Derive("app", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	direct, err := fresh.Derive("app", "db-password", InitialVersion)
+	direct, err := str(fresh.Derive("app", "db-password", InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}

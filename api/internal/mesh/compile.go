@@ -99,8 +99,8 @@ func Compile(intents []*Intent) (state map[string]any, hash string, err error) {
 //
 //  1. There is no secret here to hash. The per-key map reconcileFetch builds
 //     copies only user, reusable, ephemeral and tags from each listed key —
-//     not its ID and not Plaintext (which List leaves empty anyway). The key
-//     material itself never enters the map. CodeQL tainted it on the type's
+//     not its ID, and HSPreAuthKey has no field that carries the key itself.
+//     The key material never enters the map. CodeQL tainted it on the type's
 //     NAME, not on a value.
 //  2. This is not password hashing. The hash is a change-detection fingerprint:
 //     reconcile compares desired against observed to decide whether anything

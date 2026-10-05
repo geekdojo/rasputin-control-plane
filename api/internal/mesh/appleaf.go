@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // appTailnetFQDN is an app's bare (tailnet) name — <app>.<cluster-id>.internal.
@@ -113,35 +114,41 @@ func appLeafPaths(dir string) LeafPaths { return LeafPathsIn(dir) }
 // and only then commits it, so a node that is offline during its renew window
 // keeps triggering a re-mint + retry on every sweep — the on-disk leaf never
 // advances ahead of what the node has actually accepted.
-func PrepareAppLeaf(ca *MeshCA, dir, clusterID, appName string) (certPEM, keyPEM []byte, renewed bool, err error) {
+//
+// The private key comes back as a secret.Value the caller owns and destroys,
+// whether it was read from disk or minted (ADR-0009). A failure returns the
+// zero Value.
+func PrepareAppLeaf(ca *MeshCA, dir, clusterID, appName string) (certPEM []byte, key secret.Value, renewed bool, err error) {
 	if ca == nil {
-		return nil, nil, false, errors.New("mesh: PrepareAppLeaf: nil CA")
+		return nil, secret.Value{}, false, errors.New("mesh: PrepareAppLeaf: nil CA")
 	}
 	spec := appLeafSpec(clusterID, appName)
 	paths := appLeafPaths(dir)
 	if loadLeafIfUsable(paths, ca, spec) != nil {
 		certPEM, err = os.ReadFile(paths.CertPath)
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("mesh: read app leaf cert: %w", err)
+			return nil, secret.Value{}, false, fmt.Errorf("mesh: read app leaf cert: %w", err)
 		}
-		keyPEM, err = os.ReadFile(paths.KeyPath)
+		keyPEM, err := os.ReadFile(paths.KeyPath)
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("mesh: read app leaf key: %w", err)
+			return nil, secret.Value{}, false, fmt.Errorf("mesh: read app leaf key: %w", err)
 		}
-		return certPEM, keyPEM, false, nil
+		key = secret.New(keyPEM)
+		clear(keyPEM)
+		return certPEM, key, false, nil
 	}
-	certPEM, keyPEM, err = MintLeaf(ca, spec)
+	certPEM, key, err = MintLeaf(ca, spec)
 	if err != nil {
-		return nil, nil, false, err
+		return nil, secret.Value{}, false, err
 	}
-	return certPEM, keyPEM, true, nil
+	return certPEM, key, true, nil
 }
 
-// CommitAppLeaf atomically persists a freshly-minted app leaf (the PEMs
+// CommitAppLeaf atomically persists a freshly-minted app leaf (the cert and key
 // PrepareAppLeaf returned with renewed=true) under dir, so the next
 // PrepareAppLeaf sees it as the usable current leaf. Call only after the target
-// node has accepted the leaf.
-func CommitAppLeaf(dir string, certPEM, keyPEM []byte) error {
+// node has accepted the leaf. The caller still owns key.
+func CommitAppLeaf(dir string, certPEM []byte, key secret.Value) error {
 	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return fmt.Errorf("mesh: app leaf dir: %w", err)
 	}
@@ -149,5 +156,5 @@ func CommitAppLeaf(dir string, certPEM, keyPEM []byte) error {
 	if err := writeCert(paths.CertPath, certPEM); err != nil {
 		return err
 	}
-	return writeKey(paths.KeyPath, keyPEM)
+	return writeKey(paths.KeyPath, key)
 }

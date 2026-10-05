@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // GET /api/bmc/backends — the supported-backends list the Settings
@@ -153,16 +155,23 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 	// job specs and step results are served unredacted by the jobs API,
 	// so no secret may enter them. An empty incoming unlock keeps the
 	// stored one; the push step injects it bus-side at dispatch time.
-	secret := ""
-	if cred, ok := bmc.CredentialFor(req.Kind); ok {
+	var cred secret.Value
+	if field, ok := bmc.CredentialFor(req.Kind); ok {
 		var serr error
-		req.Config, serr = storeAndStripCredential(r.Context(), st, cred, req.Config)
+		req.Config, serr = storeAndStripCredential(r.Context(), st, field, req.Config)
 		if serr != nil {
 			writeError(w, http.StatusBadRequest, serr.Error())
 			return
 		}
-		secret, _ = st.Get(r.Context(), cred.SettingsKey)
+		// Refused, not hashed as empty: a hash without the credential is a
+		// configuration the operator never chose, and the agent would apply it.
+		var cerr error
+		if cred, cerr = bmc.StoredCredential(r.Context(), st, req.Kind); cerr != nil {
+			s.refuseUnreadableCredential(w, r, req.Kind, cerr)
+			return
+		}
 	}
+	defer cred.Destroy()
 	if err := bmc.ValidateSelection(r.Context(), s.inv, req.Kind, req.Config); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -171,7 +180,7 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		Kind:       req.Kind,
 		HostNodeID: req.HostNodeID,
 		Config:     req.Config,
-		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, secret),
+		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, cred),
 	})
 	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
 	if err != nil {
@@ -179,6 +188,15 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
+}
+
+// refuseUnreadableCredential answers a BMC request whose stored credential
+// could not be read. The store's error goes to the log under the correlation
+// id, never to the client.
+func (s *Server) refuseUnreadableCredential(w http.ResponseWriter, r *http.Request, kind string, err error) {
+	s.writeCodedError(w, r, http.StatusInternalServerError, codeCredentialUnreadable,
+		"the stored BMC credential could not be read",
+		slog.String("kind", kind), slog.String("err", err.Error()))
 }
 
 // POST /api/bmc/probe
@@ -217,8 +235,17 @@ func (s *Server) handleBMCProbe(w http.ResponseWriter, r *http.Request) {
 	// sends it to a board presenting the fingerprint the operator
 	// accepted, so injecting a stored secret cannot widen who receives
 	// it.
+	//
+	// An unreadable stored credential refuses the probe rather than sending
+	// it with none, which would read as a board that rejects its password.
 	if strings.TrimSpace(req.Pass) == "" {
-		req.Pass = bmc.StoredCredential(r.Context(), st, "turingpi")
+		cred, cerr := bmc.StoredCredential(r.Context(), st, "turingpi")
+		if cerr != nil {
+			s.refuseUnreadableCredential(w, r, "turingpi", cerr)
+			return
+		}
+		defer cred.Destroy()
+		req.Pass = string(cred.Reveal())
 	}
 	body, _ := json.Marshal(req)
 	msg, err := s.nc.Request(proto.BMCProbeSubject(host), body, 25*time.Second)

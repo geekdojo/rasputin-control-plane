@@ -46,7 +46,7 @@ func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
 		if err := os.WriteFile(p.CertPath, certPEM, 0o600); err != nil {
 			return p, err
 		}
-		return p, os.WriteFile(p.KeyPath, keyPEM, 0o600)
+		return p, os.WriteFile(p.KeyPath, keyPEM.Reveal(), 0o600)
 	}}
 }
 

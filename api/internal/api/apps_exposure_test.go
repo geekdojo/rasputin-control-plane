@@ -111,12 +111,12 @@ func TestApps_ExposureChangeRotatesTheLeaf(t *testing.T) {
 	}
 
 	var sawExpose []bool
-	f.srv.SetAppLeafRotator(func(a *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
+	f.srv.SetAppLeafRotator(func(a *apps.App) (apps.Leaf, bool, func() error, error) {
 		sawExpose = append(sawExpose, a.ExposeLAN)
 		// renewed=false: nothing to ship, so the handler needs no online node.
 		// What is being asserted is that the rotator is CONSULTED with the new
 		// exposure, which is the input its SAN drift check reads.
-		return proto.AppLeafCmd{}, false, func() error { return nil }, nil
+		return apps.Leaf{Cmd: proto.AppLeafCmd{}}, false, func() error { return nil }, nil
 	})
 
 	if w := f.do(t, http.MethodPatch, "/api/apps/app-3", `{"exposeLan":false}`, cookie); w.Code != http.StatusOK {
@@ -156,8 +156,8 @@ func TestApps_ExposureSurvivesALeafFailure(t *testing.T) {
 	if err := f.appsStore.Create(f.ctx, app); err != nil {
 		t.Fatal(err)
 	}
-	f.srv.SetAppLeafRotator(func(_ *apps.App) (proto.AppLeafCmd, bool, func() error, error) {
-		return proto.AppLeafCmd{}, false, nil, context.DeadlineExceeded
+	f.srv.SetAppLeafRotator(func(_ *apps.App) (apps.Leaf, bool, func() error, error) {
+		return apps.Leaf{Cmd: proto.AppLeafCmd{}}, false, nil, context.DeadlineExceeded
 	})
 
 	w := f.do(t, http.MethodPatch, "/api/apps/app-4", `{"exposeLan":false}`, cookie)

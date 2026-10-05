@@ -20,18 +20,18 @@ import (
 // bytes that reach the node.
 func realRotator(t *testing.T, ca *mesh.MeshCA, dir, clusterID string) LeafRotator {
 	t.Helper()
-	return func(app *App) (proto.AppLeafCmd, bool, func() error, error) {
+	return func(app *App) (Leaf, bool, func() error, error) {
 		leafDir := filepath.Join(dir, app.ID)
-		certPEM, keyPEM, renewed, err := mesh.PrepareAppLeaf(ca, leafDir, clusterID, app.Name)
+		certPEM, key, renewed, err := mesh.PrepareAppLeaf(ca, leafDir, clusterID, app.Name)
 		if err != nil {
-			return proto.AppLeafCmd{}, false, nil, err
+			return Leaf{}, false, nil, err
 		}
 		tailnetFQDN, lanFQDN := mesh.AppRouteHosts(clusterID, app.Name, app.ExposeLAN)
 		cmd := proto.AppLeafCmd{
-			AppID: app.ID, Name: app.Name, CertPEM: certPEM, KeyPEM: keyPEM,
+			AppID: app.ID, Name: app.Name, CertPEM: certPEM,
 			TailnetFQDN: tailnetFQDN, LANFQDN: lanFQDN, UpstreamPort: app.PublishedPort,
 		}
-		return cmd, renewed, func() error { return mesh.CommitAppLeaf(leafDir, certPEM, keyPEM) }, nil
+		return Leaf{Cmd: cmd, Key: key}, renewed, func() error { return mesh.CommitAppLeaf(leafDir, certPEM, key) }, nil
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // ConfigureSpec is the spec body for a bmc.configure job
@@ -26,19 +27,20 @@ type ConfigureSpec struct {
 }
 
 // ConfigHash fingerprints a selection; the agent echoes and advertises
-// it opaquely, and the registration reconcile compares it. secret is
+// it opaquely, and the registration reconcile compares it. cred is
 // any write-only credential that rides outside the config blob (the
-// bitscope unlock) — folding it in means rotating the secret triggers a
-// re-push. The advertised value is a truncated one-way hash; a
-// high-entropy secret is not recoverable from it (the factory-default
-// unlock is public anyway).
-func ConfigHash(kind string, config json.RawMessage, secret string) string {
+// bitscope unlock) — folding it in means rotating the credential triggers a
+// re-push. The bytes are the same as when cred was a string, so a hash an
+// agent advertises from an earlier release still matches. The hash is
+// carried in the job spec and step log; geekdojo/geekdojo-brain#827 tracks
+// keying it.
+func ConfigHash(kind string, config json.RawMessage, cred secret.Value) string {
 	h := sha256.New()
 	h.Write([]byte(kind))
 	h.Write([]byte{'\n'})
 	h.Write(config)
 	h.Write([]byte{'\n'})
-	h.Write([]byte(secret))
+	h.Write(cred.Reveal())
 	return hex.EncodeToString(h.Sum(nil))[:16]
 }
 
@@ -136,15 +138,16 @@ func refuseInlineCredential(kind string, config json.RawMessage) error {
 }
 
 // injectJSONField returns raw with field set — used to attach the
-// unlock to the bus command without it ever touching the job spec.
-func injectJSONField(raw json.RawMessage, field, value string) (json.RawMessage, error) {
+// unlock to the bus command without it ever touching the job spec. It is
+// where the credential leaves its secret.Value, into the configure command.
+func injectJSONField(raw json.RawMessage, field string, value secret.Value) (json.RawMessage, error) {
 	m := map[string]any{}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			return nil, fmt.Errorf("config decode: %w", err)
 		}
 	}
-	m[field] = value
+	m[field] = string(value.Reveal())
 	out, err := json.Marshal(m)
 	if err != nil {
 		return nil, err
@@ -353,13 +356,14 @@ func configurePush(st *setup.Store) jobs.DoFn {
 			return nil, err
 		}
 		pushCfg := spec.Config
-		if cred, ok := CredentialFor(spec.Kind); ok {
-			secret, serr := st.Get(sc.Ctx, cred.SettingsKey)
-			if serr != nil {
-				return nil, fmt.Errorf("read %s credential: %w", spec.Kind, serr)
+		if c, ok := CredentialFor(spec.Kind); ok {
+			cred, cerr := StoredCredential(sc.Ctx, st, spec.Kind)
+			if cerr != nil {
+				return nil, cerr
 			}
-			if secret != "" {
-				pushCfg, err = injectJSONField(spec.Config, cred.Field, secret)
+			defer cred.Destroy()
+			if cred.Len() > 0 {
+				pushCfg, err = injectJSONField(spec.Config, c.Field, cred)
 				if err != nil {
 					return nil, err
 				}
@@ -446,17 +450,33 @@ func CredentialFor(kind string) (CredentialField, bool) {
 	return c, ok
 }
 
-// StoredCredential returns the persisted credential for a kind, or ""
-// when the kind has none. Used to fold the secret into ConfigHash so a
-// rotation still re-pushes.
-func StoredCredential(ctx context.Context, st *setup.Store, kind string) string {
+// StoredCredential returns the persisted credential for a kind as a
+// secret.Value the caller destroys. A kind with no credential (mock), or
+// one with none stored, gives the zero Value and a nil error. A store read
+// that fails is an error, never an empty credential: a caller that hashed or
+// sent an empty one would push a configuration the operator never chose.
+func StoredCredential(ctx context.Context, st *setup.Store, kind string) (secret.Value, error) {
 	c, ok := CredentialFor(kind)
 	if !ok {
-		return ""
+		return secret.Value{}, nil
 	}
+	v, err := loadCredential(ctx, st, c)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("read %s credential: %w", kind, err)
+	}
+	return v, nil
+}
+
+// loadCredential is the one reader of a BMC credential's settings key. An
+// absent setting is the zero Value with no error (setup.Store.Get reads it
+// as "").
+func loadCredential(ctx context.Context, st *setup.Store, c CredentialField) (secret.Value, error) {
 	v, err := st.Get(ctx, c.SettingsKey)
 	if err != nil {
-		return ""
+		return secret.Value{}, err
 	}
-	return v
+	if v == "" {
+		return secret.Value{}, nil
+	}
+	return secret.New([]byte(v)), nil
 }

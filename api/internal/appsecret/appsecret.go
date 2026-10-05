@@ -67,6 +67,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -150,12 +151,24 @@ func (s *Seed) DerivationVersion() int {
 
 func supportedDerivation(v int) bool { return v == 1 }
 
-// Derive returns the secret value for (appID, name, version) under this seed.
+// Derive returns the secret value for (appID, name, version) under this seed,
+// as a secret.Value: the credential is one from here to the bus command that
+// carries it (ADR-0009). A failure returns the zero Value.
 //
 // A nil receiver is an error rather than a zero value: the paths that call this
 // have a real app and a real container waiting for a real credential, and an
 // empty string would be deployed as a password.
-func (s *Seed) Derive(appID, name string, version uint32) (string, error) {
+func (s *Seed) Derive(appID, name string, version uint32) (secret.Value, error) {
+	v, err := s.derive(appID, name, version)
+	if err != nil {
+		return secret.Value{}, err
+	}
+	return secret.New([]byte(v)), nil
+}
+
+// derive is Derive as a string, for Resolve, which splices the value into a
+// compose it then wraps whole. No Reveal is needed on that path.
+func (s *Seed) derive(appID, name string, version uint32) (string, error) {
 	if s == nil {
 		return "", errors.New("appsecret: no app-secret seed is loaded, so ${secret:} cannot be resolved")
 	}

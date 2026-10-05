@@ -30,6 +30,17 @@ import (
 
 const secretCompose = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${secret:db-password}\n"
 
+// derived is the value seed derives for testAppID's secret name, as the
+// string the bus command carries.
+func derived(t *testing.T, seed *appsecret.Seed, name string) string {
+	t.Helper()
+	v, err := seed.Derive(testAppID, name, appsecret.InitialVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(v.Reveal())
+}
+
 func wiringSeed(t *testing.T) *appsecret.Seed {
 	t.Helper()
 	key := make([]byte, appsecret.SeedLen)
@@ -72,10 +83,7 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedAppWithSecret(t, "n", testAppID)
 	seed := wiringSeed(t)
-	want, err := seed.Derive(testAppID, "db-password", appsecret.InitialVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
+	want := derived(t, seed, "db-password")
 
 	got := make(chan proto.AppDeployCmd, 1)
 	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
@@ -214,10 +222,7 @@ func TestPullEscapesTheTokenRatherThanResolvingIt(t *testing.T) {
 	nc := startNATS(t)
 	_, inv := seedAppWithSecret(t, "n", testAppID)
 	seed := wiringSeed(t)
-	leaked, err := seed.Derive(testAppID, "db-password", appsecret.InitialVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
+	leaked := derived(t, seed, "db-password")
 
 	cmds := make(chan proto.AppPullCmd, 1)
 	sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {

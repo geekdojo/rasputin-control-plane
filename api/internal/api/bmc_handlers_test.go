@@ -187,19 +187,21 @@ func TestStoredCredentialBacksABlankProbePassword(t *testing.T) {
 	st := bmcTestSetupStore(t)
 
 	// Nothing stored yet: a blank stays blank rather than inventing one.
-	if got := bmc.StoredCredential(ctx, st, "turingpi"); got != "" {
-		t.Errorf("with nothing stored, got %q, want empty", got)
+	// TC-825-12: an absent setting is the zero Value with a nil error.
+	if got, err := bmc.StoredCredential(ctx, st, "turingpi"); err != nil || got.Len() != 0 {
+		t.Errorf("with nothing stored, got %d bytes, err %v; want the zero Value and no error", got.Len(), err)
 	}
 	// After a configure has saved one, the probe can fall back to it.
 	if err := st.Set(ctx, setup.KeyBMCTuringPiPass, "s3cret"); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if got := bmc.StoredCredential(ctx, st, "turingpi"); got != "s3cret" {
-		t.Errorf("got %q, want the stored password", got)
+	if got, err := bmc.StoredCredential(ctx, st, "turingpi"); err != nil || string(got.Reveal()) != "s3cret" {
+		t.Errorf("got %q, err %v; want the stored password", got.Reveal(), err)
 	}
 	// Backends without a credential must not pick one up by accident.
-	if got := bmc.StoredCredential(ctx, st, "mock"); got != "" {
-		t.Errorf("mock has no credential; got %q", got)
+	// TC-825-12: a kind with no credential is the zero Value with a nil error.
+	if got, err := bmc.StoredCredential(ctx, st, "mock"); err != nil || got.Len() != 0 {
+		t.Errorf("mock has no credential; got %d bytes, err %v", got.Len(), err)
 	}
 }
 
