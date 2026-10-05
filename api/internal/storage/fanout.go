@@ -399,7 +399,7 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 func (o fanOutOpts) transferCommand(g backupxfer.Grant, base proto.BackupTransferCmd) ([]byte, error) {
 	cred, err := mintUploadCredential(o.Ingest, g, transferRPCBudget)
 	if err != nil {
-		return nil, fmt.Errorf("could not mint an upload credential for %s: %v", g.Member, err)
+		return nil, fmt.Errorf("could not mint an upload credential for %s: %w", g.Member, err)
 	}
 	defer cred.Destroy()
 	if o.heldCredential != nil {
@@ -407,7 +407,7 @@ func (o fanOutOpts) transferCommand(g backupxfer.Grant, base proto.BackupTransfe
 	}
 	cmd, err := uploadCommand(base, cred)
 	if err != nil {
-		return nil, fmt.Errorf("internal: %v", err)
+		return nil, fmt.Errorf("internal: %w", err)
 	}
 	return cmd, nil
 }

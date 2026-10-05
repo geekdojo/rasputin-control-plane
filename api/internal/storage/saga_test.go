@@ -978,25 +978,35 @@ func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
 	}
 }
 
-// A staged key claimKey refuses is destroyed there: the caller gets no key
-// back, so nothing else could destroy it (F-825-18). One it accepts is handed
-// back intact for the caller to destroy.
+// TC-825-41: a staged key claimKey refuses is destroyed there: the caller
+// gets no key back, so nothing else could destroy it (F-825-18). One it
+// accepts is handed back intact for the caller to destroy. A spec that names
+// a key when none is staged is refused without panicking on the nil key.
 func TestMatchStagedKey_DestroysARefusedKey(t *testing.T) {
 	cases := []struct {
 		name, specID string
+		noneStaged   bool
 		wantErr      bool
 	}{
 		{name: "staged but not named", specID: "", wantErr: true},
 		{name: "different ids", specID: "k2", wantErr: true},
 		{name: "agree", specID: "k1"},
+		{name: "named but none staged", specID: "k1", noneStaged: true, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			k := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
-			got, err := matchStagedKey(&ClaimSpec{ArchiveKeyID: tc.specID}, k)
+			staged := k
+			if tc.noneStaged {
+				staged = nil
+			}
+			got, err := matchStagedKey(&ClaimSpec{ArchiveKeyID: tc.specID}, staged)
 			if tc.wantErr {
 				if err == nil || got != nil {
 					t.Fatalf("got (%v, %v), want a refusal and no key", got, err)
+				}
+				if tc.noneStaged {
+					return
 				}
 				if n, m := k.WrappedByPassphrase.Len(), k.WrappedByRecoveryCode.Len(); n != 0 || m != 0 {
 					t.Errorf("refused key's wrappings Len() = %d, %d, want 0, 0", n, m)
