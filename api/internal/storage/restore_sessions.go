@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Custody of a §4.6 private key for the duration of ONE app-volume restore
@@ -38,8 +40,10 @@ import (
 
 // RestoreSession is one lent key and the restore it is lent to.
 type RestoreSession struct {
-	id  string
-	key []byte
+	id string
+	// key is this session's own payload, never the caller's: Open builds it
+	// with secret.New, so the handler's deferred Destroy cannot reach it.
+	key secret.Value
 	// jobID is the saga the session belongs to, bound once the job exists.
 	jobID string
 	// The generation the restore reads, where it is mounted, the node the
@@ -90,13 +94,14 @@ func NewRestoreSessions() *RestoreSessions {
 	return &RestoreSessions{by: map[string]*RestoreSession{}, unboundTTL: unboundSessionTTL, now: time.Now}
 }
 
-// Open copies key into a new session and returns its id. The caller zeroes
-// its own copy; this package zeroes this one on Close.
-func (r *RestoreSessions) Open(key []byte) (string, error) {
-	if len(key) != 32 {
+// Open copies key into a new session and returns its id. The session holds
+// an independent payload, so the caller destroys its own Value whenever it
+// likes; this package destroys this one on Close.
+func (r *RestoreSessions) Open(key secret.Value) (string, error) {
+	if key.Len() != 32 {
 		return "", errors.New("a restore session holds a 32-byte X25519 private key")
 	}
-	if allZero(key) {
+	if allZero(key.Reveal()) {
 		return "", errors.New("the supplied key is all zeroes")
 	}
 	r.mu.Lock()
@@ -108,9 +113,7 @@ func (r *RestoreSessions) Open(key []byte) (string, error) {
 		}
 	}
 	id := "rss-" + randomHex(12)
-	held := make([]byte, len(key))
-	copy(held, key)
-	r.by[id] = &RestoreSession{id: id, key: held, openedAt: r.now().UTC()}
+	r.by[id] = &RestoreSession{id: id, key: secret.New(key.Reveal()), openedAt: r.now().UTC()}
 	return id, nil
 }
 
@@ -140,28 +143,27 @@ func (r *RestoreSessions) Bind(id, jobID string) error {
 
 // StreamGrant is what the restore-stream endpoint needs to serve one member:
 // where the generation is, the manifest's facts for the member, and a COPY
-// of the key — taken under the lock, so a session closing mid-stream cannot
-// zero the bytes an unseal is reading. The endpoint zeroes the copy when
-// the stream ends.
+// of the key — an independent payload taken under the lock, so a session
+// closing mid-stream cannot zero the bytes an unseal is reading. The
+// endpoint destroys the copy when the stream ends.
 type StreamGrant struct {
 	MountPath       string
 	SealedSHA256    string
 	SealedBytes     uint64
 	PlaintextSHA256 string
 	PlaintextBytes  uint64
-	key             []byte
+	key             secret.Value
 }
 
-// Key is the borrowed copy. Zero it with Release when done.
-func (g *StreamGrant) Key() []byte { return g.key }
+// Key is the borrowed copy. Destroy it with Release when done.
+func (g *StreamGrant) Key() secret.Value { return g.key }
 
-// Release zeroes the copy.
+// Release zeroes and drops the copy.
 func (g *StreamGrant) Release() {
 	if g == nil {
 		return
 	}
-	zeroBytes(g.key)
-	g.key = nil
+	g.key.Destroy()
 }
 
 // Lookup answers the endpoint's question in one locked read: is there an
@@ -184,10 +186,8 @@ func (r *RestoreSessions) Lookup(jobID, generation, member string) (*StreamGrant
 		if !ok {
 			return nil, false
 		}
-		key := make([]byte, len(s.key))
-		copy(key, s.key)
 		return &StreamGrant{MountPath: s.mountPath, SealedSHA256: f.sealedSHA256, SealedBytes: f.sealedBytes,
-			PlaintextSHA256: f.plaintextSHA256, PlaintextBytes: f.plaintextBytes, key: key}, true
+			PlaintextSHA256: f.plaintextSHA256, PlaintextBytes: f.plaintextBytes, key: secret.New(s.key.Reveal())}, true
 	}
 	return nil, false
 }
@@ -294,8 +294,7 @@ func (r *RestoreSessions) closeLocked(id string) {
 	if !ok {
 		return
 	}
-	zeroBytes(s.key)
-	s.key = nil
+	s.key.Destroy()
 	s.members = nil
 	s.armed = false
 	delete(r.by, id)

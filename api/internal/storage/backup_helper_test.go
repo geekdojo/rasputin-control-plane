@@ -25,6 +25,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
@@ -690,7 +691,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 func (h *runHarness) submitRestore(t *testing.T, spec RestoreAppSpec) string {
 	t.Helper()
 	priv := h.key.priv.Bytes()
-	sid, err := h.sessions.Open(priv)
+	sid, err := h.sessions.Open(secret.New(priv))
 	if err != nil {
 		t.Fatalf("sessions.Open: %v", err)
 	}

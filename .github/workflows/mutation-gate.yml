@@ -103,6 +103,53 @@ jobs:
       - name: install gremlins
         run: go install github.com/go-gremlins/gremlins/cmd/gremlins@${{ env.GREMLINS_VERSION }}
 
+      # SIBLING-REPLACE FIX (load-bearing, CI checkout only, never committed):
+      # gremlins v0.6.0 copies the module being mutated ALONE into a temp dir
+      # and runs `go test` there. Each module's go.mod points at its siblings
+      # with relative `replace <mod> => ../<dir>` lines, which resolve to
+      # nothing in that copy — so every package importing a sibling module
+      # fails to build before any mutation and gremlins counts the failure as
+      # KILLED. Every such mutant was a false kill. Rewriting each relative
+      # replace to an absolute path into this checkout makes the copy build.
+      # Derived from the go.mod files themselves (go mod edit -json, the
+      # toolchain's own parser), never a hand-written module list.
+      - name: make sibling-module replaces absolute (for gremlins' module copy)
+        run: |
+          set -euo pipefail
+          modules="$(./scripts/workspace-modules.sh)"
+          while IFS= read -r m; do
+            # One "<old>[@<version>]<TAB><relative new path>" per relative replace.
+            reps="$(go mod edit -json "$m/go.mod" | jq -r '
+              .Replace // [] | .[]
+              | select(.New.Path | startswith("./") or startswith("../"))
+              | (.Old.Path + (if .Old.Version then "@" + .Old.Version else "" end)) + "\t" + .New.Path')"
+            [ -n "$reps" ] || continue
+            while IFS=$'\t' read -r old rel; do
+              # cd+pwd fails (set -e) if the sibling dir is missing, rather
+              # than writing a replace that points nowhere.
+              abs="$(cd "$m/$rel" && pwd -P)"
+              case "$abs" in
+                "$GITHUB_WORKSPACE"/*) ;;
+                *) echo "::error::replace $old => $rel in $m resolves outside the checkout: $abs"; exit 1 ;;
+              esac
+              go mod edit -replace="$old=$abs" "$m/go.mod"
+              echo "$m: $old => $abs"
+            done <<<"$reps"
+          done <<<"$modules"
+          # Guard: no relative replace may survive, or the false-KILLED
+          # failure is back silently.
+          left="$(while IFS= read -r m; do
+                    go mod edit -json "$m/go.mod" | jq -r --arg m "$m" '
+                      .Replace // [] | .[]
+                      | select(.New.Path | startswith("./") or startswith("../"))
+                      | $m + ": " + .Old.Path + " => " + .New.Path'
+                  done <<<"$modules")"
+          if [ -n "$left" ]; then
+            echo "::error::relative replaces remain after the rewrite:"
+            printf '%s\n' "$left"
+            exit 1
+          fi
+
       - name: mutation test (diff-scoped, advisory)
         env:
           GH_TOKEN: ${{ github.token }}

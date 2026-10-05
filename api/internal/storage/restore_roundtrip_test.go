@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
@@ -554,7 +555,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 	// The operator's choice, with the recovered key lent once more — the
 	// browser's restore-only unwrap, in Go, the same as above.
 	priv2 := openRecoveryCodeWrapping(t, vec.KeyID, vec.WrappedByRecoveryCode, vec.RecoveryCode)
-	sid, err := h.sessions.Open(priv2)
+	sid, err := h.sessions.Open(secret.New(priv2))
 	if err != nil {
 		t.Fatal(err)
 	}

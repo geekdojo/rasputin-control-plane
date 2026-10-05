@@ -13,6 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Restoring one app's data from a backup generation — the api surface of
@@ -146,18 +147,21 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid json body: "+err.Error())
 		return
 	}
-	key, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(req.PrivateKey))
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(req.PrivateKey))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "privateKey is not unpadded base64url")
 		return
 	}
-	defer func() {
-		for i := range key {
-			key[i] = 0
-		}
-	}()
+	// The key is a secret.Value from here to the unseal: this handler's own
+	// payload, destroyed when it returns. The session and every stream grant
+	// hold independent copies, so this Destroy cannot reach them.
+	key := secret.New(raw)
+	for i := range raw {
+		raw[i] = 0
+	}
+	defer key.Destroy()
 	req.PrivateKey = ""
-	if len(key) != 32 {
+	if key.Len() != 32 {
 		writeError(w, http.StatusBadRequest, "privateKey must decode to 32 bytes")
 		return
 	}
@@ -188,13 +192,8 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	spec, err := json.Marshal(storage.RestoreAppSpec{
+	spec := storage.RestoreAppSpec{
 		AppID: app.ID, PartUUID: partUUID, GenerationID: genID, KeyID: keyID, SessionID: sessionID, Volumes: req.Volumes,
-	})
-	if err != nil {
-		s.appRestore.Sessions.Close(sessionID)
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
 	}
 	j, err := s.runner.Submit(r.Context(), storage.RestoreAppJobKind, spec, creator(r))
 	if err != nil {

@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -173,7 +174,7 @@ func TestManifestRecordsForMatchesAReinstalledAppByTileAndName(t *testing.T) {
 func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 	r := NewRestoreSessions()
 	key := bytes.Repeat([]byte{7}, 32)
-	id, err := r.Open(key)
+	id, err := r.Open(secret.New(key))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,13 +183,13 @@ func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 		key[i] = 0
 	}
 	s := r.Get(id)
-	if s == nil || !bytes.Equal(s.key, bytes.Repeat([]byte{7}, 32)) {
+	if s == nil || !bytes.Equal(s.key.Reveal(), bytes.Repeat([]byte{7}, 32)) {
 		t.Fatal("the session does not hold the key")
 	}
 	if _, active := r.Active(); !active {
 		t.Fatal("an open session is not active")
 	}
-	if _, err := r.Open(bytes.Repeat([]byte{8}, 32)); !errors.Is(err, ErrRestoreActive) {
+	if _, err := r.Open(secret.New(bytes.Repeat([]byte{8}, 32))); !errors.Is(err, ErrRestoreActive) {
 		t.Fatalf("a second session opened: %v", err)
 	}
 	if err := r.Bind(id, "job-1"); err != nil {
@@ -206,7 +207,7 @@ func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 	if err := r.Arm(id, "/mnt/x", "part", "gen", "n1", []RestoreVolumePlan{{Member: "volumes/a/b.rasputin-archive"}}); err != nil {
 		t.Fatal(err)
 	}
-	held := s.key
+	held := s.key.Reveal()
 	r.CloseJob("job-1")
 	if !allZero(held) || r.Get(id) != nil || r.ByJob("job-1") != nil {
 		t.Fatal("close did not zero and forget the key")
@@ -217,10 +218,10 @@ func TestRestoreSessionsHoldOneKeyForOneJobAndZeroIt(t *testing.T) {
 	if err := r.Bind(id, "job-1"); !errors.Is(err, ErrRestoreSessionGone) {
 		t.Fatalf("bind after close: %v", err)
 	}
-	if _, err := r.Open(make([]byte, 32)); err == nil {
+	if _, err := r.Open(secret.New(make([]byte, 32))); err == nil {
 		t.Fatal("an all-zero key opened a session")
 	}
-	if _, err := r.Open([]byte("short")); err == nil {
+	if _, err := r.Open(secret.New([]byte("short"))); err == nil {
 		t.Fatal("a short key opened a session")
 	}
 }
@@ -229,19 +230,20 @@ func TestRestoreSessionsDropAnUnboundSessionAfterItsTTL(t *testing.T) {
 	r := NewRestoreSessions()
 	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
 	r.now = func() time.Time { return now }
-	id, err := r.Open(bytes.Repeat([]byte{1}, 32))
+	id, err := r.Open(secret.New(bytes.Repeat([]byte{1}, 32)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := r.Get(id)
+	held := s.key.Reveal()
 	now = now.Add(unboundSessionTTL + time.Second)
 	if r.Get(id) != nil {
 		t.Fatal("an unbound session outlived its TTL")
 	}
-	if !allZero(s.key) {
+	if !allZero(held) || s.key.Len() != 0 {
 		t.Fatal("the swept session's key was not zeroed")
 	}
-	if _, err := r.Open(bytes.Repeat([]byte{2}, 32)); err != nil {
+	if _, err := r.Open(secret.New(bytes.Repeat([]byte{2}, 32))); err != nil {
 		t.Fatalf("a new session after the sweep: %v", err)
 	}
 }
@@ -265,7 +267,7 @@ func TestReadSealedManifestTrustsTheArchiveNotTheSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = f.Close() }()
-	got, err := readSealedManifest(f, key.priv.Bytes())
+	got, err := readSealedManifest(f, secret.New(key.priv.Bytes()))
 	if err != nil {
 		t.Fatalf("readSealedManifest: %v", err)
 	}
@@ -277,7 +279,7 @@ func TestReadSealedManifestTrustsTheArchiveNotTheSidecar(t *testing.T) {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readSealedManifest(f, other.priv.Bytes()); !errors.Is(err, ErrRestoreArchive) {
+	if _, err := readSealedManifest(f, secret.New(other.priv.Bytes())); !errors.Is(err, ErrRestoreArchive) {
 		t.Fatalf("wrong key: %v", err)
 	}
 }
@@ -336,7 +338,7 @@ func newEgressRig(t *testing.T) *egressRig {
 // facts, and returns the session id.
 func (r *egressRig) arm(sealedDigest string) string {
 	r.t.Helper()
-	id, err := r.sessions.Open(r.key.priv.Bytes())
+	id, err := r.sessions.Open(secret.New(r.key.priv.Bytes()))
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -485,7 +487,7 @@ func TestRestoreEgressRefusesAMemberTheManifestDoesNotVouchFor(t *testing.T) {
 func TestRestoreEgressAbortsTheStreamWhenTheKeyDoesNotOpenTheMember(t *testing.T) {
 	r := newEgressRig(t)
 	other := newTestKeypair(t)
-	id, _ := r.sessions.Open(other.priv.Bytes())
+	id, _ := r.sessions.Open(secret.New(other.priv.Bytes()))
 	_ = r.sessions.Bind(id, "job-restore")
 	_ = r.sessions.Arm(id, r.mount, "part", r.genID, "n-compute", []RestoreVolumePlan{
 		{Member: r.member, SealedSHA256: mustSHA(r.sealed), SHA256: mustSHA(r.plain), SizeBytes: uint64(len(r.plain))},
@@ -714,7 +716,7 @@ func TestRestoreAppRefusesAnOfflineNodeByName(t *testing.T) {
 func TestRestoreAppRefusesTheWrongKeyBeforeAnythingIsStopped(t *testing.T) {
 	c := newRestoreCase(t, runHarnessOpts{})
 	other := newTestKeypair(t)
-	sid, err := c.h.sessions.Open(other.priv.Bytes())
+	sid, err := c.h.sessions.Open(secret.New(other.priv.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,7 +736,7 @@ func TestRestoreAppRefusesTheWrongKeyBeforeAnythingIsStopped(t *testing.T) {
 		t.Fatal("something was stopped for a key that did not open the disk")
 	}
 	// And the synchronous check the handler runs says the same, with no job.
-	if _, _, err := CheckRestoreCustody(context.Background(), c.h.restoreCfg, runPartUUID, "key-1", other.priv.Bytes()); !errors.Is(err, ErrRestoreKeyMismatch) {
+	if _, _, err := CheckRestoreCustody(context.Background(), c.h.restoreCfg, runPartUUID, "key-1", secret.New(other.priv.Bytes())); !errors.Is(err, ErrRestoreKeyMismatch) {
 		t.Fatalf("CheckRestoreCustody: %v", err)
 	}
 }
@@ -757,7 +759,7 @@ func TestRestoreAppRefusesWhileABackupRuns(t *testing.T) {
 // session.
 func TestBackupRunRefusesWhileARestoreIsActive(t *testing.T) {
 	c := newRestoreCase(t, runHarnessOpts{})
-	sid, err := c.h.sessions.Open(c.h.key.priv.Bytes())
+	sid, err := c.h.sessions.Open(secret.New(c.h.key.priv.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}

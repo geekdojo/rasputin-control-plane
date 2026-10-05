@@ -22,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer/fsat"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -613,19 +614,20 @@ func humanAge(d time.Duration) string {
 // derive the marker's public key and the marker to name keyID. Called by the
 // HTTP handler BEFORE a session is opened or a job submitted — a wrong
 // secret is refused with nothing stopped and no job in the ledger — and
-// again by step 1. The key is borrowed; the caller zeroes it.
-func CheckRestoreCustody(ctx context.Context, cfg RestoreAppConfig, partUUID, keyID string, privateKey []byte) (mountPath string, marker *proto.StorageBackupSet, err error) {
+// again by step 1. The key is borrowed; the caller destroys it.
+func CheckRestoreCustody(ctx context.Context, cfg RestoreAppConfig, partUUID, keyID string, privateKey secret.Value) (mountPath string, marker *proto.StorageBackupSet, err error) {
 	if strings.TrimSpace(cfg.SelfNodeID) == "" {
 		return "", nil, errors.New("this api does not know which node it runs on (RASPUTIN_SELF_NODE_ID is unset); the backup disk is read beside it and needs that name")
 	}
 	if !safePartUUID.MatchString(partUUID) {
 		return "", nil, fmt.Errorf("%w: %q is not a partition UUID", ErrRestoreArchive, partUUID)
 	}
-	suppliedPub, err := PublicKeyForPrivate(privateKey)
+	key := privateKey.Reveal()
+	suppliedPub, err := PublicKeyForPrivate(key)
 	if err != nil {
 		return "", nil, fmt.Errorf("%w: %v", ErrRestoreArchive, err)
 	}
-	if allZero(privateKey) {
+	if allZero(key) {
 		return "", nil, fmt.Errorf("%w: the supplied key is all zeroes", ErrRestoreArchive)
 	}
 	if !fsat.Supported {
@@ -1164,11 +1166,12 @@ func appRestoreWarning(app, node string, restored, failed []string, skipped int)
 // authenticated under the key before a byte is yielded, so what comes back
 // is the manifest the run wrote and not the sidecar anyone holding the disk
 // could edit. The rest of the archive is not read.
-func readSealedManifest(archive io.Reader, privateKey []byte) (*Manifest, error) {
+func readSealedManifest(archive io.Reader, privateKey secret.Value) (*Manifest, error) {
+	key := privateKey.Reveal()
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		_, err := Unseal(pw, bufio.NewReaderSize(archive, 256<<10), privateKey)
+		_, err := Unseal(pw, bufio.NewReaderSize(archive, 256<<10), key)
 		_ = pw.CloseWithError(err)
 		done <- err
 	}()
