@@ -268,8 +268,11 @@ func pushDeliver(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 			switch r.Outcome {
 			case OutcomeChanged, OutcomeUnchanged:
 				out.Applied++
-				out.Changed += btoi(r.Outcome == OutcomeChanged)
-				out.Unchanged += btoi(r.Outcome == OutcomeUnchanged)
+				if r.Outcome == OutcomeChanged {
+					out.Changed++
+				} else {
+					out.Unchanged++
+				}
 				sc.Log("info", fmt.Sprintf("%s: %s", r.NodeID, r.Outcome))
 				log.InfoContext(sc.Ctx, "console: console root password delivered to a node",
 					"job_id", sc.JobID, "hash_id", hashID, "node_id", r.NodeID, "outcome", string(r.Outcome))
@@ -286,13 +289,6 @@ func pushDeliver(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 			"job_id", sc.JobID, "hash_id", hashID, "changed", out.Changed, "unchanged", out.Unchanged, "failed", out.Failed)
 		return json.Marshal(out)
 	}
-}
-
-func btoi(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // deliverOne sends the command to one node and reads its answer honestly.
