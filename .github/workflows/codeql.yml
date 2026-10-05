@@ -94,8 +94,10 @@ env:
   # CODEQL_ACTION_DIFF_INFORMED_QUERIES; getOfflineValue returns false when it
   # is "false", before the GitHub API is asked). The action's own
   # codescanning-config-cli.yml sets it the same way. If a future action
-  # version ignores it, the gate notices: the SARIF then names the
-  # codeql-action/pr-diff-range pack, and scripts/codeql-register.sh fails.
+  # version ignores it, the gate notices only as long as the action still
+  # restricts alerts through the codeql-action/pr-diff-range extension pack:
+  # the SARIF then names that pack, and scripts/codeql-register.sh fails. A
+  # renamed pack or a different restriction mechanism would not be caught.
   CODEQL_ACTION_DIFF_INFORMED_QUERIES: "false"
 
 jobs:
@@ -113,6 +115,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      # The gate's own tests, before any analysis. Every real run here is a
+      # full scan, so the branch of the gate that fails a diff-limited SARIF is
+      # never exercised by CI otherwise. Once, on the go leg: the tests are
+      # python3 and the tree, not language-specific. Here rather than in
+      # ci.yml so that release.yml, which calls this workflow, runs them too.
+      - name: tests for the gate itself
+        if: matrix.language == 'go'
+        run: ./scripts/test-codeql-register.sh
 
       - uses: actions/setup-go@v7
         if: matrix.language == 'go'
