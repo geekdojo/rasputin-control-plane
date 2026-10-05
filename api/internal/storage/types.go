@@ -9,6 +9,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // TargetStatus is the rollup an operator sees for one claim attempt. The
@@ -77,8 +78,10 @@ type ArchiveKey struct {
 	// archive nobody can ever read, discovered on restore day.
 	PublicKey string `json:"publicKey"`
 	// WrappedByPassphrase is the PRIVATE key sealed under the operator's
-	// passphrase. Opaque to the api.
-	WrappedByPassphrase string `json:"wrappedByPassphrase"`
+	// passphrase. Opaque to the api. A secret.Value, never marshalled
+	// (json:"-"): its bytes leave only into the claim command, the staging
+	// row and the target row, and are compared on adopt.
+	WrappedByPassphrase secret.Value `json:"-"`
 	// WrappedByRecoveryCode is the SAME private key sealed under the recovery
 	// code the UI displays exactly once.
 	//
@@ -86,7 +89,47 @@ type ArchiveKey struct {
 	// passphrase wrapping is one forgotten passphrase away from an archive
 	// nobody can read, and the operator would not find out until the day they
 	// needed the backup — which is the worst possible day to discover it.
+	WrappedByRecoveryCode secret.Value `json:"-"`
+}
+
+// ArchiveKeyInput is an archive key as it arrives in a request body, every
+// field a string. NewArchiveKey converts it once; nothing else holds it.
+type ArchiveKeyInput struct {
+	KeyID                 string `json:"keyId"`
+	Alg                   string `json:"alg,omitempty"`
+	PublicKey             string `json:"publicKey"`
+	WrappedByPassphrase   string `json:"wrappedByPassphrase"`
 	WrappedByRecoveryCode string `json:"wrappedByRecoveryCode"`
+}
+
+// NewArchiveKey validates a request's archive key and converts it, the two
+// wrappings becoming secret.Values the caller owns and destroys. A nil or
+// empty input is no key: nil, nil. A partial key, or a public key that is not
+// an X25519 key, is refused (see ArchiveKey.validate).
+func NewArchiveKey(in *ArchiveKeyInput) (*ArchiveKey, error) {
+	if in == nil || (in.KeyID == "" && in.PublicKey == "" && in.WrappedByPassphrase == "" && in.WrappedByRecoveryCode == "") {
+		return nil, nil
+	}
+	if err := validateKeyFields(in.KeyID, in.PublicKey,
+		strings.TrimSpace(in.WrappedByPassphrase) != "", strings.TrimSpace(in.WrappedByRecoveryCode) != ""); err != nil {
+		return nil, err
+	}
+	return &ArchiveKey{
+		KeyID:                 in.KeyID,
+		Alg:                   in.Alg,
+		PublicKey:             in.PublicKey,
+		WrappedByPassphrase:   secret.New([]byte(in.WrappedByPassphrase)),
+		WrappedByRecoveryCode: secret.New([]byte(in.WrappedByRecoveryCode)),
+	}, nil
+}
+
+// Destroy zeroes both wrappings. Safe on a nil key; every holder defers it.
+func (k *ArchiveKey) Destroy() {
+	if k == nil {
+		return
+	}
+	k.WrappedByPassphrase.Destroy()
+	k.WrappedByRecoveryCode.Destroy()
 }
 
 // present reports whether the operator supplied any key material at all.
@@ -95,7 +138,7 @@ func (k *ArchiveKey) present() bool {
 		return false
 	}
 	return k.KeyID != "" || k.PublicKey != "" ||
-		k.WrappedByPassphrase != "" || k.WrappedByRecoveryCode != ""
+		k.WrappedByPassphrase.Len() > 0 || k.WrappedByRecoveryCode.Len() > 0
 }
 
 // validate enforces all-or-nothing, and checks the one field it can check.
@@ -108,27 +151,36 @@ func (k *ArchiveKey) present() bool {
 // one that #290 will encrypt to. Something that is not an X25519 public key
 // produces archives nobody can read, and the failure would surface on restore
 // day rather than here.
+//
+// A wrapping is checked by its length here; NewArchiveKey, the one way a
+// request's key becomes an ArchiveKey, has already refused a wrapping that is
+// only whitespace.
 func (k *ArchiveKey) validate() error {
 	if !k.present() {
 		return nil
 	}
+	return validateKeyFields(k.KeyID, k.PublicKey, k.WrappedByPassphrase.Len() > 0, k.WrappedByRecoveryCode.Len() > 0)
+}
+
+// validateKeyFields is validate's check, shared with NewArchiveKey.
+func validateKeyFields(keyID, publicKey string, hasPassphraseWrapping, hasRecoveryWrapping bool) error {
 	var missing []string
-	if strings.TrimSpace(k.KeyID) == "" {
+	if strings.TrimSpace(keyID) == "" {
 		missing = append(missing, "keyId")
 	}
-	if strings.TrimSpace(k.PublicKey) == "" {
+	if strings.TrimSpace(publicKey) == "" {
 		missing = append(missing, "publicKey")
 	}
-	if strings.TrimSpace(k.WrappedByPassphrase) == "" {
+	if !hasPassphraseWrapping {
 		missing = append(missing, "wrappedByPassphrase")
 	}
-	if strings.TrimSpace(k.WrappedByRecoveryCode) == "" {
+	if !hasRecoveryWrapping {
 		missing = append(missing, "wrappedByRecoveryCode")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("archiveKey is incomplete (missing %s): a target missing the public key or either wrapping is one forgotten passphrase — or one unreadable archive — away from useless, so it is refused rather than half-stored", strings.Join(missing, ", "))
 	}
-	return validatePublicKey(k.PublicKey)
+	return validatePublicKey(publicKey)
 }
 
 // validatePublicKey checks that an ArchiveKey's public key is a usable X25519
@@ -211,18 +263,13 @@ type ClaimSpec struct {
 	// ArchiveKeyID refers to the §4.6 keypair this claim records, by its id.
 	// Empty when the target is claimed before encryption is configured.
 	//
-	// The key itself is not in the spec. Its private half is wrapped, but a
-	// wrapped key is still a secret (it can be attacked offline), and a spec is
-	// persisted in the job ledger and served by the jobs API. SubmitClaim stages
-	// the key under the job (Store.StageClaimKey); the saga reads it from there
-	// and step 5 records it on the target row.
+	// The key itself is not in the spec, and has no field here to be in. Its
+	// private half is wrapped, but a wrapped key is still a secret (it can be
+	// attacked offline), and a spec is persisted in the job ledger and served
+	// by the jobs API. SubmitClaim takes the key beside the spec and stages it
+	// under the job (Store.StageClaimKey); the saga reads it from there and
+	// step 5 records it on the target row.
 	ArchiveKeyID string `json:"archiveKeyId,omitempty"`
-	// ArchiveKey is submission input only: the keypair from the request, the
-	// public half in clear and the private half already wrapped. It is never
-	// serialized (json:"-"), so a spec read back from the ledger never has it;
-	// the saga's steps read the staged key instead. The private key is never
-	// plaintext, and has no field here to be plaintext in.
-	ArchiveKey *ArchiveKey `json:"-"`
 }
 
 // inlineArchiveKeyField is the spec key an archive key was carried under
@@ -269,21 +316,20 @@ func ParseClaimSpec(raw json.RawMessage) (*ClaimSpec, error) {
 // ValidateClaim checks a claim as submitted — the spec and the key that comes
 // with it — without submitting it. SubmitClaim runs the same checks; the HTTP
 // handler calls this first so a refusal is a 400 rather than a job.
-func ValidateClaim(spec ClaimSpec) error {
-	_, err := claimBody(spec)
+func ValidateClaim(spec ClaimSpec, key *ArchiveKey) error {
+	_, err := claimBody(spec, key)
 	return err
 }
 
-// claimBody returns the spec as it is persisted: the key replaced by its id.
-func claimBody(spec ClaimSpec) (json.RawMessage, error) {
-	if err := spec.ArchiveKey.validate(); err != nil {
+// claimBody returns the spec as it is persisted: the key referred to by its id.
+func claimBody(spec ClaimSpec, key *ArchiveKey) (json.RawMessage, error) {
+	if err := key.validate(); err != nil {
 		return nil, err
 	}
 	spec.ArchiveKeyID = ""
-	if spec.ArchiveKey.present() {
-		spec.ArchiveKeyID = spec.ArchiveKey.KeyID
+	if key.present() {
+		spec.ArchiveKeyID = key.KeyID
 	}
-	spec.ArchiveKey = nil
 	body, err := json.Marshal(spec)
 	if err != nil {
 		return nil, err

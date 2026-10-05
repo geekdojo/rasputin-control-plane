@@ -85,7 +85,7 @@ func newAppRestoreFixture(t *testing.T) *appRestoreFixture {
 	}
 	if err := backup.MarkClaimed(f.ctx, "job-claim", storage.ClaimResult{
 		PartUUID: arPartUUID, DevicePath: "/dev/sdb", MountPath: af.mount, FSType: "ext4", SizeBytes: 1 << 40, At: time.Now().UTC(),
-		Key: &storage.ArchiveKey{KeyID: arKeyID, Alg: "x25519", PublicKey: af.pubB64, WrappedByPassphrase: "WRAPPED-PP", WrappedByRecoveryCode: "WRAPPED-RC"},
+		Key: &storage.ArchiveKey{KeyID: arKeyID, Alg: "x25519", PublicKey: af.pubB64, WrappedByPassphrase: secret.New([]byte("WRAPPED-PP")), WrappedByRecoveryCode: secret.New([]byte("WRAPPED-RC"))},
 	}); err != nil {
 		t.Fatal(err)
 	}

@@ -93,11 +93,12 @@ func applyFindTarget(inv *inventory.Store) jobs.DoFn {
 // compiles again for the bus command, which is the only place the state goes.
 func applyCompile(store *Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		intents, err := store.ListIntentsForCompile(sc.Ctx)
+		intents, secrets, err := store.ListIntentsForCompile(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list intents: %w", err)
 		}
-		_, hash, err := Compile(intents)
+		defer DestroySecrets(secrets)
+		_, hash, err := Compile(intents, secrets)
 		if err != nil {
 			return nil, fmt.Errorf("compile: %w", err)
 		}
@@ -121,16 +122,17 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		}
 		nodeID := fws[0].ID
 
-		intents, err := store.ListIntentsForCompile(sc.Ctx)
+		intents, secrets, err := store.ListIntentsForCompile(sc.Ctx)
 		if err != nil {
 			return nil, fmt.Errorf("list intents: %w", err)
 		}
-		state, intentHash, err := Compile(intents)
+		defer DestroySecrets(secrets)
+		state, intentHash, err := Compile(intents, secrets)
 		if err != nil {
 			return nil, fmt.Errorf("compile: %w", err)
 		}
 
-		cmd, err := json.Marshal(proto.FirewallApplyCmd{State: state, IntentHash: intentHash})
+		cmd, err := applyCommand(state, intentHash)
 		if err != nil {
 			return nil, err
 		}

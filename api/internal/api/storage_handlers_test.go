@@ -17,6 +17,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 )
@@ -237,8 +238,8 @@ func TestListBackupTargets_RendersTheLedgerWithoutKeyMaterial(t *testing.T) {
 	if err := store.MarkClaimed(ctx, "j1", storage.ClaimResult{
 		PartUUID: "pu-1", MountPath: "/mnt/backup", FSType: "ext4",
 		Key: &storage.ArchiveKey{
-			KeyID: "k1", WrappedByPassphrase: "SENTINEL-WRAPPED",
-			WrappedByRecoveryCode: "SENTINEL-RECOVERY",
+			KeyID: "k1", WrappedByPassphrase: secret.New([]byte("SENTINEL-WRAPPED")),
+			WrappedByRecoveryCode: secret.New([]byte("SENTINEL-RECOVERY")),
 		},
 		At: time.Now().UTC(),
 	}); err != nil {

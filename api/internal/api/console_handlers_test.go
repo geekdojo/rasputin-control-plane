@@ -91,10 +91,11 @@ func TestConsoleRootPassword_NeverReturnsTheSecret(t *testing.T) {
 	}
 	putBody := w.Body.String()
 
-	hash, _, err := f.console.HashForDispatch(f.ctx)
+	hashValue, _, err := f.console.HashForDispatch(f.ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 	w = f.do(t, http.MethodGet, "/api/console/root-password", "", c)
 	getBody := w.Body.String()
 

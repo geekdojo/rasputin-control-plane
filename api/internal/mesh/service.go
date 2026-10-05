@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Config is what the package needs from main beyond what its constructor
@@ -72,6 +73,12 @@ type Service struct {
 	// Read by main to kick a reconcile the moment the mesh can take one,
 	// rather than on a timer.
 	ready atomic.Bool
+
+	// heldEnrolKey, when set, is handed each node enrolment key enrollDispatch
+	// mints, before the send. Unset in production; it is how a test observes
+	// that the key is destroyed once the step returns, which nothing outside
+	// the step can otherwise see.
+	heldEnrolKey func(secret.Value)
 }
 
 func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Service {

@@ -14,6 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -242,10 +243,14 @@ func pushDeliver(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		defer hash.Destroy()
+		if store.heldHash != nil {
+			store.heldHash(hash)
+		}
 		if sc.NATS == nil {
 			return nil, errors.New("no bus connection")
 		}
-		cmd, err := json.Marshal(proto.ConsoleRootHashCmd{Hash: hash, HashID: hashID})
+		cmd, err := rootHashCommand(hash, hashID)
 		if err != nil {
 			return nil, err
 		}
@@ -289,6 +294,12 @@ func pushDeliver(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 			"job_id", sc.JobID, "hash_id", hashID, "changed", out.Changed, "unchanged", out.Unchanged, "failed", out.Failed)
 		return json.Marshal(out)
 	}
+}
+
+// rootHashCommand builds the ConsoleRootHashCmd bus payload: the one place
+// the crypt hash leaves its secret.Value.
+func rootHashCommand(hash secret.Value, hashID string) ([]byte, error) {
+	return json.Marshal(proto.ConsoleRootHashCmd{Hash: string(hash.Reveal()), HashID: hashID})
 }
 
 // deliverOne sends the command to one node and reads its answer honestly.

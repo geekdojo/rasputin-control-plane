@@ -373,6 +373,7 @@ func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, "mint key: "+err.Error())
 		return
 	}
+	defer key.Value.Destroy()
 	if req.ExpiresIn == "" {
 		req.ExpiresIn = mesh.UserDeviceKeyDefaultExpiry.String()
 	}
@@ -415,7 +416,7 @@ func (s *Server) handleCreateMeshKey(w http.ResponseWriter, r *http.Request) {
 
 	// The one time the value is shown. It is not stored: a lost key is
 	// deleted and a new one created.
-	writeJSON(w, http.StatusCreated, createdMeshKey{Intent: intent, HSValue: key.Value})
+	writeJSON(w, http.StatusCreated, createdMeshKey{Intent: intent, HSValue: string(key.Value.Reveal())})
 }
 
 // PATCH /api/mesh/keys/{id}

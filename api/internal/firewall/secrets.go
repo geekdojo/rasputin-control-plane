@@ -9,6 +9,7 @@ import (
 	"log"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Write-only intent secrets.
@@ -17,11 +18,10 @@ import (
 // same write-only pattern as the BMC credentials (bmc.CredentialFor): the
 // password is taken out of the intent's spec when the intent is written, kept
 // in its own table, and is never part of what the store returns to a reader.
-// It is put back only where the desired state is compiled — for the bus
-// command to the firewall agent, and for the hash of that state, which has to
-// match the hash the agent computes over what it applied. Nothing that is
-// persisted as a job spec, step result, event or log line is derived from the
-// injected form.
+// It is read back, as a secret.Value, only where the desired state is
+// compiled; its bytes leave only through revealState, for the bus command to
+// the firewall agent and for the hash of that state, which has to match the
+// hash the agent computes over what it applied.
 //
 // secretField is the spec key that holds the secret on the wire from the
 // browser and in the compiled UCI input. secretSetField is never stored: it is
@@ -63,22 +63,6 @@ func splitSecret(kind string, spec json.RawMessage) (json.RawMessage, string, er
 	return out, secret, nil
 }
 
-// injectSecret returns spec with the secret set. Used only on the compile path.
-func injectSecret(spec json.RawMessage, secret string) (json.RawMessage, error) {
-	m := map[string]json.RawMessage{}
-	if len(spec) > 0 {
-		if err := json.Unmarshal(spec, &m); err != nil {
-			return nil, fmt.Errorf("spec decode: %w", err)
-		}
-	}
-	v, err := json.Marshal(secret)
-	if err != nil {
-		return nil, err
-	}
-	m[secretField] = v
-	return json.Marshal(m)
-}
-
 // putSecret records an intent's secret inside tx. An empty secret leaves any
 // stored one in place: a form that did not re-type the password is not asking
 // to clear it.
@@ -93,49 +77,56 @@ func putSecret(ctx context.Context, tx *sql.Tx, intentID, secret string) error {
 	return err
 }
 
-// secrets returns every stored intent secret, keyed by intent id.
-func (s *Store) secrets(ctx context.Context) (map[string]string, error) {
+// secrets returns every stored intent secret, keyed by intent id, each as a
+// secret.Value from the moment it is scanned. The caller owns the map and
+// destroys it with DestroySecrets.
+func (s *Store) secrets(ctx context.Context) (map[string]secret.Value, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT intent_id, secret FROM firewall_intent_secrets`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := map[string]string{}
+	out := map[string]secret.Value{}
 	for rows.Next() {
-		var id, secret string
-		if err := rows.Scan(&id, &secret); err != nil {
+		var id string
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			DestroySecrets(out)
 			return nil, err
 		}
-		out[id] = secret
+		out[id] = secret.New(raw)
+		clear(raw)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		DestroySecrets(out)
+		return nil, err
+	}
+	return out, nil
 }
 
-// ListIntentsForCompile returns the intents with each stored secret put back
-// into its spec. It is the input to Compile on the paths that dispatch the
-// desired state or hash it; its result must never be returned to a reader or
-// written into a job spec, step result, event or log.
-func (s *Store) ListIntentsForCompile(ctx context.Context) ([]*Intent, error) {
+// ListIntentsForCompile returns the intents, exactly as ListIntents does
+// (their specs carry no secret), and every stored intent secret keyed by
+// intent id. Both are the input to Compile on the paths that dispatch the
+// desired state or hash it. The caller owns the secrets and must defer
+// DestroySecrets on every outcome.
+func (s *Store) ListIntentsForCompile(ctx context.Context) ([]*Intent, map[string]secret.Value, error) {
 	intents, err := s.ListIntents(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	secrets, err := s.secrets(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("read intent secrets: %w", err)
+		return nil, nil, fmt.Errorf("read intent secrets: %w", err)
 	}
-	for _, in := range intents {
-		secret, ok := secrets[in.ID]
-		if !ok {
-			continue
-		}
-		spec, err := injectSecret(in.Spec, secret)
-		if err != nil {
-			return nil, fmt.Errorf("intent %s: %w", in.ID, err)
-		}
-		in.Spec = spec
+	return intents, secrets, nil
+}
+
+// DestroySecrets zeroes every secret in the map. Every holder of the map
+// ListIntentsForCompile returns defers it.
+func DestroySecrets(secrets map[string]secret.Value) {
+	for _, v := range secrets {
+		v.Destroy()
 	}
-	return intents, nil
 }
 
 // migrateInlineSecrets moves any secret still stored inside a wan_config

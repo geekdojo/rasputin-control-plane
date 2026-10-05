@@ -842,8 +842,8 @@ func TestHandleGetFirewallState_Empty(t *testing.T) {
 	}
 }
 
-// Fresh node + zero intents must NOT report pending. IntentHash is empty
-// in the DB; Compile(nil) gives a non-empty canonical empty-state hash; the
+// TC-825-30 (empty row): fresh node + zero intents must NOT report pending. IntentHash is empty
+// in the DB; Compile(nil, nil) gives a non-empty canonical empty-state hash; the
 // handler treats "" as canonically equal to that, so the chip stays IN SYNC.
 func TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty(t *testing.T) {
 	f := newAPIFixture(t)

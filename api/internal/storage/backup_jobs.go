@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // RunJobKind is the workflow kind for design/storage.md §4.1's backup producer:
@@ -149,6 +150,10 @@ type RunConfig struct {
 	// consumer: the terminal hook has to close the ingest generation and
 	// remove its partial directory on a run that never reached the write.
 	generation *stagingRootRef
+	// heldUploadCredential, when set, is handed each upload credential the
+	// fan-out mints (fanOutOpts.heldCredential). Unset in production; tests
+	// observe that each is destroyed.
+	heldUploadCredential func(secret.Value)
 	// Restores is the app-volume restore registry (#291 phase 2). Step 1
 	// refuses to start a run while a restore holds a session: the run's
 	// prune could delete the generation the restore is reading. Nil means
@@ -902,6 +907,8 @@ func runFanOutStep(cfg RunConfig) jobs.DoFn {
 			Skipped:      plan.Skipped,
 			Enumeration:  plan.AppEnumeration,
 			Log:          sc.Log,
+
+			heldCredential: cfg.heldUploadCredential,
 		})
 		if err != nil {
 			return nil, err

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Compile turns a list of intents into the canonical UCI representation the
@@ -41,7 +42,13 @@ import (
 // encoding/json sorts keys alphabetically, so the hash is deterministic for
 // any equivalent state — provided the ordering of slice elements is itself
 // deterministic, which is why ListIntents enforces a stable ORDER BY.
-func Compile(intents []*Intent) (map[string]any, string, error) {
+//
+// secrets holds the write-only intent secrets keyed by intent id, as
+// ListIntentsForCompile returns them; an intent's spec never carries one. A
+// PPPoE password goes into the state as the secret.Value itself, so the
+// returned state shows "[redacted]" wherever it is printed or marshalled. Its
+// bytes leave only through revealState: the hash here, and applyCommand.
+func Compile(intents []*Intent, secrets map[string]secret.Value) (map[string]any, string, error) {
 	redirects := make([]map[string]any, 0, len(intents))
 	rules := make([]map[string]any, 0, len(intents))
 
@@ -105,7 +112,7 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 	}
 
 	if wanConfigSeen > 0 {
-		wan, err := compileWANConfig(enabledWAN)
+		wan, err := compileWANConfig(enabledWAN, secrets)
 		if err != nil {
 			return nil, "", err
 		}
@@ -140,7 +147,9 @@ func Compile(intents []*Intent) (map[string]any, string, error) {
 // `wan` section and is hardware-role-specific. We only override the proto
 // and proto-specific option keys. (For a real ubus backend this implies a
 // merge into /etc/config/network, not a full replace — see §6 of the doc.)
-func compileWANConfig(in *Intent) (map[string]any, error) {
+//
+// A PPPoE password is taken from secrets by intent id, never from the spec.
+func compileWANConfig(in *Intent, secrets map[string]secret.Value) (map[string]any, error) {
 	if in == nil {
 		return map[string]any{"proto": "none"}, nil
 	}
@@ -173,12 +182,13 @@ func compileWANConfig(in *Intent) (map[string]any, error) {
 		if spec.Username == "" {
 			return nil, fmt.Errorf("pppoe wan_config %s: username is required", in.ID)
 		}
-		if spec.Secret == "" {
+		password := secrets[in.ID]
+		if password.Len() == 0 {
 			return nil, fmt.Errorf("pppoe wan_config %s: secret is required", in.ID)
 		}
 		r["proto"] = "pppoe"
 		r["username"] = spec.Username
-		r["password"] = spec.Secret
+		r["password"] = password
 		if spec.Service != "" {
 			r["service"] = spec.Service
 		}
@@ -362,12 +372,55 @@ func ucRuleProto(p proto.FirewallRuleProto) string {
 
 // Hash returns the deterministic SHA-256 of the canonicalized state. Map keys
 // are sorted alphabetically by encoding/json; slice ordering is the caller's
-// responsibility.
+// responsibility. The hash is over the revealed state, so it equals the hash
+// the firewall agent computes over what it applied.
 func Hash(state map[string]any) (string, error) {
-	b, err := json.Marshal(state)
+	b, err := json.Marshal(revealState(state))
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// revealState returns a copy of state with the WAN password, when it is a
+// secret.Value, replaced by its plaintext. It is the one place the PPPoE
+// secret's bytes leave: into the apply command and into the hash the agent
+// recomputes over what it applied. Only the network.wan branch is copied;
+// every other branch is shared with state, which is not modified.
+func revealState(state map[string]any) map[string]any {
+	network, ok := state["network"].(map[string]any)
+	if !ok {
+		return state
+	}
+	wan, ok := network["wan"].(map[string]any)
+	if !ok {
+		return state
+	}
+	password, ok := wan["password"].(secret.Value)
+	if !ok {
+		return state
+	}
+	revealedWAN := make(map[string]any, len(wan))
+	for k, v := range wan {
+		revealedWAN[k] = v
+	}
+	revealedWAN["password"] = string(password.Reveal())
+	revealedNetwork := make(map[string]any, len(network))
+	for k, v := range network {
+		revealedNetwork[k] = v
+	}
+	revealedNetwork["wan"] = revealedWAN
+	out := make(map[string]any, len(state))
+	for k, v := range state {
+		out[k] = v
+	}
+	out["network"] = revealedNetwork
+	return out
+}
+
+// applyCommand builds the FirewallApplyCmd bus payload for a compiled state
+// and its hash, with the state revealed.
+func applyCommand(state map[string]any, intentHash string) ([]byte, error) {
+	return json.Marshal(proto.FirewallApplyCmd{State: revealState(state), IntentHash: intentHash})
 }

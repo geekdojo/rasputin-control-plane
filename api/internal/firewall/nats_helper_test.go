@@ -202,7 +202,7 @@ func TestApplyPush_HappyPath(t *testing.T) {
 
 	// Compute the hash the api will send so the fake agent can echo it back.
 	intents, _ := store.ListIntents(ctx)
-	_, wantHash, err := Compile(intents)
+	_, wantHash, err := Compile(intents, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}

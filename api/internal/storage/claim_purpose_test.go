@@ -146,7 +146,7 @@ func TestCheckClaimPurposeSupported(t *testing.T) {
 func TestClaimCmdBytesRefusesRatherThanDowngrades(t *testing.T) {
 	inv := purposeInv(t, nodeAt("n-1", "2026.08.5-dev.147"))
 	cmd := proto.StorageClaimCmd{DevicePath: "/dev/sdb", Fingerprint: "fp", Purpose: proto.StoragePurposeData}
-	b, err := claimCmdBytes(context.Background(), inv, "n-1", cmd)
+	b, err := claimCmdBytes(context.Background(), inv, "n-1", cmd, nil)
 	if err == nil {
 		t.Fatalf("a data claim was encoded for an agent that cannot read the purpose: %s", b)
 	}
@@ -160,7 +160,7 @@ func TestClaimCmdBytesRefusesRatherThanDowngrades(t *testing.T) {
 // agent from before §6 needs to see.
 func TestClaimCmdBytesLeavesTheBackupClaimAlone(t *testing.T) {
 	inv := purposeInv(t, nodeAt("n-1", "2026.08.5-dev.132"))
-	b, err := claimCmdBytes(context.Background(), inv, "n-1", proto.StorageClaimCmd{DevicePath: "/dev/sdb", Fingerprint: "fp"})
+	b, err := claimCmdBytes(context.Background(), inv, "n-1", proto.StorageClaimCmd{DevicePath: "/dev/sdb", Fingerprint: "fp"}, nil)
 	if err != nil {
 		t.Fatalf("claimCmdBytes: %v", err)
 	}

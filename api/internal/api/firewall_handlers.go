@@ -188,14 +188,15 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 	// firewall node since v0 supports exactly one — the compiled state is
 	// identical across them.
 	// The pending hash has to be the hash of what a push would send, which
-	// includes the write-only secret — so compile the injected form. Only
-	// the hash leaves this handler.
-	intents, err := s.fw.ListIntentsForCompile(r.Context())
+	// includes the write-only secret — so compile with the stored secrets.
+	// Only the hash leaves this handler.
+	intents, secrets, err := s.fw.ListIntentsForCompile(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, pendingHash, err := firewall.Compile(intents)
+	defer firewall.DestroySecrets(secrets)
+	_, pendingHash, err := firewall.Compile(intents, secrets)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "compile: "+err.Error())
 		return
@@ -204,7 +205,7 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 	// hash for the canonical empty-state map. Treat "" as equivalent to
 	// the empty-state hash so an unpushed-and-empty firewall doesn't
 	// paradoxically read as pending.
-	_, emptyHash, _ := firewall.Compile(nil)
+	_, emptyHash, _ := firewall.Compile(nil, nil)
 	out := make([]*firewall.NodeState, 0, len(fws))
 	for _, n := range fws {
 		st, err := s.fw.GetNodeState(r.Context(), n.ID)
