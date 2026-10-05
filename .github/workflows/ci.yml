@@ -168,6 +168,19 @@ jobs:
         run: go run ./api/cmd/failopenlint
       - name: tests for the lint itself
         run: go test ./api/cmd/failopenlint/...
+      # The secret.Value analyzer (ADR-0009, api/cmd/secretlint): every
+      # Reveal outside .github/secret-reveal-allow.tsv, and any unsafe or
+      # reflect access to a type that holds a secret.Value, fails the build.
+      # It lints every go.work module, derived rather than listed, so a module
+      # that starts importing the type is covered the day it does. The
+      # splitting of $patterns into one argument per module is deliberate, as
+      # in the backend job's vet and test loops. Its tests run in the backend
+      # job's go test ./api/...
+      - name: secret.Value analyzer
+        run: |
+          modules="$(./scripts/workspace-modules.sh)"
+          patterns=""; for m in $modules; do patterns="$patterns ./$m/..."; done
+          go run ./api/cmd/secretlint $patterns
 
   backend:
     name: backend (vet + test + build)

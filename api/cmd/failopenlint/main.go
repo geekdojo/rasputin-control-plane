@@ -56,7 +56,6 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"go/ast"
@@ -70,6 +69,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tsvreg"
 )
 
 // finding is one rule firing at one place.
@@ -590,7 +591,7 @@ type allowance struct {
 }
 
 func readAllow(path string) (map[string]allowance, error) {
-	rows, err := readTSV(path, []string{"rule", "path", "symbol", "verdict", "issue", "reasoning"})
+	rows, err := tsvreg.Read(path, []string{"rule", "path", "symbol", "verdict", "issue", "reasoning"})
 	if err != nil {
 		return nil, err
 	}
@@ -621,7 +622,7 @@ func readAllow(path string) (map[string]allowance, error) {
 }
 
 func readResolvers(path string) ([]map[string]string, error) {
-	return readTSV(path, []string{"id", "path", "symbol", "reads", "test", "status", "cite"})
+	return tsvreg.Read(path, []string{"id", "path", "symbol", "reads", "test", "status", "cite"})
 }
 
 // checkResolvers holds .github/security-resolvers.tsv to its own contract: the
@@ -737,56 +738,4 @@ func declares(path, symbol string) bool {
 		pat = regexp.MustCompile(`(?m)^(func|type|const|var)\s+` + regexp.QuoteMeta(name) + `\b|^\s+` + regexp.QuoteMeta(name) + `\s*(=|\w)`)
 	}
 	return pat.Match(b)
-}
-
-// readTSV reads a tab-separated register with a '#' comment convention and a
-// header naming every column, and refuses a header that does not match.
-func readTSV(path string, cols []string) ([]map[string]string, error) {
-	fh, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	// Read-only: nothing is buffered, so a close error carries no
-	// information this command could act on.
-	defer func() { _ = fh.Close() }()
-
-	var out []map[string]string
-	sc := bufio.NewScanner(fh)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	header := false
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
-			continue
-		}
-		parts := strings.Split(line, "\t")
-		if !header {
-			if len(parts) != len(cols) {
-				return nil, fmt.Errorf("%s: header has %d columns, want %d (%s)",
-					path, len(parts), len(cols), strings.Join(cols, ", "))
-			}
-			for i, c := range cols {
-				if parts[i] != c {
-					return nil, fmt.Errorf("%s: header column %d is %q, want %q", path, i+1, parts[i], c)
-				}
-			}
-			header = true
-			continue
-		}
-		if len(parts) != len(cols) {
-			return nil, fmt.Errorf("%s: a row has %d fields, want %d", path, len(parts), len(cols))
-		}
-		row := map[string]string{}
-		for i, c := range cols {
-			row[c] = parts[i]
-		}
-		out = append(out, row)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, err
-	}
-	if !header {
-		return nil, fmt.Errorf("%s: no header row", path)
-	}
-	return out, nil
 }

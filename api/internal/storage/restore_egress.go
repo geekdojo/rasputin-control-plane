@@ -230,7 +230,7 @@ func (e *RestoreEgress) serve(w http.ResponseWriter, r *http.Request, keyOwner s
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
 	backupxfer.LogGrant(r.Context(), e.log, slog.LevelDebug, "restore egress: streaming a member", grant, keyOwner, "sealed_bytes", n)
-	res, err := Unseal(&flushWriter{w: w, rc: http.NewResponseController(w)}, f, s.Key())
+	res, err := Unseal(&flushWriter{w: w, rc: http.NewResponseController(w)}, f, s.Key().Reveal())
 	if err != nil {
 		// The status is gone. Abort the connection so the node sees a cut
 		// stream — which its byte count and digest then refuse — rather

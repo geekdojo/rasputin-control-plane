@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 	"github.com/oklog/ulid/v2"
 )
@@ -222,10 +223,20 @@ func (r *Runner) Register(w Workflow) {
 	r.workflows[w.Kind] = w
 }
 
+// ErrSecretInSpec is the refusal for a spec whose type can carry a
+// secret.Value. A spec is persisted and rendered on the Tasks page, so a
+// secret is held beside the job (SubmitPrepared), never in it (ADR-0009).
+var ErrSecretInSpec = errors.New("jobs: a job spec cannot carry a secret.Value")
+
 // Submit creates a new Job and kicks it off in a background goroutine. The
 // returned Job is the initial persisted state; callers should not assume it
 // reflects later step progress (use GetJob for that).
-func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+//
+// spec is the typed spec struct, which the runner marshals, or for the
+// callers not yet migrated a pre-marshalled json.RawMessage or []byte stored
+// as given (see encodeSpec). A spec whose type can carry a secret.Value is
+// refused with ErrSecretInSpec before anything is persisted.
+func (r *Runner) Submit(ctx context.Context, kind string, spec any, createdBy string) (*Job, error) {
 	return r.submit(ctx, kind, spec, createdBy, "", nil)
 }
 
@@ -243,7 +254,7 @@ func (r *Runner) Submit(ctx context.Context, kind string, spec json.RawMessage, 
 // be recorded), no job will ever run under that id and the workflow's
 // OnTerminal hook will not fire for it: whatever prepare stored is the caller's
 // to discard.
-func (r *Runner) SubmitPrepared(ctx context.Context, kind string, spec json.RawMessage, createdBy string, prepare func(jobID string) error) (*Job, error) {
+func (r *Runner) SubmitPrepared(ctx context.Context, kind string, spec any, createdBy string, prepare func(jobID string) error) (*Job, error) {
 	return r.submit(ctx, kind, spec, createdBy, "", prepare)
 }
 
@@ -251,27 +262,17 @@ func (r *Runner) SubmitPrepared(ctx context.Context, kind string, spec json.RawM
 // child runs in its own goroutine independently of the parent; the parent
 // saga is expected to await terminal status via NATS or by polling the
 // store. Used by orchestrating sagas like system.update.
-func (r *Runner) SubmitChild(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string) (*Job, error) {
+func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, createdBy, parentID string) (*Job, error) {
 	if parentID == "" {
 		return nil, errors.New("SubmitChild requires a parentID; call Submit for a root job")
 	}
 	return r.submit(ctx, kind, spec, createdBy, parentID, nil)
 }
 
-func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
-	// Normalize an absent spec to an empty object.
-	//
-	// spec is persisted verbatim into a TEXT column and scanned straight back
-	// into a json.RawMessage (store.go). A nil/empty spec therefore round-trips
-	// as RawMessage(""), which FAILS to marshal — "unexpected end of JSON
-	// input" — and takes the entire /api/jobs response down with it, not just
-	// the offending row. One specless job blanks the whole Tasks page.
-	//
-	// Every workflow that marshals a spec struct already yields "{}" at
-	// minimum, so this just makes the genuinely specless kinds (obs.enable /
-	// obs.disable) match rather than poison the list.
-	if len(spec) == 0 {
-		spec = json.RawMessage("{}")
+func (r *Runner) submit(ctx context.Context, kind string, spec any, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
+	raw, err := encodeSpec(kind, spec)
+	if err != nil {
+		return nil, err
 	}
 	r.mu.RLock()
 	wf, ok := r.workflows[kind]
@@ -282,7 +283,7 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 	j := &Job{
 		ID:        ulid.Make().String(),
 		Kind:      kind,
-		Spec:      spec,
+		Spec:      raw,
 		Status:    StatusQueued,
 		CreatedBy: createdBy,
 		CreatedAt: time.Now().UTC(),
@@ -305,6 +306,47 @@ func (r *Runner) submit(ctx context.Context, kind string, spec json.RawMessage, 
 		r.run(j, wf)
 	}()
 	return j, nil
+}
+
+// encodeSpec turns a submitted spec into the bytes the ledger stores. It runs
+// before the job id is minted and before prepare, so a refusal leaves nothing
+// behind. In order:
+//
+//  1. nil, or an empty json.RawMessage or []byte, is "{}". spec is persisted
+//     verbatim into a TEXT column and scanned straight back into a
+//     json.RawMessage (store.go); an empty one round-trips as RawMessage(""),
+//     which FAILS to marshal and takes the whole /api/jobs response down with
+//     it. The genuinely specless kinds (obs.enable / obs.disable) rely on this.
+//  2. A non-empty json.RawMessage or []byte is stored as given: the
+//     pass-through for callers not yet migrated to a typed spec. It is retired
+//     by geekdojo/geekdojo-brain#825, which moves the two callers whose input
+//     is raw JSON by nature (POST /api/jobs and the scheduler) to one named
+//     raw entry point.
+//  3. A spec whose type can carry a secret.Value is refused.
+//  4. Anything else is json.Marshal(spec).
+func encodeSpec(kind string, spec any) (json.RawMessage, error) {
+	switch s := spec.(type) {
+	case nil:
+		return json.RawMessage("{}"), nil
+	case json.RawMessage:
+		if len(s) == 0 {
+			return json.RawMessage("{}"), nil
+		}
+		return s, nil
+	case []byte:
+		if len(s) == 0 {
+			return json.RawMessage("{}"), nil
+		}
+		return json.RawMessage(s), nil
+	}
+	if secret.Contains(spec) {
+		return nil, fmt.Errorf("%w: job kind %q", ErrSecretInSpec, kind)
+	}
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return nil, fmt.Errorf("jobs: marshal %s spec: %w", kind, err)
+	}
+	return b, nil
 }
 
 // Wait blocks until all running jobs finish. Used by main during shutdown.

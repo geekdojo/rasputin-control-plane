@@ -26,6 +26,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Backup transfer on the node listener, over real TLS: the production
@@ -258,7 +259,7 @@ func TestNodeBackup_KeyedRestoreFetch(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedSum, plainSum := sha256.Sum256(sealed.Bytes()), sha256.Sum256(plain)
-	id, err := r.sessions.Open(r.target.Bytes())
+	id, err := r.sessions.Open(secret.New(r.target.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}

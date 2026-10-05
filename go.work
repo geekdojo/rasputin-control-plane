@@ -2,10 +2,11 @@ go 1.26.0
 
 use (
 	./agent
+	./api
 	./artifactsig
 	./backupxfer
-	./api
 	./logkit
 	./proto
+	./secret
 	./tileschema
 )

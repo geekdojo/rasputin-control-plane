@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdh"
 	"crypto/rand"
 	"encoding/base64"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -48,6 +51,7 @@ type appRestoreFixture struct {
 	genID    string
 	backup   *storage.Store
 	sessions *storage.RestoreSessions
+	cfg      *storage.RestoreAppConfig
 }
 
 func newAppRestoreFixture(t *testing.T) *appRestoreFixture {
@@ -120,6 +124,7 @@ func newAppRestoreFixture(t *testing.T) *appRestoreFixture {
 	f.srv.runner.Register(storage.RestoreAppWorkflow(backup, *cfg))
 	f.srv.SetAppRestore(cfg, egress)
 	af.sessions = sessions
+	af.cfg = cfg
 	return af
 }
 
@@ -312,12 +317,115 @@ func TestAppRestoreSubmitsAJobWithASessionHandleAndNeverTheKey(t *testing.T) {
 		t.Fatal("the session outlived the job")
 	}
 	// A second submit is refused while a session is active.
-	sid, err := af.sessions.Open(af.priv.Bytes())
+	sid, err := af.sessions.Open(secret.New(af.priv.Bytes()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = af.sessions.Bind(sid, "job-elsewhere")
 	if w := af.post(t, af.goodBody()); w.Code != http.StatusConflict {
 		t.Fatalf("concurrent restore: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// keyBoundNodes is the fixture's inventory with every node advertising
+// key-bound transfer and an agent key, so step 1 routes and reaches custody.
+type keyBoundNodes struct {
+	inv interface {
+		Get(context.Context, string) (*proto.Node, error)
+	}
+}
+
+func (k keyBoundNodes) Get(ctx context.Context, id string) (*proto.Node, error) {
+	n, err := k.inv.Get(ctx, id)
+	if n != nil {
+		n.Capabilities = append(n.Capabilities, proto.CapabilityKeyBoundTransfer)
+	}
+	return n, err
+}
+
+func (keyBoundNodes) NodeKeys(context.Context, string) (proto.NodeKeys, error) {
+	return proto.NodeKeys{proto.NodeKeyAgent: "agent-key"}, nil
+}
+
+// TC-732-17: the restore is typed end to end. The stored spec carries
+// exactly the field set the previous release wrote and none of the key, and
+// the session the job reads still holds the key after the handler has
+// returned and destroyed its own copy (F-732-02).
+func TestAppRestoreSpecUnchangedAndSessionOutlivesTheHandler(t *testing.T) {
+	af := newAppRestoreFixture(t)
+	af.seedApp(t, arNodeID)
+
+	// Hold the job until the handler has returned, so step 1's custody check
+	// provably runs after the handler's deferred Destroy.
+	// The fixture's router has no node listener, which refuses at the route
+	// check before custody is reached; this one has a listener address.
+	cfg := *af.cfg
+	router, err := storage.NewTransferRouter(keyBoundNodes{af.inv}, "https://127.0.0.1:8443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Router = router
+	gate := make(chan struct{})
+	wf := storage.RestoreAppWorkflow(af.backup, cfg)
+	wf.Steps = append([]jobs.WorkflowStep{{Name: "gate", Timeout: 30 * time.Second, Do: func(*jobs.StepCtx) (json.RawMessage, error) {
+		<-gate
+		return nil, nil
+	}}}, wf.Steps...)
+	af.srv.runner.Register(wf)
+
+	body := af.goodBody()
+	body["volumes"] = []string{"vaultwarden-data"}
+	w := af.post(t, body)
+	close(gate)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	var resp appRestoreResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil || resp.Job == nil {
+		t.Fatalf("response: %v %s", err, w.Body.String())
+	}
+	stored, err := af.jobsStore.GetJob(af.ctx, resp.Job.ID)
+	if err != nil || stored == nil {
+		t.Fatalf("stored job: %v", err)
+	}
+	if _, err := storage.ParseRestoreAppSpec(stored.Spec); err != nil {
+		t.Fatalf("the stored spec does not parse: %v", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(stored.Spec, &fields); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for k := range fields {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	want := []string{"appId", "generationId", "keyId", "partUuid", "sessionId", "volumes"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("spec fields %v, want %v", got, want)
+	}
+	raw := af.priv.Bytes()
+	for _, enc := range []string{string(raw), af.privHex(), af.privB64(), base64.StdEncoding.EncodeToString(raw)} {
+		if strings.Contains(string(stored.Spec), enc) {
+			t.Fatal("the stored spec carries the private key")
+		}
+	}
+
+	waitForJobs(t, af.srv.runner)
+	steps, err := af.jobsStore.ListSteps(af.ctx, resp.Job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validated := false
+	for _, st := range steps {
+		if st.Name == "validate" {
+			validated = st.Status == jobs.StepSucceeded
+			if !validated {
+				t.Fatalf("step validate is %s (%s): the session no longer held the key after the handler returned", st.Status, st.Error)
+			}
+		}
+	}
+	if !validated {
+		t.Fatalf("step validate never ran: %+v", steps)
 	}
 }
