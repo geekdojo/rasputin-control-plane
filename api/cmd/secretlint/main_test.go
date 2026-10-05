@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,16 +12,38 @@ import (
 
 const header = "path\tsymbol\treason\n"
 
+const secretModule = "github.com/geekdojo/rasputin-control-plane/secret"
+
+// secretModuleDir asks the go command where this module resolves the secret
+// module from, so the answer follows the module's own go.mod (or go.work)
+// instead of assuming a sibling directory on disk: a module copied alone, as
+// mutation testing does, has no ../../../secret. It fails the test, never
+// skips it, when the module cannot be resolved.
+func secretModuleDir(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", secretModule).Output()
+	if err != nil {
+		var stderr []byte
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			stderr = ee.Stderr
+		}
+		t.Fatalf("resolve %s: %v: %s", secretModule, err, stderr)
+	}
+	dir := strings.TrimSpace(string(out))
+	if dir == "" {
+		t.Fatalf("resolve %s: go list returned no directory", secretModule)
+	}
+	return dir
+}
+
 // fixture writes a module at a temp dir that requires the real secret module
 // by a local replace, with the given files, and returns its root. GOWORK is
 // off so the fixture is its own module, not a member of this workspace.
 func fixture(t *testing.T, files map[string]string) string {
 	t.Helper()
+	secretDir := secretModuleDir(t)
 	t.Setenv("GOWORK", "off")
-	secretDir, err := filepath.Abs(filepath.Join("..", "..", "..", "secret"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	root := t.TempDir()
 	files["go.mod"] = "module example.com/fx\n\ngo 1.26\n\nrequire github.com/geekdojo/rasputin-control-plane/secret v0.0.0\n\n" +
 		"replace github.com/geekdojo/rasputin-control-plane/secret => " + secretDir + "\n"
