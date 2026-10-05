@@ -24,6 +24,8 @@ type sagaCase struct {
 	name string
 	// spec mutates the base spec for this case.
 	spec func(*ClaimSpec)
+	// key, when set, is submitted beside the spec through SubmitClaim.
+	key *ArchiveKey
 	// seedClaimed puts an already-claimed target in the ledger first.
 	seedClaimed bool
 	enumerate   func(call int) proto.StorageEnumerateAck
@@ -235,12 +237,10 @@ func TestClaimSaga(t *testing.T) {
 		{
 			name:      "step 3 refuses adopt with a key id the disk's generations are not under",
 			enumerate: func(int) proto.StorageEnumerateAck { return ackWith(backupSetCandidate()) },
-			spec: func(s *ClaimSpec) {
-				s.Adopt = true
-				s.ArchiveKey = &ArchiveKey{
-					KeyID: "key-brand-new", Alg: "test", PublicKey: markerPublicKey,
-					WrappedByPassphrase: "wrapped-a", WrappedByRecoveryCode: "wrapped-b",
-				}
+			spec:      func(s *ClaimSpec) { s.Adopt = true },
+			key: &ArchiveKey{
+				KeyID: "key-brand-new", Alg: "test", PublicKey: markerPublicKey,
+				WrappedByPassphrase: wrapping("wrapped-a"), WrappedByRecoveryCode: wrapping("wrapped-b"),
 			},
 			wantJob:          jobs.StatusFailed,
 			wantErrContains:  "encrypted under key key-existing",
@@ -459,7 +459,12 @@ func TestClaimSaga(t *testing.T) {
 			if tc.spec != nil {
 				tc.spec(&spec)
 			}
-			jobID := h.submit(t, spec)
+			var jobID string
+			if tc.key != nil {
+				jobID = h.submitKeyed(t, spec, tc.key)
+			} else {
+				jobID = h.submit(t, spec)
+			}
 			done := h.waitTerminal(t, jobID)
 
 			if done.Status != tc.wantJob {
@@ -587,11 +592,11 @@ func TestClaimSaga_KeyMaterialNeverEntersTheLedger(t *testing.T) {
 		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
 	})
 	spec := baseSpec()
-	spec.ArchiveKey = &ArchiveKey{
+	key := &ArchiveKey{
 		KeyID: "key-2026-08", Alg: markerKeyAlg, PublicKey: markerPublicKey,
-		WrappedByPassphrase: wrappedPass, WrappedByRecoveryCode: wrappedRecovery,
+		WrappedByPassphrase: wrapping(wrappedPass), WrappedByRecoveryCode: wrapping(wrappedRecovery),
 	}
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, key)
 	if done := h.waitTerminal(t, jobID); done.Status != jobs.StatusSucceeded {
 		t.Fatalf("job failed: %s", done.Error)
 	}
@@ -715,7 +720,7 @@ func TestReconcileStrandedRows_DiscardsStrandedClaimKeys(t *testing.T) {
 	h := newHarness(t, &fakeAgent{})
 	ctx := context.Background()
 	now := time.Now().UTC()
-	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
 	for _, j := range []*jobs.Job{
 		{ID: "done", Kind: ClaimJobKind, Spec: json.RawMessage(`{}`), Status: jobs.StatusFailed, CreatedAt: now},
 		{ID: "live", Kind: ClaimJobKind, Spec: json.RawMessage(`{}`), Status: jobs.StatusRunning, CreatedAt: now},
@@ -749,8 +754,8 @@ func TestClaimSaga_RefusesAHalfSuppliedArchiveKey(t *testing.T) {
 		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
 	})
 	spec := baseSpec()
-	spec.ArchiveKey = &ArchiveKey{KeyID: "k", WrappedByPassphrase: "only-one"}
-	_, err := SubmitClaim(context.Background(), h.runner, h.store, spec, "test")
+	_, err := SubmitClaim(context.Background(), h.runner, h.store, spec,
+		&ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("only-one")}, "test")
 	if err == nil || !strings.Contains(err.Error(), "wrappedByRecoveryCode") {
 		t.Fatalf("SubmitClaim error = %v, want it to name what is missing", err)
 	}
@@ -964,12 +969,57 @@ func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
 	ctx := context.Background()
 	_ = h.jobStore.Close() // CreateJob fails; the prepare callback has already run
 	spec := baseSpec()
-	spec.ArchiveKey = &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
-	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, "test"); err == nil {
+	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
+	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, key, "test"); err == nil {
 		t.Fatal("want the submit to fail with the job store closed")
 	}
 	if left, err := h.store.StagedClaimKeyJobs(ctx); err != nil || len(left) != 0 {
 		t.Errorf("staged keys left = %v (err %v), want none", left, err)
+	}
+}
+
+// TC-825-41: a staged key claimKey refuses is destroyed there: the caller
+// gets no key back, so nothing else could destroy it (F-825-18). One it
+// accepts is handed back intact for the caller to destroy. A spec that names
+// a key when none is staged is refused without panicking on the nil key.
+func TestMatchStagedKey_DestroysARefusedKey(t *testing.T) {
+	cases := []struct {
+		name, specID string
+		noneStaged   bool
+		wantErr      bool
+	}{
+		{name: "staged but not named", specID: "", wantErr: true},
+		{name: "different ids", specID: "k2", wantErr: true},
+		{name: "agree", specID: "k1"},
+		{name: "named but none staged", specID: "k1", noneStaged: true, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			k := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
+			staged := k
+			if tc.noneStaged {
+				staged = nil
+			}
+			got, err := matchStagedKey(&ClaimSpec{ArchiveKeyID: tc.specID}, staged)
+			if tc.wantErr {
+				if err == nil || got != nil {
+					t.Fatalf("got (%v, %v), want a refusal and no key", got, err)
+				}
+				if tc.noneStaged {
+					return
+				}
+				if n, m := k.WrappedByPassphrase.Len(), k.WrappedByRecoveryCode.Len(); n != 0 || m != 0 {
+					t.Errorf("refused key's wrappings Len() = %d, %d, want 0, 0", n, m)
+				}
+				return
+			}
+			if err != nil || got != k {
+				t.Fatalf("got (%v, %v), want the staged key back", got, err)
+			}
+			if string(got.WrappedByPassphrase.Reveal()) != "a" || string(got.WrappedByRecoveryCode.Reveal()) != "b" {
+				t.Error("an accepted key came back destroyed")
+			}
+		})
 	}
 }
 
@@ -978,7 +1028,7 @@ func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
 func TestClaimKey_SpecAndStagedKeyMustAgree(t *testing.T) {
 	h := newHarness(t, &fakeAgent{})
 	ctx := context.Background()
-	key := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}
+	key := &ArchiveKey{KeyID: "k1", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
 	if err := h.store.StageClaimKey(ctx, "staged-job", key, time.Now().UTC()); err != nil {
 		t.Fatalf("StageClaimKey: %v", err)
 	}

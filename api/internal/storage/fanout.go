@@ -11,6 +11,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -127,6 +128,12 @@ type fanOutOpts struct {
 	// routes is this pass's answer per node, asked of Router once: every
 	// volume on a node goes the same way, and the feed says which way once.
 	routes map[string]routeAnswer
+
+	// heldCredential, when set, is handed each upload credential captureOne
+	// mints, before the send. Unset in production; it is how a test observes
+	// that each credential is destroyed once its command is built, which
+	// nothing outside the attempt can otherwise see.
+	heldCredential func(secret.Value)
 }
 
 // routeAnswer is one node's upload destination, or why it has none.
@@ -327,29 +334,20 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 			o.log("warn", fmt.Sprintf("retrying the upload of %s/%s from %s (attempt %d of %d) — the staged copy is reused; the app is NOT stopped again",
 				pv.AppName, pv.Volume, node, attempt, transferAttempts))
 		}
-		// The credential: one member, one generation, one run, one node,
-		// bounded in bytes, minted now and dead by the time the verb's
-		// budget is. Never logged and never in a step result — it goes into
-		// the command and nowhere else.
-		cred, err := o.Ingest.Mint(backupxfer.Grant{
+		tcmd, err := o.transferCommand(backupxfer.Grant{
 			Generation: o.GenerationID, Member: member, NodeID: node, JobID: o.JobID,
 			// Bounded to the member it is for: the stage verb reported the
 			// tar's size, and a seal of it cannot be larger than this.
 			MaxBytes: backupxfer.SealedSizeBound(ack.SizeBytes),
-		}, transferRPCBudget)
-		if err != nil {
-			rec.Reason = fmt.Sprintf("could not mint an upload credential for %s: %v", member, err)
-			return rec
-		}
-		tcmd, err := json.Marshal(proto.BackupTransferCmd{
-			StagingName: name, Destination: dest, Credential: cred,
+		}, proto.BackupTransferCmd{
+			StagingName: name, Destination: dest,
 			PublicKey: o.PublicKey, KeyID: o.KeyID, Scope: o.Scope,
 			GenerationID: o.GenerationID, Member: member,
 			AppID: pv.AppID, AppName: pv.AppName, Volume: pv.Volume,
 			PlaintextDigest: ack.Digest, PlaintextBytes: ack.SizeBytes,
 		})
 		if err != nil {
-			rec.Reason = fmt.Sprintf("internal: %v", err)
+			rec.Reason = err.Error()
 			return rec
 		}
 		xferCtx, cancel := context.WithTimeout(ctx, transferRPCBudget)
@@ -389,6 +387,48 @@ func (o fanOutOpts) captureOne(ctx context.Context, i int, pv PlannedVolume) Vol
 	}
 	rec.Reason = fmt.Sprintf("the upload did not land after %d attempt(s); last: %s", transferAttempts, last)
 	return rec
+}
+
+// transferCommand mints one transfer attempt's upload credential and builds
+// the command that carries it. The credential: one member, one generation,
+// one run, one node, bounded in bytes, minted now and dead by the time the
+// verb's budget is. Never logged and never in a step result — it goes into
+// the command and nowhere else. Its life is this attempt's command: it is
+// destroyed when this returns, on every outcome, not when captureOne does — a
+// retry mints its own. The error is the record's reason as it stands.
+func (o fanOutOpts) transferCommand(g backupxfer.Grant, base proto.BackupTransferCmd) ([]byte, error) {
+	cred, err := mintUploadCredential(o.Ingest, g, transferRPCBudget)
+	if err != nil {
+		return nil, fmt.Errorf("could not mint an upload credential for %s: %w", g.Member, err)
+	}
+	defer cred.Destroy()
+	if o.heldCredential != nil {
+		o.heldCredential(cred)
+	}
+	cmd, err := uploadCommand(base, cred)
+	if err != nil {
+		return nil, fmt.Errorf("internal: %w", err)
+	}
+	return cmd, nil
+}
+
+// mintUploadCredential mints one upload credential through the ingest
+// endpoint and wraps it as a secret.Value at once. The caller owns it and
+// destroys it. A failure returns the zero Value.
+func mintUploadCredential(in *backupxfer.Ingest, g backupxfer.Grant, ttl time.Duration) (secret.Value, error) {
+	cred, err := in.Mint(g, ttl)
+	if err != nil {
+		return secret.Value{}, err
+	}
+	return secret.New([]byte(cred)), nil
+}
+
+// uploadCommand builds the BackupTransferCmd bus payload: base with the
+// credential set. It is the one place an upload credential leaves its
+// secret.Value.
+func uploadCommand(base proto.BackupTransferCmd, cred secret.Value) ([]byte, error) {
+	base.Credential = string(cred.Reveal())
+	return json.Marshal(base)
 }
 
 // landed fills in a record from the endpoint's receipt — and refuses to call

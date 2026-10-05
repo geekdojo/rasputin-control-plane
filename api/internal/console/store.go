@@ -10,6 +10,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 const schema = `
@@ -74,6 +75,12 @@ type Status struct {
 // Store is the console root password's slice of rasputin.db.
 type Store struct {
 	db *sql.DB
+
+	// heldHash, when set, is handed each hash pushDeliver reads, before the
+	// send. Unset in production; it is how a test observes that the hash is
+	// destroyed once the step returns, which nothing outside the step can
+	// otherwise see.
+	heldHash func(secret.Value)
 }
 
 // OpenStore opens (and migrates) the console tables in the database at path.
@@ -132,28 +139,30 @@ func (s *Store) SetPassword(ctx context.Context, password string) (hashID string
 	return hashID, nil
 }
 
-// HashForDispatch returns the stored hash and its id.
+// HashForDispatch returns the stored hash, as a secret.Value the caller owns
+// and destroys, and its id.
 //
-// THE ONLY READER OF THE HASH. Its result goes into the bus command and
-// nowhere else — not into a job spec, a step result, an event or a log
-// line. ErrNoPassword when none is set; an empty hash is never returned
+// THE ONLY READER OF THE HASH. Its bytes leave only through rootHashCommand,
+// into the bus command — not into a job spec, a step result, an event or a
+// log line. ErrNoPassword when none is set; an empty hash is never returned
 // alongside a nil error, because dispatching one would either lock or open
-// every root account in the fleet.
-func (s *Store) HashForDispatch(ctx context.Context) (hash, hashID string, err error) {
+// every root account in the fleet. Every failure returns the zero Value.
+func (s *Store) HashForDispatch(ctx context.Context) (hash secret.Value, hashID string, err error) {
+	var stored string
 	row := s.db.QueryRowContext(ctx, `SELECT hash, hash_id FROM console_root_secret WHERE id = 1`)
-	if err := row.Scan(&hash, &hashID); err != nil {
+	if err := row.Scan(&stored, &hashID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", ErrNoPassword
+			return secret.Value{}, "", ErrNoPassword
 		}
-		return "", "", err
+		return secret.Value{}, "", err
 	}
-	if hash == "" {
-		return "", "", ErrNoPassword
+	if stored == "" {
+		return secret.Value{}, "", ErrNoPassword
 	}
-	if err := proto.ValidConsoleRootHash(hash); err != nil {
-		return "", "", fmt.Errorf("console: stored hash is unusable: %w", err)
+	if err := proto.ValidConsoleRootHash(stored); err != nil {
+		return secret.Value{}, "", fmt.Errorf("console: stored hash is unusable: %w", err)
 	}
-	return hash, hashID, nil
+	return secret.New([]byte(stored)), hashID, nil
 }
 
 // CurrentHashID returns the id of the stored password, or "" when none is

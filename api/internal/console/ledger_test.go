@@ -49,10 +49,11 @@ func TestPushNeverPutsTheHashInTheLedger_RealRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, _, err := f.store.HashForDispatch(ctx)
+	hashValue, _, err := f.store.HashForDispatch(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 	// Two different claims, so two different proofs.
 	//
 	// The HASH is the one that travels: it goes to each agent, so its

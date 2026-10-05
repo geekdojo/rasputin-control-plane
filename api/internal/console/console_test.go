@@ -66,10 +66,11 @@ func TestSetPasswordStoresOnlyAHash(t *testing.T) {
 	if hashID == "" {
 		t.Fatal("SetPassword returned no id")
 	}
-	hash, gotID, err := st.HashForDispatch(ctx)
+	hashValue, gotID, err := st.HashForDispatch(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 	if gotID != hashID {
 		t.Fatalf("dispatch id %q, stored id %q", gotID, hashID)
 	}
@@ -254,10 +255,11 @@ func TestPushAppliesToEveryNodeIncludingTheControlPlane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hash, _, err := f.store.HashForDispatch(ctx)
+	hashValue, _, err := f.store.HashForDispatch(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 
 	results, err := f.run(t, PushSpec{Reason: "test"})
 	if err != nil {
@@ -303,10 +305,11 @@ func TestPushNeverPutsTheHashInTheLedger(t *testing.T) {
 	if _, err := f.store.SetPassword(ctx, goodPassword); err != nil {
 		t.Fatal(err)
 	}
-	hash, _, err := f.store.HashForDispatch(ctx)
+	hashValue, _, err := f.store.HashForDispatch(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 
 	spec, _ := json.Marshal(PushSpec{Reason: "ledger check"})
 	results, jobErr := f.run(t, PushSpec{Reason: "ledger check"})
@@ -892,10 +895,11 @@ func mixedFleet(t *testing.T) (*fleet, string) {
 	if _, err := f.store.SetPassword(context.Background(), goodPassword); err != nil {
 		t.Fatal(err)
 	}
-	hash, _, err := f.store.HashForDispatch(context.Background())
+	hashValue, _, err := f.store.HashForDispatch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
+	hash := string(hashValue.Reveal())
 	return f, hash
 }
 
@@ -1168,7 +1172,8 @@ func TestPushFailureBeforeVerifyIsJournalledOnce(t *testing.T) {
 				if _, err := f.store.SetPassword(ctx, goodPassword); err != nil {
 					t.Fatal(err)
 				}
-				hash, _, _ = f.store.HashForDispatch(ctx)
+				hashValue, _, _ := f.store.HashForDispatch(ctx)
+				hash = string(hashValue.Reveal())
 			}
 			nodes := Nodes(f.list)
 			if tc.nodes != nil {

@@ -19,6 +19,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -612,6 +613,23 @@ func enrollValidate(inv *inventory.Store) jobs.DoFn {
 	}
 }
 
+// enrollCommand builds the MeshEnrollCmd bus payload: the one place the
+// node's pre-auth key leaves its secret.Value. meshCA is shipped so the node
+// trusts the self-hosted Headscale's HTTPS leaf before tailscaled dials it;
+// it is nil/empty in mock and HTTP dev, and when Headscale is externally
+// managed with a public cert.
+func enrollCommand(loginServer string, key secret.Value, spec EnrollSpec, meshCA []byte) ([]byte, error) {
+	return json.Marshal(proto.MeshEnrollCmd{
+		LoginServer:     loginServer,
+		AuthKey:         string(key.Reveal()),
+		Hostname:        spec.NodeID,
+		AdvertiseRoutes: spec.AdvertiseRoutes,
+		AcceptDNS:       true,
+		AcceptRoutes:    true,
+		MeshCAPEM:       meshCA,
+	})
+}
+
 func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		s, err := enrollSessionFrom(sc, "validate")
@@ -650,6 +668,10 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if err != nil {
 			return nil, fmt.Errorf("mint key: %w", err)
 		}
+		defer key.Value.Destroy()
+		if svc.heldEnrolKey != nil {
+			svc.heldEnrolKey(key.Value)
+		}
 		s.KeyID = key.ID
 		sc.Log("info", fmt.Sprintf("minted enrollment key %s for %s", proto.ShortFingerprint(key.ID), s.NodeID))
 		// The key's life is this step. Expire it on every way out — an ack,
@@ -657,18 +679,10 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		// sent but not consumed does not stay valid for its safety-net TTL.
 		defer expireEnrolKey(sc, svc, s.NodeID, key.ID)
 
-		cmd, _ := json.Marshal(proto.MeshEnrollCmd{
-			LoginServer:     loginServer,
-			AuthKey:         key.Value,
-			Hostname:        s.NodeID,
-			AdvertiseRoutes: s.AdvertiseRoutes,
-			AcceptDNS:       true,
-			AcceptRoutes:    true,
-			// Ship the Mesh CA so the node trusts the self-hosted Headscale's
-			// HTTPS leaf before tailscaled dials it. Nil/empty in mock + HTTP
-			// dev and when Headscale is externally managed with a public cert.
-			MeshCAPEM: svc.cfg.MeshCAPEM,
-		})
+		cmd, err := enrollCommand(loginServer, key.Value, s.EnrollSpec, svc.cfg.MeshCAPEM)
+		if err != nil {
+			return nil, err
+		}
 		sc.Log("info", fmt.Sprintf("dispatching mesh.enroll to %s", s.NodeID))
 		subject := proto.MeshEnrollSubject(s.NodeID)
 		sent := time.Now()

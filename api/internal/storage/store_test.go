@@ -94,26 +94,36 @@ func TestValidateClaim_ArchiveKey(t *testing.T) {
 		wantErr string
 	}{
 		{name: "no key"},
-		{name: "half a key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: "a"}, wantErr: "wrappedByRecoveryCode"},
+		// A key whose every field is empty, wrappings included, is no key:
+		// present() reads a zero-length wrapping as absent.
+		{name: "an empty key", key: &ArchiveKey{}},
+		// A lone wrapping of either kind is key material, so the key is
+		// partial and refused rather than read as no key.
+		{name: "only the passphrase wrapping", key: &ArchiveKey{WrappedByPassphrase: wrapping("a")}, wantErr: "keyId"},
+		{name: "only the recovery wrapping", key: &ArchiveKey{WrappedByRecoveryCode: wrapping("b")}, wantErr: "keyId"},
+		{name: "half a key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("a")}, wantErr: "wrappedByRecoveryCode"},
+		{
+			name:    "every field but the passphrase wrapping",
+			key:     &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByRecoveryCode: wrapping("b")},
+			wantErr: "wrappedByPassphrase",
+		},
 		{
 			// §4.6 as amended: the public key is part of "whole". A target
 			// without it can be written to by nothing — #290 has nothing to
 			// seal a generation to — so it is refused rather than half-stored,
 			// exactly like a missing wrapping.
-			name: "wrappings but no public key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"},
+			name: "wrappings but no public key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")},
 			wantErr: "publicKey",
 		},
 		{
-			name: "a public key that is not an X25519 key", key: &ArchiveKey{KeyID: "k", PublicKey: "AAEC", WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"},
+			name: "a public key that is not an X25519 key", key: &ArchiveKey{KeyID: "k", PublicKey: "AAEC", WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")},
 			wantErr: "X25519 public key is 32",
 		},
-		{name: "a whole key", key: &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: "a", WrappedByRecoveryCode: "b"}},
+		{name: "a whole key", key: &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := base
-			spec.ArchiveKey = tc.key
-			err := ValidateClaim(spec)
+			err := ValidateClaim(base, tc.key)
 			switch {
 			case tc.wantErr == "" && err != nil:
 				t.Fatalf("unexpected error: %v", err)
@@ -173,7 +183,7 @@ func TestStore_RoundTripsThePublicKeyAndNotTheWrappings(t *testing.T) {
 		PartUUID: "pu",
 		Key: &ArchiveKey{
 			KeyID: "ak-1", Alg: markerKeyAlg, PublicKey: markerPublicKey,
-			WrappedByPassphrase: "sealed-a", WrappedByRecoveryCode: "sealed-b",
+			WrappedByPassphrase: wrapping("sealed-a"), WrappedByRecoveryCode: wrapping("sealed-b"),
 		},
 		At: time.Now().UTC(),
 	}); err != nil {

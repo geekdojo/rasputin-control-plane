@@ -153,16 +153,16 @@ type claimOutcome struct {
 
 // SubmitClaim submits a backup.target.claim job for spec.
 //
-// spec.ArchiveKey, when set, is staged under the new job's id before the job is
+// key, when set, travels beside the spec rather than in it. The caller owns
+// it and destroys it. It is staged under the new job's id before the job is
 // recorded or run, and the persisted spec carries only its id. A submit that
 // fails after staging discards what it staged; a job that ran has its staged
 // key discarded by the workflow's terminal hook.
-func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec ClaimSpec, createdBy string) (*jobs.Job, error) {
-	body, err := claimBody(spec)
+func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec ClaimSpec, key *ArchiveKey, createdBy string) (*jobs.Job, error) {
+	body, err := claimBody(spec, key)
 	if err != nil {
 		return nil, err
 	}
-	key := spec.ArchiveKey
 	var staged string
 	prepare := func(jobID string) error {
 		if !key.present() {
@@ -186,12 +186,24 @@ func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec Cl
 // claimKey returns the key staged for this claim job, or nil when the spec
 // refers to none. A spec that names a key which is not staged, or a staged key
 // with a different id, is refused: the claim would otherwise record, or write
-// to the disk's marker, a key other than the one the operator submitted.
+// to the disk's marker, a key other than the one the operator submitted. A
+// refused staged key is destroyed before claimKey returns.
 func claimKey(sc *jobs.StepCtx, store *Store, spec *ClaimSpec) (*ArchiveKey, error) {
 	k, err := store.StagedClaimKey(sc.Ctx, sc.JobID)
 	if err != nil {
 		return nil, fmt.Errorf("read staged archive key: %w", err)
 	}
+	return matchStagedKey(spec, k)
+}
+
+// matchStagedKey is claimKey's check of the staged key k against the spec. On
+// a refusal it destroys k: the caller gets no key back, so nothing else could.
+func matchStagedKey(spec *ClaimSpec, k *ArchiveKey) (_ *ArchiveKey, err error) {
+	defer func() {
+		if err != nil {
+			k.Destroy()
+		}
+	}()
 	switch {
 	case spec.ArchiveKeyID == "" && k == nil:
 		return nil, nil
@@ -245,9 +257,11 @@ func claimValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 				displayLabel(cur.Label), cur.NodeID, cur.PartUUID)
 		}
 		// Refused before the row is written, like every other step-1 refusal.
-		if _, err := claimKey(sc, store, spec); err != nil {
+		key, err := claimKey(sc, store, spec)
+		if err != nil {
 			return nil, err
 		}
+		defer key.Destroy()
 		now := time.Now().UTC()
 		if err := store.CreatePending(sc.Ctx, sc.JobID, spec.NodeID, spec.DevicePath, spec.Label, now); err != nil {
 			return nil, fmt.Errorf("record claim attempt: %w", err)
@@ -430,6 +444,7 @@ func claimCheckExisting(store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		defer key.Destroy()
 		if k := key; k.present() && set.KeyID != "" && k.KeyID != set.KeyID {
 			return nil, fmt.Errorf("refusing to adopt %s: its generations are encrypted under key %s, and the claim supplies key %s. Supply the wrapped blobs for the disk's own key, or pick a different disk",
 				res.DevicePath, set.KeyID, k.KeyID)
@@ -529,13 +544,12 @@ func claimClaim(cfg Config, inv *inventory.Store, store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		keyID, keyAlg, publicKey, wrappedPass, wrappedRecovery := "", "", "", "", ""
+		defer key.Destroy()
+		keyID, keyAlg, publicKey := "", "", ""
 		if key.present() {
 			keyID = key.KeyID
 			keyAlg = key.Alg
 			publicKey = key.PublicKey
-			wrappedPass = key.WrappedByPassphrase
-			wrappedRecovery = key.WrappedByRecoveryCode
 		}
 		// Through claimCmdBytes, never json.Marshal: that is where the
 		// version-skew gate on Purpose lives, and a claim this agent would
@@ -559,13 +573,12 @@ func claimClaim(cfg Config, inv *inventory.Store, store *Store) jobs.DoFn {
 			// to keep writing, plus the sealed private key, openable with the
 			// passphrase or the recovery code the operator is holding. They
 			// travel as a marshalled command over the bus and never enter a
-			// step result, a log line or the ledger.
-			KeyID:                 keyID,
-			KeyAlg:                keyAlg,
-			PublicKey:             publicKey,
-			WrappedByPassphrase:   wrappedPass,
-			WrappedByRecoveryCode: wrappedRecovery,
-		})
+			// step result, a log line or the ledger. claimCmdBytes sets the
+			// two wrappings from key.
+			KeyID:     keyID,
+			KeyAlg:    keyAlg,
+			PublicKey: publicKey,
+		}, key)
 		if err != nil {
 			return nil, err
 		}
@@ -699,6 +712,7 @@ func claimPersist(store *Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		defer key.Destroy()
 
 		res := ClaimResult{
 			PartUUID:    out.PartUUID,
@@ -970,7 +984,7 @@ func checkAdoptedKeyCustody(devicePath string, set *proto.StorageBackupSet, k *A
 		return fmt.Errorf("refusing to adopt %s: its marker carries the sealed §4.6 private key %s, and this claim supplies no key. Adopting without it would record a target whose key nobody has been asked to open — it would list as configured, backups would keep being written to it, and not one of them could ever be read. Unlock the disk with its passphrase or its recovery code and adopt again, or, if both are lost, wipe the disk and claim it fresh",
 			devicePath, displayLabel(set.KeyID))
 	}
-	if k.WrappedByPassphrase != set.WrappedByPassphrase || k.WrappedByRecoveryCode != set.WrappedByRecoveryCode ||
+	if string(k.WrappedByPassphrase.Reveal()) != set.WrappedByPassphrase || string(k.WrappedByRecoveryCode.Reveal()) != set.WrappedByRecoveryCode ||
 		k.PublicKey != set.PublicKey || (set.KeyAlg != "" && k.Alg != set.KeyAlg) {
 		return fmt.Errorf("refusing to adopt %s: the wrapped key in this claim is not the one on the disk. Adopt takes the disk's key over exactly as it stands and never re-wraps it — a re-wrap that reaches the database and not the marker leaves the disk unreadable by the restore path that only has the disk. Changing the passphrase is a separate operation on an already-claimed target",
 			devicePath)

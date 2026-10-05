@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Headscale pre-auth keys are minted in exactly one place, MintPreAuthKey,
@@ -83,11 +85,11 @@ type PreAuthKeyRequest struct {
 	Tags []string
 }
 
-// MintedPreAuthKey is a freshly minted key. Value is the plaintext, which
-// Headscale returns only at creation.
+// MintedPreAuthKey is a freshly minted key. Value is the key itself, which
+// Headscale returns only at creation; the holder destroys it on every way out.
 type MintedPreAuthKey struct {
 	ID      string
-	Value   string
+	Value   secret.Value
 	User    string
 	Tags    []string
 	Expires time.Time
@@ -156,7 +158,7 @@ func (s *Service) MintPreAuthKey(ctx context.Context, profile PreAuthProfile, re
 	}
 	return &MintedPreAuthKey{
 		ID:      id,
-		Value:   value,
+		Value:   secret.New([]byte(value)),
 		User:    in.User,
 		Tags:    slices.Clone(in.Tags),
 		Expires: in.Expiry,

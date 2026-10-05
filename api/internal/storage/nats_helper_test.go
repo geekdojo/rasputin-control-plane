@@ -12,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
 )
@@ -410,26 +411,33 @@ func newHarness(t *testing.T, agent *fakeAgent) *harness {
 
 func (h *harness) submit(t *testing.T, spec ClaimSpec) string {
 	t.Helper()
-	if spec.ArchiveKey == nil {
-		// Submitted raw, past SubmitClaim's validation, so the step-1
-		// refusals are exercised on a spec that reaches the saga some other
-		// way — a hand-built job through POST /api/jobs.
-		body, err := json.Marshal(spec)
-		if err != nil {
-			t.Fatalf("marshal spec: %v", err)
-		}
-		j, err := h.runner.Submit(context.Background(), ClaimJobKind, body, "test")
-		if err != nil {
-			t.Fatalf("Submit: %v", err)
-		}
-		return j.ID
+	// Submitted raw, past SubmitClaim's validation, so the step-1 refusals are
+	// exercised on a spec that reaches the saga some other way — a hand-built
+	// job through POST /api/jobs.
+	body, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal spec: %v", err)
 	}
-	j, err := SubmitClaim(context.Background(), h.runner, h.store, spec, "test")
+	j, err := h.runner.Submit(context.Background(), ClaimJobKind, body, "test")
+	if err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	return j.ID
+}
+
+// submitKeyed submits spec with key beside it, through SubmitClaim, as the
+// handler does.
+func (h *harness) submitKeyed(t *testing.T, spec ClaimSpec, key *ArchiveKey) string {
+	t.Helper()
+	j, err := SubmitClaim(context.Background(), h.runner, h.store, spec, key, "test")
 	if err != nil {
 		t.Fatalf("SubmitClaim: %v", err)
 	}
 	return j.ID
 }
+
+// wrapping is a test wrapping as the secret.Value an ArchiveKey holds.
+func wrapping(s string) secret.Value { return secret.New([]byte(s)) }
 
 // waitTerminal polls until the job reaches a terminal status, then waits for
 // the runner's goroutine to unwind.

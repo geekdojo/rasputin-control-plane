@@ -451,6 +451,8 @@ type runHarnessOpts struct {
 	noAppSource bool
 	// appsErr makes the installed-app list fail.
 	appsErr error
+	// heldUploadCredential is RunConfig.heldUploadCredential.
+	heldUploadCredential func(secret.Value)
 	// stageOutcomes decides what the fake agents do with each volume, keyed
 	// by volume name.
 	stageOutcomes map[string]stageOutcome
@@ -640,6 +642,8 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		// of earlier captures from the other.
 		Settings: h.settings,
 		Jobs:     js,
+
+		heldUploadCredential: opts.heldUploadCredential,
 	}
 	if !opts.noIngest {
 		cfg.Ingest = ingest
@@ -758,8 +762,8 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 			KeyID:                 keyID,
 			Alg:                   "x25519+argon2id",
 			PublicKey:             pub,
-			WrappedByPassphrase:   testWrappedPass,
-			WrappedByRecoveryCode: testWrappedRecovery,
+			WrappedByPassphrase:   wrapping(testWrappedPass),
+			WrappedByRecoveryCode: wrapping(testWrappedRecovery),
 		}
 	} else if opts.noPartUUID {
 		// A row with no partition UUID still needs to be claimed for step 1 to
@@ -984,6 +988,11 @@ type stageOutcome struct {
 	lieLanded         bool
 	garbleAck         bool
 	transferRefusal   proto.StorageRefusal
+	// failFirstTransfer answers the volume's first transfer with an
+	// unreadable reply and no upload, so the api retries on a fresh
+	// credential; failedOnce records that it has.
+	failFirstTransfer bool
+	failedOnce        bool
 	// replayAck records what the endpoint said to the replay.
 	replayAck *proto.BackupTransferAck
 }
@@ -1087,6 +1096,15 @@ func (f *fakeBackupAgent) startVolumeAgent(t *testing.T, nc *nats.Conn, outcomes
 			f.mu.Lock()
 			f.transfers = append(f.transfers, transferRecord{cmd: cmd, ack: ack})
 			f.mu.Unlock()
+		}
+		if out.failFirstTransfer && !out.failedOnce {
+			f.mu.Lock()
+			out.failedOnce = true
+			outcomes[cmd.Volume] = out
+			f.mu.Unlock()
+			record(proto.BackupTransferAck{OK: false, StagingName: cmd.StagingName, Member: cmd.Member})
+			_ = m.Respond([]byte("{not json"))
+			return
 		}
 		if out.transferRefusal != "" {
 			ack := proto.BackupTransferAck{OK: false, StagingName: cmd.StagingName, Member: cmd.Member, Refusal: out.transferRefusal, Detail: "injected"}

@@ -78,14 +78,20 @@ func CheckClaimPurposeSupported(ctx context.Context, inv *inventory.Store, nodeI
 }
 
 // claimCmdBytes is the ONE way a StorageClaimCmd reaches the wire: it applies
-// the version gate for the command's own purpose and then encodes it.
+// the version gate for the command's own purpose, sets key's two wrappings on
+// the command when a key is given, and then encodes it. It is the one place
+// the wrappings leave their secret.Values for the bus.
 //
 // Gate and encode are one function so the gate cannot be forgotten by a caller
 // that adds a second claim path later. A claim that fails the gate produces no
 // bytes at all, so there is nothing to accidentally publish.
-func claimCmdBytes(ctx context.Context, inv *inventory.Store, nodeID string, cmd proto.StorageClaimCmd) ([]byte, error) {
+func claimCmdBytes(ctx context.Context, inv *inventory.Store, nodeID string, cmd proto.StorageClaimCmd, key *ArchiveKey) ([]byte, error) {
 	if err := CheckClaimPurposeSupported(ctx, inv, nodeID, cmd.EffectivePurpose()); err != nil {
 		return nil, err
+	}
+	if key.present() {
+		cmd.WrappedByPassphrase = string(key.WrappedByPassphrase.Reveal())
+		cmd.WrappedByRecoveryCode = string(key.WrappedByRecoveryCode.Reveal())
 	}
 	return json.Marshal(cmd)
 }

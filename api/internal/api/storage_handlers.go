@@ -258,7 +258,7 @@ type claimTargetRequest struct {
 	// private half already wrapped. The keypair is minted where the passphrase
 	// and the recovery code exist — the browser — and the api never sees the
 	// private half at all.
-	ArchiveKey *storage.ArchiveKey `json:"archiveKey,omitempty"`
+	ArchiveKey *storage.ArchiveKeyInput `json:"archiveKey,omitempty"`
 }
 
 // maxClaimBody caps the request body. The wrapped blobs are small; a megabyte
@@ -294,16 +294,23 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 		Label:       strings.TrimSpace(req.Label),
 		Replace:     req.Replace,
 		Adopt:       req.Adopt,
-		ArchiveKey:  req.ArchiveKey,
 	}
 	if req.Wipe != nil {
 		// Rebuilt rather than forwarded, like every other field here: a wipe
 		// carries exactly one thing into the job ledger, and it is the token.
 		spec.Wipe = &storage.WipeConfirmation{Token: strings.TrimSpace(req.Wipe.Token)}
 	}
+	// The key is converted once, here: from now on its wrappings are
+	// secret.Values, destroyed when the handler returns.
+	key, err := storage.NewArchiveKey(req.ArchiveKey)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer key.Destroy()
 	// Validated here as well as in step 1 so an operator gets a 400 with the
 	// reason instead of a job that exists only to fail.
-	if err := storage.ValidateClaim(spec); err != nil {
+	if err := storage.ValidateClaim(spec, key); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -322,7 +329,7 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 	}
 	// The archive key is staged with the job and the spec refers to it by id,
 	// so the wrapped key never enters the job ledger.
-	j, err := storage.SubmitClaim(r.Context(), s.runner, s.backup, spec, creator(r))
+	j, err := storage.SubmitClaim(r.Context(), s.runner, s.backup, spec, key, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

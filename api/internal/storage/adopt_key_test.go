@@ -73,8 +73,8 @@ func markerKey() *ArchiveKey {
 		KeyID:                 "key-existing",
 		Alg:                   markerKeyAlg,
 		PublicKey:             markerPublicKey,
-		WrappedByPassphrase:   markerWrappedPass,
-		WrappedByRecoveryCode: markerWrappedRecovery,
+		WrappedByPassphrase:   wrapping(markerWrappedPass),
+		WrappedByRecoveryCode: wrapping(markerWrappedRecovery),
 	}
 }
 
@@ -84,9 +84,8 @@ func TestAdopt_CarriesTheDisksOwnSealedKeyIntoTheLedger(t *testing.T) {
 	})
 	spec := baseSpec()
 	spec.Adopt = true
-	spec.ArchiveKey = markerKey()
 
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, markerKey())
 	if done := h.waitTerminal(t, jobID); done.Status != jobs.StatusSucceeded {
 		t.Fatalf("adopt failed: %s", done.Error)
 	}
@@ -161,10 +160,9 @@ func TestAdopt_RefusesAReWrappedKey(t *testing.T) {
 	spec := baseSpec()
 	spec.Adopt = true
 	k := markerKey()
-	k.WrappedByPassphrase = "RE-WRAPPED-UNDER-A-NEW-PASSPHRASE"
-	spec.ArchiveKey = k
+	k.WrappedByPassphrase = wrapping("RE-WRAPPED-UNDER-A-NEW-PASSPHRASE")
 
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, k)
 	done := h.waitTerminal(t, jobID)
 	if done.Status != jobs.StatusFailed {
 		t.Fatalf("want failed, got %q", done.Status)
@@ -225,12 +223,12 @@ func TestClaim_SendsTheWrappedBlobsToTheAgentForTheMarker(t *testing.T) {
 		enumerate: func(int) proto.StorageEnumerateAck { return ackWith(blankCandidate()) },
 	})
 	spec := baseSpec()
-	spec.ArchiveKey = &ArchiveKey{
+	key := &ArchiveKey{
 		KeyID: "ak-fresh", Alg: markerKeyAlg, PublicKey: markerPublicKey,
-		WrappedByPassphrase: markerWrappedPass, WrappedByRecoveryCode: markerWrappedRecovery,
+		WrappedByPassphrase: wrapping(markerWrappedPass), WrappedByRecoveryCode: wrapping(markerWrappedRecovery),
 	}
 
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, key)
 	if done := h.waitTerminal(t, jobID); done.Status != jobs.StatusSucceeded {
 		t.Fatalf("claim failed: %s", done.Error)
 	}
@@ -297,9 +295,8 @@ func TestAdopt_RefusesASymmetricEraDiskEvenWithAKeySupplied(t *testing.T) {
 	spec.Adopt = true
 	k := markerKey()
 	k.Alg = legacySymmetricKeyAlg
-	spec.ArchiveKey = k
 
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, k)
 	done := h.waitTerminal(t, jobID)
 	if done.Status != jobs.StatusFailed {
 		t.Fatalf("want failed, got %q", done.Status)
@@ -319,10 +316,10 @@ func TestWipe_ReclaimsASymmetricEraDisk(t *testing.T) {
 	})
 	spec := baseSpec()
 	spec.Wipe = &WipeConfirmation{Token: CandidateWipeToken(&c)}
-	spec.ArchiveKey = markerKey()
-	spec.ArchiveKey.KeyID = "ak-fresh"
+	key := markerKey()
+	key.KeyID = "ak-fresh"
 
-	jobID := h.submit(t, spec)
+	jobID := h.submitKeyed(t, spec, key)
 	if done := h.waitTerminal(t, jobID); done.Status != jobs.StatusSucceeded {
 		t.Fatalf("wipe failed: %s", done.Error)
 	}
@@ -453,7 +450,7 @@ func TestCheckAdoptedKeyCustody(t *testing.T) {
 
 	t.Run("a changed recovery wrapping is refused", func(t *testing.T) {
 		k := markerKey()
-		k.WrappedByRecoveryCode = "different"
+		k.WrappedByRecoveryCode = wrapping("different")
 		if err := checkAdoptedKeyCustody("/dev/sdb", keyed, k); err == nil {
 			t.Error("want a refusal")
 		}

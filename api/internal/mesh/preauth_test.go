@@ -123,7 +123,7 @@ func TestMintPreAuthKey_OneFunctionTwoProfiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("node mint: %v", err)
 	}
-	if k.ID == "" || k.Value == "" || !slices.Equal(k.Tags, []string{meshNodeTag}) || k.User != f.svc.cfg.DefaultUser {
+	if k.ID == "" || k.Value.Len() == 0 || !slices.Equal(k.Tags, []string{meshNodeTag}) || k.User != f.svc.cfg.DefaultUser {
 		t.Errorf("node key = %+v", k)
 	}
 	if _, err := f.svc.MintPreAuthKey(f.ctx, PreAuthUserDevice, PreAuthKeyRequest{Tags: []string{meshNodeTag}}); !errors.Is(err, ErrPreAuthRequest) {

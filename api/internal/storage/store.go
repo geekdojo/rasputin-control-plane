@@ -11,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // Store is the SQLite-backed backup_targets ledger.
@@ -103,8 +104,8 @@ func (s *Store) MarkClaimed(ctx context.Context, jobID string, res ClaimResult) 
 		}
 		keyAlg = res.Key.Alg
 		publicKey = res.Key.PublicKey
-		wrappedPass = res.Key.WrappedByPassphrase
-		wrappedRecovery = res.Key.WrappedByRecoveryCode
+		wrappedPass = string(res.Key.WrappedByPassphrase.Reveal())
+		wrappedRecovery = string(res.Key.WrappedByRecoveryCode.Reveal())
 	}
 	adopted, wiped := 0, 0
 	if res.Adopted {
@@ -394,23 +395,30 @@ func (s *Store) StageClaimKey(ctx context.Context, jobID string, k *ArchiveKey, 
         INSERT INTO backup_claim_keys (job_id, key_id, key_alg, public_key,
             wrapped_by_passphrase, wrapped_by_recovery_code, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		jobID, k.KeyID, k.Alg, k.PublicKey, k.WrappedByPassphrase, k.WrappedByRecoveryCode, ms(now))
+		jobID, k.KeyID, k.Alg, k.PublicKey, string(k.WrappedByPassphrase.Reveal()), string(k.WrappedByRecoveryCode.Reveal()), ms(now))
 	return err
 }
 
 // StagedClaimKey returns the key staged for a claim job, or nil when none was.
+// The wrappings are secret.Values from the scan on; the caller destroys the
+// key (ArchiveKey.Destroy).
 func (s *Store) StagedClaimKey(ctx context.Context, jobID string) (*ArchiveKey, error) {
 	var k ArchiveKey
+	var pass, recovery []byte
 	err := s.db.QueryRowContext(ctx, `
         SELECT key_id, key_alg, public_key, wrapped_by_passphrase, wrapped_by_recovery_code
         FROM backup_claim_keys WHERE job_id = ?`, jobID).
-		Scan(&k.KeyID, &k.Alg, &k.PublicKey, &k.WrappedByPassphrase, &k.WrappedByRecoveryCode)
+		Scan(&k.KeyID, &k.Alg, &k.PublicKey, &pass, &recovery)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	k.WrappedByPassphrase = secret.New(pass)
+	k.WrappedByRecoveryCode = secret.New(recovery)
+	clear(pass)
+	clear(recovery)
 	return &k, nil
 }
 
