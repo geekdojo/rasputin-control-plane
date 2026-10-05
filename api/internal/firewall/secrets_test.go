@@ -56,17 +56,14 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	ledgertest.AssertAbsentIn(t, "the ListIntents response", string(blob),
 		ledgertest.Secrets("the PPPoE password", pppoeSecret))
 
-	forCompile, secrets, err := s.ListIntentsForCompile(ctx)
+	forCompile, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
 		t.Fatalf("ListIntentsForCompile: %v", err)
 	}
-	if got := string(secrets["w1"].Reveal()); got != pppoeSecret {
-		t.Errorf("compile input secret = %q, want the stored one", got)
+	var spec proto.WANConfigSpec
+	if err := json.Unmarshal(forCompile[0].Spec, &spec); err != nil || spec.Secret != pppoeSecret {
+		t.Errorf("compile input secret = %q (err %v), want the stored one", spec.Secret, err)
 	}
-	if strings.Contains(string(forCompile[0].Spec), pppoeSecret) {
-		t.Errorf("compile input spec carries the secret: %s", forCompile[0].Spec)
-	}
-	DestroySecrets(secrets)
 
 	// An update without a secret keeps the stored one.
 	got.Name = "renamed"
@@ -76,11 +73,11 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	if !got.SecretSet {
 		t.Error("after an update with no secret, secretSet = false")
 	}
-	_, secrets, _ = s.ListIntentsForCompile(ctx)
-	if got := string(secrets["w1"].Reveal()); got != pppoeSecret {
-		t.Errorf("an update with no secret changed it to %q", got)
+	forCompile, _ = s.ListIntentsForCompile(ctx)
+	_ = json.Unmarshal(forCompile[0].Spec, &spec)
+	if spec.Secret != pppoeSecret {
+		t.Errorf("an update with no secret changed it to %q", spec.Secret)
 	}
-	DestroySecrets(secrets)
 
 	// An update with a secret replaces it.
 	upd := pppoeIntent(t, "w1", "SENTINEL-ROTATED")
@@ -88,11 +85,11 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	if err := s.UpdateIntent(ctx, upd); err != nil {
 		t.Fatalf("UpdateIntent: %v", err)
 	}
-	_, secrets, _ = s.ListIntentsForCompile(ctx)
-	if got := string(secrets["w1"].Reveal()); got != "SENTINEL-ROTATED" {
-		t.Errorf("secret after rotation = %q", got)
+	forCompile, _ = s.ListIntentsForCompile(ctx)
+	_ = json.Unmarshal(forCompile[0].Spec, &spec)
+	if spec.Secret != "SENTINEL-ROTATED" {
+		t.Errorf("secret after rotation = %q", spec.Secret)
 	}
-	DestroySecrets(secrets)
 
 	// Deleting the intent deletes its secret.
 	if err := s.DeleteIntent(ctx, "w1"); err != nil {
@@ -111,9 +108,10 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "fw.db")
 	in := pppoeIntent(t, "w1", pppoeSecret)
-	// The hash the previous build computed for this intent with the secret
-	// inline (pppoeLegacyHash), which every applied firewall holds.
-	wantHash := pppoeLegacyHash
+	_, wantHash, err := Compile([]*Intent{in})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
 
 	// Write the row the way the previous build did: secret inline.
 	raw, err := sql.Open("sqlite", path)
@@ -144,12 +142,11 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 	if strings.Contains(spec, pppoeSecret) {
 		t.Errorf("the secret is still inline after open: %s", spec)
 	}
-	intents, secrets, err := s.ListIntentsForCompile(ctx)
+	intents, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
 		t.Fatalf("ListIntentsForCompile: %v", err)
 	}
-	defer DestroySecrets(secrets)
-	_, gotHash, err := Compile(intents, secrets)
+	_, gotHash, err := Compile(intents)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -164,9 +161,8 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 		t.Fatalf("re-open: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
-	intents, secrets2, _ := s2.ListIntentsForCompile(ctx)
-	defer DestroySecrets(secrets2)
-	if _, h, _ := Compile(intents, secrets2); h != wantHash {
+	intents, _ = s2.ListIntentsForCompile(ctx)
+	if _, h, _ := Compile(intents); h != wantHash {
 		t.Errorf("hash after re-open = %s, want %s", h, wantHash)
 	}
 }

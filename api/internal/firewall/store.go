@@ -233,7 +233,7 @@ func (s *Store) GetNodeState(ctx context.Context, nodeID string) (*NodeState, er
 	// a drift banner on an untouched firewall.
 	effectiveIntent := ns.IntentHash
 	if effectiveIntent == "" {
-		if _, h, err := Compile(nil, nil); err == nil {
+		if _, h, err := Compile(nil); err == nil {
 			effectiveIntent = h
 		}
 	}

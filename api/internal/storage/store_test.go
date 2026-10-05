@@ -94,7 +94,19 @@ func TestValidateClaim_ArchiveKey(t *testing.T) {
 		wantErr string
 	}{
 		{name: "no key"},
+		// A key whose every field is empty, wrappings included, is no key:
+		// present() reads a zero-length wrapping as absent.
+		{name: "an empty key", key: &ArchiveKey{}},
+		// A lone wrapping of either kind is key material, so the key is
+		// partial and refused rather than read as no key.
+		{name: "only the passphrase wrapping", key: &ArchiveKey{WrappedByPassphrase: wrapping("a")}, wantErr: "keyId"},
+		{name: "only the recovery wrapping", key: &ArchiveKey{WrappedByRecoveryCode: wrapping("b")}, wantErr: "keyId"},
 		{name: "half a key", key: &ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("a")}, wantErr: "wrappedByRecoveryCode"},
+		{
+			name:    "every field but the passphrase wrapping",
+			key:     &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByRecoveryCode: wrapping("b")},
+			wantErr: "wrappedByPassphrase",
+		},
 		{
 			// §4.6 as amended: the public key is part of "whole". A target
 			// without it can be written to by nothing — #290 has nothing to

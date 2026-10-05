@@ -27,7 +27,7 @@ func dnsForwardIntent(t *testing.T, id string, enabled bool, zone, target string
 }
 
 func TestCompile_DNSForward(t *testing.T) {
-	state, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", true, "home1.internal", "192.168.1.5")}, nil)
+	state, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", true, "home1.internal", "192.168.1.5")})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestCompile_DNSForward(t *testing.T) {
 }
 
 func TestCompile_DNSForwardDisabledOmitsKey(t *testing.T) {
-	state, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", false, "home1.internal", "192.168.1.5")}, nil)
+	state, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", false, "home1.internal", "192.168.1.5")})
 	if err != nil {
 		t.Fatalf("compile: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestCompile_DNSForwardDisabledOmitsKey(t *testing.T) {
 }
 
 func TestCompile_DNSForwardRejectsIPv6Target(t *testing.T) {
-	if _, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", true, "home1.internal", "fd00::1")}, nil); err == nil {
+	if _, _, err := Compile([]*Intent{dnsForwardIntent(t, "d1", true, "home1.internal", "fd00::1")}); err == nil {
 		t.Error("IPv6 target must be rejected (decision #9)")
 	}
 }
@@ -61,7 +61,7 @@ func TestCompile_DNSForwardRejectsTwoEnabled(t *testing.T) {
 		dnsForwardIntent(t, "d1", true, "home1.internal", "192.168.1.5"),
 		dnsForwardIntent(t, "d2", true, "home1.internal", "192.168.1.6"),
 	}
-	if _, _, err := Compile(ins, nil); err == nil {
+	if _, _, err := Compile(ins); err == nil {
 		t.Error("two enabled dns_forward intents must error")
 	}
 }
