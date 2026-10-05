@@ -301,9 +301,8 @@ func enclosing(f *ast.File, pos token.Pos) string {
 			for _, s := range d.Specs {
 				switch s := s.(type) {
 				case *ast.ValueSpec:
-					if len(s.Names) > 0 {
-						return s.Names[0].Name
-					}
+					// go/ast guarantees len(Names) > 0 for a ValueSpec.
+					return s.Names[0].Name
 				case *ast.TypeSpec:
 					return s.Name.Name
 				}
