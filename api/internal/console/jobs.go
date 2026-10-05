@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -44,17 +45,41 @@ type PlanResult struct {
 
 // DeliverResult is the deliver step's result: one row per target. No hash,
 // by construction — the only hash-shaped value here is an id.
+//
+// Applied counts every node that holds the password afterwards, so it is
+// always Changed + Unchanged; the split is what tells an operator whether a
+// re-apply wrote anything (#597).
 type DeliverResult struct {
-	HashID  string       `json:"hashId"`
-	Results []NodeResult `json:"results"`
-	Applied int          `json:"applied"`
-	Failed  int          `json:"failed"`
+	HashID    string       `json:"hashId"`
+	Results   []NodeResult `json:"results"`
+	Changed   int          `json:"changed"`
+	Unchanged int          `json:"unchanged"`
+	Applied   int          `json:"applied"`
+	Failed    int          `json:"failed"`
 }
+
+// NodeOutcome is what delivering the password did to one node.
+type NodeOutcome string
+
+const (
+	// OutcomeChanged: the node wrote the password.
+	OutcomeChanged NodeOutcome = "changed"
+	// OutcomeUnchanged: the node already held this password and wrote
+	// nothing. It holds the password, so its status is still applied.
+	OutcomeUnchanged NodeOutcome = "unchanged"
+	// OutcomeFailed: the node does not hold the password; Detail says why.
+	OutcomeFailed NodeOutcome = "failed"
+)
+
+// unchangedDetail is the Settings row's detail for an unchanged node, so the
+// row says a re-apply found nothing to do rather than reading like a write.
+const unchangedDetail = "already held this password — nothing was written"
 
 // NodeResult is one node's outcome.
 type NodeResult struct {
-	NodeID string     `json:"nodeId"`
-	Status NodeStatus `json:"status"`
+	NodeID  string      `json:"nodeId"`
+	Status  NodeStatus  `json:"status"`
+	Outcome NodeOutcome `json:"outcome"`
 	// HashID is the password the node holds afterwards, as the node named
 	// it; "" when it did not apply one.
 	HashID string `json:"hashId,omitempty"`
@@ -85,15 +110,43 @@ const deliverFanout = 8
 //
 // The hash is read inside deliver, from the store, and put straight into
 // the bus command. It is in no spec, no result, no event and no log line.
-func PushWorkflow(store *Store, nodes Nodes) jobs.Workflow {
+//
+// log is the process logger: the plan, every node's outcome and the delivery
+// summary go to the api journal through it, and OnTerminal writes the one
+// ERROR record a failed job gets, whichever step or restart failed it (#597).
+// now stamps the record step's rows. A nil log or now is a wiring fault and
+// panics here, at construction.
+func PushWorkflow(store *Store, nodes Nodes, log *slog.Logger, now func() time.Time) jobs.Workflow {
+	if log == nil {
+		panic("console: PushWorkflow needs a logger; nil was passed")
+	}
+	if now == nil {
+		panic("console: PushWorkflow needs a clock; nil was passed")
+	}
 	return jobs.Workflow{
 		Kind: PushKind,
 		Steps: []jobs.WorkflowStep{
-			{Name: "plan", Timeout: 10 * time.Second, Do: pushPlan(store, nodes)},
-			{Name: "deliver", Timeout: 2 * time.Minute, Do: pushDeliver(store, nodes)},
-			{Name: "record", Timeout: 15 * time.Second, Do: pushRecord(store)},
+			{Name: "plan", Timeout: 10 * time.Second, Do: pushPlan(store, nodes, log)},
+			{Name: "deliver", Timeout: 2 * time.Minute, Do: pushDeliver(store, nodes, log)},
+			{Name: "record", Timeout: 15 * time.Second, Do: pushRecord(store, now)},
 			{Name: "verify", Timeout: 5 * time.Second, Do: pushVerify()},
 		},
+		OnTerminal: pushTerminal(log),
+	}
+}
+
+// pushTerminal writes the journal record for a failed push. It is the only
+// ERROR record a failed job writes, and it fires from every failure path —
+// plan, deliver, record, verify, and a job orphaned by an api restart — so
+// no failure is silent and none is logged twice. The hook gets no spec or
+// result, so it carries no hash_id; job_id correlates it to the plan record,
+// which does. A success writes nothing: the deliver summary already said it.
+func pushTerminal(log *slog.Logger) func(ctx context.Context, jobID string, success bool, errMsg string) {
+	return func(ctx context.Context, jobID string, success bool, errMsg string) {
+		if success {
+			return
+		}
+		log.ErrorContext(ctx, "console: console root password push failed", "job_id", jobID, "error", errMsg)
 	}
 }
 
@@ -141,7 +194,7 @@ func targets(ctx context.Context, spec *PushSpec, nodes Nodes) ([]*proto.Node, e
 	return out, nil
 }
 
-func pushPlan(store *Store, nodes Nodes) jobs.DoFn {
+func pushPlan(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parsePushSpec(sc.Spec)
 		if err != nil {
@@ -166,6 +219,8 @@ func pushPlan(store *Store, nodes Nodes) jobs.DoFn {
 			ids = append(ids, n.ID)
 		}
 		sc.Log("info", fmt.Sprintf("console root password %s → %d node(s): %s", hashID, len(ids), strings.Join(ids, ", ")))
+		log.InfoContext(sc.Ctx, "console: pushing the console root password",
+			"job_id", sc.JobID, "hash_id", hashID, "reason", spec.Reason, "targets", ids)
 		return json.Marshal(PlanResult{HashID: hashID, Targets: ids, Reason: spec.Reason})
 	}
 }
@@ -173,7 +228,7 @@ func pushPlan(store *Store, nodes Nodes) jobs.DoFn {
 // pushDeliver is the only place the hash is read. It reads it once, sends
 // it to each target over that node's own command lane, and returns per-node
 // outcomes — nothing derived from the hash but its id.
-func pushDeliver(store *Store, nodes Nodes) jobs.DoFn {
+func pushDeliver(store *Store, nodes Nodes, log *slog.Logger) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parsePushSpec(sc.Spec)
 		if err != nil {
@@ -210,14 +265,28 @@ func pushDeliver(store *Store, nodes Nodes) jobs.DoFn {
 		wg.Wait()
 
 		for _, r := range out.Results {
-			if r.Status == NodeApplied {
+			switch r.Outcome {
+			case OutcomeChanged, OutcomeUnchanged:
 				out.Applied++
-			} else {
+				if r.Outcome == OutcomeChanged {
+					out.Changed++
+				} else {
+					out.Unchanged++
+				}
+				sc.Log("info", fmt.Sprintf("%s: %s", r.NodeID, r.Outcome))
+				log.InfoContext(sc.Ctx, "console: console root password delivered to a node",
+					"job_id", sc.JobID, "hash_id", hashID, "node_id", r.NodeID, "outcome", string(r.Outcome))
+			default:
 				out.Failed++
-				sc.Log("warn", fmt.Sprintf("%s: %s", r.NodeID, r.Detail))
+				sc.Log("warn", fmt.Sprintf("%s: %s — %s", r.NodeID, r.Outcome, r.Detail))
+				log.WarnContext(sc.Ctx, "console: console root password not applied on a node",
+					"job_id", sc.JobID, "hash_id", hashID, "node_id", r.NodeID, "outcome", string(r.Outcome), "detail", r.Detail)
 			}
 		}
-		sc.Log("info", fmt.Sprintf("console root password %s applied on %d/%d node(s)", hashID, out.Applied, len(out.Results)))
+		sc.Log("info", fmt.Sprintf("console root password %s on %d node(s): %d changed, %d unchanged, %d failed",
+			hashID, len(out.Results), out.Changed, out.Unchanged, out.Failed))
+		log.InfoContext(sc.Ctx, "console: console root password delivery finished",
+			"job_id", sc.JobID, "hash_id", hashID, "changed", out.Changed, "unchanged", out.Unchanged, "failed", out.Failed)
 		return json.Marshal(out)
 	}
 }
@@ -230,7 +299,7 @@ func pushDeliver(store *Store, nodes Nodes) jobs.DoFn {
 // "update this node's agent" and "this node is unplugged" send the operator
 // to different places.
 func deliverOne(sc *jobs.StepCtx, n *proto.Node, cmd []byte, hashID string) NodeResult {
-	res := NodeResult{NodeID: n.ID, Status: NodeFailed}
+	res := NodeResult{NodeID: n.ID, Status: NodeFailed, Outcome: OutcomeFailed}
 	msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.NodeCmdSubject(n.ID, proto.ConsoleRootHashVerb), cmd)
 	if err != nil {
 		res.Detail = explainNoAnswer(n, err)
@@ -257,6 +326,10 @@ func deliverOne(sc *jobs.StepCtx, n *proto.Node, cmd []byte, hashID string) Node
 		return res
 	}
 	res.Status, res.HashID, res.Changed = NodeApplied, hashID, ack.Changed
+	res.Outcome = OutcomeUnchanged
+	if ack.Changed {
+		res.Outcome = OutcomeChanged
+	}
 	return res
 }
 
@@ -316,7 +389,7 @@ func agentPredatesVerb(agentVersion, floor string) bool {
 	return err == nil && c < 0
 }
 
-func pushRecord(store *Store) jobs.DoFn {
+func pushRecord(store *Store, clock func() time.Time) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		raw, ok := sc.PriorResults["deliver"]
 		if !ok {
@@ -326,11 +399,15 @@ func pushRecord(store *Store) jobs.DoFn {
 		if err := json.Unmarshal(raw, &del); err != nil {
 			return nil, fmt.Errorf("decode deliver result: %w", err)
 		}
-		now := time.Now().UTC()
+		now := clock().UTC()
 		for _, r := range del.Results {
+			detail := r.Detail
+			if r.Outcome == OutcomeUnchanged {
+				detail = unchangedDetail
+			}
 			if err := store.RecordNode(sc.Ctx, NodeState{
 				NodeID: r.NodeID, Status: r.Status, HashID: r.HashID,
-				Detail: r.Detail, JobID: sc.JobID, UpdatedAt: now,
+				Detail: detail, JobID: sc.JobID, UpdatedAt: now,
 			}); err != nil {
 				return nil, fmt.Errorf("record %s: %w", r.NodeID, err)
 			}

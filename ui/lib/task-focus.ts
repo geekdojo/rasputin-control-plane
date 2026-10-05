@@ -76,6 +76,14 @@ export async function resolveFocus(
   }
 }
 
+/**
+ * The link that opens one job on the Tasks page. Every "follow it in Tasks"
+ * builds its href here, so the focus route has one spelling.
+ */
+export function taskHref(jobId: string): string {
+  return `/tasks?id=${encodeURIComponent(jobId)}`;
+}
+
 /** The inline note for a focus that is not simply "expanded in place". */
 export function focusNote(f: TaskFocus, appFilter: string | null): string | null {
   switch (f.state) {

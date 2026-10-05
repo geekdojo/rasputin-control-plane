@@ -29,9 +29,16 @@ import {
   type ConsoleRootNode,
   type ConsoleRootStatus,
 } from '../lib/api';
-import { consoleDraftState, consoleSummary, MIN_CONSOLE_PASSWORD, readNode } from '../lib/console-root';
+import {
+  consoleDraftState,
+  consoleSavedNote,
+  consoleSummary,
+  MIN_CONSOLE_PASSWORD,
+  readNode,
+} from '../lib/console-root';
+import { taskHref } from '../lib/task-focus';
 import { Btn, DIM, FG, HAIR, Hint, Input } from './kit';
-import { MONO } from './ui-theme';
+import { ACCENT, MONO } from './ui-theme';
 
 const OK = '#4ade80';
 const WARN = '#facc15';
@@ -52,6 +59,8 @@ export function ConsoleRootPassword({
   const [busy, setBusy] = useState<'save' | 'push' | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // The push job the last action submitted, so the note can link to it.
+  const [jobId, setJobId] = useState<string | null>(null);
 
   // The first load is the promise chain rather than a call to refresh():
   // an effect body must not reach a setState synchronously
@@ -87,15 +96,14 @@ export function ConsoleRootPassword({
     setBusy('save');
     setErr(null);
     setNote(null);
+    setJobId(null);
     try {
       const saved = await setConsoleRootPassword(password);
       setPassword('');
       setConfirm('');
-      setNote(
-        saved.pushError
-          ? `Saved, but the job that applies it did not start: ${saved.pushError}`
-          : 'Saved. Applying it to every node — the per-node result appears below.',
-      );
+      const after = consoleSavedNote(saved);
+      setNote(after.note);
+      setJobId(after.jobId ?? null);
       await refresh();
       onSaved?.();
     } catch (e) {
@@ -109,9 +117,11 @@ export function ConsoleRootPassword({
     setBusy('push');
     setErr(null);
     setNote(null);
+    setJobId(null);
     try {
-      await pushConsoleRootPassword();
+      const pushed = await pushConsoleRootPassword();
       setNote('Applying the saved password to every node — the per-node result appears below.');
+      setJobId(pushed.jobId ?? null);
       await refresh();
     } catch (e) {
       setErr(String(e));
@@ -139,7 +149,19 @@ export function ConsoleRootPassword({
           {err}
         </Hint>
       )}
-      {note && <Hint style={{ marginBottom: 12, color: OK }}>{note}</Hint>}
+      {note && (
+        <Hint style={{ marginBottom: 12, color: OK }}>
+          {note}
+          {jobId && (
+            <>
+              {' '}
+              <a href={taskHref(jobId)} style={{ color: ACCENT }}>
+                Follow it in Tasks →
+              </a>
+            </>
+          )}
+        </Hint>
+      )}
 
       {status === null && !err && <Hint>Loading…</Hint>}
 

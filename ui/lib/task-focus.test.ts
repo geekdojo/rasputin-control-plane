@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, test } from 'node:test';
 import { ApiError } from './api';
-import { focusNote, locateFocus, resolveFocus } from './task-focus';
+import { focusNote, locateFocus, resolveFocus, taskHref } from './task-focus';
 import type { Job } from './types';
 
 // /tasks?id=<jobId>, executed: a job the page already shows is expanded in
@@ -104,4 +104,11 @@ describe('focusNote', () => {
       'task 01DOWN could not be loaded: boom',
     );
   });
+});
+
+// TC-597-16: the focus route every "Follow it in Tasks" link uses, with the
+// job id encoded so an id with a separator cannot change the route.
+test('taskHref builds the encoded /tasks focus route', () => {
+  assert.equal(taskHref('abc'), '/tasks?id=abc');
+  assert.equal(taskHref('a/b c'), '/tasks?id=a%2Fb%20c');
 });
