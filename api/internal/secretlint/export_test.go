@@ -3,6 +3,6 @@ package secretlint
 // Exported for the external test package only.
 var (
 	ValueMethods = valueMethods
-	SigKey       = sigKey
+	MatchesSig   = methodSig.matches
 	Enclosing    = enclosing
 )

@@ -5,7 +5,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"maps"
 	"testing"
 
 	"golang.org/x/tools/go/analysis/analysistest"
@@ -17,10 +16,11 @@ import (
 // TC-732-12: SL01 fires on a call, a method value, a method expression
 // (value and pointer receiver), a promoted method, and Reveal through an
 // interface or a type parameter Value satisfies — including one spelled
-// []uint8, which only the exact types.Implements path accepts — with the
-// enclosing symbol named, a package-level var initializer included. It is silent for an unrelated Reveal, for an interface Value does
-// not satisfy, and inside the stub at the real import path; it fires inside a
-// second package named secret at another path.
+// []uint8 — with the enclosing symbol named, a package-level var initializer
+// included. It is silent for an unrelated Reveal, for an interface Value does
+// not satisfy, for a constraint whose ~[]byte term Value cannot meet (which
+// only the exact types.Implements path sees), and inside the stub at the real
+// import path; it fires inside a second package named secret at another path.
 func TestSL01(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), secretlint.Analyzer,
 		"sl01", "other/secret", "github.com/geekdojo/rasputin-control-plane/secret")
@@ -28,6 +28,9 @@ func TestSL01(t *testing.T) {
 
 // TC-732-12: a package that cannot see secret.Value still reports Reveal
 // through an interface Value satisfies, matched by method set.
+// F-732-09: the match compares types, so []uint8, an alias of []byte and
+// slog.Value match; a defined type over []byte, string, and a local type
+// named Value do not.
 func TestSL01_InterfaceWithoutImport(t *testing.T) {
 	analysistest.Run(t, analysistest.TestData(), secretlint.Analyzer, "noimport")
 }
@@ -59,7 +62,8 @@ func TestResult(t *testing.T) {
 
 // F-732-06: valueMethods, the fallback for a package that cannot see
 // secret.Value, is pinned to the real type's method set, name and signature.
-// A method added to Value without a row here fails this test.
+// A method added to Value without a row here, or a row whose signature types
+// differ from the real method's, fails this test.
 func TestValueMethodsMatchSecretValue(t *testing.T) {
 	pkgs, err := packages.Load(&packages.Config{Mode: packages.NeedName | packages.NeedTypes}, secretlint.PkgPath)
 	if err != nil {
@@ -72,14 +76,20 @@ func TestValueMethodsMatchSecretValue(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s has no type Value", secretlint.PkgPath)
 	}
-	got := map[string]string{}
 	ms := types.NewMethodSet(obj.Type())
+	if ms.Len() != len(secretlint.ValueMethods) {
+		t.Fatalf("secret.Value has %d methods, valueMethods has %d", ms.Len(), len(secretlint.ValueMethods))
+	}
 	for sel := range ms.Methods() {
 		fn := sel.Obj().(*types.Func)
-		got[fn.Name()] = secretlint.SigKey(fn.Signature())
-	}
-	if !maps.Equal(got, secretlint.ValueMethods) {
-		t.Fatalf("valueMethods = %v\nsecret.Value's method set = %v", secretlint.ValueMethods, got)
+		want, ok := secretlint.ValueMethods[fn.Name()]
+		if !ok {
+			t.Errorf("valueMethods has no row for %s", fn.Name())
+			continue
+		}
+		if !secretlint.MatchesSig(want, fn.Signature()) {
+			t.Errorf("valueMethods[%q] does not match %s", fn.Name(), fn.Signature())
+		}
 	}
 }
 

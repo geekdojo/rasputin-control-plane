@@ -26,7 +26,6 @@ import (
 	"go/token"
 	"go/types"
 	"reflect"
-	"strings"
 
 	"golang.org/x/tools/go/analysis"
 )
@@ -127,41 +126,76 @@ func (c *checker) isReveal(sel *ast.SelectorExpr) bool {
 // implementedByValue reports whether secret.Value satisfies iface. When this
 // package cannot see secret.Value (nothing it imports reaches it), a Value can
 // still arrive through the interface from elsewhere, so the method set is
-// matched by name and signature against Value's.
+// matched by name and by signature type against Value's.
 func (c *checker) implementedByValue(iface *types.Interface) bool {
 	if c.value != nil {
 		return types.Implements(c.value, iface)
 	}
 	for m := range iface.Methods() {
 		want, ok := valueMethods[m.Name()]
-		if !ok || sigKey(m.Signature()) != want {
+		if !ok || !want.matches(m.Signature()) {
 			return false
 		}
 	}
 	return true
 }
 
-// valueMethods is secret.Value's method set, by signature key. Used only
-// for a package that cannot see the type itself.
-var valueMethods = map[string]string{
-	"Reveal":      "()([]byte)",
-	"Len":         "()(int)",
-	"Destroy":     "()()",
-	"String":      "()(string)",
-	"Format":      "(fmt.State,rune)()",
-	"MarshalJSON": "()([]byte,error)",
-	"LogValue":    "()(log/slog.Value)",
+// typeRef is one parameter or result type of a secret.Value method. A type
+// built from the universe is compared with types.Identical, so []uint8 and an
+// alias of []byte match []byte. A named type from another package (fmt.State,
+// slog.Value) cannot be built here; it is compared, through any alias, by its
+// defining package path and name, which is its identity in one type-checked
+// program.
+type typeRef struct {
+	t         types.Type
+	pkg, name string
 }
 
-func sigKey(sig *types.Signature) string {
-	list := func(t *types.Tuple) string {
-		parts := make([]string, 0, t.Len())
-		for v := range t.Variables() {
-			parts = append(parts, types.TypeString(v.Type(), nil))
-		}
-		return "(" + strings.Join(parts, ",") + ")"
+func (r typeRef) matches(t types.Type) bool {
+	if r.t != nil {
+		return types.Identical(r.t, t)
 	}
-	return list(sig.Params()) + list(sig.Results())
+	n, ok := types.Unalias(t).(*types.Named)
+	if !ok || n.Obj().Pkg() == nil {
+		return false
+	}
+	return n.Obj().Pkg().Path() == r.pkg && n.Obj().Name() == r.name
+}
+
+// methodSig is a secret.Value method's signature, by type.
+type methodSig struct{ params, results []typeRef }
+
+func (s methodSig) matches(sig *types.Signature) bool {
+	return !sig.Variadic() && tupleMatches(s.params, sig.Params()) && tupleMatches(s.results, sig.Results())
+}
+
+func tupleMatches(want []typeRef, got *types.Tuple) bool {
+	if len(want) != got.Len() {
+		return false
+	}
+	for i, r := range want {
+		if !r.matches(got.At(i).Type()) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	byteSlice = types.NewSlice(types.Typ[types.Byte])
+	errorType = types.Universe.Lookup("error").Type()
+)
+
+// valueMethods is secret.Value's method set, by signature type. Used only
+// for a package that cannot see the type itself.
+var valueMethods = map[string]methodSig{
+	"Reveal":      {results: []typeRef{{t: byteSlice}}},
+	"Len":         {results: []typeRef{{t: types.Typ[types.Int]}}},
+	"Destroy":     {},
+	"String":      {results: []typeRef{{t: types.Typ[types.String]}}},
+	"Format":      {params: []typeRef{{pkg: "fmt", name: "State"}, {t: types.Typ[types.Rune]}}},
+	"MarshalJSON": {results: []typeRef{{t: byteSlice}, {t: errorType}}},
+	"LogValue":    {results: []typeRef{{pkg: "log/slog", name: "Value"}}},
 }
 
 // unsafeAccess reports unsafe.Pointer(x), reflect.ValueOf(x) and

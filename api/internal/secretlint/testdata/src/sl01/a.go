@@ -11,8 +11,7 @@ func (unrelated) Reveal() []byte { return nil }
 type other interface{ Reveal() string }
 
 // spelled is satisfied by secret.Value: []uint8 is []byte to the type
-// checker. Only the exact types.Implements path sees that; the by-name
-// fallback for packages that cannot see Value compares spellings.
+// checker.
 type spelled interface{ Reveal() []uint8 }
 
 type holder struct{ secret.Value }
@@ -40,6 +39,17 @@ func Calls(v secret.Value, r revealer, u unrelated, o other, h holder, sp spelle
 
 func Generic[T revealer](t T) []byte {
 	return t.Reveal() // want "SL01"
+}
+
+// byteSet's type set holds only types whose underlying type is []byte, so a
+// secret.Value can never be its T. The exact types.Implements path sees the
+// type term; the method-set fallback for packages that cannot see Value does
+// not, so this stays silent only when the package's own Value is found.
+func ByteSet[T interface {
+	~[]byte
+	Reveal() []byte
+}](t T) []byte {
+	return t.Reveal()
 }
 
 var held secret.Value
