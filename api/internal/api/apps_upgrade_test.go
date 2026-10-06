@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -49,10 +51,26 @@ func upgradeFixtureWith(t *testing.T, extra ...tileschema.BundleTile) (*apiFixtu
 		t.Fatalf("catalog store: %v", err)
 	}
 	f.srv.SetCatalogSync(cat, nil)
-	f.runner.Register(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned, nil))
-	f.runner.Register(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil, nil))
+	// The secret source main wires: the HKDF adapter, over a test seed.
+	seed, err := appsecret.NewSeed(bytes.Repeat([]byte{7}, appsecret.SeedLen), appsecret.DerivationVersion)
+	if err != nil {
+		t.Fatalf("app-secret seed: %v", err)
+	}
+	src, err := appsecret.NewHKDFSource(seed)
+	if err != nil {
+		t.Fatalf("app-secret source: %v", err)
+	}
+	must := func(w jobs.Workflow, err error) jobs.Workflow {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("workflow constructor refused: %v", err)
+		}
+		return w
+	}
+	f.runner.Register(must(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned, src)))
+	f.runner.Register(must(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil, src)))
 	stash := apps.NewComposeStash()
-	f.runner.Register(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash, nil))
+	f.runner.Register(must(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash, src)))
 	f.srv.SetComposeStash(stash)
 
 	// The volumes check every compose change's pull step makes first (#412);

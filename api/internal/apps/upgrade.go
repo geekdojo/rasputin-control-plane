@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -159,9 +158,15 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 // installed hash now matches the tile. Nothing is reverted automatically: new
 // containers may have started and migrated the data. Retrying is an ordinary
 // deploy; going back is the owner's explicit re-apply (RevertWorkflow).
-func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets *appsecret.Seed) jobs.Workflow {
+//
+// It refuses a nil secrets source, returning the zero Workflow.
+func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource) (jobs.Workflow, error) {
+	const kind = "app.upgrade"
+	if err := requireSecretSource(kind, secrets); err != nil {
+		return jobs.Workflow{}, err
+	}
 	return jobs.Workflow{
-		Kind: "app.upgrade",
+		Kind: kind,
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: upgradeLoad(store, inv, lookup)},
 			// A backstop, like push's: the real deadline is the tile's budget,
@@ -175,7 +180,7 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate L
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 		},
-	}
+	}, nil
 }
 
 // upgradeLoad loads the app and ends the job, successfully and having touched

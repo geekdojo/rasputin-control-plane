@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
@@ -90,55 +91,103 @@ func seedComposeApp(t *testing.T, id, compose string) (*Store, *inventory.Store)
 	return store, inv
 }
 
+// sourceCall is one ResolveCompose call, with the step that was running.
+type sourceCall struct {
+	step, appID, compose string
+}
+
+// recordingSource records every call to the source it wraps, labelled with
+// the step *step names when the call was made.
+type recordingSource struct {
+	inner SecretSource
+	step  *atomic.Value
+	mu    sync.Mutex
+	calls []sourceCall
+}
+
+func (r *recordingSource) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error) {
+	step, _ := r.step.Load().(string)
+	r.mu.Lock()
+	r.calls = append(r.calls, sourceCall{step: step, appID: appID, compose: compose})
+	r.mu.Unlock()
+	return r.inner.ResolveCompose(ctx, appID, compose)
+}
+
+// labelSteps wraps every step of w so that *step holds the running step's name
+// while its Do runs.
+func labelSteps(w jobs.Workflow, step *atomic.Value) jobs.Workflow {
+	steps := make([]jobs.WorkflowStep, len(w.Steps))
+	copy(steps, w.Steps)
+	for i := range steps {
+		name, do := steps[i].Name, steps[i].Do
+		steps[i].Do = func(sc *jobs.StepCtx) (json.RawMessage, error) {
+			step.Store(name)
+			defer step.Store("")
+			return do(sc)
+		}
+	}
+	w.Steps = steps
+	return w
+}
+
 // TC-825-03: on the real Runner, each workflow of the deploy family sends the
 // derived value in AppDeployCmd and nowhere else: the app row keeps the
 // placeholder, and neither the stored spec nor any step result carries the
 // value.
+//
+// TC-692-04: the secret source is called exactly once per job, during the step
+// named push, with the app's ID and the compose the row holds at push.
+//
+// TC-692-05: the derivation runs through the real HKDF adapter, and the
+// expected value comes from the seed itself, independently of it.
 func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
-	seed := wiringSeed(t)
 
 	for _, tc := range []struct {
 		kind string
 		// setup seeds the app and returns the workflow, the spec, the
 		// prepare hook (or nil) and the compose the row holds afterwards.
-		setup func(t *testing.T, nc *nats.Conn) (*Store, jobs.Workflow, any, func(string) error, string)
+		setup func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string)
 	}{
-		{"app.deploy", func(t *testing.T, nc *nats.Conn) (*Store, jobs.Workflow, any, func(string) error, string) {
+		{"app.deploy", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
-			return store, DeployWorkflow(store, inv, nc, nil, seed), DeploySpec{AppID: id}, nil, secretComposeV1
+			return store, wf(t)(DeployWorkflow(store, inv, nc, nil, src)), DeploySpec{AppID: id}, nil, secretComposeV1
 		}},
-		{"app.upgrade", func(t *testing.T, nc *nats.Conn) (*Store, jobs.Workflow, any, func(string) error, string) {
+		{"app.upgrade", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedUpgradeApp(t, id)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return store, UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), seed), ComposeChangeSpec{AppID: id}, nil, tile
+			return store, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src)), ComposeChangeSpec{AppID: id}, nil, tile
 		}},
-		{"app.edit", func(t *testing.T, nc *nats.Conn) (*Store, jobs.Workflow, any, func(string) error, string) {
+		{"app.edit", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, customV1)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			stash := NewComposeStash()
 			put := func(jobID string) error { return stash.Put(jobID, secretComposeV2) }
-			return store, EditWorkflow(store, inv, nc, nil, stash, seed), ComposeChangeSpec{AppID: id}, put, secretComposeV2
+			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src)), ComposeChangeSpec{AppID: id}, put, secretComposeV2
 		}},
-		{"app.revert", func(t *testing.T, nc *nats.Conn) (*Store, jobs.Workflow, any, func(string) error, string) {
+		{"app.revert", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
 			if err := store.EditCompose(context.Background(), id, ComposeHash(secretComposeV1), customV2, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
-			return store, RevertWorkflow(store, inv, nc, nil, seed), RevertSpec{AppID: id, ComposeSHA256: ComposeHash(secretComposeV1)}, nil, secretComposeV1
+			return store, wf(t)(RevertWorkflow(store, inv, nc, nil, src)), RevertSpec{AppID: id, ComposeSHA256: ComposeHash(secretComposeV1)}, nil, secretComposeV1
 		}},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			ctx := context.Background()
 			nc := startNATS(t)
 			deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
-			store, w, spec, prepare, rowCompose := tc.setup(t, nc)
+			inner, derived := wiringSource(t)
+			var step atomic.Value
+			step.Store("")
+			src := &recordingSource{inner: inner, step: &step}
+			store, w, spec, prepare, rowCompose := tc.setup(t, nc, src)
 			if w.Kind != tc.kind {
 				t.Fatalf("workflow kind %q, want %q", w.Kind, tc.kind)
 			}
-			runner, jst := realRunner(t, nc, w)
+			runner, jst := realRunner(t, nc, labelSteps(w, &step))
 			if prepare == nil {
 				prepare = func(string) error { return nil }
 			}
@@ -151,11 +200,17 @@ func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 				t.Fatalf("job ended %+v", got)
 			}
 
-			v, err := seed.Derive(id, "db-password", appsecret.InitialVersion)
-			if err != nil {
-				t.Fatal(err)
+			src.mu.Lock()
+			calls := append([]sourceCall(nil), src.calls...)
+			src.mu.Unlock()
+			if len(calls) != 1 {
+				t.Fatalf("the secret source was called %d time(s), want exactly 1: %+v", len(calls), calls)
 			}
-			want := string(v.Reveal())
+			if c := calls[0]; c.step != "push" || c.appID != id || c.compose != rowCompose {
+				t.Fatalf("the secret source was called during step %q with (%q, %q), want step push with (%q, %q)", c.step, c.appID, c.compose, id, rowCompose)
+			}
+
+			want := derived(id, "db-password")
 			cmd := receiveWithin(t, deploys, "the agent never received the deploy command")
 			if strings.Contains(cmd.ComposeYAML, "${secret:") || !strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: "+want) {
 				t.Fatalf("the deploy command does not carry the derived value in place of the token:\n%s", cmd.ComposeYAML)
@@ -172,8 +227,16 @@ func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 	}
 }
 
-// TC-825-04: a compose whose token cannot be resolved fails the push step with
-// Resolve's error before anything is announced or sent.
+// failingSource refuses every compose with err and the zero Value.
+type failingSource struct{ err error }
+
+func (f failingSource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
+	return secret.Value{}, f.err
+}
+
+// TC-825-04, TC-692-06: a source that refuses fails the push step, with an
+// error that wraps the source's and names the app, before anything is
+// announced or sent.
 func TestPushStep_RefusedResolvePublishesNothing(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
@@ -194,10 +257,13 @@ func TestPushStep_RefusedResolvePublishesNothing(t *testing.T) {
 		t.Cleanup(func() { _ = sub.Unsubscribe() })
 	}
 
-	_, err = deployPush(store, inv, nc, nil)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
-	_, resolveErr := appsecret.Resolve(secretCompose, testAppID, nil, appsecret.InitialVersion)
-	if err == nil || resolveErr == nil || err.Error() != resolveErr.Error() {
-		t.Fatalf("push step error = %v, want Resolve's own error %v", err, resolveErr)
+	sentinel := errors.New("test source: refused")
+	_, err = deployPush(store, inv, nc, failingSource{err: sentinel})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("push step error = %v, want one wrapping the source's %v", err, sentinel)
+	}
+	if !strings.Contains(err.Error(), "apps: resolve compose for "+testAppID) {
+		t.Fatalf("push step error %q does not name the app", err)
 	}
 	if err := nc.Flush(); err != nil {
 		t.Fatal(err)
