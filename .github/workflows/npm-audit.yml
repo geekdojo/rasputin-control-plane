@@ -62,5 +62,12 @@ jobs:
           # release.yml. No `cache:` — the audit installs nothing.
           node-version: "22"
 
+      # The gate's own tests, before the real audit. The live tree only shows
+      # whatever fixAvailable shapes today's advisories happen to have, so the
+      # labelling of each shape is exercised here against fixture reports.
+      # No network: a stub npm prints the fixtures.
+      - name: tests for the gate itself
+        run: ./scripts/test-npm-audit.sh
+
       - name: gate
         run: ./scripts/npm-audit.sh --gate
