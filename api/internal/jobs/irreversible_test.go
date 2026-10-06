@@ -39,7 +39,7 @@ func TestRunner_Irreversible_NotRetriedOnFailure(t *testing.T) {
 		}},
 	})
 
-	j, err := r.Submit(context.Background(), "test.irreversible.fail", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.irreversible.fail", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestRunner_NormalStep_StillRetriesPerRetries(t *testing.T) {
 		}},
 	})
 
-	j, err := r.Submit(context.Background(), "test.reversible.retries", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.reversible.retries", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

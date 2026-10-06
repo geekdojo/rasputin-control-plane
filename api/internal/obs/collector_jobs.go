@@ -351,8 +351,7 @@ func collectorConverge(d CollectorReconcileDeps) jobs.DoFn {
 				w := wants[nodeID]
 				body.CollectorKey, body.TrustFingerprint = w.key, w.trust
 			}
-			spec, _ := json.Marshal(body)
-			if _, err := d.Runner.Submit(sc.Ctx, kind, spec, "obs-collectors-reconcile"); err != nil {
+			if _, err := d.Runner.Submit(sc.Ctx, kind, body, "obs-collectors-reconcile"); err != nil {
 				sc.Log("warn", fmt.Sprintf("converge: submit %s for %s: %v", kind, nodeID, err))
 				act.skipped["submit_error"]++
 				return false

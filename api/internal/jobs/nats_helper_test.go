@@ -80,7 +80,7 @@ func TestRunner_Submit_RunsWorkflowToSuccess(t *testing.T) {
 	}
 	defer func() { _ = wildcardSub.Unsubscribe() }()
 
-	j, err := r.Submit(context.Background(), "test.sync.ok", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.sync.ok", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestRunner_Submit_StopWorkflowEndsEarlySuccess(t *testing.T) {
 		},
 	})
 
-	j, err := r.Submit(context.Background(), "test.stop.early", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.stop.early", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestRunner_Submit_StepFailureMarksJobFailed(t *testing.T) {
 		},
 	})
 
-	j, err := r.Submit(context.Background(), "test.fail", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.fail", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestRunner_Submit_StepSucceedsOnRetry(t *testing.T) {
 	})
 
 	start := time.Now()
-	j, err := r.Submit(context.Background(), "test.flaky", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(context.Background(), "test.flaky", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestRunner_SubmitChild_RunsWithParent(t *testing.T) {
 		Steps: []WorkflowStep{{Name: "noop", Timeout: time.Second, Do: func(sc *StepCtx) (json.RawMessage, error) { return nil, nil }}},
 	})
 
-	child, err := r.SubmitChild(context.Background(), "test.child", json.RawMessage(`{}`), "test", "parent-xyz")
+	child, err := r.SubmitChild(context.Background(), "test.child", nil, "test", "parent-xyz")
 	if err != nil {
 		t.Fatalf("SubmitChild: %v", err)
 	}

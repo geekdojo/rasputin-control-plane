@@ -186,8 +186,7 @@ type jobResult struct {
 
 func (r *rig) run(verb proto.BMCPowerVerb) jobResult {
 	r.t.Helper()
-	spec, _ := json.Marshal(map[string]any{"targetNodeId": rigTarget, "verb": verb})
-	j, err := r.runner.Submit(context.Background(), "bmc.power", spec, "test")
+	j, err := r.runner.Submit(context.Background(), "bmc.power", Spec{TargetNodeID: rigTarget, Verb: verb}, "test")
 	if err != nil {
 		r.t.Fatalf("Submit: %v", err)
 	}
@@ -405,8 +404,7 @@ func TestPowerJob_TheBMCHostsOwnFailureIsTheJobsError(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	spec, _ := json.Marshal(map[string]any{"targetNodeId": rigTarget, "verb": "reset"})
-	j, err := runner.Submit(context.Background(), "bmc.power", spec, "test")
+	j, err := runner.Submit(context.Background(), "bmc.power", Spec{TargetNodeID: rigTarget, Verb: "reset"}, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

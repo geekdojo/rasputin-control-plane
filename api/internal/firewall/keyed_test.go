@@ -15,7 +15,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -110,7 +109,6 @@ type harness struct {
 	inv      *inventory.Store
 	jobStore *jobs.Store
 	runner   *jobs.Runner
-	logs     *ledgertest.Log
 
 	applies atomic.Int32
 	lastCmd atomic.Pointer[[]byte]
@@ -123,7 +121,7 @@ type harness struct {
 // between the Service and the real store.
 func newHarness(t *testing.T, intents []*Intent, wrap func(*Store) stateStore) *harness {
 	t.Helper()
-	h := &harness{ctx: context.Background(), nc: startNATS(t), logs: ledgertest.CaptureLog(t)}
+	h := &harness{ctx: context.Background(), nc: startNATS(t)}
 	dbPath := filepath.Join(t.TempDir(), "rasputin.db")
 	store, err := OpenStore(h.ctx, dbPath)
 	if err != nil {
@@ -202,20 +200,44 @@ func (h *harness) agentReports(t *testing.T, state, hash string) {
 	h.reply.Store(&s)
 }
 
-// ran is one finished job and its ledger.
+// ran is one finished job: its steps, its step logs and the change events it
+// published, and the same surfaces as plain text for the absence checks.
 type ran struct {
 	job     *jobs.Job
 	steps   map[string]*jobs.JobStep
 	logs    []proto.LogEventData
 	changes []proto.FirewallChangeEvt
-	ledger  *ledgertest.Surfaces
+
+	specText      string // the stored spec and the job error
+	stepText      string // every step result and step error
+	eventText     string // every job event's data, the step logs included
+	publishedText string // every published FirewallChangeEvt, as sent
 }
 
-// run submits kind, waits for it, and collects its ledger and the change
-// events it published.
+// assertNoSurfaceCarries fails if the stored spec or job error, a step result
+// or error, a job event (the step logs included) or a published change event
+// holds value. The hashes it is used for are plain strings, so neither the
+// secret.Value type nor the refusal at submit keeps them out of the ledger
+// (geekdojo/geekdojo-brain#827).
+func (r *ran) assertNoSurfaceCarries(t *testing.T, what, value string) {
+	t.Helper()
+	for surface, text := range map[string]string{
+		"the stored spec or job error":  r.specText,
+		"a step result or error":        r.stepText,
+		"a job event or step log":       r.eventText,
+		"a published FirewallChangeEvt": r.publishedText,
+	} {
+		if strings.Contains(text, value) {
+			t.Errorf("%s carries %s", surface, what)
+		}
+	}
+}
+
+// run submits kind, waits for it, and collects its steps, its step logs and
+// the change events it published.
 func (h *harness) run(t *testing.T, kind string) *ran {
 	t.Helper()
-	j, err := h.runner.Submit(h.ctx, kind, json.RawMessage(`{}`), "test")
+	j, err := h.runner.Submit(h.ctx, kind, nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -224,22 +246,21 @@ func (h *harness) run(t *testing.T, kind string) *ran {
 	if err != nil || done == nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	r := &ran{job: done, steps: map[string]*jobs.JobStep{},
-		ledger: &ledgertest.Surfaces{Spec: string(done.Spec) + done.Error, Log: h.logs.String()}}
+	r := &ran{job: done, steps: map[string]*jobs.JobStep{}, specText: string(done.Spec) + done.Error}
 	steps, err := h.jobStore.ListSteps(h.ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
 	for _, st := range steps {
 		r.steps[st.Name] = st
-		r.ledger.Steps += string(st.Result) + st.Error
+		r.stepText += string(st.Result) + st.Error
 	}
 	events, err := h.jobStore.ListEvents(h.ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
-		r.ledger.Events += string(ev.Data)
+		r.eventText += string(ev.Data)
 		if ev.Type == string(proto.JobLog) {
 			var l proto.LogEventData
 			_ = json.Unmarshal(ev.Data, &l)
@@ -262,7 +283,7 @@ func (h *harness) run(t *testing.T, kind string) *ran {
 		var ev proto.FirewallChangeEvt
 		_ = json.Unmarshal(m.Data, &ev)
 		r.changes = append(r.changes, ev)
-		r.ledger.Events += string(m.Data)
+		r.publishedText += string(m.Data)
 	}
 	return r
 }
@@ -341,8 +362,8 @@ func TestNewService_RefusesNilCollaborators(t *testing.T) {
 // carries the stored PPPoE secret, the State bytes are the previous release's,
 // and IntentHash is keyed; the compile input holds the secret only as a
 // secret.Value; the step results hold only the keyed fingerprint and the
-// count or node; and no ledger surface holds the plaintext or the unkeyed
-// SHA-256 of the sent state, which the stub agent acks with.
+// count or node; and no ledger surface or published change event holds the
+// unkeyed SHA-256 of the sent state, which the stub agent acks with.
 func TestApplyWorkflow_PPPoEKeyedAndBytesUnchanged(t *testing.T) {
 	h := newHarness(t, vectorIntents(pppoeSecret), nil)
 
@@ -396,10 +417,10 @@ func TestApplyWorkflow_PPPoEKeyedAndBytesUnchanged(t *testing.T) {
 		}
 	}
 
-	secretsList := ledgertest.Secrets("the PPPoE password", pppoeSecret)
-	r.ledger.AssertPresent(t, "the apply command the agent received", string(*got), secretsList)
-	r.ledger.AssertAbsent(t, append(secretsList,
-		ledgertest.Secrets("the unkeyed SHA-256 of the sent state", vectorLegacyHash)...))
+	if !strings.Contains(string(*got), pppoeSecret) {
+		t.Error("the apply command the agent received does not carry the PPPoE password")
+	}
+	r.assertNoSurfaceCarries(t, "the unkeyed SHA-256 of the sent state", vectorLegacyHash)
 
 	// The allowlist rows for the two new Reveal sites and the rewritten
 	// ConfigHash reason cite this change (F-827-05).
@@ -615,9 +636,11 @@ func TestReconcile_AdoptsAnInSyncLegacyHash(t *testing.T) {
 	if adopted != 1 {
 		t.Errorf("adoption INFO logs = %d (%v), want 1", adopted, infos)
 	}
-	legacy := ledgertest.Secrets("the pre-upgrade hash", vectorLegacyHash, "its prefix", vectorLegacyHash[:12])
-	r.ledger.AssertPresent(t, "the stored row before the reconcile", before, legacy)
-	r.ledger.AssertAbsent(t, legacy)
+	if !strings.Contains(before, vectorLegacyHash) {
+		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
+	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 }
 
 // TC-827-17: a stored pre-upgrade hash that differs from the agent's own is
@@ -653,9 +676,11 @@ func TestReconcile_ForgetsADriftedLegacyHash(t *testing.T) {
 	if forgot != 1 {
 		t.Errorf("forget WARN logs = %d (%v), want 1", forgot, warns)
 	}
-	legacy := ledgertest.Secrets("the pre-upgrade hash", vectorLegacyHash, "its prefix", vectorLegacyHash[:12])
-	r.ledger.AssertPresent(t, "the stored row before the reconcile", before, legacy)
-	r.ledger.AssertAbsent(t, legacy)
+	if !strings.Contains(before, vectorLegacyHash) {
+		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
+	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 }
 
 // TC-827-18 (F-827-01): a never-applied node (intent hash "", no last
@@ -716,9 +741,11 @@ func TestReconcile_AgentReadFailureWithALegacyHash(t *testing.T) {
 	if len(r.changes) != 0 {
 		t.Errorf("published %+v, want nothing", r.changes)
 	}
-	legacy := ledgertest.Secrets("the pre-upgrade hash", vectorLegacyHash, "its prefix", vectorLegacyHash[:12])
-	r.ledger.AssertPresent(t, "the stored row before the reconcile", before, legacy)
-	r.ledger.AssertAbsent(t, legacy)
+	if !strings.Contains(before, vectorLegacyHash) {
+		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
+	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 
 	h.agentReports(t, vectorState, vectorLegacyHash)
 	if r := h.run(t, "firewall.reconcile"); r.job.Status != jobs.StatusSucceeded {

@@ -943,12 +943,8 @@ func (f *fleet) run(spec proto.SystemUpdateSpec) fleetRun {
 		f.t.Fatalf("flush: %v", err)
 	}
 
-	body, err := json.Marshal(spec)
-	if err != nil {
-		f.t.Fatalf("marshal spec: %v", err)
-	}
 	started := time.Now()
-	job, err := f.runner.Submit(ctx, "system.update", body, "fleetsim")
+	job, err := f.runner.Submit(ctx, "system.update", spec, "fleetsim")
 	if err != nil {
 		f.t.Fatalf("submit system.update: %v", err)
 	}

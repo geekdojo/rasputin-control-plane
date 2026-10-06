@@ -199,7 +199,7 @@ func TestBMC_RefusesANilFingerprinter(t *testing.T) {
 	before := f.nc.NumSubscriptions()
 	stop, err := StartReconcile(f.nc, newSetupStore(t),
 		func(context.Context) (bool, error) { return false, nil },
-		func(context.Context, string, json.RawMessage, string) error { return nil },
+		func(context.Context, string, any, string) error { return nil },
 		slog.New(slog.DiscardHandler), nil)
 	if err == nil || stop != nil {
 		if stop != nil {
@@ -235,12 +235,16 @@ func TestReconcile_UpgradeRepushesOnceAndLogsNoHash(t *testing.T) {
 	r := &reconciler{
 		st:   st,
 		busy: func(context.Context) (bool, error) { return false, nil },
-		submit: func(_ context.Context, kind string, spec json.RawMessage, _ string) error {
+		submit: func(_ context.Context, kind string, spec any, _ string) error {
 			if kind != "bmc.configure" {
 				t.Errorf("submitted %q", kind)
 			}
+			raw, err := json.Marshal(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
 			var cs ConfigureSpec
-			if err := json.Unmarshal(spec, &cs); err != nil {
+			if err := json.Unmarshal(raw, &cs); err != nil {
 				t.Fatal(err)
 			}
 			specs = append(specs, cs)
@@ -309,7 +313,7 @@ func TestReconcile_UnreadableCredentialSubmitsNothingAndLogs(t *testing.T) {
 			r := &reconciler{
 				st:     st,
 				busy:   func(context.Context) (bool, error) { return false, nil },
-				submit: func(context.Context, string, json.RawMessage, string) error { submitted++; return nil },
+				submit: func(context.Context, string, any, string) error { submitted++; return nil },
 				log:    logger,
 				mac:    credmactest.Key(t),
 			}
@@ -339,7 +343,7 @@ func TestStartReconcile_RefusesANilLogger(t *testing.T) {
 	f := newFixture(t)
 	stop, err := StartReconcile(f.nc, newSetupStore(t),
 		func(context.Context) (bool, error) { return false, nil },
-		func(context.Context, string, json.RawMessage, string) error { return nil }, nil, credmactest.Key(t))
+		func(context.Context, string, any, string) error { return nil }, nil, credmactest.Key(t))
 	if err == nil {
 		stop()
 		t.Fatal("StartReconcile accepted a nil logger")

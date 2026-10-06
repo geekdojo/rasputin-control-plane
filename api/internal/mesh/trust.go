@@ -320,7 +320,7 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 			// Re-delivery re-runs `tailscale up --reset`; name the routes the
 			// node advertises now so the reset keeps them.
 			routes, _ := ReenrolRoutes(sc.Ctx, svc, n.ID, d, nil)
-			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes})
+			spec := EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes}
 			if _, err := runner.Submit(sc.Ctx, "mesh.enroll_node", spec, "converge-trust"); err != nil {
 				sc.Log("warn", fmt.Sprintf("trust: submit re-delivery for %s: %v", n.ID, err))
 				res.Skipped["submit_error"]++

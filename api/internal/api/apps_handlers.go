@@ -379,8 +379,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	spec, _ := json.Marshal(apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named})
-	j, err := s.runner.Submit(r.Context(), "app.delete", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "app.delete", apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named}, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
@@ -439,8 +438,7 @@ func (s *Server) checkDeleteVolumes(w http.ResponseWriter, r *http.Request, app 
 // POST /api/apps/{id}/deploy
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	spec, _ := json.Marshal(map[string]string{"appId": id})
-	j, err := s.runner.Submit(r.Context(), "app.deploy", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "app.deploy", map[string]string{"appId": id}, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
@@ -766,11 +764,6 @@ func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *a
 // that must not be in the spec is where the job will look for it by the time
 // its first step runs.
 func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind string, spec any, stash func(jobID string) error) {
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	var stashedFor string
 	prepare := func(jobID string) error {
 		if stash == nil {
@@ -782,7 +775,7 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 		stashedFor = jobID
 		return nil
 	}
-	j, err := s.runner.SubmitPrepared(r.Context(), kind, raw, creator(r), prepare)
+	j, err := s.runner.SubmitPrepared(r.Context(), kind, spec, creator(r), prepare)
 	if err != nil {
 		// No job will run under that id, so no OnTerminal will discard what
 		// was held for it.
@@ -798,8 +791,7 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 // POST /api/apps/{id}/stop
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	spec, _ := json.Marshal(map[string]string{"appId": id})
-	j, err := s.runner.Submit(r.Context(), "app.stop", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "app.stop", map[string]string{"appId": id}, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

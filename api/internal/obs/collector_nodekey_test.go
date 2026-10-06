@@ -431,3 +431,47 @@ func TestCollectorConverge_LeavesNodesWithUnreadableKeysAlone(t *testing.T) {
 		t.Errorf("the global log was written: %q", global.String())
 	}
 }
+
+// A deploy the runner refuses (here no deploy workflow is registered) is not
+// reported as deployed: it is counted under submit_error and logged as one
+// warn feed line naming the kind and the node.
+func TestCollectorConverge_CountsARefusedSubmit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	inv := admittedStoreAt(t, filepath.Join(dir, "inv.db"), "c01")
+	js, err := jobs.OpenStore(ctx, filepath.Join(dir, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = js.Close() })
+	d := CollectorReconcileDeps{
+		Inv: inv, Jobs: js, Runner: jobs.NewRunner(js, nil),
+		Deploy: CollectorDeployDeps{Inv: inv, MeshCAPEM: testMeshCA},
+	}
+	var feed []string
+	out, err := collectorConverge(d)(&jobs.StepCtx{Ctx: ctx, JobID: "j", Log: func(level, msg string) {
+		feed = append(feed, level+": "+msg)
+	}})
+	if err != nil {
+		t.Fatalf("converge: %v", err)
+	}
+	var res struct {
+		Deployed []string       `json:"deployed"`
+		Skipped  map[string]int `json:"skipped"`
+	}
+	if err := json.Unmarshal(out, &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Deployed) != 0 || res.Skipped["submit_error"] != 1 {
+		t.Errorf("result = %+v, want nothing deployed and submit_error:1", res)
+	}
+	n := 0
+	for _, l := range feed {
+		if strings.HasPrefix(l, "warn: converge: submit "+CollectorDeployKind+" for c01: ") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("warn lines for the refused submit = %d, want 1; feed:\n%s", n, strings.Join(feed, "\n"))
+	}
+}

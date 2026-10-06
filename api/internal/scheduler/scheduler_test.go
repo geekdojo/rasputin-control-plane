@@ -1,9 +1,12 @@
 package scheduler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -165,14 +168,55 @@ func TestStop_TerminatesEntryGoroutines(t *testing.T) {
 // fire / submit-error path
 // ============================================================================
 
+// lockedBuffer is a log sink safe for writers on other goroutines.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureLog sends the standard logger to a buffer for the test.
+func captureLog(t *testing.T) *lockedBuffer {
+	t.Helper()
+	var b lockedBuffer
+	prev := log.Writer()
+	log.SetOutput(&b)
+	t.Cleanup(func() { log.SetOutput(prev) })
+	return &b
+}
+
+// A refused submit is logged with the kind and the reason, and a successful
+// one logs no submit line.
 func TestFire_UnknownKindLogged(t *testing.T) {
 	nc := embeddedNATS(t)
 	r := newRunner(t, nc)
+	var fired int64
+	r.Register(countingWorkflow("known.kind", &fired))
 	s := New(r, nil)
-	// Unknown kind: Submit returns an error which fire just logs.
-	// We're verifying it doesn't panic and the function returns.
+	logs := captureLog(t)
 	ctx := context.Background()
+
 	s.fire(ctx, "unknown.kind", json.RawMessage(`{}`), "tester")
+	if got := logs.String(); !strings.Contains(got, "scheduler: submit unknown.kind: ") {
+		t.Errorf("log = %q, want the refused submit logged", got)
+	}
+
+	s.fire(ctx, "known.kind", json.RawMessage(`{}`), "tester")
+	waitFor(t, &fired, 1, 2*time.Second)
+	if got := logs.String(); strings.Contains(got, "scheduler: submit known.kind") {
+		t.Errorf("log = %q, want no submit line for a submit that succeeded", got)
+	}
 }
 
 // ============================================================================
@@ -308,4 +352,46 @@ func TestNoEntries_StartStopClean(t *testing.T) {
 		s.Stop()
 	}()
 	wg.Wait()
+}
+
+// ============================================================================
+// fire: the raw entry point (geekdojo/geekdojo-brain#825)
+// ============================================================================
+
+// TC-825-21: an entry's spec is raw JSON by nature, so fire submits it through
+// SubmitRawSpec. An empty spec is stored as {} and a non-empty one as given,
+// with no ErrRawSpec raised.
+func TestFire_SubmitsTheEntrySpecThroughTheRawEntryPoint(t *testing.T) {
+	nc := embeddedNATS(t)
+	ctx := context.Background()
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("jobs.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	r := jobs.NewRunner(store, nc)
+	var fired int64
+	r.Register(countingWorkflow("raw.empty", &fired))
+	r.Register(countingWorkflow("raw.given", &fired))
+	s := New(r, nil)
+
+	s.fire(ctx, "raw.empty", nil, "tester")
+	s.fire(ctx, "raw.given", json.RawMessage(`{"a": [1, 2]}`), "tester")
+	r.Wait()
+
+	for kind, want := range map[string]string{"raw.empty": `{}`, "raw.given": `{"a": [1, 2]}`} {
+		js, err := store.ListJobsByKind(ctx, kind, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(js) != 1 {
+			t.Fatalf("%s: %d jobs, want 1 (a refused submit is only logged, so a missing job is the ErrRawSpec symptom)", kind, len(js))
+		}
+		if string(js[0].Spec) != want {
+			t.Errorf("%s: stored spec %s, want %s", kind, js[0].Spec, want)
+		}
+	}
+	if atomic.LoadInt64(&fired) != 2 {
+		t.Errorf("%d jobs ran, want 2", fired)
+	}
 }

@@ -222,7 +222,7 @@ func dnsForwardReconcile(store *Store, runner *jobs.Runner, cfg DNSForwardConfig
 		// firewall is being idled anyway and apply is gated off, so skip it.
 		applied := false
 		if want && runner != nil {
-			if _, err := runner.Submit(sc.Ctx, "firewall.apply", json.RawMessage(`{}`), "dns-forward-auto"); err != nil {
+			if _, err := runner.Submit(sc.Ctx, "firewall.apply", nil, "dns-forward-auto"); err != nil {
 				sc.Log("warn", "dns_forward changed but auto-apply submit failed: "+err.Error())
 			} else {
 				applied = true

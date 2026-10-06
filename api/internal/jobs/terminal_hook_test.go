@@ -64,7 +64,7 @@ func TestOnTerminal_FiresOnSuccessAndFailure(t *testing.T) {
 				OnTerminal: rec.hook,
 			})
 
-			j, err := r.Submit(ctx, "k", json.RawMessage(`{}`), "test")
+			j, err := r.Submit(ctx, "k", nil, "test")
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
@@ -155,7 +155,7 @@ func TestOnTerminal_AbsentHookIsHarmless(t *testing.T) {
 		Do: func(*StepCtx) (json.RawMessage, error) { return nil, nil },
 	}}})
 
-	j, err := r.Submit(ctx, "k", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(ctx, "k", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestOnTerminal_PanicDoesNotEscape(t *testing.T) {
 		OnTerminal: func(context.Context, string, bool, string) { panic("hook exploded") },
 	})
 
-	j, err := r.Submit(ctx, "k", json.RawMessage(`{}`), "test")
+	j, err := r.Submit(ctx, "k", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

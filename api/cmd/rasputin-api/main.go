@@ -738,7 +738,7 @@ func main() {
 		Inv:     invStore,
 	}))
 	submitDNSForward := func(reason string) {
-		if _, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), reason); err != nil {
+		if _, err := runner.Submit(ctx, "firewall.dns_forward", nil, reason); err != nil {
 			log.Printf("rasputin-api: dns_forward submit (%s): %v", reason, err)
 		}
 	}
@@ -1056,8 +1056,7 @@ func main() {
 		// converge_enrollment step retries any node this misses (e.g. one that
 		// registered before Headscale finished bring-up), every reconcile tick.
 		if slices.Contains(mesh.AutoEnrollRoles, n.Role) {
-			spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: n.ID})
-			if _, err := runner.Submit(hookCtx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
+			if _, err := runner.Submit(hookCtx, "mesh.enroll_node", mesh.EnrollSpec{NodeID: n.ID}, "auto-enroll"); err != nil {
 				log.Printf("rasputin-api: auto mesh-enroll %s: %v", n.ID, err)
 			} else {
 				log.Printf("rasputin-api: auto-enrolling %s (%s) into the mesh", n.ID, n.Role)
@@ -1078,7 +1077,7 @@ func main() {
 	// And a node that registers without the cluster's console root password
 	// is pushed it (#587) — including one enrolling for the first time,
 	// which is what "nodes that join later receive it" means in practice.
-	consoleConverger := console.NewConverger(consoleStore, func(hookCtx context.Context, kind string, spec json.RawMessage, createdBy string) error {
+	consoleConverger := console.NewConverger(consoleStore, func(hookCtx context.Context, kind string, spec any, createdBy string) error {
 		_, err := runner.Submit(hookCtx, kind, spec, createdBy)
 		return err
 	})
@@ -1457,7 +1456,7 @@ func main() {
 			}
 		}
 		return false, nil
-	}, func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error {
+	}, func(ctx context.Context, kind string, spec any, createdBy string) error {
 		_, serr := runner.Submit(ctx, kind, spec, createdBy)
 		return serr
 	}, logger, mac)

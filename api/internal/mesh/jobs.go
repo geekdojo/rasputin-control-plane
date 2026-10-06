@@ -465,7 +465,7 @@ func reconcileConvergeEnrollment(svc *Service, inv *inventory.Store, jstore *job
 			if len(routes) > 0 {
 				sc.Log("info", fmt.Sprintf("converge: %s re-enrols advertising %s (from %s)", n.ID, strings.Join(routes, ", "), source))
 			}
-			spec, _ := json.Marshal(EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes})
+			spec := EnrollSpec{NodeID: n.ID, AdvertiseRoutes: routes}
 			if _, err := runner.Submit(sc.Ctx, "mesh.enroll_node", spec, "auto-enroll"); err != nil {
 				// A single bad submit shouldn't fail the whole reconcile.
 				sc.Log("warn", fmt.Sprintf("converge: submit enroll for %s: %v", n.ID, err))

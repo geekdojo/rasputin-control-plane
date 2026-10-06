@@ -661,10 +661,10 @@ func liveChildDriver(jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn) c
 			// whole of Decision 11 at the point it matters. On a mixed tier
 			// consecutive children are handed different artifacts of the same
 			// release.
-			childSpec, _ := json.Marshal(map[string]string{
+			childSpec := map[string]string{
 				"nodeId":       t.NodeID,
 				"bundleSha256": t.BundleSHA256,
-			})
+			}
 			child, err := runner.SubmitChild(sc.Ctx, "node.update", childSpec, "system.update", sc.JobID)
 			if err != nil {
 				return "", err

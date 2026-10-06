@@ -248,7 +248,7 @@ func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
 	submitted := make(chan string, 1)
 	stop, err := StartReconcile(f.nc, st,
 		func(context.Context) (bool, error) { return false, nil },
-		func(_ context.Context, kind string, _ json.RawMessage, _ string) error {
+		func(_ context.Context, kind string, _ any, _ string) error {
 			submitted <- kind
 			return nil
 		}, slog.New(slog.DiscardHandler), credmactest.Key(t))

@@ -212,7 +212,7 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 
 // POST /api/firewall/apply — kicks off a firewall.apply job and returns it.
 func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "firewall.apply", json.RawMessage("{}"), creator(r))
+	j, err := s.runner.Submit(r.Context(), "firewall.apply", nil, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
@@ -222,7 +222,7 @@ func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/firewall/reconcile — kicks off a firewall.reconcile job.
 func (s *Server) handleReconcileFirewall(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "firewall.reconcile", json.RawMessage("{}"), creator(r))
+	j, err := s.runner.Submit(r.Context(), "firewall.reconcile", nil, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

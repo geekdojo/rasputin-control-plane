@@ -332,7 +332,7 @@ func TestDNSForwardWorkflow_BoundedRetries(t *testing.T) {
 			}
 			runner.Register(wf)
 
-			j, err := runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), "test")
+			j, err := runner.Submit(ctx, "firewall.dns_forward", nil, "test")
 			if err != nil {
 				t.Fatal(err)
 			}

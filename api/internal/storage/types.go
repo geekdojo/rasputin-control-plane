@@ -321,10 +321,11 @@ func ValidateClaim(spec ClaimSpec, key *ArchiveKey) error {
 	return err
 }
 
-// claimBody returns the spec as it is persisted: the key referred to by its id.
-func claimBody(spec ClaimSpec, key *ArchiveKey) (json.RawMessage, error) {
+// claimBody returns the spec as it is persisted, the key referred to by its
+// id, after checking it as ParseClaimSpec will read it back.
+func claimBody(spec ClaimSpec, key *ArchiveKey) (ClaimSpec, error) {
 	if err := key.validate(); err != nil {
-		return nil, err
+		return ClaimSpec{}, err
 	}
 	spec.ArchiveKeyID = ""
 	if key.present() {
@@ -332,12 +333,12 @@ func claimBody(spec ClaimSpec, key *ArchiveKey) (json.RawMessage, error) {
 	}
 	body, err := json.Marshal(spec)
 	if err != nil {
-		return nil, err
+		return ClaimSpec{}, err
 	}
 	if _, err := ParseClaimSpec(body); err != nil {
-		return nil, err
+		return ClaimSpec{}, err
 	}
-	return body, nil
+	return spec, nil
 }
 
 // BackupTarget is one row of the backup_targets ledger: an attempt to claim a

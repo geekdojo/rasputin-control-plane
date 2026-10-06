@@ -154,11 +154,7 @@ func (s *Server) handlePushConsoleRootPassword(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) submitConsolePush(r *http.Request, spec console.PushSpec) (string, error) {
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		return "", err
-	}
-	j, err := s.runner.Submit(r.Context(), console.PushKind, raw, creator(r))
+	j, err := s.runner.Submit(r.Context(), console.PushKind, spec, creator(r))
 	if err != nil {
 		return "", err
 	}

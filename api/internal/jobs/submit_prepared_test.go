@@ -32,7 +32,7 @@ func TestRunner_SubmitPrepared_PreparesBeforeTheFirstStepRuns(t *testing.T) {
 	})
 
 	var preparedFor string
-	j, err := r.SubmitPrepared(context.Background(), "test.prepared", json.RawMessage(`{}`), "test", func(jobID string) error {
+	j, err := r.SubmitPrepared(context.Background(), "test.prepared", nil, "test", func(jobID string) error {
 		// The job must not be recorded yet: a job that exists can be run.
 		if got, _ := store.GetJob(context.Background(), jobID); got != nil {
 			t.Errorf("job %s was recorded before prepare ran", jobID)

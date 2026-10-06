@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,8 +52,9 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 		t.Fatalf("ListIntents: %v (%d)", err, len(list))
 	}
 	blob, _ := json.Marshal(list)
-	ledgertest.AssertAbsentIn(t, "the ListIntents response", string(blob),
-		ledgertest.Secrets("the PPPoE password", pppoeSecret))
+	if strings.Contains(string(blob), pppoeSecret) {
+		t.Error("the ListIntents response carries the PPPoE password")
+	}
 
 	forCompile, secrets, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
@@ -175,13 +175,15 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 	}
 }
 
-// No secret in the job ledger (geekdojo/geekdojo-brain#493, gate 6), for
-// firewall.apply: a PPPoE wan_config's password reaches the agent's bus
-// command, and nothing that is persisted — the spec, a step result, an event —
-// or logged.
+// firewall.apply through the real Runner: a PPPoE wan_config's password
+// reaches the agent's bus command, and the compile step's result carries the
+// hash and the intent count, never the compiled state. The secret.Value type
+// and the refusal at submit hold the password out of the ledger (ADR-0009).
+// The unkeyed hash of the sent state, which the agent acks with, is a plain
+// string, so no ledger surface or published change event may carry it
+// (geekdojo/geekdojo-brain#827).
 func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	ctx := context.Background()
-	logs := ledgertest.CaptureLog(t)
 	nc := startNATS(t)
 	dbPath := filepath.Join(t.TempDir(), "rasputin.db")
 	store, err := OpenStore(ctx, dbPath)
@@ -222,9 +224,15 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
+	published, err := nc.SubscribeSync("rasputin.firewall.fw.*")
+	if err != nil {
+		t.Fatalf("change sub: %v", err)
+	}
+	defer func() { _ = published.Unsubscribe() }()
+
 	runner := jobs.NewRunner(jobStore, nc)
 	runner.Register(ApplyWorkflow(newService(t, store), inv, nc, nil))
-	j, err := runner.Submit(ctx, "firewall.apply", json.RawMessage(`{}`), "test")
+	j, err := runner.Submit(ctx, "firewall.apply", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -246,20 +254,13 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 		t.Fatal("the agent was never asked to apply")
 	}
 
-	secrets := ledgertest.Secrets("the PPPoE password", pppoeSecret)
-	ledger := &ledgertest.Surfaces{Spec: string(done.Spec) + done.Error, Log: logs.String()}
-	// Not vacuous: the agent really was sent the password, checked above.
-	ledger.AssertPresent(t, "the apply command the agent received", pppoeSecret, secrets)
-	// The unkeyed hash of the sent state is derived from the password, so the
-	// ledger is held to the same rule for it (geekdojo/geekdojo-brain#827).
-	secrets = append(secrets, ledgertest.Secrets("the unkeyed SHA-256 of the sent state", pppoeLegacyHash)...)
-
 	steps, err := jobStore.ListSteps(ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
+	surfaces := map[string]string{"the stored spec or job error": string(done.Spec) + done.Error}
 	for _, st := range steps {
-		ledger.Steps += string(st.Result) + st.Error
+		surfaces["a step result or error"] += string(st.Result) + st.Error
 		if st.Name == "compile" {
 			var res map[string]any
 			_ = json.Unmarshal(st.Result, &res)
@@ -276,7 +277,29 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
-		ledger.Events += string(ev.Data)
+		surfaces["a job event or step log"] += string(ev.Data)
 	}
-	ledger.AssertAbsent(t, secrets)
+	// Flush is a round trip: every change event published before it has been
+	// delivered to the sync subscription once it returns.
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if n, _, _ := published.Pending(); n == 0 {
+			break
+		}
+		m, err := published.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("change event: %v", err)
+		}
+		surfaces["a published FirewallChangeEvt"] += string(m.Data)
+	}
+	if surfaces["a published FirewallChangeEvt"] == "" {
+		t.Fatal("no change event was published")
+	}
+	for surface, text := range surfaces {
+		if strings.Contains(text, pppoeLegacyHash) {
+			t.Errorf("%s carries the unkeyed SHA-256 of the sent state", surface)
+		}
+	}
 }
