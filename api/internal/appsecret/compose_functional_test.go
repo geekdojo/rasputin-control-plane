@@ -6,7 +6,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 )
+
+// functionalEnv is the switch that makes this file's skips failures.
+const functionalEnv = "RASPUTIN_APPSECRET_FUNCTIONAL"
 
 // The functional half of this package's tests: what REAL Docker Compose does
 // with what Resolve and Escape emit.
@@ -24,16 +29,19 @@ import (
 //   - a resolved compose parses and the base64url-nopad value arrives intact
 //     and unquoted, which is why that encoding was chosen.
 //
-// Skips where Compose is absent, so it is free on a laptop without Docker. That
-// makes it a test a developer runs, NOT an enforced gate — it needs a CI job
-// with Docker present, like the repo's existing real-caddy and real-grafana
-// jobs, to be one. Flagged rather than assumed (geekdojo/geekdojo-brain#520).
+// Skips where Docker or the Compose plugin is absent, so it is free on a laptop
+// without them. RASPUTIN_APPSECRET_FUNCTIONAL=required turns those skips into
+// failures: the required `backend (vet + test + build)` CI job sets it on its
+// `test (api with coverage)` step, so on every PR into main this test must run
+// against real Compose and pass. See docs/testing-appsecret-compose.md
+// (geekdojo/geekdojo-brain#695).
 func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("no docker binary")
+		functest.SkipOrFail(t, functionalEnv, "docker not on PATH: %v", err)
 	}
-	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
-		t.Skip("no docker compose plugin")
+	if out, err := exec.Command("docker", "compose", "version").CombinedOutput(); err != nil {
+		functest.SkipOrFail(t, functionalEnv, "docker compose plugin unavailable: %v (%s)",
+			err, strings.TrimSpace(string(out)))
 	}
 
 	const tile = `services:

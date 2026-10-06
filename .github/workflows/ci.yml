@@ -24,7 +24,10 @@ name: ci
 #              built, vetted or tested — and both ship tests that therefore
 #              never ran). api's coverage is uploaded as a build artifact so
 #              we can watch it trend over time. Failures gate merges via
-#              branch-protection (configured outside this file).
+#              branch-protection (configured outside this file). The api test
+#              step sets RASPUTIN_APPSECRET_FUNCTIONAL=required, so the
+#              appsecret Compose functional test must run against the runner's
+#              real Compose and pass rather than skip (geekdojo-brain#695).
 #
 #   caddy-admin-socket — the agent's Caddy supervisor against the real Caddy
 #              the OS image ships, run as root: the admin API is reachable
@@ -242,6 +245,12 @@ jobs:
       # trend, and that choice is deliberate rather than a list that drifts.
       # Every other module is still TESTED below; it just isn't profiled.
       - name: test (api with coverage)
+        env:
+          # Turns the appsecret Compose test's skips into failures: a runner
+          # without docker or the Compose plugin fails this required job
+          # instead of passing having tested nothing (geekdojo-brain#695,
+          # docs/testing-appsecret-compose.md).
+          RASPUTIN_APPSECRET_FUNCTIONAL: required
         run: |
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
