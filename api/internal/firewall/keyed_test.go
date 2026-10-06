@@ -201,12 +201,36 @@ func (h *harness) agentReports(t *testing.T, state, hash string) {
 }
 
 // ran is one finished job: its steps, its step logs and the change events it
-// published.
+// published, and the same surfaces as plain text for the absence checks.
 type ran struct {
 	job     *jobs.Job
 	steps   map[string]*jobs.JobStep
 	logs    []proto.LogEventData
 	changes []proto.FirewallChangeEvt
+
+	specText      string // the stored spec and the job error
+	stepText      string // every step result and step error
+	eventText     string // every job event's data, the step logs included
+	publishedText string // every published FirewallChangeEvt, as sent
+}
+
+// assertNoSurfaceCarries fails if the stored spec or job error, a step result
+// or error, a job event (the step logs included) or a published change event
+// holds value. The hashes it is used for are plain strings, so neither the
+// secret.Value type nor the refusal at submit keeps them out of the ledger
+// (geekdojo/geekdojo-brain#827).
+func (r *ran) assertNoSurfaceCarries(t *testing.T, what, value string) {
+	t.Helper()
+	for surface, text := range map[string]string{
+		"the stored spec or job error":  r.specText,
+		"a step result or error":        r.stepText,
+		"a job event or step log":       r.eventText,
+		"a published FirewallChangeEvt": r.publishedText,
+	} {
+		if strings.Contains(text, value) {
+			t.Errorf("%s carries %s", surface, what)
+		}
+	}
 }
 
 // run submits kind, waits for it, and collects its steps, its step logs and
@@ -222,19 +246,21 @@ func (h *harness) run(t *testing.T, kind string) *ran {
 	if err != nil || done == nil {
 		t.Fatalf("GetJob: %v", err)
 	}
-	r := &ran{job: done, steps: map[string]*jobs.JobStep{}}
+	r := &ran{job: done, steps: map[string]*jobs.JobStep{}, specText: string(done.Spec) + done.Error}
 	steps, err := h.jobStore.ListSteps(h.ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
 	for _, st := range steps {
 		r.steps[st.Name] = st
+		r.stepText += string(st.Result) + st.Error
 	}
 	events, err := h.jobStore.ListEvents(h.ctx, j.ID)
 	if err != nil {
 		t.Fatalf("ListEvents: %v", err)
 	}
 	for _, ev := range events {
+		r.eventText += string(ev.Data)
 		if ev.Type == string(proto.JobLog) {
 			var l proto.LogEventData
 			_ = json.Unmarshal(ev.Data, &l)
@@ -257,6 +283,7 @@ func (h *harness) run(t *testing.T, kind string) *ran {
 		var ev proto.FirewallChangeEvt
 		_ = json.Unmarshal(m.Data, &ev)
 		r.changes = append(r.changes, ev)
+		r.publishedText += string(m.Data)
 	}
 	return r
 }
@@ -334,8 +361,9 @@ func TestNewService_RefusesNilCollaborators(t *testing.T) {
 // TC-827-11 (carries TC-825-28): firewall.apply on the real Runner. The bus
 // carries the stored PPPoE secret, the State bytes are the previous release's,
 // and IntentHash is keyed; the compile input holds the secret only as a
-// secret.Value; and the step results hold only the keyed fingerprint and the
-// count or node.
+// secret.Value; the step results hold only the keyed fingerprint and the
+// count or node; and no ledger surface or published change event holds the
+// unkeyed SHA-256 of the sent state, which the stub agent acks with.
 func TestApplyWorkflow_PPPoEKeyedAndBytesUnchanged(t *testing.T) {
 	h := newHarness(t, vectorIntents(pppoeSecret), nil)
 
@@ -392,6 +420,7 @@ func TestApplyWorkflow_PPPoEKeyedAndBytesUnchanged(t *testing.T) {
 	if !strings.Contains(string(*got), pppoeSecret) {
 		t.Error("the apply command the agent received does not carry the PPPoE password")
 	}
+	r.assertNoSurfaceCarries(t, "the unkeyed SHA-256 of the sent state", vectorLegacyHash)
 
 	// The allowlist rows for the two new Reveal sites and the rewritten
 	// ConfigHash reason cite this change (F-827-05).
@@ -573,7 +602,7 @@ func TestReconcile_KeyedInSync(t *testing.T) {
 // TC-827-16: a stored pre-upgrade hash equal to the agent's own hash is
 // adopted: the stored hash becomes the keyed fingerprint of what the agent
 // reports, compare reports in_sync, nothing is applied, one INFO step log says
-// so without a hash.
+// so without a hash, and no surface carries the legacy value.
 func TestReconcile_AdoptsAnInSyncLegacyHash(t *testing.T) {
 	h := newHarness(t, nil, nil)
 	if err := h.store.UpdateAfterApply(h.ctx, "fw", vectorLegacyHash, time.Now().UTC()); err != nil {
@@ -610,11 +639,13 @@ func TestReconcile_AdoptsAnInSyncLegacyHash(t *testing.T) {
 	if !strings.Contains(before, vectorLegacyHash) {
 		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
 	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 }
 
 // TC-827-17: a stored pre-upgrade hash that differs from the agent's own is
 // forgotten, not adopted: the stored hash becomes "", compare reports drift,
-// and one WARN step log carries no hash.
+// one WARN step log carries no hash, and no surface carries the legacy value.
 func TestReconcile_ForgetsADriftedLegacyHash(t *testing.T) {
 	h := newHarness(t, nil, nil)
 	if err := h.store.UpdateAfterApply(h.ctx, "fw", vectorLegacyHash, time.Now().UTC()); err != nil {
@@ -648,6 +679,8 @@ func TestReconcile_ForgetsADriftedLegacyHash(t *testing.T) {
 	if !strings.Contains(before, vectorLegacyHash) {
 		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
 	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 }
 
 // TC-827-18 (F-827-01): a never-applied node (intent hash "", no last
@@ -683,7 +716,7 @@ func TestReconcile_NeverAppliedNodeIsLeftAlone(t *testing.T) {
 
 // TC-827-19 (F-827-01): with a pre-upgrade hash stored, an agent read failure
 // (Hash "") leaves the stored value, fails the fetch step, never runs compare
-// and publishes nothing; the next healthy reconcile adopts. With a keyed hash
+// and leaks nothing; the next healthy reconcile adopts. With a keyed hash
 // stored, the same failure records "" and reports no drift.
 func TestReconcile_AgentReadFailureWithALegacyHash(t *testing.T) {
 	h := newHarness(t, nil, nil)
@@ -711,6 +744,8 @@ func TestReconcile_AgentReadFailureWithALegacyHash(t *testing.T) {
 	if !strings.Contains(before, vectorLegacyHash) {
 		t.Fatal("the stored row before the reconcile does not carry the pre-upgrade hash")
 	}
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash", vectorLegacyHash)
+	r.assertNoSurfaceCarries(t, "the pre-upgrade hash's prefix", vectorLegacyHash[:12])
 
 	h.agentReports(t, vectorState, vectorLegacyHash)
 	if r := h.run(t, "firewall.reconcile"); r.job.Status != jobs.StatusSucceeded {

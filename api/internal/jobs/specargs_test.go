@@ -173,12 +173,20 @@ func isRawSpecType(t types.Type) bool {
 		return false
 	}
 	if ptr, ok := types.Unalias(t).(*types.Pointer); ok {
-		return isNamed(ptr.Elem(), "encoding/json", "RawMessage")
+		return isRawMessage(ptr.Elem())
 	}
-	if isNamed(t, "encoding/json", "RawMessage") {
+	if isRawMessage(t) {
 		return true
 	}
 	return types.Identical(types.Unalias(t), types.NewSlice(types.Typ[types.Byte]))
+}
+
+// isRawMessage reports json.RawMessage under either encoding/json build. Up
+// to Go 1.26 it is the named type encoding/json.RawMessage; from Go 1.27 the
+// default build is backed by json/v2, where RawMessage is an alias of
+// encoding/json/jsontext.Value, and Unalias yields that.
+func isRawMessage(t types.Type) bool {
+	return isNamed(t, "encoding/json", "RawMessage") || isNamed(t, "encoding/json/jsontext", "Value")
 }
 
 // declName names a top-level declaration as secretlint does: Recv.Method for

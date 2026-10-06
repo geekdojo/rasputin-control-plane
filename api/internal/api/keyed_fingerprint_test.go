@@ -224,8 +224,9 @@ func TestHandleGetFirewallState_CodedErrorOnAFailedRead(t *testing.T) {
 
 // TC-827-10: bmc.configure, submitted once through the configure handler and
 // once by the registration reconcile, each on the real Runner with a stub
-// host agent. The bus command carries the credential, and the spec
-// configHash, the step logs and the step results carry the keyed fingerprint.
+// host agent. The bus command carries the credential; the spec configHash,
+// the step logs and the step results carry the keyed fingerprint; and no
+// ledger surface holds the previous release's unkeyed hash for those inputs.
 func TestConfigureLedger_OnlyKeyedValues(t *testing.T) {
 	const (
 		unlock = "SENTINEL-BMC-UNLOCK"
@@ -280,7 +281,8 @@ func TestConfigureLedger_OnlyKeyedValues(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		var stepText string
+		specText := string(done.Spec) + done.Error
+		var stepText, eventText string
 		for _, s := range steps {
 			stepText += string(s.Result) + s.Error
 		}
@@ -290,6 +292,7 @@ func TestConfigureLedger_OnlyKeyedValues(t *testing.T) {
 		}
 		sawKeyedLog := false
 		for _, ev := range events {
+			eventText += string(ev.Data)
 			if ev.Type == string(proto.JobLog) && strings.Contains(string(ev.Data), keyedHash) {
 				sawKeyedLog = true
 			}
@@ -303,6 +306,17 @@ func TestConfigureLedger_OnlyKeyedValues(t *testing.T) {
 		cmdBytes, _ := json.Marshal(cmd)
 		if !strings.Contains(string(cmdBytes), unlock) {
 			t.Errorf("%s: the configure command does not carry the BMC unlock", how)
+		}
+		// The unkeyed hash is a plain string, so neither the secret.Value type
+		// nor the refusal at submit keeps it out (geekdojo/geekdojo-brain#827).
+		for surface, text := range map[string]string{
+			"the stored spec or job error": specText,
+			"a step result or error":       stepText,
+			"a job event or step log":      eventText,
+		} {
+			if strings.Contains(text, legacyHash) {
+				t.Errorf("%s: %s carries the previous release's unkeyed hash", how, surface)
+			}
 		}
 	}
 

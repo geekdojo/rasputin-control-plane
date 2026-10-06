@@ -179,6 +179,9 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 // reaches the agent's bus command, and the compile step's result carries the
 // hash and the intent count, never the compiled state. The secret.Value type
 // and the refusal at submit hold the password out of the ledger (ADR-0009).
+// The unkeyed hash of the sent state, which the agent acks with, is a plain
+// string, so no ledger surface or published change event may carry it
+// (geekdojo/geekdojo-brain#827).
 func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
@@ -221,6 +224,12 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
+	published, err := nc.SubscribeSync("rasputin.firewall.fw.*")
+	if err != nil {
+		t.Fatalf("change sub: %v", err)
+	}
+	defer func() { _ = published.Unsubscribe() }()
+
 	runner := jobs.NewRunner(jobStore, nc)
 	runner.Register(ApplyWorkflow(newService(t, store), inv, nc, nil))
 	j, err := runner.Submit(ctx, "firewall.apply", nil, "test")
@@ -249,7 +258,9 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListSteps: %v", err)
 	}
+	surfaces := map[string]string{"the stored spec or job error": string(done.Spec) + done.Error}
 	for _, st := range steps {
+		surfaces["a step result or error"] += string(st.Result) + st.Error
 		if st.Name == "compile" {
 			var res map[string]any
 			_ = json.Unmarshal(st.Result, &res)
@@ -259,6 +270,36 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 			if res["hash"] == "" || res["intentCount"] == nil {
 				t.Errorf("compile step result should carry the hash and count: %s", st.Result)
 			}
+		}
+	}
+	events, err := jobStore.ListEvents(ctx, j.ID)
+	if err != nil {
+		t.Fatalf("ListEvents: %v", err)
+	}
+	for _, ev := range events {
+		surfaces["a job event or step log"] += string(ev.Data)
+	}
+	// Flush is a round trip: every change event published before it has been
+	// delivered to the sync subscription once it returns.
+	if err := nc.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if n, _, _ := published.Pending(); n == 0 {
+			break
+		}
+		m, err := published.NextMsg(time.Second)
+		if err != nil {
+			t.Fatalf("change event: %v", err)
+		}
+		surfaces["a published FirewallChangeEvt"] += string(m.Data)
+	}
+	if surfaces["a published FirewallChangeEvt"] == "" {
+		t.Fatal("no change event was published")
+	}
+	for surface, text := range surfaces {
+		if strings.Contains(text, pppoeLegacyHash) {
+			t.Errorf("%s carries the unkeyed SHA-256 of the sent state", surface)
 		}
 	}
 }
