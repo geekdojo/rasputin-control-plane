@@ -79,6 +79,85 @@ type RestoreLayout struct {
 // restoreMove is one rename the apply performs, recorded for rollback.
 type restoreMove struct{ from, to string }
 
+// restoreDirs are the live directories an apply rule resolves its path in,
+// with RestoreLayout's defaults already filled in.
+type restoreDirs struct{ data, trust, mesh, bus string }
+
+// applyKind is what the apply does with a restored entry.
+type applyKind int
+
+const (
+	// applyReplace moves the live file aside and the staged file in.
+	applyReplace applyKind = iota
+	// applyReplaceTree does the same for a whole directory, once, however
+	// many of its members the report lists.
+	applyReplaceTree
+	// applyMerge is not moved into place: it is merged after every move has
+	// succeeded.
+	applyMerge
+)
+
+// applyRule is one row of the restore's placement table: an archive path, or
+// a directory prefix ending in "/" for a tree, and where its live copy is.
+type applyRule struct {
+	archive string
+	kind    applyKind
+	live    func(restoreDirs) string
+}
+
+// matches is the one test of whether a rule handles an archive member: exact,
+// or by prefix for a tree rule. ApplyPendingRestore and the coverage gate in
+// restore_coverage_test.go both match through it.
+func (r applyRule) matches(p string) bool {
+	if r.kind == applyReplaceTree {
+		return strings.HasPrefix(p, r.archive)
+	}
+	return p == r.archive
+}
+
+// matchRule returns the first rule that handles path.
+func matchRule(rules []applyRule, path string) (applyRule, bool) {
+	for _, r := range rules {
+		if r.matches(path) {
+			return r, true
+		}
+	}
+	return applyRule{}, false
+}
+
+// identityApplyRules is where each restored identity-archive member goes. A
+// member that no row matches is refused by ApplyPendingRestore, and
+// TestEveryIdentityMemberHasARestorePath fails when Assemble writes a member
+// that no row (or identityRestorePath) handles. A fresh slice every call, so
+// nothing can mutate the table under a running restore.
+func identityApplyRules() []applyRule {
+	return []applyRule{
+		{archive: "rasputin.db", kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.data, "rasputin.db") }},
+		{archive: "trust/mesh-ca.key", kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.trust, "mesh-ca.key") }},
+		{archive: "trust/mesh-ca.pem", kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.trust, "mesh-ca.pem") }},
+		// The restored seed replaces the one this fresh install generated at
+		// its first start (#520). Without this row the entry is staged,
+		// reported as restored, and then refused — and without the refusal
+		// the cluster would come up with a seed that derives a different value
+		// for every app secret in it, while each app's data volume still holds
+		// the one it was given. There is no way back from that: nothing can
+		// re-derive the old values, so the apps' credentials are simply lost.
+		// Assemble captures it and this puts it back; the pair is the whole
+		// feature, which is why they landed in one change.
+		{archive: appSecretSeedArchivePath, kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.trust, appsecret.SeedFileName) }},
+		// The restored key replaces the one this fresh install generated, so
+		// every node that pinned the original joins again (#448).
+		{archive: busKeyArchivePath, kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.bus, "bus.key") }},
+		// Put back beside the key, so the restored bus serves the same
+		// certificate it served before. If it is absent, or if it does not
+		// match the key that landed, EnsureCert re-mints it at the next start.
+		{archive: busCertArchivePath, kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.bus, bustls.CertFileName) }},
+		// Not moved into place: merged, after every move has succeeded.
+		{archive: busTombstonesArchivePath, kind: applyMerge, live: func(d restoreDirs) string { return filepath.Join(d.bus, busauth.TombstoneFileName) }},
+		{archive: "mesh/headscale/", kind: applyReplaceTree, live: func(d restoreDirs) string { return filepath.Join(d.mesh, "headscale") }},
+	}
+}
+
 // ApplyPendingRestore looks for a prepared restore under the data dir and, if
 // one is there, swaps its files into place. It returns the report with
 // AppliedAt set, and true, when a restore was applied; nil and false when
@@ -112,23 +191,15 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 		return nil, false, fmt.Errorf("%w: the pending restore is phase %q; this build applies %q", ErrRestoreApplyFailed, report.Phase, RestorePhase)
 	}
 
-	now := time.Now().UTC()
-	replaced := filepath.Join(layout.DataDir, restoreReplacedPrefix+now.Format("20060102T150405Z"))
-	if err := os.Mkdir(replaced, 0o700); err != nil {
-		return nil, false, fmt.Errorf("%w: %v", ErrRestoreApplyFailed, err)
+	dirs := restoreDirs{data: layout.DataDir, trust: layout.TrustDir, mesh: layout.MeshStateDir, bus: layout.BusDir}
+	if dirs.trust == "" {
+		dirs.trust = filepath.Join(layout.DataDir, "trust")
 	}
-
-	trustDir := layout.TrustDir
-	if trustDir == "" {
-		trustDir = filepath.Join(layout.DataDir, "trust")
+	if dirs.mesh == "" {
+		dirs.mesh = filepath.Join(layout.DataDir, "mesh")
 	}
-	meshDir := layout.MeshStateDir
-	if meshDir == "" {
-		meshDir = filepath.Join(layout.DataDir, "mesh")
-	}
-	busDir := layout.BusDir
-	if busDir == "" {
-		busDir = filepath.Join(layout.DataDir, "bus")
+	if dirs.bus == "" {
+		dirs.bus = filepath.Join(layout.DataDir, "bus")
 	}
 
 	// Each staged path and where the live one lives. Only what the report
@@ -140,48 +211,33 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 		aside  string // relative to replaced
 		isDir  bool
 	}
-	var targets []target
-	restoredHeadscale := false
-	restoredTombstones := false
+	var targets, trees []target
+	treeSeen := map[string]bool{}
+	var merges []applyRule
+	rules := identityApplyRules()
 	for _, e := range report.Restored {
-		switch {
-		case e.Path == "rasputin.db":
-			targets = append(targets, target{staged: "rasputin.db", live: filepath.Join(layout.DataDir, "rasputin.db"), aside: "rasputin.db"})
-		case e.Path == "trust/mesh-ca.key":
-			targets = append(targets, target{staged: "trust/mesh-ca.key", live: filepath.Join(trustDir, "mesh-ca.key"), aside: "trust/mesh-ca.key"})
-		case e.Path == "trust/mesh-ca.pem":
-			targets = append(targets, target{staged: "trust/mesh-ca.pem", live: filepath.Join(trustDir, "mesh-ca.pem"), aside: "trust/mesh-ca.pem"})
-		case e.Path == appSecretSeedArchivePath:
-			// The restored seed replaces the one this fresh install generated at
-			// its first start (#520). Without this case the entry is staged,
-			// reported as restored, and then silently left behind — and the
-			// cluster comes up with a seed that derives a different value for
-			// every app secret in it, while each app's data volume still holds
-			// the one it was given. There is no way back from that: nothing can
-			// re-derive the old values, so the apps' credentials are simply
-			// lost. Assemble captures it and this puts it back; the pair is the
-			// whole feature, which is why they landed in one change.
-			targets = append(targets, target{staged: appSecretSeedArchivePath, live: filepath.Join(trustDir, appsecret.SeedFileName), aside: appSecretSeedArchivePath})
-		case e.Path == busKeyArchivePath:
-			// The restored key replaces the one this fresh install generated,
-			// so every node that pinned the original joins again (#448).
-			targets = append(targets, target{staged: busKeyArchivePath, live: filepath.Join(busDir, "bus.key"), aside: busKeyArchivePath})
-		case e.Path == busCertArchivePath:
-			// Put back beside the key, so the restored bus serves the same
-			// certificate it served before. If it is absent, or if
-			// it does not match the key that landed, EnsureCert re-mints it at
-			// the next start.
-			targets = append(targets, target{staged: busCertArchivePath, live: filepath.Join(busDir, bustls.CertFileName), aside: busCertArchivePath})
-		case e.Path == busTombstonesArchivePath:
-			// Not moved into place: merged, after every move has succeeded.
-			restoredTombstones = true
-		case strings.HasPrefix(e.Path, "mesh/headscale/"):
-			restoredHeadscale = true
+		r, ok := matchRule(rules, e.Path)
+		if !ok {
+			// Refused, not skipped: an entry the report calls restored that
+			// nothing puts back would come up as a green restore with the
+			// fresh install's file in its place.
+			return nil, false, fmt.Errorf("%w: the restore lists %s but this build has no rule to put it back", ErrRestoreApplyFailed, e.Path)
+		}
+		staged := strings.TrimSuffix(r.archive, "/")
+		switch r.kind {
+		case applyReplace:
+			targets = append(targets, target{staged: staged, live: r.live(dirs), aside: staged})
+		case applyReplaceTree:
+			// The whole tree moves once, however many members it held.
+			if !treeSeen[r.archive] {
+				treeSeen[r.archive] = true
+				trees = append(trees, target{staged: staged, live: r.live(dirs), aside: staged, isDir: true})
+			}
+		case applyMerge:
+			merges = append(merges, r)
 		}
 	}
-	if restoredHeadscale {
-		targets = append(targets, target{staged: "mesh/headscale", live: filepath.Join(meshDir, "headscale"), aside: "mesh/headscale", isDir: true})
-	}
+	targets = append(targets, trees...)
 	// The mesh CA is a pair; EnsureMeshCA refuses a half. Restore both or
 	// neither.
 	hasKey, hasPem := false, false
@@ -191,6 +247,14 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	}
 	if hasKey != hasPem {
 		return nil, false, fmt.Errorf("%w: the restore holds one half of the mesh CA and not the other", ErrRestoreApplyFailed)
+	}
+
+	// Created only once every entry has a rule and the CA pair is whole, so a
+	// refusal above leaves nothing behind.
+	now := time.Now().UTC()
+	replaced := filepath.Join(layout.DataDir, restoreReplacedPrefix+now.Format("20060102T150405Z"))
+	if err := os.Mkdir(replaced, 0o700); err != nil {
+		return nil, false, fmt.Errorf("%w: %v", ErrRestoreApplyFailed, err)
 	}
 
 	var done []restoreMove
@@ -236,10 +300,10 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			return nil, false, fmt.Errorf("%w: place %s: %v", ErrRestoreApplyFailed, t.staged, err)
 		}
 	}
-	syncDir(layout.DataDir)
-	syncDir(trustDir)
-	syncDir(meshDir)
-	syncDir(busDir)
+	syncDir(dirs.data)
+	syncDir(dirs.trust)
+	syncDir(dirs.mesh)
+	syncDir(dirs.bus)
 
 	// Revocation tombstones are the one identity file a restore never
 	// replaces: the archive's are UNIONED into the live file, which may hold
@@ -249,9 +313,9 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	// not fail the restore: the live file is untouched and still re-applied,
 	// and the archive's own revocations are rows in the restored database,
 	// which that same start adds back to the file.
-	if restoredTombstones {
-		live := filepath.Join(busDir, busauth.TombstoneFileName)
-		if added, err := busauth.MergeTombstoneFiles(live, filepath.Join(pending, busTombstonesArchivePath)); err != nil {
+	for _, r := range merges {
+		live := r.live(dirs)
+		if added, err := busauth.MergeTombstoneFiles(live, filepath.Join(pending, r.archive)); err != nil {
 			log.Printf("storage: restore: merging the archive's bus-token tombstones into %s: %v — the live tombstones are unchanged and are re-applied at this start", live, err)
 		} else if added > 0 {
 			log.Printf("storage: restore: merged %d bus-token revocation tombstone(s) from the archive into %s", added, live)
