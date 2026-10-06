@@ -451,9 +451,9 @@ func trustFiles(src IdentitySources) []trustFile {
 // and the app's own data volume keeps the value it was given. A restore without
 // the seed therefore comes up with apps whose credentials cannot be re-derived:
 // not degraded, not recoverable by redeploying, gone. That is why it ships out
-// AND comes back in the same change — see the case in restore_apply.go, which is
-// a hand-written switch on path and silently restores nothing for an entry no
-// case names.
+// AND comes back in the same change — see its row in restore_apply.go's
+// identityApplyRules table, which refuses an entry no row names, and
+// TestEveryIdentityMemberHasARestorePath, which fails on a member no row names.
 //
 // One file, not two, and the derivation version rides inside it (appsecret's
 // seed.go says why): a version that could be separated from its seed is a way to

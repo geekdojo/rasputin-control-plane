@@ -24,10 +24,10 @@ import (
 //
 // The two halves fail differently, which is why both are tested here. Leaving it
 // out of trustFiles is at least visible — the manifest does not list it. Leaving
-// out the case in restore_apply.go's hand-written path switch is SILENT: the
-// entry is staged, verified, written into the report as restored, and then
-// dropped on the floor, so the report says the seed came back and the live file
-// is the fresh install's.
+// out its row in restore_apply.go's identityApplyRules table used to be SILENT:
+// the entry was staged, verified, written into the report as restored, and then
+// dropped on the floor. The apply now refuses an entry no row names, and
+// TestEveryIdentityMemberHasARestorePath fails on a member no row names.
 
 func appSecretFixtureSeed(t *testing.T, dir string) []byte {
 	t.Helper()
@@ -120,9 +120,9 @@ func TestMeasureIdentitySetCountsTheAppSecretSeed(t *testing.T) {
 	}
 }
 
-// The restore half: the case in restore_apply.go's path switch. Without it this
-// test's live seed stays the fresh install's while the report claims the
-// archive's was restored.
+// The restore half: the seed's row in restore_apply.go's identityApplyRules
+// table. Without it the apply refuses this test's restore, and the live seed
+// stays the fresh install's.
 func TestApplyPendingRestorePutsTheAppSecretSeedBack(t *testing.T) {
 	dataDir := t.TempDir()
 	trustDir := filepath.Join(dataDir, "trust")
@@ -161,7 +161,7 @@ func TestApplyPendingRestorePutsTheAppSecretSeedBack(t *testing.T) {
 		t.Fatalf("read the live seed: %v", err)
 	}
 	if !bytes.Equal(live, archivedSeed) {
-		t.Fatalf("the restored seed is not in place — an entry with no case in restore_apply.go's switch is staged, reported as restored, and silently dropped.\n live %q\nwant %q", live, archivedSeed)
+		t.Fatalf("the restored seed is not in place after an apply that reported success — its identityApplyRules row resolves to somewhere other than the live trust dir.\n live %q\nwant %q", live, archivedSeed)
 	}
 
 	// The fresh install's own seed was moved ASIDE, not deleted: a failed or
