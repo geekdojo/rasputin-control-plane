@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
@@ -63,8 +64,22 @@ func newFixture(t *testing.T) *fixture {
 	}
 	t.Cleanup(func() { _ = st.Close() })
 	nc := embeddedNATS(t)
-	svc := NewService(Config{HostNodeID: "host-1"}, st, nc)
+	svc := newTestService(t, Config{HostNodeID: "host-1"}, st, nc)
 	return &fixture{ctx: ctx, dir: dir, store: st, nc: nc, svc: svc}
+}
+
+// newTestService is NewService under the fixed test key, failing the test on
+// a refusal.
+func newTestService(t *testing.T, cfg Config, st *Store, nc *nats.Conn) *Service {
+	t.Helper()
+	if cfg.MAC == nil {
+		cfg.MAC = credmactest.Key(t)
+	}
+	svc, err := NewService(cfg, st, nc)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	return svc
 }
 
 // ============================================================================
@@ -209,12 +224,12 @@ func TestNewService_AccessorsAndMissingHost(t *testing.T) {
 	}
 	// Constructing with no host resolution logs a warning but still
 	// returns a service.
-	svc2 := NewService(Config{}, f.store, f.nc)
+	svc2 := newTestService(t, Config{}, f.store, f.nc)
 	if svc2.Host(f.ctx) != "" {
 		t.Errorf("Host: want empty, got %q", svc2.Host(f.ctx))
 	}
 	// HostFn wins over the static fallback and is read live.
-	svc3 := NewService(Config{HostNodeID: "static", HostFn: func(context.Context) string { return "live" }}, f.store, f.nc)
+	svc3 := newTestService(t, Config{HostNodeID: "static", HostFn: func(context.Context) string { return "live" }}, f.store, f.nc)
 	if svc3.Host(f.ctx) != "live" {
 		t.Errorf("HostFn: got %q, want live", svc3.Host(f.ctx))
 	}
@@ -332,7 +347,7 @@ func TestNewSessionManager_Empty(t *testing.T) {
 
 func TestSessionManager_Open_NoHostConfigured(t *testing.T) {
 	f := newFixture(t)
-	svcNoHost := NewService(Config{}, f.store, f.nc)
+	svcNoHost := newTestService(t, Config{}, f.store, f.nc)
 	mgr := NewSessionManager(svcNoHost)
 	if _, err := mgr.Open(f.ctx, "target-1"); err == nil {
 		t.Error("want error when no host configured")

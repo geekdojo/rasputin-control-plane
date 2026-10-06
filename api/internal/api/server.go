@@ -38,6 +38,7 @@ type Server struct {
 	inv             *inventory.Store
 	invSvc          *inventory.Service
 	fw              *firewall.Store
+	fwState         firewallState
 	apps            *apps.Store
 	catalog         *catalog.Catalog
 	catalogStore    *catalogsync.Store
@@ -197,16 +198,18 @@ func (s *Server) SetHostLANInfo(fn func() (ip string, mac string)) {
 // configured with an "allow-all" middleware in a future refactor — for v0
 // auth is always on.
 //
-// bus, logger and newCorrelationID are required, and NewServer returns an
-// error rather than a Server that would fail on its first use: bus is the bus
-// TLS state (bustls.Available or bustls.Unavailable), logger the process
-// logger, and newCorrelationID the source of the id a coded error carries.
+// fwState, bus, logger and newCorrelationID are required, and NewServer
+// returns an error rather than a Server that would fail on its first use:
+// fwState is the firewall service the state route reads, bus is the bus TLS
+// state (bustls.Available or bustls.Unavailable), logger the process logger,
+// and newCorrelationID the source of the id a coded error carries.
 func NewServer(
 	store *jobs.Store,
 	runner *jobs.Runner,
 	inv *inventory.Store,
 	invSvc *inventory.Service,
 	fw *firewall.Store,
+	fwState firewallState,
 	appsStore *apps.Store,
 	mtr *metrics.Store,
 	updaterStore *updater.Store,
@@ -225,6 +228,8 @@ func NewServer(
 	newCorrelationID func() string,
 ) (*Server, error) {
 	switch {
+	case fwState == nil:
+		return nil, errors.New("api: NewServer: a firewall state service is required")
 	case bus == nil:
 		return nil, errors.New("api: NewServer: a BusState is required")
 	case logger == nil:
@@ -239,7 +244,7 @@ func NewServer(
 		obsStatus = obs.NewStatus(nil, nil, nil)
 	}
 	return &Server{
-		store: store, runner: runner, inv: inv, invSvc: invSvc, fw: fw, apps: appsStore,
+		store: store, runner: runner, inv: inv, invSvc: invSvc, fw: fw, fwState: fwState, apps: appsStore,
 		// The catalog is embedded, read-only content — MustLoad panics on an
 		// invalid tile (a build defect in our own content), the same contract
 		// as template.Must. catalog_test.go gates this in CI.

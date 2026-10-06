@@ -75,7 +75,7 @@ func sequentialIDs() func() string {
 func (f *apiFixture) useBusState(t *testing.T, st BusState) {
 	t.Helper()
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
-		f.fw, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
+		f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
 		st, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
@@ -252,7 +252,7 @@ func TestNewServer_RefusesNilCollaborators(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
-				f.fw, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
+				f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 				f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
 				tc.bus, tc.log, tc.ids)
 			if err == nil || srv != nil {

@@ -30,18 +30,19 @@ type Intent struct {
 //
 // When both Pending and Drift are true (user has changes AND firewall was
 // hand-edited), drift dominates in the UI — it's the more surprising state.
-// Pending is computed on read by the api (handler runs Compile against the
-// current intents); it's not persisted.
+// Pending is computed on read by the api (the handler compares
+// Service.DesiredHash with the stored intent hash); it's not persisted.
 type NodeState struct {
 	NodeID         string     `json:"nodeId"`
 	IntentHash     string     `json:"intentHash"`   // what we last pushed
 	ObservedHash   string     `json:"observedHash"` // what agent reported on last reconcile
 	LastApplied    *time.Time `json:"lastApplied,omitempty"`
 	LastReconciled *time.Time `json:"lastReconciled,omitempty"`
-	// Drift is true when ObservedHash is set and differs from IntentHash.
-	// Set to false when not yet reconciled (we don't claim drift on no data).
+	// Drift is true when the node has been applied and ObservedHash is set
+	// and differs from IntentHash. Service.NodeState computes it; the store
+	// never sets it, so a row read straight from the store says false.
 	Drift bool `json:"drift"`
-	// Pending is true when the current compiled intent hash differs from the
+	// Pending is true when the current desired fingerprint differs from the
 	// last-pushed IntentHash — i.e. the user has changes they haven't
 	// Applied yet. Computed at GET-state time, not stored.
 	Pending bool `json:"pending"`

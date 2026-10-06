@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busident"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -39,12 +40,16 @@ type BusyFn func(ctx context.Context) (bool, error)
 // the running job is already converging the cluster.
 //
 // logger records the failures that stop a re-push (an unreadable
-// credential); a nil one is refused.
-func StartReconcile(nc *nats.Conn, st *setup.Store, busy BusyFn, submit SubmitFn, logger *slog.Logger) (unsubscribe func(), err error) {
+// credential) and each re-push; mac keys the desired selection's fingerprint
+// (ConfigHash). A nil one of either is refused, and nothing is subscribed.
+func StartReconcile(nc *nats.Conn, st *setup.Store, busy BusyFn, submit SubmitFn, logger *slog.Logger, mac Fingerprinter) (unsubscribe func(), err error) {
 	if logger == nil {
 		return nil, errors.New("bmc: StartReconcile needs a logger; nil was passed")
 	}
-	r := &reconciler{st: st, busy: busy, submit: submit, log: logger}
+	if mac == nil {
+		return nil, errors.New("bmc: StartReconcile needs a Fingerprinter; nil was passed")
+	}
+	r := &reconciler{st: st, busy: busy, submit: submit, log: logger, mac: mac}
 	sub, err := nc.Subscribe("rasputin.node.*.evt.registered", func(m *nats.Msg) { r.onRegistered(m.Subject, m.Data) })
 	if err != nil {
 		return nil, err
@@ -57,6 +62,7 @@ type reconciler struct {
 	busy   BusyFn
 	submit SubmitFn
 	log    *slog.Logger
+	mac    Fingerprinter
 
 	mu            sync.Mutex
 	lastHash      string
@@ -119,7 +125,7 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 		return
 	}
 	defer cred.Destroy()
-	desired := ConfigHash(kind, cfg, cred)
+	desired := ConfigHash(r.mac, kind, cfg, cred)
 	var advertised string
 	if ev.Metadata != nil {
 		advertised, _ = ev.Metadata[proto.MetadataBMCConfigHash].(string)
@@ -148,7 +154,10 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 		Kind: kind, HostNodeID: hostID,
 		Config: cfg, ConfigHash: desired,
 	})
-	log.Printf("bmc: host %s registered with config hash %q, want %q — re-pushing", hostID, advertised, desired)
+	// No fingerprint value is logged: whether the host advertised a keyed one
+	// says whether this is the one re-push an upgrade costs.
+	r.log.InfoContext(ctx, "bmc: reconcile: re-pushing",
+		"host", hostID, "kind", kind, "advertised_keyed", credmac.IsKeyed(advertised))
 	if err := r.submit(ctx, "bmc.configure", spec, "system:bmc-reconcile"); err != nil {
 		log.Printf("bmc: reconcile submit: %v", err)
 	}

@@ -21,10 +21,11 @@ type applyPlan struct {
 }
 
 // planFromState validates the compiled state map and normalizes it into an
-// applyPlan. Strictness is deliberate: Apply returns hashState(input) as
-// the applied hash, so anything in the input that the renderer would
-// silently skip (an unknown section type, a non-string value) would break
-// the api's exact-hash-match contract — better to hard-error here.
+// applyPlan. Strictness is deliberate: the api's reconcile compares a
+// fingerprint of what Get reads back with one of what it compiled, so
+// anything in the input that the renderer would silently skip (an unknown
+// section type, a non-string value) would read as drift on every reconcile —
+// better to hard-error here.
 //
 // Accepts both []map[string]any (in-process, e.g. straight from Compile in
 // tests) and []any (what a NATS JSON round-trip produces) for the section

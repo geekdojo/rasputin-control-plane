@@ -84,7 +84,7 @@ type ConsoleRootHashAck struct {
 // Safe to put in a job spec, a step result, an event, a log line and the UI.
 // The digest is taken over the salt as well as the hash, so it cannot be
 // tested against a password guess by anyone who does not already hold the
-// hash itself. Same shape and same reasoning as bmc.ConfigHash.
+// hash itself.
 //
 // An empty hash has an empty id — "no password set" is not a value to name.
 func ConsoleRootHashID(hash string) string {

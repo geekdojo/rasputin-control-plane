@@ -2,8 +2,6 @@ package bmc
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,22 +24,23 @@ type ConfigureSpec struct {
 	ConfigHash string          `json:"configHash,omitempty"`
 }
 
-// ConfigHash fingerprints a selection; the agent echoes and advertises
-// it opaquely, and the registration reconcile compares it. cred is
-// any write-only credential that rides outside the config blob (the
-// bitscope unlock) — folding it in means rotating the credential triggers a
-// re-push. The bytes are the same as when cred was a string, so a hash an
-// agent advertises from an earlier release still matches. The hash is
-// carried in the job spec and step log; geekdojo/geekdojo-brain#827 tracks
-// keying it.
-func ConfigHash(kind string, config json.RawMessage, cred secret.Value) string {
-	h := sha256.New()
-	h.Write([]byte(kind))
-	h.Write([]byte{'\n'})
-	h.Write(config)
-	h.Write([]byte{'\n'})
-	h.Write(cred.Reveal())
-	return hex.EncodeToString(h.Sum(nil))[:16]
+// Fingerprinter computes a keyed fingerprint (credmac.Key does).
+type Fingerprinter interface {
+	Sum(purpose string, parts ...[]byte) string
+}
+
+// ConfigHash fingerprints a selection under mac; the agent echoes and
+// advertises it opaquely, and the registration reconcile compares it. cred is
+// any write-only credential that rides outside the config blob (the bitscope
+// unlock, the turingpi password) — folding it in means rotating the credential
+// triggers a re-push. The fingerprint is keyed (geekdojo/geekdojo-brain#827),
+// so the copy in the job spec, the step log and inventory is fit to be there.
+//
+// A host still advertising the previous release's unkeyed hash differs from
+// this, so it is re-pushed once after an upgrade and then advertises the keyed
+// one.
+func ConfigHash(mac Fingerprinter, kind string, config json.RawMessage, cred secret.Value) string {
+	return mac.Sum("bmc.config", []byte(kind), config, cred.Reveal())
 }
 
 // RunningPowerJobsFn reports whether any bmc.power job is currently

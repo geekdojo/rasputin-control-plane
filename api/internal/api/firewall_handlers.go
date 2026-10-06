@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -175,6 +176,21 @@ func (s *Server) handleDeleteIntent(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// firewallState is what the state route needs from the firewall's business
+// service (*firewall.Service).
+type firewallState interface {
+	DesiredHash(ctx context.Context) (string, error)
+	NodeState(ctx context.Context, nodeID string) (*firewall.NodeState, error)
+	EmptyHash() string
+}
+
+// refuseFirewallState answers a state read that failed. The error goes to the
+// log under the correlation id, never to the client.
+func (s *Server) refuseFirewallState(w http.ResponseWriter, r *http.Request, err error) {
+	s.writeCodedError(w, r, http.StatusInternalServerError, codeFirewallStateUnavailable,
+		"the firewall state could not be read", slog.String("err", err.Error()))
+}
+
 // GET /api/firewall/state — returns the per-node state for every firewall
 // node currently known to inventory (typically zero or one in v0).
 func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) {
@@ -183,33 +199,21 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Compute the pending status: hash of current enabled intents vs the
-	// hash we last pushed (NodeState.IntentHash). One Compile covers every
-	// firewall node since v0 supports exactly one — the compiled state is
-	// identical across them.
-	// The pending hash has to be the hash of what a push would send, which
-	// includes the write-only secret — so compile the injected form. Only
-	// the hash leaves this handler.
-	intents, err := s.fw.ListIntentsForCompile(r.Context())
+	// Pending: the fingerprint of what an apply would push now against the
+	// one last pushed (NodeState.IntentHash). One desired fingerprint covers
+	// every firewall node since v0 supports exactly one. A brand-new node has
+	// IntentHash="", which stands for the empty state, so an unpushed-and-
+	// empty firewall doesn't paradoxically read as pending.
+	desired, err := s.fwState.DesiredHash(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.refuseFirewallState(w, r, err)
 		return
 	}
-	_, pendingHash, err := firewall.Compile(intents)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "compile: "+err.Error())
-		return
-	}
-	// A brand-new node has IntentHash="" but Compile(nil) produces a real
-	// hash for the canonical empty-state map. Treat "" as equivalent to
-	// the empty-state hash so an unpushed-and-empty firewall doesn't
-	// paradoxically read as pending.
-	_, emptyHash, _ := firewall.Compile(nil)
 	out := make([]*firewall.NodeState, 0, len(fws))
 	for _, n := range fws {
-		st, err := s.fw.GetNodeState(r.Context(), n.ID)
+		st, err := s.fwState.NodeState(r.Context(), n.ID)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+			s.refuseFirewallState(w, r, err)
 			return
 		}
 		if st == nil {
@@ -217,9 +221,9 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 		}
 		effectivePushed := st.IntentHash
 		if effectivePushed == "" {
-			effectivePushed = emptyHash
+			effectivePushed = s.fwState.EmptyHash()
 		}
-		st.Pending = effectivePushed != pendingHash
+		st.Pending = effectivePushed != desired
 		out = append(out, st)
 	}
 	writeJSON(w, http.StatusOK, out)

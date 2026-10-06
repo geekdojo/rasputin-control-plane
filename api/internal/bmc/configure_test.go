@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -37,10 +38,11 @@ func insertNode(t *testing.T, f *fixture, inv *inventory.Store, id string) {
 }
 
 func TestConfigHash_Deterministic(t *testing.T) {
-	a := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
-	b := ConfigHash("mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
-	c := ConfigHash("mock", json.RawMessage(`{"targets":["b"]}`), secret.Value{})
-	d := ConfigHash("bitscope", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
+	mac := credmactest.Key(t)
+	a := ConfigHash(mac, "mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
+	b := ConfigHash(mac, "mock", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
+	c := ConfigHash(mac, "mock", json.RawMessage(`{"targets":["b"]}`), secret.Value{})
+	d := ConfigHash(mac, "bitscope", json.RawMessage(`{"targets":["a"]}`), secret.Value{})
 	if a != b {
 		t.Error("same input must hash equal")
 	}
@@ -249,7 +251,7 @@ func TestStartReconcile_SubscribesAndSubmits(t *testing.T) {
 		func(_ context.Context, kind string, _ json.RawMessage, _ string) error {
 			submitted <- kind
 			return nil
-		}, slog.New(slog.DiscardHandler))
+		}, slog.New(slog.DiscardHandler), credmactest.Key(t))
 	if err != nil || stop == nil {
 		t.Fatalf("StartReconcile: stop-nil=%t err=%v", stop == nil, err)
 	}

@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 func newStore(t *testing.T) *Store {
@@ -212,9 +214,12 @@ func TestStore_UpdateAfterApply_SetsBothHashes(t *testing.T) {
 	}
 }
 
-func TestStore_UpdateAfterReconcile_DriftDetection(t *testing.T) {
+// TC-827-31: the drift rule, retargeted from Store.GetNodeState to
+// Service.NodeState (F-827-10). The store keeps the columns as written.
+func TestNodeState_UpdateAfterReconcile_DriftDetection(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
+	svc := newService(t, s)
 	// Apply baseline.
 	if err := s.UpdateAfterApply(ctx, "n", "intent-1", time.Now().UTC()); err != nil {
 		t.Fatalf("apply: %v", err)
@@ -224,7 +229,10 @@ func TestStore_UpdateAfterReconcile_DriftDetection(t *testing.T) {
 	if err := s.UpdateAfterReconcile(ctx, "n", "observed-rogue", t1); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got, _ := s.GetNodeState(ctx, "n")
+	if raw, _ := s.GetNodeState(ctx, "n"); raw.Drift || raw.IntentHash != "intent-1" || raw.ObservedHash != "observed-rogue" {
+		t.Errorf("the store's row is not the columns as written: %+v", raw)
+	}
+	got, _ := svc.NodeState(ctx, "n")
 	if got.IntentHash != "intent-1" {
 		t.Errorf("IntentHash should be preserved across reconcile: %q", got.IntentHash)
 	}
@@ -243,31 +251,38 @@ func TestStore_UpdateAfterReconcile_DriftDetection(t *testing.T) {
 	}
 }
 
-func TestStore_UpdateAfterReconcile_InSyncClearsDrift(t *testing.T) {
+// TC-827-31: retargeted to Service.NodeState (F-827-10).
+func TestNodeState_UpdateAfterReconcile_InSyncClearsDrift(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
+	svc := newService(t, s)
 	if err := s.UpdateAfterApply(ctx, "n", "hash-x", time.Now().UTC()); err != nil {
 		t.Fatalf("apply: %v", err)
+	}
+	if got, _ := svc.NodeState(ctx, "n"); got.Drift {
+		t.Errorf("Drift should be false right after an apply")
 	}
 	if err := s.UpdateAfterReconcile(ctx, "n", "hash-x", time.Now().UTC()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got, _ := s.GetNodeState(ctx, "n")
+	got, _ := svc.NodeState(ctx, "n")
 	if got.Drift {
 		t.Errorf("Drift should be false when observed == intent")
 	}
 }
 
-func TestStore_UpdateAfterReconcile_FreshNodeNoApply(t *testing.T) {
+// TC-827-31: retargeted to Service.NodeState (F-827-10).
+func TestNodeState_UpdateAfterReconcile_FreshNodeNoApply(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)
+	svc := newService(t, s)
 	// Reconcile arrives before any apply: intent_hash is empty, observed
 	// is populated, Drift should be false because we don't claim drift on
 	// no data.
 	if err := s.UpdateAfterReconcile(ctx, "n", "observed-only", time.Now().UTC()); err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	got, _ := s.GetNodeState(ctx, "n")
+	got, _ := svc.NodeState(ctx, "n")
 	if got == nil {
 		t.Fatal("state should be created by reconcile")
 	}
@@ -290,31 +305,29 @@ func TestStore_UpdateAfterReconcile_FreshNodeNoApply(t *testing.T) {
 func TestCompile_EmptyAndDisabledProduceStableHash(t *testing.T) {
 	// Two cases that should compile to the same canonical empty state and
 	// therefore the same hash.
-	_, h1, err := Compile(nil)
+	s1, err := Compile(nil, nil)
 	if err != nil {
-		t.Fatalf("Compile(nil): %v", err)
+		t.Fatalf("Compile(nil, nil): %v", err)
 	}
 	disabled := makePortForwardIntent(t, "i", "x", false, 1, 2)
-	_, h2, err := Compile([]*Intent{disabled})
+	s2, err := Compile([]*Intent{disabled}, nil)
 	if err != nil {
-		t.Fatalf("Compile(disabled): %v", err)
+		t.Fatalf("Compile(disabled, nil): %v", err)
 	}
+	h1, h2 := fingerprintOf(t, s1), fingerprintOf(t, s2)
 	if h1 != h2 {
 		t.Errorf("disabled intents should be omitted: %q vs %q", h1, h2)
 	}
-	if len(h1) != 64 {
-		t.Errorf("hex sha256 should be 64 chars, got %d", len(h1))
+	if !credmac.IsKeyed(h1) {
+		t.Errorf("the fingerprint should be keyed, got %q", h1)
 	}
 }
 
 func TestCompile_EnabledPortForwardShape(t *testing.T) {
 	in := makePortForwardIntent(t, "i", "ssh", true, 2222, 22)
-	state, h, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
-	}
-	if h == "" {
-		t.Error("hash should be non-empty")
 	}
 	fw, ok := state["firewall"].(map[string]any)
 	if !ok {
@@ -347,7 +360,7 @@ func TestCompile_ProtocolDefaultsToTCP(t *testing.T) {
 		ID: "i", Kind: string(proto.IntentPortForward), Name: "n",
 		Enabled: true, Spec: spec,
 	}
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -360,18 +373,18 @@ func TestCompile_ProtocolDefaultsToTCP(t *testing.T) {
 func TestCompile_RejectsIPv6(t *testing.T) {
 	// port_forward lanHost pinned to an IPv6 literal is rejected (decision #9).
 	pf, _ := json.Marshal(proto.PortForwardSpec{WanPort: 80, LanHost: "fd7a:115c:a1e0::5", LanPort: 80})
-	if _, _, err := Compile([]*Intent{{ID: "i", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: pf}}); err == nil {
+	if _, err := Compile([]*Intent{{ID: "i", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: pf}}, nil); err == nil {
 		t.Error("expected IPv6 lanHost to be rejected")
 	}
 	// firewall_rule destIp as an IPv6 CIDR is rejected.
 	fr, _ := json.Marshal(proto.FirewallRuleSpec{Src: "wan", Target: proto.RuleTargetAccept, DestIP: "2001:db8::/32"})
-	if _, _, err := Compile([]*Intent{{ID: "j", Kind: string(proto.IntentFirewallRule), Name: "n", Enabled: true, Spec: fr}}); err == nil {
+	if _, err := Compile([]*Intent{{ID: "j", Kind: string(proto.IntentFirewallRule), Name: "n", Enabled: true, Spec: fr}}, nil); err == nil {
 		t.Error("expected IPv6 destIp CIDR to be rejected")
 	}
 	// IPv4 literal and a bare hostname both pass (the firewall resolves the name).
 	for _, host := range []string{"10.0.0.5", "nas.lan"} {
 		ok, _ := json.Marshal(proto.PortForwardSpec{WanPort: 80, LanHost: host, LanPort: 80})
-		if _, _, err := Compile([]*Intent{{ID: "k", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: ok}}); err != nil {
+		if _, err := Compile([]*Intent{{ID: "k", Kind: string(proto.IntentPortForward), Name: "n", Enabled: true, Spec: ok}}, nil); err != nil {
 			t.Errorf("lanHost %q should be accepted: %v", host, err)
 		}
 	}
@@ -385,7 +398,7 @@ func TestCompile_ProtocolTCPUDPExpands(t *testing.T) {
 		ID: "i", Kind: string(proto.IntentPortForward), Name: "dns",
 		Enabled: true, Spec: spec,
 	}
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -414,7 +427,7 @@ func TestCompile_RejectsBadSpec(t *testing.T) {
 				ID: "i", Kind: string(proto.IntentPortForward), Name: "n",
 				Enabled: true, Spec: spec,
 			}
-			_, _, err := Compile([]*Intent{in})
+			_, err := Compile([]*Intent{in}, nil)
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), tc.match) {
 				t.Errorf("want error containing %q, got %v", tc.match, err)
 			}
@@ -427,7 +440,7 @@ func TestCompile_RejectsInvalidJSONSpec(t *testing.T) {
 		ID: "i", Kind: string(proto.IntentPortForward), Name: "n",
 		Enabled: true, Spec: json.RawMessage("not-json"),
 	}
-	if _, _, err := Compile([]*Intent{in}); err == nil {
+	if _, err := Compile([]*Intent{in}, nil); err == nil {
 		t.Error("expected error for invalid spec JSON")
 	}
 }
@@ -437,7 +450,7 @@ func TestCompile_RejectsUnknownKind(t *testing.T) {
 		ID: "i", Kind: "wireguard_peer", Name: "n", Enabled: true,
 		Spec: json.RawMessage("{}"),
 	}
-	_, _, err := Compile([]*Intent{in})
+	_, err := Compile([]*Intent{in}, nil)
 	if err == nil || !strings.Contains(err.Error(), "unsupported kind") {
 		t.Errorf("want 'unsupported kind' error, got %v", err)
 	}
@@ -459,9 +472,9 @@ func makeRuleIntent(t *testing.T, id, name string, spec proto.FirewallRuleSpec) 
 func TestCompile_EmptyStateIncludesBothSlices(t *testing.T) {
 	// Both kind slices appear even when nothing is on file, so the canonical
 	// empty-state shape is stable as new kinds land.
-	state, _, err := Compile(nil)
+	state, err := Compile(nil, nil)
 	if err != nil {
-		t.Fatalf("Compile(nil): %v", err)
+		t.Fatalf("Compile(nil, nil): %v", err)
 	}
 	fw, ok := state["firewall"].(map[string]any)
 	if !ok {
@@ -482,7 +495,7 @@ func TestCompile_FirewallRuleShape(t *testing.T) {
 		Proto: proto.RuleProtoTCP, Target: proto.RuleTargetReject,
 		Log: true, Comment: "block IoT",
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -524,7 +537,7 @@ func TestCompile_FirewallRuleProtoDefaultIsAll(t *testing.T) {
 		Src: "lan", Target: proto.RuleTargetAccept,
 		// Proto left empty
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -538,7 +551,7 @@ func TestCompile_FirewallRuleProtoTCPUDPExpands(t *testing.T) {
 	in := makeRuleIntent(t, "i", "n", proto.FirewallRuleSpec{
 		Src: "lan", Target: proto.RuleTargetAccept, Proto: proto.RuleProtoTCPUDP,
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -556,7 +569,7 @@ func TestCompile_FirewallRuleEmptyDestIsInputChain(t *testing.T) {
 		Src: "lan", Target: proto.RuleTargetAccept,
 		DestPort: "22", Proto: proto.RuleProtoTCP,
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -587,7 +600,7 @@ func TestCompile_WANConfigAbsentWhenNoRows(t *testing.T) {
 	// Zero wan_configs → no "network" key. This is the "Rasputin doesn't
 	// manage WAN here" state — leaves whatever OpenWrt's stock config does
 	// in place.
-	state, _, err := Compile(nil)
+	state, err := Compile(nil, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -602,7 +615,7 @@ func TestCompile_WANConfigAllDisabledIsKillSwitch(t *testing.T) {
 	in := makeWANIntent(t, "w1", "isp-a", false, proto.WANConfigSpec{
 		Proto: proto.WANProtoDHCP,
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -619,7 +632,7 @@ func TestCompile_WANConfigDHCP(t *testing.T) {
 	in := makeWANIntent(t, "w1", "isp-a", true, proto.WANConfigSpec{
 		Proto: proto.WANProtoDHCP, Hostname: "router",
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -636,7 +649,7 @@ func TestCompile_WANConfigStatic(t *testing.T) {
 		Gateway: "203.0.113.1",
 		DNS:     []string{"1.1.1.1", "9.9.9.9"},
 	})
-	state, _, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -656,14 +669,15 @@ func TestCompile_WANConfigPPPoE(t *testing.T) {
 	in := makeWANIntent(t, "w1", "isp-de", true, proto.WANConfigSpec{
 		Proto:    proto.WANProtoPppoe,
 		Username: "user@isp.de",
-		Secret:   "shh",
 		Service:  "internet",
 	})
-	state, _, err := Compile([]*Intent{in})
+	secrets := map[string]secret.Value{"w1": secret.New([]byte("shh"))}
+	defer DestroySecrets(secrets)
+	state, err := Compile([]*Intent{in}, secrets)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	wan := state["network"].(map[string]any)["wan"].(map[string]any)
+	wan := revealState(state)["network"].(map[string]any)["wan"].(map[string]any)
 	if wan["proto"] != "pppoe" ||
 		wan["username"] != "user@isp.de" ||
 		wan["password"] != "shh" ||
@@ -677,7 +691,7 @@ func TestCompile_WANConfigRejectsMultipleEnabled(t *testing.T) {
 	// the primary enforcer; this is the backstop.
 	a := makeWANIntent(t, "w1", "a", true, proto.WANConfigSpec{Proto: proto.WANProtoDHCP})
 	b := makeWANIntent(t, "w2", "b", true, proto.WANConfigSpec{Proto: proto.WANProtoDHCP})
-	if _, _, err := Compile([]*Intent{a, b}); err == nil {
+	if _, err := Compile([]*Intent{a, b}, nil); err == nil {
 		t.Error("expected error when two wan_configs are enabled")
 	}
 }
@@ -692,7 +706,7 @@ func TestCompile_WANConfigRejectsBadSpec(t *testing.T) {
 	}
 	for i, spec := range cases {
 		in := makeWANIntent(t, "w", "n", true, spec)
-		if _, _, err := Compile([]*Intent{in}); err == nil {
+		if _, err := Compile([]*Intent{in}, nil); err == nil {
 			t.Errorf("case %d: want error for spec %+v", i, spec)
 		}
 	}
@@ -759,7 +773,7 @@ func TestCompile_FirewallRuleRejectsBadSpec(t *testing.T) {
 	for name, spec := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := makeRuleIntent(t, "i", "n", spec)
-			if _, _, err := Compile([]*Intent{in}); err == nil {
+			if _, err := Compile([]*Intent{in}, nil); err == nil {
 				t.Errorf("want error for %s", name)
 			}
 		})
@@ -844,21 +858,14 @@ func TestModeGate(t *testing.T) {
 	}
 }
 
-func TestHash_Determinism(t *testing.T) {
+func TestFingerprint_Determinism(t *testing.T) {
 	m1 := map[string]any{"firewall": map[string]any{"redirect": []map[string]any{
 		{"name": "a", "src": "wan"},
 	}}}
 	m2 := map[string]any{"firewall": map[string]any{"redirect": []map[string]any{
 		{"src": "wan", "name": "a"}, // key order swapped — encoding/json sorts.
 	}}}
-	h1, err := Hash(m1)
-	if err != nil {
-		t.Fatalf("Hash m1: %v", err)
-	}
-	h2, err := Hash(m2)
-	if err != nil {
-		t.Fatalf("Hash m2: %v", err)
-	}
+	h1, h2 := fingerprintOf(t, m1), fingerprintOf(t, m2)
 	if h1 != h2 {
 		t.Errorf("hash should be invariant to map key order: %q vs %q", h1, h2)
 	}
@@ -867,26 +874,29 @@ func TestHash_Determinism(t *testing.T) {
 // Regression for the fresh-install drift bug (first Mu + CWWK bench,
 // 2026-06-12): a node whose agent reported clean empty state BEFORE any
 // apply has intent_hash="" in firewall_state, and the raw comparison
-// flagged DRIFT on an untouched firewall. GetNodeState must canonicalize
-// "" to the empty-compile hash, exactly as the pending computation does.
-func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
+// flagged DRIFT on an untouched firewall. Service.NodeState must canonicalize
+// "" to the empty-state fingerprint, exactly as the pending computation does.
+// TC-827-31: retargeted from Store.GetNodeState (F-827-10); the store leaves
+// the empty intent hash as "".
+func TestNodeState_FreshInstallNoDrift(t *testing.T) {
 	s := newStore(t)
+	svc := newService(t, s)
 	ctx := context.Background()
-	_, emptyHash, err := Compile(nil)
-	if err != nil {
-		t.Fatalf("Compile(nil): %v", err)
-	}
+	emptyHash := svc.EmptyHash()
 
 	// Reconcile-before-any-apply: agent reports canonical empty state.
 	if err := s.UpdateAfterReconcile(ctx, "n", emptyHash, time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAfterReconcile: %v", err)
 	}
-	ns, err := s.GetNodeState(ctx, "n")
+	ns, err := svc.NodeState(ctx, "n")
 	if err != nil {
 		t.Fatalf("GetNodeState: %v", err)
 	}
 	if ns.Drift {
 		t.Error("fresh install (never applied, agent reports empty) must NOT read as drift")
+	}
+	if raw, _ := s.GetNodeState(ctx, "n"); raw.IntentHash != "" || raw.ObservedHash != emptyHash || raw.Drift {
+		t.Errorf("the store's row should be the columns as written, intent hash \"\": %+v", raw)
 	}
 
 	// A never-applied node whose agent reports NON-empty state (its factory
@@ -898,7 +908,7 @@ func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
 	if err := s.UpdateAfterReconcile(ctx, "n", "stock-config-hash", time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAfterReconcile: %v", err)
 	}
-	ns, err = s.GetNodeState(ctx, "n")
+	ns, err = svc.NodeState(ctx, "n")
 	if err != nil {
 		t.Fatalf("GetNodeState: %v", err)
 	}
@@ -915,7 +925,7 @@ func TestStore_GetNodeState_FreshInstallNoDrift(t *testing.T) {
 	if err := s.UpdateAfterReconcile(ctx, "n", "diverged-hash", time.Now().UTC()); err != nil {
 		t.Fatalf("UpdateAfterReconcile: %v", err)
 	}
-	ns, err = s.GetNodeState(ctx, "n")
+	ns, err = svc.NodeState(ctx, "n")
 	if err != nil {
 		t.Fatalf("GetNodeState: %v", err)
 	}

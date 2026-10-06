@@ -2,6 +2,8 @@ package bmc
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
@@ -24,6 +27,10 @@ type Config struct {
 	// HostNodeID is a static fallback used when HostFn is nil — tests
 	// and single-purpose tools; production wires HostFn.
 	HostNodeID string
+
+	// MAC keys the selection fingerprint (ConfigHash). Required: NewService
+	// refuses a nil one.
+	MAC Fingerprinter
 }
 
 // Service ties together the store + config. The SOL session manager and
@@ -35,11 +42,21 @@ type Service struct {
 	nc    *nats.Conn
 }
 
-func NewService(cfg Config, store *Store, nc *nats.Conn) *Service {
+// NewService builds the service. It refuses a Config with no MAC rather than
+// returning a Service that cannot fingerprint a selection.
+func NewService(cfg Config, store *Store, nc *nats.Conn) (*Service, error) {
+	if cfg.MAC == nil {
+		return nil, errors.New("bmc: NewService needs a Config.MAC; nil was passed")
+	}
 	if cfg.HostFn == nil && cfg.HostNodeID == "" {
 		log.Printf("bmc: WARNING — no host resolution configured; bmc operations will fail until the BMC host is set")
 	}
-	return &Service{cfg: cfg, store: store, nc: nc}
+	return &Service{cfg: cfg, store: store, nc: nc}, nil
+}
+
+// ConfigHash is the package ConfigHash under this service's key.
+func (s *Service) ConfigHash(kind string, config json.RawMessage, cred secret.Value) string {
+	return ConfigHash(s.cfg.MAC, kind, config, cred)
 }
 
 // Host resolves the current BMC-host node id ("" = none configured).

@@ -53,17 +53,17 @@ func modeGate(managed Managed) jobs.WorkflowStep {
 //     manage the firewall (LAN peer).
 //  2. find_target  — resolve the firewall node id (validates exactly one).
 //  3. compile      — load + compile intents to canonical UCI state.
-//  4. push         — RPC the agent, persist resulting hash.
+//  4. push         — RPC the agent, persist the state's keyed fingerprint.
 //
 // Steps don't share data via the runner; each re-reads what it needs.
-func ApplyWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
+func ApplyWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "firewall.apply",
 		Steps: []jobs.WorkflowStep{
 			modeGate(managed),
 			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
-			{Name: "compile", Timeout: 2 * time.Second, Do: applyCompile(store)},
-			{Name: "push", Timeout: 5 * time.Second, Do: applyPush(store, inv, nc)},
+			{Name: "compile", Timeout: 2 * time.Second, Do: applyCompile(svc)},
+			{Name: "push", Timeout: 5 * time.Second, Do: applyPush(svc, inv, nc)},
 		},
 	}
 }
@@ -85,34 +85,41 @@ func applyFindTarget(inv *inventory.Store) jobs.DoFn {
 	}
 }
 
-// applyCompile checks that the intent set compiles and records its hash.
+// applyCompile checks that the intent set compiles and records its keyed
+// fingerprint.
 //
-// The result is the hash and the enabled-intent count, never the compiled
-// state: a step result is persisted in the job ledger and served by the jobs
-// API, and the compiled state carries the PPPoE password. The push step
-// compiles again for the bus command, which is the only place the state goes.
-func applyCompile(store *Store) jobs.DoFn {
+// The result is the fingerprint and the enabled-intent count, never the
+// compiled state: a step result is persisted in the job ledger and served by
+// the jobs API, and the compiled state carries the PPPoE password. The push
+// step compiles again for the bus command, which is the only place the state
+// goes.
+func applyCompile(svc *Service) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		intents, err := store.ListIntentsForCompile(sc.Ctx)
+		c, err := svc.compile(sc.Ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list intents: %w", err)
+			return nil, err
 		}
-		_, hash, err := Compile(intents)
-		if err != nil {
-			return nil, fmt.Errorf("compile: %w", err)
-		}
+		defer c.release()
 		enabled := 0
-		for _, i := range intents {
+		for _, i := range c.intents {
 			if i.Enabled {
 				enabled++
 			}
 		}
-		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, hash[:12]))
-		return json.Marshal(map[string]any{"hash": hash, "intentCount": enabled})
+		sc.Log("info", fmt.Sprintf("compiled %d enabled intent(s), hash=%s", enabled, proto.ShortFingerprint(c.hash)))
+		return json.Marshal(map[string]any{"hash": c.hash, "intentCount": enabled})
 	}
 }
 
-func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+// applyPush sends the compiled state to the agent and records its keyed
+// fingerprint as both the intent and the observed hash.
+//
+// The agent's ack carries its own unkeyed hash of what it applied. It is not
+// compared: the api fingerprints under a key the agent never holds, and the
+// agent's hash is of its own input, so a match would prove only that the JSON
+// round trip held. The next reconcile fingerprints what the agent reports and
+// catches a state that did not land. OK is still required.
+func applyPush(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		// Re-find target and re-compile so the step is self-contained.
 		fws, err := inv.ListByRole(sc.Ctx, proto.RoleFirewall)
@@ -121,21 +128,20 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		}
 		nodeID := fws[0].ID
 
-		intents, err := store.ListIntentsForCompile(sc.Ctx)
+		c, err := svc.compile(sc.Ctx)
 		if err != nil {
-			return nil, fmt.Errorf("list intents: %w", err)
+			return nil, err
 		}
-		state, intentHash, err := Compile(intents)
-		if err != nil {
-			return nil, fmt.Errorf("compile: %w", err)
-		}
+		defer c.release()
+		intentHash := c.hash
 
-		cmd, err := json.Marshal(proto.FirewallApplyCmd{State: state, IntentHash: intentHash})
+		cmd, err := applyCommand(c.state, intentHash)
 		if err != nil {
 			return nil, err
 		}
 		sc.Log("info", fmt.Sprintf("pushing to %s", nodeID))
 		msg, err := nc.RequestWithContext(sc.Ctx, proto.FirewallApplySubject(nodeID), cmd)
+		clear(cmd)
 		if err != nil {
 			return nil, fmt.Errorf("apply rpc: %w", err)
 		}
@@ -146,12 +152,9 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		if !ack.OK {
 			return nil, errors.New("agent reported apply failed")
 		}
-		if ack.Hash != intentHash {
-			return nil, fmt.Errorf("hash mismatch: intent=%s applied=%s", intentHash, ack.Hash)
-		}
 
 		now := time.Now().UTC()
-		if err := store.UpdateAfterApply(sc.Ctx, nodeID, intentHash, now); err != nil {
+		if err := svc.store.UpdateAfterApply(sc.Ctx, nodeID, intentHash, now); err != nil {
 			log.Printf("firewall: persist apply state: %v", err)
 		}
 		// Publish a "applied" change event for live UI subscribers.
@@ -163,7 +166,7 @@ func applyPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		})
 		_ = nc.Publish(proto.FirewallChangeSubject(nodeID, proto.FirewallApplied), evPayload)
 
-		sc.Log("info", fmt.Sprintf("applied: hash=%s", intentHash[:12]))
+		sc.Log("info", fmt.Sprintf("applied: hash=%s", proto.ShortFingerprint(intentHash)))
 		return json.Marshal(map[string]string{"nodeId": nodeID, "hash": intentHash})
 	}
 }
@@ -236,17 +239,17 @@ func sendSetActive(ctx context.Context, inv *inventory.Store, nc *nats.Conn, act
 
 // ----- ReconcileWorkflow --------------------------------------------------
 
-// ReconcileWorkflow fetches the firewall agent's observed state, compares it
-// against the intent hash the api thinks should be live, and emits a drift
-// or in_sync change event accordingly.
-func ReconcileWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
+// ReconcileWorkflow fetches the firewall agent's observed state, compares its
+// keyed fingerprint against the intent hash the api thinks should be live, and
+// emits a drift or in_sync change event accordingly.
+func ReconcileWorkflow(svc *Service, inv *inventory.Store, nc *nats.Conn, managed Managed) jobs.Workflow {
 	return jobs.Workflow{
 		Kind: "firewall.reconcile",
 		Steps: []jobs.WorkflowStep{
 			modeEnforce(managed, inv, nc),
 			{Name: "find_target", Timeout: 2 * time.Second, Do: applyFindTarget(inv)},
-			{Name: "fetch_observed", Timeout: 5 * time.Second, Do: reconcileFetch(store, inv, nc)},
-			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(store, inv, nc)},
+			{Name: "fetch_observed", Timeout: 5 * time.Second, Do: reconcileFetch(svc, inv, nc)},
+			{Name: "compare", Timeout: 2 * time.Second, Do: reconcileCompare(svc, inv, nc)},
 		},
 	}
 }
@@ -284,7 +287,10 @@ func modeEnforce(managed Managed, inv *inventory.Store, nc *nats.Conn) jobs.Work
 	}
 }
 
-func reconcileFetch(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+// reconcileFetch asks the agent for its state and records the keyed
+// fingerprint of it (Service.observe). A failure to record fails the step, so
+// compare never reports on a state that was not written.
+func reconcileFetch(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		fws, err := inv.ListByRole(sc.Ctx, proto.RoleFirewall)
 		if err != nil || len(fws) != 1 {
@@ -296,27 +302,23 @@ func reconcileFetch(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn
 		if err != nil {
 			return nil, fmt.Errorf("get rpc: %w", err)
 		}
-		var ack proto.FirewallGetAck
-		if err := json.Unmarshal(msg.Data, &ack); err != nil {
-			return nil, fmt.Errorf("decode ack: %w", err)
+		observed, err := svc.observe(sc.Ctx, nodeID, msg.Data, time.Now().UTC(), sc.Log)
+		if err != nil {
+			return nil, err
 		}
-		now := time.Now().UTC()
-		if err := store.UpdateAfterReconcile(sc.Ctx, nodeID, ack.Hash, now); err != nil {
-			log.Printf("firewall: persist reconcile state: %v", err)
-		}
-		sc.Log("info", fmt.Sprintf("observed hash=%s", proto.ShortFingerprint(ack.Hash)))
-		return json.Marshal(map[string]string{"nodeId": nodeID, "observedHash": ack.Hash})
+		sc.Log("info", fmt.Sprintf("observed hash=%s", proto.ShortFingerprint(observed)))
+		return json.Marshal(map[string]string{"nodeId": nodeID, "observedHash": observed})
 	}
 }
 
-func reconcileCompare(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+func reconcileCompare(svc *Service, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		fws, err := inv.ListByRole(sc.Ctx, proto.RoleFirewall)
 		if err != nil || len(fws) != 1 {
 			return nil, fmt.Errorf("firewall node lookup: %w", err)
 		}
 		nodeID := fws[0].ID
-		state, err := store.GetNodeState(sc.Ctx, nodeID)
+		state, err := svc.NodeState(sc.Ctx, nodeID)
 		if err != nil {
 			return nil, err
 		}

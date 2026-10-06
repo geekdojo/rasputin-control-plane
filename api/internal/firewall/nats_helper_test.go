@@ -177,7 +177,7 @@ func TestApplyCompile_HappyPath(t *testing.T) {
 		t.Fatalf("create intent: %v", err)
 	}
 	sc := newStepCtxNATS(`{}`, nil)
-	out, err := applyCompile(store)(sc)
+	out, err := applyCompile(newService(t, store))(sc)
 	if err != nil {
 		t.Fatalf("applyCompile: %v", err)
 	}
@@ -200,11 +200,10 @@ func TestApplyPush_HappyPath(t *testing.T) {
 		t.Fatalf("create intent: %v", err)
 	}
 
-	// Compute the hash the api will send so the fake agent can echo it back.
-	intents, _ := store.ListIntents(ctx)
-	_, wantHash, err := Compile(intents)
+	svc := newService(t, store)
+	wantHash, err := svc.DesiredHash(ctx)
 	if err != nil {
-		t.Fatalf("Compile: %v", err)
+		t.Fatalf("DesiredHash: %v", err)
 	}
 
 	sub, err := nc.Subscribe(proto.FirewallApplySubject("fw"), func(m *nats.Msg) {
@@ -223,7 +222,7 @@ func TestApplyPush_HappyPath(t *testing.T) {
 	defer func() { _ = chSub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := applyPush(store, inv, nc)(sc)
+	out, err := applyPush(svc, inv, nc)(sc)
 	if err != nil {
 		t.Fatalf("applyPush: %v", err)
 	}
@@ -254,24 +253,8 @@ func TestApplyPush_AgentReportsFailure(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := applyPush(store, inv, nc)(sc); err == nil {
+	if _, err := applyPush(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("agent OK=false: want error")
-	}
-}
-
-func TestApplyPush_HashMismatch(t *testing.T) {
-	nc := startNATS(t)
-	store := newStore(t)
-	inv := newInventory(t)
-	seedFirewallNode(t, inv, "fw")
-	sub, _ := nc.Subscribe(proto.FirewallApplySubject("fw"), func(m *nats.Msg) {
-		ack, _ := json.Marshal(proto.FirewallApplyAck{OK: true, Hash: "deadbeef"})
-		_ = m.Respond(ack)
-	})
-	defer func() { _ = sub.Unsubscribe() }()
-	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := applyPush(store, inv, nc)(sc); err == nil {
-		t.Error("hash mismatch: want error")
 	}
 }
 
@@ -284,7 +267,7 @@ func TestApplyPush_RPCTimeout(t *testing.T) {
 	defer cancel()
 	sc := newStepCtxNATS(`{}`, nc)
 	sc.Ctx = tctx
-	if _, err := applyPush(store, inv, nc)(sc); err == nil {
+	if _, err := applyPush(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("timeout: want error")
 	}
 }
@@ -294,7 +277,7 @@ func TestApplyPush_NoFirewallNode(t *testing.T) {
 	store := newStore(t)
 	inv := newInventory(t) // no firewall node seeded
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := applyPush(store, inv, nc)(sc); err == nil {
+	if _, err := applyPush(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("no firewall: want error")
 	}
 }
@@ -309,7 +292,7 @@ func TestApplyPush_BadAck(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := applyPush(store, inv, nc)(sc); err == nil {
+	if _, err := applyPush(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("bad ack: want error")
 	}
 }
@@ -335,18 +318,21 @@ func TestReconcileFetch_HappyPath(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileFetch(store, inv, nc)(sc)
+	out, err := reconcileFetch(newService(t, store), inv, nc)(sc)
 	if err != nil {
 		t.Fatalf("reconcileFetch: %v", err)
 	}
+	// The observed hash is the api's keyed fingerprint of the reported state,
+	// not the agent's own hash.
+	want := fingerprintOf(t, map[string]any{"firewall": map[string]any{}})
 	var got map[string]string
 	_ = json.Unmarshal(out, &got)
-	if got["observedHash"] != "observed-1" {
-		t.Errorf("observed: %q", got["observedHash"])
+	if got["observedHash"] != want {
+		t.Errorf("observed: %q, want %q", got["observedHash"], want)
 	}
 	// state should have been persisted.
 	state, _ := store.GetNodeState(ctx, "fw")
-	if state == nil || state.ObservedHash != "observed-1" {
+	if state == nil || state.ObservedHash != want {
 		t.Errorf("state: %+v", state)
 	}
 }
@@ -360,7 +346,7 @@ func TestReconcileFetch_RPCTimeout(t *testing.T) {
 	defer cancel()
 	sc := newStepCtxNATS(`{}`, nc)
 	sc.Ctx = tctx
-	if _, err := reconcileFetch(store, inv, nc)(sc); err == nil {
+	if _, err := reconcileFetch(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("timeout: want error")
 	}
 }
@@ -375,7 +361,7 @@ func TestReconcileFetch_BadAck(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := reconcileFetch(store, inv, nc)(sc); err == nil {
+	if _, err := reconcileFetch(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("bad ack: want error")
 	}
 }
@@ -385,7 +371,7 @@ func TestReconcileFetch_NoFirewallNode(t *testing.T) {
 	store := newStore(t)
 	inv := newInventory(t)
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := reconcileFetch(store, inv, nc)(sc); err == nil {
+	if _, err := reconcileFetch(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("no node: want error")
 	}
 }
@@ -409,7 +395,7 @@ func TestReconcileCompare_DriftPath(t *testing.T) {
 	defer func() { _ = chSub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	out, err := reconcileCompare(store, inv, nc)(sc)
+	out, err := reconcileCompare(newService(t, store), inv, nc)(sc)
 	if err != nil {
 		t.Fatalf("reconcileCompare: %v", err)
 	}
@@ -436,7 +422,7 @@ func TestReconcileCompare_InSyncPath(t *testing.T) {
 	defer func() { _ = chSub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := reconcileCompare(store, inv, nc)(sc); err != nil {
+	if _, err := reconcileCompare(newService(t, store), inv, nc)(sc); err != nil {
 		t.Fatalf("reconcileCompare: %v", err)
 	}
 	if _, err := chSub.NextMsg(time.Second); err != nil {
@@ -451,7 +437,7 @@ func TestReconcileCompare_NoStateRecorded(t *testing.T) {
 	seedFirewallNode(t, inv, "fw")
 	// no UpdateAfterApply call — state is nil
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := reconcileCompare(store, inv, nc)(sc); err == nil {
+	if _, err := reconcileCompare(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("no state recorded: want error")
 	}
 }
@@ -461,7 +447,7 @@ func TestReconcileCompare_NoFirewallNode(t *testing.T) {
 	store := newStore(t)
 	inv := newInventory(t)
 	sc := newStepCtxNATS(`{}`, nc)
-	if _, err := reconcileCompare(store, inv, nc)(sc); err == nil {
+	if _, err := reconcileCompare(newService(t, store), inv, nc)(sc); err == nil {
 		t.Error("no node: want error")
 	}
 }

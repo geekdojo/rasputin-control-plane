@@ -36,6 +36,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog/floor"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -435,6 +436,23 @@ func main() {
 	log.Printf("rasputin-api: app-secret seed loaded from %s (derivation version %d)",
 		filepath.Join(trustDir, appsecret.SeedFileName), appSecretSeed.DerivationVersion())
 
+	// The key the BMC selection and firewall state fingerprints are keyed
+	// under (geekdojo/geekdojo-brain#827), derived from the seed on every
+	// start and never written anywhere. FATAL for the same reason as the seed:
+	// without it no fingerprint the api wrote can be checked.
+	macKey, err := appSecretSeed.MACKey()
+	if err != nil {
+		log.Fatalf("rasputin-api: fingerprint key: %v", err)
+	}
+	mac, err := credmac.New(macKey)
+	if err != nil {
+		log.Fatalf("rasputin-api: fingerprint key: %v", err)
+	}
+	fwSvc, err := firewall.NewService(fwStore, mac)
+	if err != nil {
+		log.Fatalf("rasputin-api: firewall service: %v", err)
+	}
+
 	// Mesh subsystem. The controlplane self-hosts Headscale: when Docker is
 	// present (production and most dev), the api brings up the Headscale
 	// container, mints its own admin API key against it, and talks to it for
@@ -553,14 +571,17 @@ func main() {
 	// redirects routing without a restart. The env var seeds first boot
 	// only (seedObsEnabled recipe); the operator's choice wins after.
 	seedBMCHostNode(ctx, setupStore, envOr("RASPUTIN_BMC_HOST_NODE_ID", selfNodeID))
-	bmcSvc := bmc.NewService(bmc.Config{HostFn: func(ctx context.Context) string {
+	bmcSvc, err := bmc.NewService(bmc.Config{HostFn: func(ctx context.Context) string {
 		v, err := setupStore.Get(ctx, setup.KeyBMCHostNode)
 		if err != nil {
 			log.Printf("bmc: read %s: %v", setup.KeyBMCHostNode, err)
 			return ""
 		}
 		return v
-	}}, bmcStore, busSrv.Conn())
+	}, MAC: mac}, bmcStore, busSrv.Conn())
+	if err != nil {
+		log.Fatalf("rasputin-api: bmc service: %v", err)
+	}
 
 	// Setup wizard service. Probes are functions over the other
 	// subsystems' stores; defined here so the setup package stays narrow
@@ -689,8 +710,8 @@ func main() {
 		}
 		return setup.Mode(m) != setup.ModeLANPeer, nil
 	}
-	runner.Register(firewall.ApplyWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
-	runner.Register(firewall.ReconcileWorkflow(fwStore, invStore, busSrv.Conn(), fwManaged))
+	runner.Register(firewall.ApplyWorkflow(fwSvc, invStore, busSrv.Conn(), fwManaged))
+	runner.Register(firewall.ReconcileWorkflow(fwSvc, invStore, busSrv.Conn(), fwManaged))
 	runner.Register(firewall.SetActiveWorkflow(invStore, busSrv.Conn()))
 	// AA-11 Mode-A/C zero-touch DNS (ADR-0004 §10): keep the firewall's dnsmasq
 	// conditional-forward for <cluster-id>.internal pointed at the control plane's
@@ -1317,7 +1338,7 @@ func main() {
 
 	// busState is a value, never nil: bustls.Available or bustls.Unavailable.
 	// The correlation id a coded error carries is crypto/rand's Text.
-	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
+	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
 		busState, logger, cryptorand.Text)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: api server", "err", err.Error())
@@ -1435,7 +1456,7 @@ func main() {
 	}, func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error {
 		_, serr := runner.Submit(ctx, kind, spec, createdBy)
 		return serr
-	}, logger)
+	}, logger, mac)
 	if err != nil {
 		log.Fatalf("rasputin-api: bmc reconcile: %v", err)
 	}

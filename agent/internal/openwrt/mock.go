@@ -112,8 +112,8 @@ func (c *MockClient) Get(ctx context.Context) (map[string]any, string, error) {
 }
 
 // emptyState matches what firewall.Compile produces with no enabled intents,
-// so a fresh agent's hash matches the api's expectation when both have zero
-// intents on file. Both kind slices are always present (possibly empty) so
+// so a fresh agent's state fingerprints equal to the api's empty state when
+// both have zero intents on file. Both kind slices are always present (possibly empty) so
 // adding a new intent kind doesn't churn the empty-state hash.
 func emptyState() map[string]any {
 	return map[string]any{
@@ -125,8 +125,9 @@ func emptyState() map[string]any {
 }
 
 // hashState canonicalizes the state and SHA-256s it. Map keys are sorted by
-// encoding/json; the api's firewall.Hash uses the same function, so hashes
-// match across the boundary.
+// encoding/json. The api fingerprints the same canonical JSON under its own
+// key, so the canonicalization is still what makes equal states compare equal
+// across the boundary.
 func hashState(state map[string]any) (string, error) {
 	b, err := json.Marshal(state)
 	if err != nil {

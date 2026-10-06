@@ -490,8 +490,8 @@ func TestUCIRealClient_RoundTripHashAgreement(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Apply: %v", err)
 			}
-			// The agent's applied hash must equal what the api computed
-			// over its own compiled map (firewall.Hash mirrors hashState).
+			// The agent's applied hash must equal the hash of the compiled
+			// map it was sent: Apply hashes its input verbatim.
 			if want := mustHash(t, tc.state); applied != want {
 				t.Errorf("applied hash %s != api-side hash %s", applied, want)
 			}

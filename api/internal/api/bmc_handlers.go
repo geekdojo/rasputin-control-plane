@@ -180,7 +180,7 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		Kind:       req.Kind,
 		HostNodeID: req.HostNodeID,
 		Config:     req.Config,
-		ConfigHash: bmc.ConfigHash(req.Kind, req.Config, cred),
+		ConfigHash: s.bmc.ConfigHash(req.Kind, req.Config, cred),
 	})
 	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
 	if err != nil {

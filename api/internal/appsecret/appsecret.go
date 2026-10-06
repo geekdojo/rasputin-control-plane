@@ -197,6 +197,33 @@ func (s *Seed) derive(appID, name string, version uint32) (string, error) {
 	}
 }
 
+// macKeyInfo is the HKDF info for the credential-fingerprint key. It cannot
+// equal an app secret's info: infoV1 begins with a big-endian uint32 length of
+// at most maxAppIDLen, so its first byte is always 0x00, and this begins with
+// 'r'. Changing it changes every fingerprint the api has written, which reads
+// as drift on every firewall and re-pushes every BMC host once.
+const macKeyInfo = "rasputin/credmac/v1"
+
+// macKeyLen is the fingerprint key's length: the SHA-256 output size.
+const macKeyLen = 32
+
+// MACKey derives the key the api fingerprints credential-bearing state under
+// (package credmac, geekdojo/geekdojo-brain#827). It is a pure function of the
+// seed, so it is the same on every start and after a restore, and it is never
+// written anywhere. App-secret derivation is unchanged by it.
+func (s *Seed) MACKey() (secret.Value, error) {
+	if s == nil {
+		return secret.Value{}, errors.New("appsecret: no app-secret seed is loaded, so there is no fingerprint key")
+	}
+	out, err := hkdf.Expand(sha256.New, s.key, macKeyInfo, macKeyLen)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("appsecret: hkdf expand: %w", err)
+	}
+	v := secret.New(out)
+	clear(out)
+	return v, nil
+}
+
 // --- DERIVATION VERSION 1. FROZEN. DO NOT EDIT ANY BYTE OF WHAT FOLLOWS. ---
 //
 //	value = base64url-nopad( HKDF-Expand-SHA256(seed, info, 32) )

@@ -197,9 +197,9 @@ var wanProtoKeys = map[string][]string{
 
 // Apply renders state to uci commands, commits, reloads, and returns the
 // hash of the state it applied. Since the input is applied verbatim,
-// hashing the input (same canonicalization as the mock's hashState, which
-// the api's firewall.Hash mirrors) is correct — the api compares this
-// against its own compile hash and hard-errors on mismatch.
+// hashing the input (same canonicalization as the mock's hashState) is
+// correct. The api no longer compares it with its own fingerprint, which is
+// keyed (geekdojo/geekdojo-brain#827); it fingerprints what Get reports.
 //
 // No retries: the agent runs ON the firewall and a network reload may
 // briefly bounce WAN (the agent itself talks over br-lan and survives);
