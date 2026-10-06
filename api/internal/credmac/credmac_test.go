@@ -110,9 +110,13 @@ func TestKey_NeverRenders(t *testing.T) {
 	for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
 		outs = append(outs, fmt.Sprintf(verb, k), fmt.Sprintf(verb, *k))
 	}
-	if b, err := json.Marshal(k); err == nil {
-		outs = append(outs, string(b))
+	// As a field of something a caller logs or returns, the way a Key would
+	// reach encoding/json in practice.
+	b, err := json.Marshal(struct{ Key *credmac.Key }{k})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
 	}
+	outs = append(outs, string(b))
 	for _, h := range []func(*bytes.Buffer) slog.Handler{
 		func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) },
 		func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) },
