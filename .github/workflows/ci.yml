@@ -252,6 +252,7 @@ jobs:
           # docs/testing-appsecret-compose.md).
           RASPUTIN_APPSECRET_FUNCTIONAL: required
         run: |
+          sudo mv "$(command -v docker)" "$RUNNER_TEMP/docker.hidden"
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
       - name: test (remaining modules)
