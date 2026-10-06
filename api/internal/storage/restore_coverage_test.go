@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -200,12 +201,17 @@ func TestRestoreCoverageFixtureIsComplete(t *testing.T) {
 			continue
 		}
 		files := 0
-		_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-			if err == nil && !d.IsDir() {
+		if err := filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
 				files++
 			}
 			return nil
-		})
+		}); err != nil {
+			t.Fatalf("walk IdentitySources.%s (%s): %v", name, dir, err)
+		}
 		if files == 0 {
 			t.Errorf("IdentitySources.%s (%s) has no file beneath it in the coverage fixture", name, dir)
 		}
@@ -401,6 +407,19 @@ func assertRefusedWithNoResidue(t *testing.T, dataDir string, staged map[string]
 	}
 }
 
+// replacedDir returns the restore-replaced-<ts> directory a successful apply
+// created under dataDir.
+func replacedDir(t *testing.T, dataDir string) string {
+	t.Helper()
+	for _, e := range dataDirEntries(t, dataDir) {
+		if strings.HasPrefix(e, restoreReplacedPrefix) {
+			return filepath.Join(dataDir, e)
+		}
+	}
+	t.Fatal("no restore-replaced directory was created")
+	return ""
+}
+
 func readString(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
@@ -448,15 +467,7 @@ func TestApplyPendingRestorePlacesTheBusCertInTheConfiguredBusDir(t *testing.T) 
 	if got := readString(t, filepath.Join(busDir, bustls.CertFileName)); got != "ARCHIVED-CERT" {
 		t.Errorf("live bus cert = %q, want ARCHIVED-CERT", got)
 	}
-	var replaced string
-	for _, e := range dataDirEntries(t, dataDir) {
-		if strings.HasPrefix(e, restoreReplacedPrefix) {
-			replaced = filepath.Join(dataDir, e)
-		}
-	}
-	if replaced == "" {
-		t.Fatal("no restore-replaced directory was created")
-	}
+	replaced := replacedDir(t, dataDir)
 	if got := readString(t, filepath.Join(replaced, "bus", bustls.CertFileName)); got != "FRESH-CERT" {
 		t.Errorf("set-aside bus cert = %q, want FRESH-CERT", got)
 	}
@@ -491,4 +502,53 @@ func TestApplyPendingRestoreHalfACARefusalLeavesNoResidue(t *testing.T) {
 		t.Errorf("live mesh-ca.key = %q, want FRESH-CA-KEY", got)
 	}
 	assertRefusedWithNoResidue(t, dataDir, staged)
+}
+
+// The mesh-state default: with MeshStateDir unset, the headscale tree is
+// placed under <DataDir>/mesh, where a default install keeps it, and the fresh
+// tree is set aside. The working directory is a temp dir, so a resolver that
+// fell back to a relative path would land there and not in the source tree.
+func TestApplyPendingRestorePlacesTheHeadscaleTreeUnderTheDefaultMeshDir(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	liveTree := filepath.Join(dataDir, "mesh", "headscale")
+	if err := os.MkdirAll(liveTree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(liveTree, "db.sqlite"), "FRESH-HS")
+	const member = "mesh/headscale/db.sqlite"
+	stagePending(t, dataDir, map[string]string{member: "ARCHIVED-HS"}, []string{member})
+
+	if _, applied, err := ApplyPendingRestore(RestoreLayout{DataDir: dataDir}); err != nil || !applied {
+		t.Fatalf("ApplyPendingRestore: applied=%v err=%v", applied, err)
+	}
+	if got := readString(t, filepath.Join(liveTree, "db.sqlite")); got != "ARCHIVED-HS" {
+		t.Errorf("live headscale db = %q, want ARCHIVED-HS", got)
+	}
+	if got := readString(t, filepath.Join(replacedDir(t, dataDir), "mesh", "headscale", "db.sqlite")); got != "FRESH-HS" {
+		t.Errorf("set-aside headscale db = %q, want FRESH-HS", got)
+	}
+}
+
+// The tombstone merge reports what it did: a merge that succeeds logs how many
+// revocations it added and never the failure line, so an operator reading the
+// log after a restore is not told the archive's revocations were dropped.
+func TestApplyPendingRestoreLogsASuccessfulTombstoneMerge(t *testing.T) {
+	var logs bytes.Buffer
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	dataDir := t.TempDir()
+	archived := `{"version":1,"tombstones":[{"hash":"h-archived","revokedAt":"2026-01-02T03:04:05Z"}]}`
+	stagePending(t, dataDir, map[string]string{busTombstonesArchivePath: archived}, []string{busTombstonesArchivePath})
+
+	if _, applied, err := ApplyPendingRestore(RestoreLayout{DataDir: dataDir}); err != nil || !applied {
+		t.Fatalf("ApplyPendingRestore: applied=%v err=%v", applied, err)
+	}
+	if !strings.Contains(logs.String(), "merged 1 bus-token revocation tombstone(s) from the archive") {
+		t.Errorf("no merge line in the log:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "the live tombstones are unchanged") {
+		t.Errorf("a successful merge logged the failure line:\n%s", logs.String())
+	}
 }

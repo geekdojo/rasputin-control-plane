@@ -161,7 +161,7 @@ func TestApplyPendingRestorePutsTheAppSecretSeedBack(t *testing.T) {
 		t.Fatalf("read the live seed: %v", err)
 	}
 	if !bytes.Equal(live, archivedSeed) {
-		t.Fatalf("the restored seed is not in place — an entry with no case in restore_apply.go's switch is staged, reported as restored, and silently dropped.\n live %q\nwant %q", live, archivedSeed)
+		t.Fatalf("the restored seed is not in place after an apply that reported success — its identityApplyRules row resolves to somewhere other than the live trust dir.\n live %q\nwant %q", live, archivedSeed)
 	}
 
 	// The fresh install's own seed was moved ASIDE, not deleted: a failed or
