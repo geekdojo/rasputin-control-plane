@@ -16,20 +16,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
-// attr returns the named attribute of r as a string, and whether it was set.
-func attr(r slog.Record, key string) (string, bool) {
-	var v string
-	found := false
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			v, found = a.Value.String(), true
-			return false
-		}
-		return true
-	})
-	return v, found
-}
-
 // TC-692-13: a seed file that does not parse is one FATAL record, with the
 // path and the error, and exactly one exit(1); nothing is returned and no
 // "loaded" record is written.
@@ -57,10 +43,10 @@ func TestLoadAppSecrets_UnreadableSeedIsFatal(t *testing.T) {
 	if len(fatal) != 1 {
 		t.Fatalf("%d FATAL seed records, want 1", len(fatal))
 	}
-	if got, _ := attr(fatal[0], "path"); got != path {
+	if got := attrOf(fatal[0], "path"); got != path {
 		t.Errorf("FATAL record path=%q, want %q", got, path)
 	}
-	if got, _ := attr(fatal[0], "err"); got == "" {
+	if got := attrOf(fatal[0], "err"); got == "" {
 		t.Error("FATAL record carries no err")
 	}
 	if n := len(h.matching(slog.LevelInfo, "seed loaded")); n != 0 {
@@ -92,11 +78,12 @@ func TestLoadAppSecrets_LoadedIsInfoWithoutTheSeed(t *testing.T) {
 	if len(info) != 1 {
 		t.Fatalf("%d seed-loaded INFO records, want 1", len(info))
 	}
-	if got, _ := attr(info[0], "path"); got != path {
+	if got := attrOf(info[0], "path"); got != path {
 		t.Errorf("INFO record path=%q, want %q", got, path)
 	}
-	if got, ok := attr(info[0], "derivation_version"); !ok || got != "1" || appsecret.DerivationVersion != 1 {
-		t.Errorf("INFO record derivation_version=%q (set %v), want %d", got, ok, appsecret.DerivationVersion)
+	// attrOf returns "" for an absent attribute, so got == "1" also proves it is set.
+	if got := attrOf(info[0], "derivation_version"); got != "1" || appsecret.DerivationVersion != 1 {
+		t.Errorf("INFO record derivation_version=%q, want %d", got, appsecret.DerivationVersion)
 	}
 
 	// The second start reads the file the first one wrote; no attribute of its
@@ -151,7 +138,7 @@ func TestWorkflowOrExit(t *testing.T) {
 		if len(fatal) != 1 || len(h.recs) != 1 {
 			t.Fatalf("%d FATAL records of %d, want exactly 1", len(fatal), len(h.recs))
 		}
-		if got, _ := attr(fatal[0], "err"); got != refusal.Error() {
+		if got := attrOf(fatal[0], "err"); got != refusal.Error() {
 			t.Fatalf("FATAL record err=%q, want %q", got, refusal.Error())
 		}
 	})

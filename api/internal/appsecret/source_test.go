@@ -6,15 +6,6 @@ import (
 	"testing"
 )
 
-func sourceTestSeed(t *testing.T) *Seed {
-	t.Helper()
-	seed, err := NewSeed(bytes.Repeat([]byte{0x42}, SeedLen), DerivationVersion)
-	if err != nil {
-		t.Fatalf("NewSeed: %v", err)
-	}
-	return seed
-}
-
 // TC-692-09: the adapter's constructor refuses a nil seed (ARCH-IOC).
 func TestNewHKDFSourceRefusesANilSeed(t *testing.T) {
 	src, err := NewHKDFSource(nil)
@@ -56,7 +47,7 @@ func TestHKDFSourceWithNoSeedRefusesEveryCompose(t *testing.T) {
 // TC-692-11: the adapter returns exactly Resolve at InitialVersion, and a
 // token-free compose comes back byte for byte.
 func TestHKDFSourceEqualsResolveAtInitialVersion(t *testing.T) {
-	seed := sourceTestSeed(t)
+	seed := testSeed(t)
 	src, err := NewHKDFSource(seed)
 	if err != nil {
 		t.Fatalf("NewHKDFSource: %v", err)
@@ -91,7 +82,7 @@ func TestHKDFSourceEqualsResolveAtInitialVersion(t *testing.T) {
 // TC-692-12: a malformed token is Resolve's refusal, passed through unchanged
 // with the zero Value.
 func TestHKDFSourcePassesResolvesRefusalThrough(t *testing.T) {
-	seed := sourceTestSeed(t)
+	seed := testSeed(t)
 	src, err := NewHKDFSource(seed)
 	if err != nil {
 		t.Fatalf("NewHKDFSource: %v", err)
