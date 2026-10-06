@@ -562,7 +562,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 	for i := range priv2 {
 		priv2[i] = 0
 	}
-	spec, _ := json.Marshal(RestoreAppSpec{AppID: appRow.ID, PartUUID: runPartUUID, GenerationID: run.GenerationID, KeyID: vec.KeyID, SessionID: sid})
+	spec := RestoreAppSpec{AppID: appRow.ID, PartUUID: runPartUUID, GenerationID: run.GenerationID, KeyID: vec.KeyID, SessionID: sid}
 	rjob, err := h.runner.Submit(ctx, RestoreAppJobKind, spec, "test")
 	if err != nil {
 		t.Fatal(err)

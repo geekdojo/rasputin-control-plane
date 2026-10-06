@@ -232,10 +232,10 @@ var ErrSecretInSpec = errors.New("jobs: a job spec cannot carry a secret.Value")
 // returned Job is the initial persisted state; callers should not assume it
 // reflects later step progress (use GetJob for that).
 //
-// spec is the typed spec struct, which the runner marshals, or for the
-// callers not yet migrated a pre-marshalled json.RawMessage or []byte stored
-// as given (see encodeSpec). A spec whose type can carry a secret.Value is
-// refused with ErrSecretInSpec before anything is persisted.
+// spec is the typed spec struct, which the runner marshals, or nil for a
+// specless kind. A pre-marshalled json.RawMessage, *json.RawMessage or []byte
+// is refused with ErrRawSpec, and a spec whose type can carry a secret.Value
+// with ErrSecretInSpec, both before anything is persisted (see encodeSpec).
 func (r *Runner) Submit(ctx context.Context, kind string, spec any, createdBy string) (*Job, error) {
 	return r.submit(ctx, kind, spec, createdBy, "", nil)
 }
@@ -269,11 +269,33 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, created
 	return r.submit(ctx, kind, spec, createdBy, parentID, nil)
 }
 
+// SubmitRawSpec is Submit for a spec that is raw JSON by nature: the body of
+// POST /api/jobs and a scheduler entry's configured spec. An empty spec is
+// stored as "{}"; anything else is stored as given.
+//
+// It is the only way a pre-marshalled spec reaches the ledger. Every other
+// caller passes its typed spec to Submit, which refuses raw bytes with
+// ErrRawSpec, so a secret cannot be marshalled past the secret.Value refusal.
+// Its callers are pinned to Server.handleCreateJob and Scheduler.fire by a
+// type-checked test (specargs_test.go).
+func (r *Runner) SubmitRawSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+	if len(spec) == 0 {
+		spec = json.RawMessage("{}")
+	}
+	return r.create(ctx, kind, spec, createdBy, "", nil)
+}
+
 func (r *Runner) submit(ctx context.Context, kind string, spec any, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
 	raw, err := encodeSpec(kind, spec)
 	if err != nil {
 		return nil, err
 	}
+	return r.create(ctx, kind, raw, createdBy, parentID, prepare)
+}
+
+// create records a job with its encoded spec and starts it: the path that
+// submit and SubmitRawSpec share once the spec is bytes.
+func (r *Runner) create(ctx context.Context, kind string, raw json.RawMessage, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
 	r.mu.RLock()
 	wf, ok := r.workflows[kind]
 	r.mu.RUnlock()
@@ -308,36 +330,31 @@ func (r *Runner) submit(ctx context.Context, kind string, spec any, createdBy, p
 	return j, nil
 }
 
+// ErrRawSpec is the refusal for a pre-marshalled spec (json.RawMessage,
+// *json.RawMessage or []byte, empty or not) passed to Submit, SubmitPrepared or
+// SubmitChild. Bytes hide their type, so the secret.Value refusal cannot see
+// into them; a typed caller passes its struct and the runner marshals it.
+var ErrRawSpec = errors.New("jobs: a pre-marshalled spec is accepted only through SubmitRawSpec")
+
 // encodeSpec turns a submitted spec into the bytes the ledger stores. It runs
 // before the job id is minted and before prepare, so a refusal leaves nothing
 // behind. In order:
 //
-//  1. nil, or an empty json.RawMessage or []byte, is "{}". spec is persisted
-//     verbatim into a TEXT column and scanned straight back into a
-//     json.RawMessage (store.go); an empty one round-trips as RawMessage(""),
-//     which FAILS to marshal and takes the whole /api/jobs response down with
-//     it. The genuinely specless kinds (obs.enable / obs.disable) rely on this.
-//  2. A non-empty json.RawMessage or []byte is stored as given: the
-//     pass-through for callers not yet migrated to a typed spec. It is retired
-//     by geekdojo/geekdojo-brain#825, which moves the two callers whose input
-//     is raw JSON by nature (POST /api/jobs and the scheduler) to one named
-//     raw entry point.
+//  1. nil is "{}". spec is persisted verbatim into a TEXT column and scanned
+//     straight back into a json.RawMessage (store.go); an empty one
+//     round-trips as RawMessage(""), which FAILS to marshal and takes the
+//     whole /api/jobs response down with it. The genuinely specless kinds
+//     (obs.enable / obs.disable) rely on this.
+//  2. A json.RawMessage, *json.RawMessage or []byte is refused with
+//     ErrRawSpec; raw JSON enters only through SubmitRawSpec.
 //  3. A spec whose type can carry a secret.Value is refused.
 //  4. Anything else is json.Marshal(spec).
 func encodeSpec(kind string, spec any) (json.RawMessage, error) {
-	switch s := spec.(type) {
+	switch spec.(type) {
 	case nil:
 		return json.RawMessage("{}"), nil
-	case json.RawMessage:
-		if len(s) == 0 {
-			return json.RawMessage("{}"), nil
-		}
-		return s, nil
-	case []byte:
-		if len(s) == 0 {
-			return json.RawMessage("{}"), nil
-		}
-		return json.RawMessage(s), nil
+	case json.RawMessage, *json.RawMessage, []byte:
+		return nil, fmt.Errorf("%w: job kind %q", ErrRawSpec, kind)
 	}
 	if secret.Contains(spec) {
 		return nil, fmt.Errorf("%w: job kind %q", ErrSecretInSpec, kind)

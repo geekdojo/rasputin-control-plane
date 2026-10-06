@@ -53,7 +53,7 @@ func newReconciler(t *testing.T, st *setup.Store, busy bool) (*reconciler, *int)
 	r := &reconciler{
 		st:     st,
 		busy:   func(context.Context) (bool, error) { return busy, nil },
-		submit: func(context.Context, string, json.RawMessage, string) error { submitted++; return nil },
+		submit: func(context.Context, string, any, string) error { submitted++; return nil },
 		log:    slog.New(slog.DiscardHandler),
 		mac:    credmactest.Key(t),
 	}
@@ -179,9 +179,10 @@ func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
 		log:  slog.New(slog.DiscardHandler),
 		mac:  credmactest.Key(t),
 		busy: func(context.Context) (bool, error) { return false, nil },
-		submit: func(_ context.Context, _ string, s json.RawMessage, _ string) error {
-			spec = s
-			return nil
+		submit: func(_ context.Context, _ string, s any, _ string) error {
+			var err error
+			spec, err = json.Marshal(s)
+			return err
 		},
 	}
 	r.onRegistered(regMsg(t, "host-1", nil))

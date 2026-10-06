@@ -700,11 +700,7 @@ func (h *runHarness) submitRestore(t *testing.T, spec RestoreAppSpec) string {
 		t.Fatalf("sessions.Open: %v", err)
 	}
 	spec.SessionID = sid
-	body, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	j, err := h.runner.Submit(context.Background(), RestoreAppJobKind, body, "test")
+	j, err := h.runner.Submit(context.Background(), RestoreAppJobKind, spec, "test")
 	if err != nil {
 		t.Fatalf("Submit restore: %v", err)
 	}
@@ -778,11 +774,7 @@ func seedRunTarget(t *testing.T, st *Store, key testKeypair, opts runHarnessOpts
 
 func (h *runHarness) submit(t *testing.T, spec RunSpec) string {
 	t.Helper()
-	body, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatalf("marshal spec: %v", err)
-	}
-	j, err := h.runner.Submit(context.Background(), RunJobKind, body, "test")
+	j, err := h.runner.Submit(context.Background(), RunJobKind, spec, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

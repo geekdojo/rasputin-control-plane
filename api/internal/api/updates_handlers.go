@@ -602,8 +602,7 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 	// two overrides for one tier — need the plan and are enforced there, where
 	// the failure is a job that never touches a node rather than a 400 that
 	// duplicates the planner's knowledge of the fleet.
-	spec, _ := json.Marshal(req)
-	j, err := s.runner.Submit(r.Context(), "system.update", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "system.update", req, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
@@ -684,8 +683,7 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	spec, _ := json.Marshal(req)
-	j, err := s.runner.Submit(r.Context(), "node.update", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "node.update", req, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

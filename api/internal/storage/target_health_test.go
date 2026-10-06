@@ -314,7 +314,7 @@ func TestTargetHealthWorkflow_RecordsWithoutFailingTheJob(t *testing.T) {
 	if !due {
 		t.Fatal("a claimed target exists and the tick is not due")
 	}
-	j, err := r.Submit(context.Background(), TargetHealthJobKind, []byte(`{}`), "test")
+	j, err := r.Submit(context.Background(), TargetHealthJobKind, nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

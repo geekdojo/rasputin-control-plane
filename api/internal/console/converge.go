@@ -2,7 +2,6 @@ package console
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -22,7 +21,7 @@ import (
 // converge by the same route.
 
 // Submitter submits a job. Wired to jobs.Runner.Submit in main.
-type Submitter func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error
+type Submitter func(ctx context.Context, kind string, spec any, createdBy string) error
 
 // Converger pushes the console root password to a node that does not hold
 // it, on registration.
@@ -83,13 +82,9 @@ func (c *Converger) OnRegistered(ctx context.Context, n *proto.Node) {
 		log.Printf("console: claim %q for a console root password push: %v", n.ID, err)
 		return
 	}
-	spec, err := json.Marshal(PushSpec{
+	spec := PushSpec{
 		NodeIDs: []string{n.ID},
 		Reason:  "registration of " + n.ID,
-	})
-	if err != nil {
-		log.Printf("console: build the push spec for %q: %v", n.ID, err)
-		return
 	}
 	if err := c.submit(ctx, PushKind, spec, "system:console-converge"); err != nil {
 		// Put the node back where it was, so the next registration retries

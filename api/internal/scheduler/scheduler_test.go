@@ -309,3 +309,45 @@ func TestNoEntries_StartStopClean(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// ============================================================================
+// fire: the raw entry point (geekdojo/geekdojo-brain#825)
+// ============================================================================
+
+// TC-825-21: an entry's spec is raw JSON by nature, so fire submits it through
+// SubmitRawSpec. An empty spec is stored as {} and a non-empty one as given,
+// with no ErrRawSpec raised.
+func TestFire_SubmitsTheEntrySpecThroughTheRawEntryPoint(t *testing.T) {
+	nc := embeddedNATS(t)
+	ctx := context.Background()
+	store, err := jobs.OpenStore(ctx, filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatalf("jobs.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	r := jobs.NewRunner(store, nc)
+	var fired int64
+	r.Register(countingWorkflow("raw.empty", &fired))
+	r.Register(countingWorkflow("raw.given", &fired))
+	s := New(r, nil)
+
+	s.fire(ctx, "raw.empty", nil, "tester")
+	s.fire(ctx, "raw.given", json.RawMessage(`{"a": [1, 2]}`), "tester")
+	r.Wait()
+
+	for kind, want := range map[string]string{"raw.empty": `{}`, "raw.given": `{"a": [1, 2]}`} {
+		js, err := store.ListJobsByKind(ctx, kind, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(js) != 1 {
+			t.Fatalf("%s: %d jobs, want 1 (a refused submit is only logged, so a missing job is the ErrRawSpec symptom)", kind, len(js))
+		}
+		if string(js[0].Spec) != want {
+			t.Errorf("%s: stored spec %s, want %s", kind, js[0].Spec, want)
+		}
+	}
+	if atomic.LoadInt64(&fired) != 2 {
+		t.Errorf("%d jobs ran, want 2", fired)
+	}
+}

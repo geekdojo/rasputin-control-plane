@@ -181,7 +181,7 @@ func (s *Scheduler) fire(ctx context.Context, kind string, spec json.RawMessage,
 	// the create-job-row work; the saga then runs in its own goroutine.
 	subCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if _, err := s.runner.Submit(subCtx, kind, spec, createdBy); err != nil {
+	if _, err := s.runner.SubmitRawSpec(subCtx, kind, spec, createdBy); err != nil {
 		log.Printf("scheduler: submit %s: %v", kind, err)
 	}
 }

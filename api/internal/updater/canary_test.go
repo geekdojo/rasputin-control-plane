@@ -709,7 +709,7 @@ func TestSystemUpdate_ReportSurvivesAFailedRun(t *testing.T) {
 	defer sub.Unsubscribe()
 	_ = nc.Flush()
 
-	parent, err := runner.Submit(ctx, "system.update", json.RawMessage(`{"version":"2026.08.4"}`), "test")
+	parent, err := runner.Submit(ctx, "system.update", proto.SystemUpdateSpec{Version: "2026.08.4"}, "test")
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}
@@ -791,7 +791,7 @@ func TestSystemUpdate_CanaryAbortReportsNotAttempted(t *testing.T) {
 	defer sub.Unsubscribe()
 	_ = nc.Flush()
 
-	parent, err := runner.Submit(ctx, "system.update", json.RawMessage(`{"version":"2026.08.4"}`), "test")
+	parent, err := runner.Submit(ctx, "system.update", proto.SystemUpdateSpec{Version: "2026.08.4"}, "test")
 	if err != nil {
 		t.Fatalf("submit: %v", err)
 	}

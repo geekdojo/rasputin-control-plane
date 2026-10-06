@@ -19,7 +19,7 @@ import (
 
 // SubmitFn submits a job (matches the runner's Submit shape closed over
 // in main).
-type SubmitFn func(ctx context.Context, kind string, spec json.RawMessage, createdBy string) error
+type SubmitFn func(ctx context.Context, kind string, spec any, createdBy string) error
 
 // BusyFn reports whether a bmc.configure job is queued or running.
 type BusyFn func(ctx context.Context) (bool, error)
@@ -150,10 +150,10 @@ func (r *reconciler) onRegistered(subject string, data []byte) {
 	r.lastSubmitted = time.Now()
 	r.mu.Unlock()
 
-	spec, _ := json.Marshal(ConfigureSpec{
+	spec := ConfigureSpec{
 		Kind: kind, HostNodeID: hostID,
 		Config: cfg, ConfigHash: desired,
-	})
+	}
 	// No fingerprint value is logged: whether the host advertised a keyed one
 	// says whether this is the one re-push an upgrade costs.
 	r.log.InfoContext(ctx, "bmc: reconcile: re-pushing",

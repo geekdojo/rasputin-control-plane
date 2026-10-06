@@ -136,7 +136,7 @@ func TestJobsLedger_ReadsSucceededRecordSteps(t *testing.T) {
 	runner := jobs.NewRunner(jst, f.nc)
 	runner.Register(EnrollNodeWorkflow(f.svc, f.inv, f.nc))
 	for _, n := range []string{"good", "bad"} {
-		spec, _ := json.Marshal(EnrollSpec{NodeID: n, AdvertiseRoutes: []string{"10.9.0.0/24"}})
+		spec := EnrollSpec{NodeID: n, AdvertiseRoutes: []string{"10.9.0.0/24"}}
 		if _, err := runner.Submit(f.ctx, "mesh.enroll_node", spec, "test"); err != nil {
 			t.Fatalf("Submit: %v", err)
 		}

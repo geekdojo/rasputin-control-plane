@@ -518,7 +518,7 @@ type recordingSubmitter struct {
 	err   error
 }
 
-func (r *recordingSubmitter) submit(_ context.Context, kind string, spec json.RawMessage, _ string) error {
+func (r *recordingSubmitter) submit(_ context.Context, kind string, spec any, _ string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if kind != PushKind {
@@ -527,8 +527,14 @@ func (r *recordingSubmitter) submit(_ context.Context, kind string, spec json.Ra
 	if r.err != nil {
 		return r.err
 	}
+	// Marshalled as the runner stores it, so the recorded spec is the one a
+	// job would carry.
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
 	var s PushSpec
-	if err := json.Unmarshal(spec, &s); err != nil {
+	if err := json.Unmarshal(raw, &s); err != nil {
 		return err
 	}
 	r.specs = append(r.specs, s)
@@ -735,11 +741,7 @@ func realRunner(t *testing.T, nc *nats.Conn, wf jobs.Workflow) (*jobs.Runner, *j
 // submitAndWait runs one push to its terminal state, OnTerminal included.
 func submitAndWait(t *testing.T, r *jobs.Runner, js *jobs.Store, spec PushSpec) *jobs.Job {
 	t.Helper()
-	raw, err := json.Marshal(spec)
-	if err != nil {
-		t.Fatal(err)
-	}
-	j, err := r.Submit(context.Background(), PushKind, raw, "test")
+	j, err := r.Submit(context.Background(), PushKind, spec, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

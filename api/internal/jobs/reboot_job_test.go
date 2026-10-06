@@ -155,8 +155,7 @@ func runRebootJob(t *testing.T, nc *nats.Conn, nodeID string, waitBound time.Dur
 	}
 	r.Register(w)
 
-	spec, _ := json.Marshal(map[string]any{"nodeId": nodeID, "delaySeconds": 1})
-	j, err := r.Submit(context.Background(), "node.reboot", spec, "test")
+	j, err := r.Submit(context.Background(), "node.reboot", map[string]any{"nodeId": nodeID, "delaySeconds": 1}, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

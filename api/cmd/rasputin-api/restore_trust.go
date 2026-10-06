@@ -78,7 +78,7 @@ func kickTrustConvergenceAfterRestore(ctx context.Context, meshSvc *mesh.Service
 	case <-time.After(restoreTrustSettle):
 	}
 
-	j, err := runner.Submit(ctx, "mesh.reconcile", json.RawMessage("{}"), "restore-trust")
+	j, err := runner.Submit(ctx, "mesh.reconcile", nil, "restore-trust")
 	if err != nil {
 		fail(fmt.Sprintf("could not submit the post-restore mesh.reconcile: %v; the scheduled one will re-deliver the restored mesh CA", err))
 		return

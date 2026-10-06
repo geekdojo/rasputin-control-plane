@@ -418,7 +418,7 @@ func (h *harness) submit(t *testing.T, spec ClaimSpec) string {
 	if err != nil {
 		t.Fatalf("marshal spec: %v", err)
 	}
-	j, err := h.runner.Submit(context.Background(), ClaimJobKind, body, "test")
+	j, err := h.runner.SubmitRawSpec(context.Background(), ClaimJobKind, body, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}

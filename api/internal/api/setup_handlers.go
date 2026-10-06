@@ -79,7 +79,7 @@ func (s *Server) handleSetupMode(w http.ResponseWriter, r *http.Request) {
 	// its own errors in the Tasks panel. Only submitted when a firewall node
 	// exists (the SetActive workflow needs exactly one).
 	if state != nil && state.FirewallCapable {
-		spec, _ := json.Marshal(firewall.SetActiveSpec{Active: state.Mode != setup.ModeLANPeer})
+		spec := firewall.SetActiveSpec{Active: state.Mode != setup.ModeLANPeer}
 		if _, err := s.runner.Submit(r.Context(), "firewall.set_active", spec, creator(r)); err != nil {
 			log.Printf("setup: submit firewall.set_active after mode change: %v", err)
 		}
@@ -98,7 +98,7 @@ func (s *Server) submitDNSForward(ctx context.Context, createdBy string) {
 	if s.runner == nil {
 		return
 	}
-	if _, err := s.runner.Submit(ctx, "firewall.dns_forward", json.RawMessage(`{}`), createdBy); err != nil {
+	if _, err := s.runner.Submit(ctx, "firewall.dns_forward", nil, createdBy); err != nil {
 		log.Printf("api: submit firewall.dns_forward (%s): %v", createdBy, err)
 	}
 }
@@ -114,8 +114,7 @@ func (s *Server) handleSetupMesh(w http.ResponseWriter, r *http.Request) {
 			"RASPUTIN_SELF_NODE_ID is not configured on the api process; cannot enroll without it")
 		return
 	}
-	spec, _ := json.Marshal(mesh.EnrollSpec{NodeID: selfID})
-	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", spec, creator(r))
+	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", mesh.EnrollSpec{NodeID: selfID}, creator(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

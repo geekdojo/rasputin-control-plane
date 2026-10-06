@@ -728,8 +728,7 @@ func TestRestoreAppRefusesTheWrongKeyBeforeAnythingIsStopped(t *testing.T) {
 	}
 	spec := c.spec()
 	spec.SessionID = sid
-	body, _ := json.Marshal(spec)
-	jb, err := c.h.runner.Submit(context.Background(), RestoreAppJobKind, body, "test")
+	jb, err := c.h.runner.Submit(context.Background(), RestoreAppJobKind, spec, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

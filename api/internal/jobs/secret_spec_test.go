@@ -122,26 +122,31 @@ func TestSubmit_RefusesASpecCarryingASecret(t *testing.T) {
 }
 
 // TC-732-10: every spec form a current caller passes is accepted and stored
-// as before, and each job runs to its terminal status.
+// as before, and each job runs to its terminal status. Since
+// geekdojo/geekdojo-brain#825 the raw forms are passed to SubmitRawSpec, the
+// one entry point that accepts them; Submit refuses them (raw_spec_test.go).
 func TestSubmit_AcceptsEveryCurrentSpecForm(t *testing.T) {
 	g := newSpecRig(t)
 	ctx := context.Background()
 	typed := plainSpec{Name: "n", Count: 3}
 	typedJSON, _ := json.Marshal(typed)
+	submit := func(spec any) (*Job, error) { return g.r.Submit(ctx, specKind, spec, "test") }
+	raw := func(spec json.RawMessage) func(any) (*Job, error) {
+		return func(any) (*Job, error) { return g.r.SubmitRawSpec(ctx, specKind, spec, "test") }
+	}
 	cases := []struct {
-		name string
-		spec any
-		want string
+		name   string
+		spec   any
+		submit func(any) (*Job, error)
+		want   string
 	}{
-		{"typed struct", typed, string(typedJSON)},
-		{"non-empty json.RawMessage", json.RawMessage(`{"a": 1}`), `{"a": 1}`},
-		{"non-empty []byte", []byte(`{"b":[1, 2]}`), `{"b":[1, 2]}`},
-		{"nil", nil, `{}`},
-		{"empty json.RawMessage", json.RawMessage{}, `{}`},
-		{"empty []byte", []byte{}, `{}`},
+		{"typed struct", typed, submit, string(typedJSON)},
+		{"nil", nil, submit, `{}`},
+		{"non-empty raw JSON", nil, raw(json.RawMessage(`{"a": 1}`)), `{"a": 1}`},
+		{"empty raw JSON", nil, raw(json.RawMessage{}), `{}`},
 	}
 	for _, c := range cases {
-		j, err := g.r.Submit(ctx, specKind, c.spec, "test")
+		j, err := c.submit(c.spec)
 		if err != nil {
 			t.Fatalf("%s: %v", c.name, err)
 		}

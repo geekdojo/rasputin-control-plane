@@ -27,7 +27,7 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "kind is required")
 		return
 	}
-	j, err := s.runner.Submit(r.Context(), req.Kind, req.Spec, "user")
+	j, err := s.runner.SubmitRawSpec(r.Context(), req.Kind, req.Spec, "user")
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

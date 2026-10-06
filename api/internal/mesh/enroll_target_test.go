@@ -90,8 +90,7 @@ func TestEnrollJob_InvalidOrUnregisteredTargetSendsNothing(t *testing.T) {
 	targets := append([]string{"beta"}, invalidEnrollNodeIDs...)
 	ids := make([]string, 0, len(targets))
 	for _, id := range targets {
-		spec, _ := json.Marshal(EnrollSpec{NodeID: id})
-		j, err := runner.Submit(f.ctx, "mesh.enroll_node", spec, "test")
+		j, err := runner.Submit(f.ctx, "mesh.enroll_node", EnrollSpec{NodeID: id}, "test")
 		if err != nil {
 			t.Fatalf("Submit(%q): %v", id, err)
 		}

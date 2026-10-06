@@ -366,8 +366,7 @@ func TestEnrollJob_KeyNeverReachesTheLedger(t *testing.T) {
 	runner.Register(EnrollNodeWorkflow(f.svc, f.inv, f.nc))
 	var ids []string
 	for _, node := range []string{"good", "bad"} {
-		spec, _ := json.Marshal(EnrollSpec{NodeID: node})
-		j, err := runner.Submit(f.ctx, "mesh.enroll_node", spec, "test")
+		j, err := runner.Submit(f.ctx, "mesh.enroll_node", EnrollSpec{NodeID: node}, "test")
 		if err != nil {
 			t.Fatalf("Submit: %v", err)
 		}

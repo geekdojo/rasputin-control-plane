@@ -641,18 +641,22 @@ func TestParseRebootSpec(t *testing.T) {
 // was the first) takes the whole Tasks page down with it.
 func TestRunner_Submit_NormalizesEmptySpec(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		spec json.RawMessage
+		name   string
+		submit func(r *Runner) (*Job, error)
 	}{
-		{"nil", nil},
-		{"empty", json.RawMessage("")},
+		{"nil", func(r *Runner) (*Job, error) { return r.Submit(context.Background(), "obs.enable", nil, "test") }},
+		// An empty raw spec reaches the ledger only through SubmitRawSpec
+		// (geekdojo/geekdojo-brain#825); Submit refuses it with ErrRawSpec.
+		{"empty", func(r *Runner) (*Job, error) {
+			return r.SubmitRawSpec(context.Background(), "obs.enable", json.RawMessage(""), "test")
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := newStore(t)
 			r := NewRunner(store, nil)
 			r.Register(Workflow{Kind: "obs.enable"})
 
-			j, err := r.Submit(context.Background(), "obs.enable", tc.spec, "test")
+			j, err := tc.submit(r)
 			if err != nil {
 				t.Fatalf("Submit: %v", err)
 			}
