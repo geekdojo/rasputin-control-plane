@@ -44,6 +44,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 )
 
@@ -51,16 +52,13 @@ const proxyFuncProject = "rasputin-obs-proxyfunc"
 
 func proxyFuncRequireDocker(t *testing.T) {
 	t.Helper()
-	mode := os.Getenv("RASPUTIN_GRAFANA_FUNCTIONAL")
-	if mode == "" {
+	const env = "RASPUTIN_GRAFANA_FUNCTIONAL"
+	if os.Getenv(env) == "" {
 		t.Skip("set RASPUTIN_GRAFANA_FUNCTIONAL=1 to run (needs docker)")
 	}
 	fail := func(format string, args ...any) {
 		t.Helper()
-		if mode == "required" {
-			t.Fatalf("RASPUTIN_GRAFANA_FUNCTIONAL=required but "+format, args...)
-		}
-		t.Skipf(format, args...)
+		functest.SkipOrFail(t, env, format, args...)
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		fail("docker not on PATH: %v", err)

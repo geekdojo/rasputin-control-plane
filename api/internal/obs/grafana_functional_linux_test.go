@@ -35,6 +35,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 )
 
 const (
@@ -48,22 +50,17 @@ const (
 	funcCurlImage = "curlimages/curl:8.11.1"
 )
 
-// funcRequired reports whether skips must become failures.
-func funcRequired() bool {
-	return os.Getenv("RASPUTIN_GRAFANA_FUNCTIONAL") == "required"
-}
+// grafanaFuncEnv opts these tests in; functest.Required makes skips failures.
+const grafanaFuncEnv = "RASPUTIN_GRAFANA_FUNCTIONAL"
 
 func skipOrFail(t *testing.T, format string, args ...any) {
 	t.Helper()
-	if funcRequired() {
-		t.Fatalf("RASPUTIN_GRAFANA_FUNCTIONAL=required but "+format, args...)
-	}
-	t.Skipf(format, args...)
+	functest.SkipOrFail(t, grafanaFuncEnv, format, args...)
 }
 
 func requireDocker(t *testing.T) {
 	t.Helper()
-	if os.Getenv("RASPUTIN_GRAFANA_FUNCTIONAL") == "" {
+	if os.Getenv(grafanaFuncEnv) == "" {
 		t.Skip("set RASPUTIN_GRAFANA_FUNCTIONAL=1 to run (needs docker; see file comment)")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
