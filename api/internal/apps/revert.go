@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -164,9 +163,15 @@ func revertSpecAppID(raw json.RawMessage) (string, error) {
 //
 // Like the other compose sagas, a failure after the pull is not reverted
 // automatically.
-func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets *appsecret.Seed) jobs.Workflow {
+//
+// It refuses a nil secrets source, returning the zero Workflow.
+func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets SecretSource) (jobs.Workflow, error) {
+	const kind = "app.revert"
+	if err := requireSecretSource(kind, secrets); err != nil {
+		return jobs.Workflow{}, err
+	}
 	return jobs.Workflow{
-		Kind: "app.revert",
+		Kind: kind,
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: revertLoad(store, inv)},
 			// Backstops, as in UpgradeWorkflow; the real deadlines are the
@@ -177,7 +182,7 @@ func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Le
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, revertSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, revertSpecAppID)},
 		},
-	}
+	}, nil
 }
 
 func revertLoad(store *Store, inv *inventory.Store) jobs.DoFn {

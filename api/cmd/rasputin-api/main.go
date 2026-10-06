@@ -26,7 +26,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
@@ -429,12 +428,7 @@ func main() {
 	// old one, the old values still live inside the apps' data volumes, and
 	// there is nothing to re-derive them from. Failing to boot leaves the file
 	// intact to be rolled back or restored; carrying on does not.
-	appSecretSeed, err := appsecret.EnsureSeed(trustDir)
-	if err != nil {
-		log.Fatalf("rasputin-api: app-secret seed: %v", err)
-	}
-	log.Printf("rasputin-api: app-secret seed loaded from %s (derivation version %d)",
-		filepath.Join(trustDir, appsecret.SeedFileName), appSecretSeed.DerivationVersion())
+	appSecretSeed, appSecrets := loadAppSecrets(ctx, logger, os.Exit, trustDir)
 
 	// The key the BMC selection and firewall state fingerprints are keyed
 	// under (geekdojo/geekdojo-brain#827), derived from the seed on every
@@ -763,18 +757,21 @@ func main() {
 			return removeAppLeafDir(appLeafDir, appID)
 		}
 	}
-	runner.Register(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecretSeed))
+	// The deploy-family constructors refuse a missing secret source; must
+	// turns that refusal into a FATAL exit instead of a saga that cannot run.
+	must := workflowOrExit(ctx, logger, os.Exit)
+	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecrets)))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
 	// compose comes from the row, so unlike app.upgrade it needs nothing from
 	// the catalog.
-	runner.Register(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecretSeed))
+	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecrets)))
 	// app.edit (#410): replace a custom app's compose with one its owner sent.
 	// The compose is held in composeStash, never in the job spec; the server
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, appSecretSeed))
+	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, appSecrets)))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
@@ -846,7 +843,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, appSecretSeed))
+	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, appSecrets)))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.

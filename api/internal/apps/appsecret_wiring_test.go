@@ -9,6 +9,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -30,18 +31,11 @@ import (
 
 const secretCompose = "services:\n  db:\n    environment:\n      POSTGRES_PASSWORD: ${secret:db-password}\n"
 
-// derived is the value seed derives for testAppID's secret name, as the
-// string the bus command carries.
-func derived(t *testing.T, seed *appsecret.Seed, name string) string {
-	t.Helper()
-	v, err := seed.Derive(testAppID, name, appsecret.InitialVersion)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return string(v.Reveal())
-}
-
-func wiringSeed(t *testing.T) *appsecret.Seed {
+// wiringSource is the HKDF source the deploy-family workflows are wired with
+// in main, over a fixed test seed, and the value that seed derives for an
+// app's secret name, as the string the bus command carries. The expected value
+// is computed by the seed itself, independently of the source under test.
+func wiringSource(t *testing.T) (SecretSource, func(appID, name string) string) {
 	t.Helper()
 	key := make([]byte, appsecret.SeedLen)
 	for i := range key {
@@ -51,7 +45,39 @@ func wiringSeed(t *testing.T) *appsecret.Seed {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return seed
+	src, err := appsecret.NewHKDFSource(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived := func(appID, name string) string {
+		t.Helper()
+		v, err := seed.Derive(appID, name, appsecret.InitialVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(v.Reveal())
+	}
+	return src, derived
+}
+
+// testSource is wiringSource's source alone, for a test that resolves no
+// token and checks no derived value.
+func testSource(t *testing.T) SecretSource {
+	t.Helper()
+	src, _ := wiringSource(t)
+	return src
+}
+
+// wf unwraps a deploy-family constructor's (Workflow, error), failing the test
+// on a refusal.
+func wf(t *testing.T) func(jobs.Workflow, error) jobs.Workflow {
+	return func(w jobs.Workflow, err error) jobs.Workflow {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("workflow constructor refused: %v", err)
+		}
+		return w
+	}
 }
 
 // seedAppWithSecret seeds an online compute node and an app whose INSTALLED
@@ -82,8 +108,8 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedAppWithSecret(t, "n", testAppID)
-	seed := wiringSeed(t)
-	want := derived(t, seed, "db-password")
+	src, derived := wiringSource(t)
+	want := derived(testAppID, "db-password")
 
 	got := make(chan proto.AppDeployCmd, 1)
 	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
@@ -98,7 +124,7 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc, seed)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, src)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	var cmd proto.AppDeployCmd
@@ -129,41 +155,60 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	}
 }
 
-// No seed and a compose that needs one: refused, and refused before the status
-// moves, so the app is left where it was rather than stranded in DEPLOYING.
+// TC-692-07: an HKDF source with no seed — a typed nil, or the zero value —
+// still reaches pushStep through the interface, and it is refused there, before
+// the status moves, so the app is left where it was rather than stranded in
+// DEPLOYING. No panic, and no deploy command.
 func TestDeployPushRefusesASecretComposeWithNoSeed(t *testing.T) {
-	ctx := context.Background()
-	nc := startNATS(t)
-	store, inv := seedAppWithSecret(t, "n", testAppID)
-	before, err := store.Get(ctx, testAppID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name string
+		src  SecretSource
+	}{
+		{"typed-nil *HKDFSource", (*appsecret.HKDFSource)(nil)},
+		{"zero HKDFSource{}", &appsecret.HKDFSource{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			nc := startNATS(t)
+			store, inv := seedAppWithSecret(t, "n", testAppID)
+			before, err := store.Get(ctx, testAppID)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
-		t.Error("the agent was sent a deploy command although no secret could be resolved")
-		ack, _ := json.Marshal(proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
-		_ = m.Respond(ack)
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = sub.Unsubscribe() }()
+			sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
+				t.Error("the agent was sent a deploy command although no secret could be resolved")
+				ack, _ := json.Marshal(proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
+				_ = m.Respond(ack)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc, nil)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err == nil {
-		t.Fatal("the deploy went ahead with no seed loaded")
-	}
-	after, err := store.Get(ctx, testAppID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.LastStatus != before.LastStatus {
-		t.Errorf("the refused deploy moved the status to %q (was %q)", after.LastStatus, before.LastStatus)
+			_, err = deployPush(store, inv, nc, tc.src)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
+			if err == nil {
+				t.Fatal("the deploy went ahead with no seed loaded")
+			}
+			if !strings.Contains(err.Error(), "appsecret: HKDF source has no seed") || !strings.Contains(err.Error(), testAppID) {
+				t.Fatalf("error %q does not name the missing seed and the app", err)
+			}
+			if err := nc.Flush(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := store.Get(ctx, testAppID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.LastStatus != before.LastStatus {
+				t.Errorf("the refused deploy moved the status to %q (was %q)", after.LastStatus, before.LastStatus)
+			}
+		})
 	}
 }
 
-// A compose with no token is sent byte for byte, with or without a seed: the
-// install path stays a verbatim copy for every app in the field today.
+// TC-692-08: a compose with no token is sent byte for byte: the install path
+// stays a verbatim copy for every app in the field today.
 func TestDeployPushSendsAComposeWithNoTokensVerbatim(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", testAppID, "plain")
@@ -185,7 +230,7 @@ func TestDeployPushSendsAComposeWithNoTokensVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deployPush(store, inv, nc, wiringSeed(t))(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, testSource(t))(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	select {
@@ -221,8 +266,8 @@ func TestVolumesCheckEscapesTheTokenRatherThanResolvingIt(t *testing.T) {
 func TestPullEscapesTheTokenRatherThanResolvingIt(t *testing.T) {
 	nc := startNATS(t)
 	_, inv := seedAppWithSecret(t, "n", testAppID)
-	seed := wiringSeed(t)
-	leaked := derived(t, seed, "db-password")
+	_, derived := wiringSource(t)
+	leaked := derived(testAppID, "db-password")
 
 	cmds := make(chan proto.AppPullCmd, 1)
 	sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {

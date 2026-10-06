@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -58,9 +57,15 @@ type DeleteSpec struct {
 //
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
-func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets *appsecret.Seed) jobs.Workflow {
+//
+// It refuses a nil secrets source, returning the zero Workflow.
+func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets SecretSource) (jobs.Workflow, error) {
+	const kind = "app.deploy"
+	if err := requireSecretSource(kind, secrets); err != nil {
+		return jobs.Workflow{}, err
+	}
 	return jobs.Workflow{
-		Kind: "app.deploy",
+		Kind: kind,
 		Steps: []jobs.WorkflowStep{
 			{Name: "load", Timeout: 2 * time.Second, Do: deployLoad(store, inv)},
 			// This is a BACKSTOP, not the deploy deadline. The real deadline is
@@ -76,7 +81,7 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Le
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, rotate)},
 		},
-	}
+	}, nil
 }
 
 // deployLeaf mints the app's TLS leaf and delivers it (+ proxy route info) to
@@ -849,12 +854,12 @@ func deployCommand(app *App, compose secret.Value) ([]byte, error) {
 	return cmd, nil
 }
 
-func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets *appsecret.Seed) jobs.DoFn {
+func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets SecretSource) jobs.DoFn {
 	return pushStep(store, inv, nc, deploySpecAppID, secrets)
 }
 
 // pushStep is deployPush for a saga whose spec has its own shape.
-func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID, secrets *appsecret.Seed) jobs.DoFn {
+func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID, secrets SecretSource) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		app, err := loadAppFor(sc, store, inv, appID)
 		if err != nil {
@@ -872,12 +877,9 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		// resolved is a refusal, and refusing before anything was announced
 		// leaves the app where it was instead of stranding it in DEPLOYING with
 		// nothing on the node having changed.
-		//
-		// Rotation always derives at InitialVersion for now — nothing stores a
-		// per-app counter yet (see appsecret.InitialVersion).
-		compose, err := appsecret.Resolve(app.ComposeYAML, app.ID, secrets, appsecret.InitialVersion)
+		compose, err := secrets.ResolveCompose(sc.Ctx, app.ID, app.ComposeYAML)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("apps: resolve compose for %s: %w", app.ID, err)
 		}
 		defer compose.Destroy()
 		cmd, err := deployCommand(app, compose)
