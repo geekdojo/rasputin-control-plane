@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,33 +19,48 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ledgertest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
 )
 
-// recordingState is a firewallState that counts its calls and can fail them.
+// recordingState is a firewallState that records the node ids it is asked for.
 type recordingState struct {
-	inner                   firewallState
-	desiredErr, nodeErr     error
-	desiredCalls, nodeCalls atomic.Int32
+	inner firewallState
+	calls [][]string
 }
 
-func (r *recordingState) DesiredHash(ctx context.Context) (string, error) {
-	r.desiredCalls.Add(1)
-	if r.desiredErr != nil {
-		return "", r.desiredErr
+func (r *recordingState) NodeStates(ctx context.Context, nodeIDs []string) ([]*firewall.NodeState, error) {
+	r.calls = append(r.calls, append([]string(nil), nodeIDs...))
+	return r.inner.NodeStates(ctx, nodeIDs)
+}
+
+// cannedState is a firewallState that answers with fixed node states.
+type cannedState []*firewall.NodeState
+
+func (c cannedState) NodeStates(context.Context, []string) ([]*firewall.NodeState, error) {
+	return c, nil
+}
+
+// failingFirewallStore is the firewall store with its desired-state or
+// node-state read failing.
+type failingFirewallStore struct {
+	*firewall.Store
+	desiredErr, nodeErr error
+}
+
+func (s failingFirewallStore) ListIntentsForCompile(ctx context.Context) ([]*firewall.Intent, map[string]secret.Value, error) {
+	if s.desiredErr != nil {
+		return nil, nil, s.desiredErr
 	}
-	return r.inner.DesiredHash(ctx)
+	return s.Store.ListIntentsForCompile(ctx)
 }
 
-func (r *recordingState) NodeState(ctx context.Context, nodeID string) (*firewall.NodeState, error) {
-	r.nodeCalls.Add(1)
-	if r.nodeErr != nil {
-		return nil, r.nodeErr
+func (s failingFirewallStore) GetNodeState(ctx context.Context, nodeID string) (*firewall.NodeState, error) {
+	if s.nodeErr != nil {
+		return nil, s.nodeErr
 	}
-	return r.inner.NodeState(ctx, nodeID)
+	return s.Store.GetNodeState(ctx, nodeID)
 }
-
-func (r *recordingState) EmptyHash() string { return r.inner.EmptyHash() }
 
 func insertFirewallNode(t *testing.T, f *apiFixture) {
 	t.Helper()
@@ -72,9 +86,11 @@ func TestNewServer_RefusesANilFirewallState(t *testing.T) {
 
 // TC-827-13 (carries TC-825-30): with the PPPoE state applied, so the stored
 // intent hash is its keyed fingerprint, the state route reads not pending;
-// after only the PPPoE secret changes it reads pending. Its values come from
-// the firewall service (DesiredHash and NodeState), not a compile of its own.
-// The empty row is TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty.
+// after only the PPPoE secret changes it reads pending. Pending comes from the
+// firewall service, asked once per request for the inventory's firewall nodes.
+// The empty row is TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty;
+// that the handler adds no comparison of its own is
+// TestHandleGetFirewallState_ServiceDecidesPending.
 func TestHandleGetFirewallState_PendingThroughTheService(t *testing.T) {
 	// The keyed fingerprint of exactly these two intents with the password
 	// SENTINEL-PPPOE-PASSWORD under credmactest's key, computed outside Go;
@@ -130,9 +146,32 @@ func TestHandleGetFirewallState_PendingThroughTheService(t *testing.T) {
 	if !pending() {
 		t.Error("after only the PPPoE secret changed, the firewall is not pending")
 	}
-	if rec.desiredCalls.Load() != 2 || rec.nodeCalls.Load() != 2 {
-		t.Errorf("the handler called DesiredHash %d and NodeState %d time(s), want 2 each",
-			rec.desiredCalls.Load(), rec.nodeCalls.Load())
+	if len(rec.calls) != 2 || len(rec.calls[0]) != 1 || rec.calls[0][0] != "node-fw" || len(rec.calls[1]) != 1 {
+		t.Errorf("the handler asked the service for %v, want [[node-fw] [node-fw]]", rec.calls)
+	}
+}
+
+// TC-827-13: the handler maps the service's answer and decides nothing. The
+// canned states contradict any comparison the handler could make — an empty
+// intent hash read as pending, a differing one read as not — and are returned
+// as given.
+func TestHandleGetFirewallState_ServiceDecidesPending(t *testing.T) {
+	f := newAPIFixture(t)
+	insertFirewallNode(t, f)
+	f.srv.fwState = cannedState{
+		{NodeID: "node-fw", IntentHash: "", Pending: true},
+		{NodeID: "node-2", IntentHash: "k1-not-the-desired", Pending: false, Drift: true},
+	}
+	w := f.do(t, http.MethodGet, "/api/firewall/state", "", f.authenticate(t))
+	if w.Code != http.StatusOK {
+		t.Fatalf("get state: %d %s", w.Code, w.Body.String())
+	}
+	var out []firewall.NodeState
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode state: %v (%s)", err, w.Body.String())
+	}
+	if len(out) != 2 || !out[0].Pending || out[0].IntentHash != "" || out[1].Pending || !out[1].Drift {
+		t.Errorf("state = %+v, want the service's states unchanged", out)
 	}
 }
 
@@ -141,15 +180,19 @@ func TestHandleGetFirewallState_PendingThroughTheService(t *testing.T) {
 // store's error stays out of the body and is logged at WARN under that id.
 func TestHandleGetFirewallState_CodedErrorOnAFailedRead(t *testing.T) {
 	const marker = "SENTINEL-SQL-DETAIL no such table"
-	for name, rec := range map[string]*recordingState{
-		"DesiredHash": {desiredErr: errors.New(marker)},
-		"NodeState":   {nodeErr: errors.New(marker)},
+	for name, store := range map[string]failingFirewallStore{
+		"desired state": {desiredErr: errors.New(marker)},
+		"node state":    {nodeErr: errors.New(marker)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newAPIFixture(t)
 			insertFirewallNode(t, f)
-			rec.inner = f.fwSvc
-			f.srv.fwState = rec
+			store.Store = f.fw
+			svc, err := firewall.NewService(store, credmactest.Key(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.srv.fwState = svc
 			c := f.authenticate(t)
 			w := f.do(t, http.MethodGet, "/api/firewall/state", "", c)
 			if w.Code != http.StatusInternalServerError {

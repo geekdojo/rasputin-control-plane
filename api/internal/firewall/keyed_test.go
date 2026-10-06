@@ -934,6 +934,72 @@ func TestNodeState_NoRowAndJustApplied(t *testing.T) {
 	}
 }
 
+// TC-827-13: Service.NodeStates decides pending. A node with nothing stored,
+// or with an empty stored intent hash, stands for the empty state and is not
+// pending while there are no intents; an intent makes it pending until the
+// apply stores the desired fingerprint. A failed desired-state or node-state
+// read is returned wrapped.
+func TestNodeStates_Pending(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	svc := newService(t, s)
+	if err := s.UpdateAfterReconcile(ctx, "stored", svc.EmptyHash(), time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.NodeStates(ctx, []string{"fresh", "stored"})
+	if err != nil || len(got) != 2 || got[0].NodeID != "fresh" || got[1].NodeID != "stored" ||
+		got[0].Pending || got[1].Pending || got[1].IntentHash != "" {
+		t.Fatalf("no intents: %+v (err %v), want fresh and stored, neither pending, intent hash as stored", got, err)
+	}
+
+	if err := s.CreateIntent(ctx, makePortForwardIntent(t, "i", "web", true, 8080, 80)); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := svc.NodeStates(ctx, []string{"stored"}); len(got) != 1 || !got[0].Pending {
+		t.Fatalf("an unapplied intent: %+v, want pending", got)
+	}
+	desired, err := svc.DesiredHash(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateAfterApply(ctx, "stored", desired, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := svc.NodeStates(ctx, []string{"stored"}); len(got) != 1 || got[0].Pending {
+		t.Fatalf("applied: %+v, want not pending", got)
+	}
+
+	for name, st := range map[string]stateStore{
+		"firewall: desired state: list intents:": &readFailStore{Store: s, failDesired: true},
+		"firewall: node stored state:":           &readFailStore{Store: s, failNode: true},
+	} {
+		got, err := newService(t, st).NodeStates(ctx, []string{"stored"})
+		if got != nil || !errors.Is(err, errInjected) || !strings.HasPrefix(err.Error(), name) {
+			t.Errorf("%s: (%v, %v), want nil and the wrapped store error", name, got, err)
+		}
+	}
+}
+
+// readFailStore fails the desired-state or the node-state read.
+type readFailStore struct {
+	*Store
+	failDesired, failNode bool
+}
+
+func (r *readFailStore) ListIntentsForCompile(ctx context.Context) ([]*Intent, map[string]secret.Value, error) {
+	if r.failDesired {
+		return nil, nil, errInjected
+	}
+	return r.Store.ListIntentsForCompile(ctx)
+}
+
+func (r *readFailStore) GetNodeState(ctx context.Context, nodeID string) (*NodeState, error) {
+	if r.failNode {
+		return nil, errInjected
+	}
+	return r.Store.GetNodeState(ctx, nodeID)
+}
+
 // errInjected is what the stateStore doubles fail with.
 var errInjected = errors.New("SENTINEL-STORE-FAILURE")
 

@@ -129,6 +129,44 @@ func (s *Service) DesiredHash(ctx context.Context) (string, error) {
 	return c.hash, nil
 }
 
+// pushed is the fingerprint a stored intent hash stands for. A never-applied
+// node has intent_hash="", which stands for the empty state, so neither an
+// unpushed-and-empty firewall reads as pending nor a factory-fresh node whose
+// agent reports clean empty state reads as drift. Found on the first Mu + CWWK
+// bench (2026-06-12): reconcile ran before any apply and the UI showed a drift
+// banner on an untouched firewall.
+func (s *Service) pushed(intentHash string) string {
+	if intentHash == "" {
+		return s.emptyHash
+	}
+	return intentHash
+}
+
+// NodeStates is the state of each of nodeIDs, in order, with the drift and
+// pending rules applied. A node with nothing stored reads as a fresh node.
+// Pending is the fingerprint of what an apply would push now against the one
+// last pushed; one desired fingerprint covers every node, since v0 supports
+// exactly one firewall. IntentHash is returned as stored.
+func (s *Service) NodeStates(ctx context.Context, nodeIDs []string) ([]*NodeState, error) {
+	desired, err := s.DesiredHash(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("firewall: desired state: %w", err)
+	}
+	out := make([]*NodeState, 0, len(nodeIDs))
+	for _, id := range nodeIDs {
+		ns, err := s.NodeState(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("firewall: node %s state: %w", id, err)
+		}
+		if ns == nil {
+			ns = &NodeState{NodeID: id}
+		}
+		ns.Pending = s.pushed(ns.IntentHash) != desired
+		out = append(out, ns)
+	}
+	return out, nil
+}
+
 // NodeState is nodeID's stored state with the drift rule applied, or nil when
 // nothing is stored for it. IntentHash is returned as stored.
 func (s *Service) NodeState(ctx context.Context, nodeID string) (*NodeState, error) {
@@ -136,16 +174,7 @@ func (s *Service) NodeState(ctx context.Context, nodeID string) (*NodeState, err
 	if err != nil || ns == nil {
 		return ns, err
 	}
-	// A never-applied node has intent_hash="" — canonicalize it to the
-	// empty-state fingerprint before comparing, exactly as the pending
-	// computation does, so a factory-fresh node whose agent reports clean
-	// empty state doesn't read as DRIFT. Found on the first Mu + CWWK
-	// bench (2026-06-12): reconcile ran before any apply and the UI showed
-	// a drift banner on an untouched firewall.
-	effectiveIntent := ns.IntentHash
-	if effectiveIntent == "" {
-		effectiveIntent = s.emptyHash
-	}
+	effectiveIntent := s.pushed(ns.IntentHash)
 	// Drift requires a PRIOR APPLY by definition — it means "the firewall
 	// diverged from what we pushed," which presupposes we pushed something.
 	// A never-applied node (LastApplied==nil) arrives with its factory/stock

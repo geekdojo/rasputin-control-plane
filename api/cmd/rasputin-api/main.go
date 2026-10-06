@@ -442,15 +442,18 @@ func main() {
 	// without it no fingerprint the api wrote can be checked.
 	macKey, err := appSecretSeed.MACKey()
 	if err != nil {
-		log.Fatalf("rasputin-api: fingerprint key: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: fingerprint key", "err", err.Error())
+		os.Exit(1)
 	}
 	mac, err := credmac.New(macKey)
 	if err != nil {
-		log.Fatalf("rasputin-api: fingerprint key: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: fingerprint key", "err", err.Error())
+		os.Exit(1)
 	}
 	fwSvc, err := firewall.NewService(fwStore, mac)
 	if err != nil {
-		log.Fatalf("rasputin-api: firewall service: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: firewall service", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// Mesh subsystem. The controlplane self-hosts Headscale: when Docker is
@@ -580,7 +583,8 @@ func main() {
 		return v
 	}, MAC: mac}, bmcStore, busSrv.Conn())
 	if err != nil {
-		log.Fatalf("rasputin-api: bmc service: %v", err)
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: bmc service", "err", err.Error())
+		os.Exit(1)
 	}
 
 	// Setup wizard service. Probes are functions over the other

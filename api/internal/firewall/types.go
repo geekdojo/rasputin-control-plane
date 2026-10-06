@@ -30,8 +30,8 @@ type Intent struct {
 //
 // When both Pending and Drift are true (user has changes AND firewall was
 // hand-edited), drift dominates in the UI — it's the more surprising state.
-// Pending is computed on read by the api (the handler compares
-// Service.DesiredHash with the stored intent hash); it's not persisted.
+// Pending is computed on read by Service.NodeStates, which compares the
+// desired fingerprint with the stored intent hash; it's not persisted.
 type NodeState struct {
 	NodeID         string     `json:"nodeId"`
 	IntentHash     string     `json:"intentHash"`   // what we last pushed

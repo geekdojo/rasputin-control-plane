@@ -179,9 +179,7 @@ func (s *Server) handleDeleteIntent(w http.ResponseWriter, r *http.Request) {
 // firewallState is what the state route needs from the firewall's business
 // service (*firewall.Service).
 type firewallState interface {
-	DesiredHash(ctx context.Context) (string, error)
-	NodeState(ctx context.Context, nodeID string) (*firewall.NodeState, error)
-	EmptyHash() string
+	NodeStates(ctx context.Context, nodeIDs []string) ([]*firewall.NodeState, error)
 }
 
 // refuseFirewallState answers a state read that failed. The error goes to the
@@ -192,39 +190,22 @@ func (s *Server) refuseFirewallState(w http.ResponseWriter, r *http.Request, err
 }
 
 // GET /api/firewall/state — returns the per-node state for every firewall
-// node currently known to inventory (typically zero or one in v0).
+// node currently known to inventory (typically zero or one in v0). Drift and
+// pending are the firewall service's to decide.
 func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) {
 	fws, err := s.inv.ListByRole(r.Context(), proto.RoleFirewall)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Pending: the fingerprint of what an apply would push now against the
-	// one last pushed (NodeState.IntentHash). One desired fingerprint covers
-	// every firewall node since v0 supports exactly one. A brand-new node has
-	// IntentHash="", which stands for the empty state, so an unpushed-and-
-	// empty firewall doesn't paradoxically read as pending.
-	desired, err := s.fwState.DesiredHash(r.Context())
+	ids := make([]string, 0, len(fws))
+	for _, n := range fws {
+		ids = append(ids, n.ID)
+	}
+	out, err := s.fwState.NodeStates(r.Context(), ids)
 	if err != nil {
 		s.refuseFirewallState(w, r, err)
 		return
-	}
-	out := make([]*firewall.NodeState, 0, len(fws))
-	for _, n := range fws {
-		st, err := s.fwState.NodeState(r.Context(), n.ID)
-		if err != nil {
-			s.refuseFirewallState(w, r, err)
-			return
-		}
-		if st == nil {
-			st = &firewall.NodeState{NodeID: n.ID}
-		}
-		effectivePushed := st.IntentHash
-		if effectivePushed == "" {
-			effectivePushed = s.fwState.EmptyHash()
-		}
-		st.Pending = effectivePushed != desired
-		out = append(out, st)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
