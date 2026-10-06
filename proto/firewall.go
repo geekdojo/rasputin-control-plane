@@ -165,22 +165,28 @@ type FirewallApplyCmd struct {
 	// State is the compiled UCI representation of all enabled intents.
 	// The shape mirrors OpenWrt UCI: { "<config>": { "<section_type>": [ {...}, ... ] } }
 	State map[string]any `json:"state"`
-	// IntentHash is what the api computed for State; the agent should report
-	// it back on success so the api can confirm the round-trip.
+	// IntentHash is the api's keyed fingerprint of State
+	// (geekdojo/geekdojo-brain#827). The agent does not read it: it cannot
+	// recompute a keyed fingerprint, and the api does not compare the ack's
+	// hash with it.
 	IntentHash string `json:"intentHash"`
 }
 
 // FirewallApplyAck is the synchronous reply from the agent's apply handler.
+// The api requires OK and does not compare Hash.
 type FirewallApplyAck struct {
 	OK   bool   `json:"ok"`
-	Hash string `json:"hash"` // SHA-256 of the canonicalized applied state
+	Hash string `json:"hash"` // the agent's SHA-256 of the canonicalized applied state
 }
 
 // FirewallGetCmd is sent on rasputin.node.<id>.cmd.firewall.get. The agent
 // returns FirewallGetAck describing the currently observed state.
 type FirewallGetCmd struct{}
 
-// FirewallGetAck is the synchronous reply from the agent's get handler.
+// FirewallGetAck is the synchronous reply from the agent's get handler. The
+// api fingerprints State itself, keyed; it reads Hash only for whether it is
+// empty (the agent could not read its state) and, after an upgrade, to settle
+// an intent hash an earlier release stored.
 type FirewallGetAck struct {
 	State map[string]any `json:"state"`
 	Hash  string         `json:"hash"`

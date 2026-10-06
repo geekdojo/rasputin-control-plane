@@ -26,6 +26,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -82,6 +83,7 @@ type apiFixture struct {
 	runner          *jobs.Runner
 	inv             *inventory.Store
 	fw              *firewall.Store
+	fwSvc           *firewall.Service
 	appsStore       *apps.Store
 	metricsStore    *metrics.Store
 	updStore        *updater.Store
@@ -262,7 +264,16 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	meshClient := newFakeMeshClient()
 	meshSvc := mesh.NewService(mesh.Config{}, meshStore, meshClient, mesh.NewNoopSupervisor())
-	bmcSvc := bmc.NewService(bmc.Config{HostNodeID: "self-node"}, bmcStore, nc)
+	mac := credmactest.Key(t)
+	bmcSvc, err := bmc.NewService(bmc.Config{HostNodeID: "self-node", MAC: mac}, bmcStore, nc)
+	if err != nil {
+		t.Fatalf("bmc NewService: %v", err)
+	}
+	fwSvc, err := firewall.NewService(fwStore, mac)
+	if err != nil {
+		t.Fatalf("firewall NewService: %v", err)
+	}
+	f.fwSvc = fwSvc
 
 	bundleDir := filepath.Join(dir, "bundles")
 	// No root-ca.pem in dir, so this verifier is UNAVAILABLE and refuses every
@@ -288,7 +299,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		t.Fatalf("bus key: %v", err)
 	}
 	logs := &logCapture{}
-	srv, err := NewServer(jobStore, runner, invStore, invSvc, fwStore, appStore,
+	srv, err := NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc,
 		bustls.Available(busKey), slog.New(logs), sequentialIDs())
@@ -842,9 +853,10 @@ func TestHandleGetFirewallState_Empty(t *testing.T) {
 	}
 }
 
-// Fresh node + zero intents must NOT report pending. IntentHash is empty
-// in the DB; Compile(nil) gives a non-empty canonical empty-state hash; the
-// handler treats "" as canonically equal to that, so the chip stays IN SYNC.
+// TC-827-13 (empty row): fresh node + zero intents must NOT report pending.
+// IntentHash is empty in the DB; the empty state has a non-empty keyed
+// fingerprint (EmptyHash); the handler treats "" as canonically equal to
+// that, so the chip stays IN SYNC.
 func TestHandleGetFirewallState_PendingFalseWhenFreshAndEmpty(t *testing.T) {
 	f := newAPIFixture(t)
 	_ = f.inv.Insert(f.ctx, &proto.Node{
@@ -1626,7 +1638,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		HeadplaneURL: hpURL,
 	}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
-		f.fw, f.appsStore,
+		f.fw, f.fwSvc, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
 		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
@@ -1667,7 +1679,7 @@ func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
 	ca := []byte("-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n")
 	meshSvc := mesh.NewService(mesh.Config{MeshCAPEM: ca}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
-		f.fw, f.appsStore,
+		f.fw, f.fwSvc, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
 		f.srv.bus, f.srv.log, f.srv.newCorrelationID)

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -27,7 +28,7 @@ func desiredMock(t *testing.T, st *setup.Store) string {
 	if err := st.Set(ctx, setup.KeyBMCConfig, cfg); err != nil {
 		t.Fatal(err)
 	}
-	return ConfigHash("mock", json.RawMessage(cfg), secret.Value{})
+	return ConfigHash(credmactest.Key(t), "mock", json.RawMessage(cfg), secret.Value{})
 }
 
 func regEvt(t *testing.T, nodeID string, meta map[string]any) []byte {
@@ -54,6 +55,7 @@ func newReconciler(t *testing.T, st *setup.Store, busy bool) (*reconciler, *int)
 		busy:   func(context.Context) (bool, error) { return busy, nil },
 		submit: func(context.Context, string, json.RawMessage, string) error { submitted++; return nil },
 		log:    slog.New(slog.DiscardHandler),
+		mac:    credmactest.Key(t),
 	}
 	return r, &submitted
 }
@@ -175,6 +177,7 @@ func TestReconcile_MovesALegacyInlineCredentialOutOfTheSpec(t *testing.T) {
 	r := &reconciler{
 		st:   st,
 		log:  slog.New(slog.DiscardHandler),
+		mac:  credmactest.Key(t),
 		busy: func(context.Context) (bool, error) { return false, nil },
 		submit: func(_ context.Context, _ string, s json.RawMessage, _ string) error {
 			spec = s

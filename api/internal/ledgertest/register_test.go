@@ -403,18 +403,12 @@ var bareIssueRef = regexp.MustCompile(`(^|[^\w/.-])#[0-9]+`)
 // TC-825-16: a row whose workflow still has an open residual cites it, in the
 // cross-repo form, and no note cites an issue by a bare number.
 func TestLedgerRegisterNotesCiteTheirOpenResiduals(t *testing.T) {
-	const (
-		ackText = "geekdojo/geekdojo-brain#749" // the deploy ack text
-		hashes  = "geekdojo/geekdojo-brain#827" // the credential-derived hashes
-	)
+	const ackText = "geekdojo/geekdojo-brain#749" // the deploy ack text
 	want := map[string]string{
-		"app.deploy":         ackText,
-		"app.upgrade":        ackText,
-		"app.edit":           ackText,
-		"app.revert":         ackText,
-		"bmc.configure":      hashes,
-		"firewall.reconcile": hashes,
-		"firewall.apply":     hashes,
+		"app.deploy":  ackText,
+		"app.upgrade": ackText,
+		"app.edit":    ackText,
+		"app.revert":  ackText,
 	}
 	seen := map[string]bool{}
 	for _, r := range readRegister(t, repoRoot(t)) {
@@ -428,6 +422,40 @@ func TestLedgerRegisterNotesCiteTheirOpenResiduals(t *testing.T) {
 		seen[r["kind"]] = true
 		if !strings.Contains(r["note"], cite) {
 			t.Errorf("%s: %s's note does not cite its open residual %s: %q", registerPath, r["kind"], cite, r["note"])
+		}
+	}
+	for kind := range want {
+		if !seen[kind] {
+			t.Errorf("%s: no row for %s", registerPath, kind)
+		}
+	}
+}
+
+// TC-827-26: the three workflows whose ledger carried a credential-derived
+// fingerprint are typed or covered now that it is keyed, and none of them
+// cites geekdojo/geekdojo-brain#827 as a residual still open. That the tests
+// they name exist is TestLedgerRegisterRowsHoldTheirOwnContract.
+func TestLedgerRegisterKeyedFingerprintRows(t *testing.T) {
+	want := map[string]string{
+		"bmc.configure":      "typed",
+		"firewall.apply":     "covered",
+		"firewall.reconcile": "typed",
+	}
+	seen := map[string]bool{}
+	for _, r := range readRegister(t, repoRoot(t)) {
+		status, ok := want[r["kind"]]
+		if !ok {
+			continue
+		}
+		seen[r["kind"]] = true
+		if r["status"] != status {
+			t.Errorf("%s: %s is %q, want %q", registerPath, r["kind"], r["status"], status)
+		}
+		if r["test"] == "" {
+			t.Errorf("%s: %s names no test", registerPath, r["kind"])
+		}
+		if strings.Contains(r["cite"]+r["note"], "geekdojo/geekdojo-brain#827") {
+			t.Errorf("%s: %s still cites geekdojo/geekdojo-brain#827 as open", registerPath, r["kind"])
 		}
 	}
 	for kind := range want {

@@ -28,6 +28,9 @@ const (
 	// codeCredentialUnreadable: a stored credential the request needs could
 	// not be read, so the request was refused rather than sent without it.
 	codeCredentialUnreadable = "credential_unreadable"
+	// codeFirewallStateUnavailable: the firewall's desired or recorded state
+	// could not be read, so whether it is pending or drifted is unknown.
+	codeFirewallStateUnavailable = "firewall_state_unavailable"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

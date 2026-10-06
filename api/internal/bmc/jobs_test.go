@@ -54,7 +54,7 @@ func TestPowerValidate_RejectsBadSpec(t *testing.T) {
 func TestPowerValidate_NoHostConfigured(t *testing.T) {
 	f := newFixture(t)
 	inv := newInvStore(t)
-	svcNoHost := NewService(Config{}, f.store, f.nc)
+	svcNoHost := newTestService(t, Config{}, f.store, f.nc)
 	step := powerValidate(svcNoHost, inv)
 	sc := stepCtx(f.ctx, f.nc, Spec{TargetNodeID: "n", Verb: proto.BMCPowerOn})
 	if _, err := step(sc); err == nil {

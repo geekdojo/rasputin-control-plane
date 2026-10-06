@@ -202,6 +202,10 @@ func scanIntent(scan func(...any) error) (*Intent, error) {
 
 // ----- NodeState ----------------------------------------------------------
 
+// GetNodeState returns nodeID's stored row as it is, or nil when there is
+// none. It makes no business decision: Drift is never set here, and an
+// unapplied node's intent hash stays "". Service.NodeState applies the drift
+// rule.
 func (s *Store) GetNodeState(ctx context.Context, nodeID string) (*NodeState, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT target_node_id, intent_hash, observed_hash, last_applied, last_reconciled
@@ -225,29 +229,6 @@ func (s *Store) GetNodeState(ctx context.Context, nodeID string) (*NodeState, er
 		t := fromMs(lastReconciled.Int64)
 		ns.LastReconciled = &t
 	}
-	// A never-applied node has intent_hash="" — canonicalize it to the
-	// empty-compile hash before comparing, exactly as the pending
-	// computation does, so a factory-fresh node whose agent reports clean
-	// empty state doesn't read as DRIFT. Found on the first Mu + CWWK
-	// bench (2026-06-12): reconcile ran before any apply and the UI showed
-	// a drift banner on an untouched firewall.
-	effectiveIntent := ns.IntentHash
-	if effectiveIntent == "" {
-		if _, h, err := Compile(nil); err == nil {
-			effectiveIntent = h
-		}
-	}
-	// Drift requires a PRIOR APPLY by definition — it means "the firewall
-	// diverged from what we pushed," which presupposes we pushed something.
-	// A never-applied node (LastApplied==nil) arrives with its factory/stock
-	// OpenWrt config on disk (the ~9 default rules), which is non-empty and
-	// won't match our intent — but that's not drift, it's "unmanaged / not
-	// yet adopted." Reporting it as drift on a freshly-attached firewall is
-	// alarming and wrong (Mu+CWWK bench, 2026-06-12): the node reads as
-	// PENDING instead (operator has the seeded baseline rules to APPLY), and
-	// genuine drift detection turns on only after the first apply — which
-	// still correctly catches a later factory-reset-back-to-stock.
-	ns.Drift = ns.LastApplied != nil && ns.ObservedHash != "" && ns.ObservedHash != effectiveIntent
 	return &ns, nil
 }
 
@@ -294,6 +275,35 @@ func (s *Store) UpdateAfterReconcile(ctx context.Context, nodeID, observedHash s
             last_reconciled = excluded.last_reconciled`,
 		nodeID, "", observedHash, ms(ts))
 	return err
+}
+
+// AdoptIntentHash replaces nodeID's intent hash with keyed, but only while it
+// is still legacy: a compare-and-set, so an apply that wrote a new hash since
+// the caller read legacy wins. It reports whether a row changed.
+func (s *Store) AdoptIntentHash(ctx context.Context, nodeID, legacy, keyed string) (bool, error) {
+	return s.swapIntentHash(ctx, nodeID, legacy, keyed)
+}
+
+// ForgetIntentHash clears nodeID's intent hash, but only while it is still
+// legacy, under the same compare-and-set as AdoptIntentHash. last_applied is
+// left as it is. It reports whether a row changed.
+func (s *Store) ForgetIntentHash(ctx context.Context, nodeID, legacy string) (bool, error) {
+	return s.swapIntentHash(ctx, nodeID, legacy, "")
+}
+
+func (s *Store) swapIntentHash(ctx context.Context, nodeID, from, to string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE firewall_state SET intent_hash = ?
+        WHERE target_node_id = ? AND intent_hash = ?`,
+		to, nodeID, from)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
 }
 
 // ----- Baseline-seeded marker ---------------------------------------------

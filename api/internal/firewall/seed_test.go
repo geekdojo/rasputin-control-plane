@@ -237,7 +237,7 @@ func TestCompile_FirewallRuleProtoIGMP(t *testing.T) {
 	in := makeRuleIntent(t, "i", "Allow-IGMP", proto.FirewallRuleSpec{
 		Src: "wan", Proto: proto.RuleProtoIGMP, Target: proto.RuleTargetAccept,
 	})
-	state, h1, err := Compile([]*Intent{in})
+	state, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
@@ -245,11 +245,12 @@ func TestCompile_FirewallRuleProtoIGMP(t *testing.T) {
 	if r["proto"] != "igmp" {
 		t.Errorf("proto = %v, want igmp", r["proto"])
 	}
-	// Hash is stable across recompiles of the same intent.
-	_, h2, err := Compile([]*Intent{in})
+	// The fingerprint is stable across recompiles of the same intent.
+	again, err := Compile([]*Intent{in}, nil)
 	if err != nil {
 		t.Fatalf("Compile (2): %v", err)
 	}
+	h1, h2 := fingerprintOf(t, state), fingerprintOf(t, again)
 	if h1 != h2 {
 		t.Errorf("igmp compile hash not stable: %s != %s", h1, h2)
 	}

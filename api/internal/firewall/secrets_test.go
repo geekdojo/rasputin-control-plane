@@ -56,14 +56,17 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	ledgertest.AssertAbsentIn(t, "the ListIntents response", string(blob),
 		ledgertest.Secrets("the PPPoE password", pppoeSecret))
 
-	forCompile, err := s.ListIntentsForCompile(ctx)
+	forCompile, secrets, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
 		t.Fatalf("ListIntentsForCompile: %v", err)
 	}
-	var spec proto.WANConfigSpec
-	if err := json.Unmarshal(forCompile[0].Spec, &spec); err != nil || spec.Secret != pppoeSecret {
-		t.Errorf("compile input secret = %q (err %v), want the stored one", spec.Secret, err)
+	if got := string(secrets["w1"].Reveal()); got != pppoeSecret {
+		t.Errorf("compile input secret = %q, want the stored one", got)
 	}
+	if strings.Contains(string(forCompile[0].Spec), pppoeSecret) {
+		t.Errorf("compile input spec carries the secret: %s", forCompile[0].Spec)
+	}
+	DestroySecrets(secrets)
 
 	// An update without a secret keeps the stored one.
 	got.Name = "renamed"
@@ -73,11 +76,11 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	if !got.SecretSet {
 		t.Error("after an update with no secret, secretSet = false")
 	}
-	forCompile, _ = s.ListIntentsForCompile(ctx)
-	_ = json.Unmarshal(forCompile[0].Spec, &spec)
-	if spec.Secret != pppoeSecret {
-		t.Errorf("an update with no secret changed it to %q", spec.Secret)
+	_, secrets, _ = s.ListIntentsForCompile(ctx)
+	if got := string(secrets["w1"].Reveal()); got != pppoeSecret {
+		t.Errorf("an update with no secret changed it to %q", got)
 	}
+	DestroySecrets(secrets)
 
 	// An update with a secret replaces it.
 	upd := pppoeIntent(t, "w1", "SENTINEL-ROTATED")
@@ -85,11 +88,11 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 	if err := s.UpdateIntent(ctx, upd); err != nil {
 		t.Fatalf("UpdateIntent: %v", err)
 	}
-	forCompile, _ = s.ListIntentsForCompile(ctx)
-	_ = json.Unmarshal(forCompile[0].Spec, &spec)
-	if spec.Secret != "SENTINEL-ROTATED" {
-		t.Errorf("secret after rotation = %q", spec.Secret)
+	_, secrets, _ = s.ListIntentsForCompile(ctx)
+	if got := string(secrets["w1"].Reveal()); got != "SENTINEL-ROTATED" {
+		t.Errorf("secret after rotation = %q", got)
 	}
+	DestroySecrets(secrets)
 
 	// Deleting the intent deletes its secret.
 	if err := s.DeleteIntent(ctx, "w1"); err != nil {
@@ -102,16 +105,15 @@ func TestStore_PPPoESecretIsWriteOnly(t *testing.T) {
 }
 
 // A database written before the slot existed has the password inside the
-// spec. Opening the store moves it out, and the compiled hash — which the
-// firewall agent computes over what it applied — does not change.
+// spec. Opening the store moves it out, and the compiled state — what the
+// firewall agent applies and the api fingerprints — does not change a byte.
 func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "fw.db")
 	in := pppoeIntent(t, "w1", pppoeSecret)
-	_, wantHash, err := Compile([]*Intent{in})
-	if err != nil {
-		t.Fatalf("Compile: %v", err)
-	}
+	// The canonical state the previous build compiled for this intent with
+	// the secret inline (pppoeLegacyState), which every applied firewall holds.
+	want := pppoeLegacyState
 
 	// Write the row the way the previous build did: secret inline.
 	raw, err := sql.Open("sqlite", path)
@@ -142,16 +144,17 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 	if strings.Contains(spec, pppoeSecret) {
 		t.Errorf("the secret is still inline after open: %s", spec)
 	}
-	intents, err := s.ListIntentsForCompile(ctx)
+	intents, secrets, err := s.ListIntentsForCompile(ctx)
 	if err != nil {
 		t.Fatalf("ListIntentsForCompile: %v", err)
 	}
-	_, gotHash, err := Compile(intents)
+	defer DestroySecrets(secrets)
+	state, err := Compile(intents, secrets)
 	if err != nil {
 		t.Fatalf("Compile: %v", err)
 	}
-	if gotHash != wantHash {
-		t.Errorf("hash changed across the move: %s -> %s (every firewall would report drift)", wantHash, gotHash)
+	if got := revealedJSON(t, state); got != want {
+		t.Errorf("the compiled state changed across the move (every firewall would report drift):\n got %s\nwant %s", got, want)
 	}
 
 	// Re-opening is a no-op.
@@ -161,9 +164,14 @@ func TestOpenStore_MovesInlineSecretOutWithoutChangingTheHash(t *testing.T) {
 		t.Fatalf("re-open: %v", err)
 	}
 	t.Cleanup(func() { _ = s2.Close() })
-	intents, _ = s2.ListIntentsForCompile(ctx)
-	if _, h, _ := Compile(intents); h != wantHash {
-		t.Errorf("hash after re-open = %s, want %s", h, wantHash)
+	intents, secrets2, _ := s2.ListIntentsForCompile(ctx)
+	defer DestroySecrets(secrets2)
+	state2, err := Compile(intents, secrets2)
+	if err != nil {
+		t.Fatalf("Compile after re-open: %v", err)
+	}
+	if got := revealedJSON(t, state2); got != want {
+		t.Errorf("the compiled state after re-open:\n got %s\nwant %s", got, want)
 	}
 }
 
@@ -196,9 +204,9 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	sub, err := nc.Subscribe(proto.FirewallApplySubject("fw"), func(m *nats.Msg) {
 		var cmd proto.FirewallApplyCmd
 		_ = json.Unmarshal(m.Data, &cmd)
-		// The agent hashes what it applied; echo the api's hash of the same
-		// state, recomputed here from the state it was sent.
-		h, _ := Hash(cmd.State)
+		// The agent acks with its own unkeyed hash of what it applied: for
+		// this state, the previous release's pinned value.
+		h := pppoeLegacyHash
 		var pw string
 		if network, ok := cmd.State["network"].(map[string]any); ok {
 			if wan, ok := network["wan"].(map[string]any); ok {
@@ -215,7 +223,7 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	runner := jobs.NewRunner(jobStore, nc)
-	runner.Register(ApplyWorkflow(store, inv, nc, nil))
+	runner.Register(ApplyWorkflow(newService(t, store), inv, nc, nil))
 	j, err := runner.Submit(ctx, "firewall.apply", json.RawMessage(`{}`), "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -242,6 +250,9 @@ func TestApplyWorkflow_PPPoESecretNeverEntersTheLedger(t *testing.T) {
 	ledger := &ledgertest.Surfaces{Spec: string(done.Spec) + done.Error, Log: logs.String()}
 	// Not vacuous: the agent really was sent the password, checked above.
 	ledger.AssertPresent(t, "the apply command the agent received", pppoeSecret, secrets)
+	// The unkeyed hash of the sent state is derived from the password, so the
+	// ledger is held to the same rule for it (geekdojo/geekdojo-brain#827).
+	secrets = append(secrets, ledgertest.Secrets("the unkeyed SHA-256 of the sent state", pppoeLegacyHash)...)
 
 	steps, err := jobStore.ListSteps(ctx, j.ID)
 	if err != nil {

@@ -16,3 +16,21 @@ da9e6bf33f8b79bf7827bc24303480fc04f053b7:api/internal/storage/testdata/recovery-
 
 # generic-api-key in ui/lib/restore.test.ts:60 — test fixture: base64url of the bytes 0..31 the test builds itself, not a key
 da9e6bf33f8b79bf7827bc24303480fc04f053b7:ui/lib/restore.test.ts:generic-api-key:60
+
+# generic-api-key in api/internal/appsecret/appsecret.go:205 — public HKDF info label macKeyInfo ("rasputin/credmac/v1"), a domain-separation string, not key material
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/appsecret/appsecret.go:generic-api-key:205
+
+# generic-api-key in api/internal/bmc/secret_value_test.go:163 — test vector: HMAC-SHA256 output under credmactest's fixed test key 0x00..0x1f, a digest, not a key
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/bmc/secret_value_test.go:generic-api-key:163
+
+# generic-api-key in api/internal/api/keyed_fingerprint_test.go:82 — test vector: HMAC-SHA256 output under credmactest's fixed test key 0x00..0x1f, a digest, not a key
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/api/keyed_fingerprint_test.go:generic-api-key:82
+
+# generic-api-key in api/internal/api/keyed_fingerprint_test.go:197 — test vector: HMAC-SHA256 output under credmactest's fixed test key 0x00..0x1f, a digest, not a key
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/api/keyed_fingerprint_test.go:generic-api-key:197
+
+# generic-api-key in api/internal/firewall/keyed_test.go:39 — test vector: HMAC-SHA256 output under credmactest's fixed test key 0x00..0x1f, a digest, not a key
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/firewall/keyed_test.go:generic-api-key:39
+
+# generic-api-key in api/internal/firewall/keyed_test.go:43 — test vector: HMAC-SHA256 output under credmactest's fixed test key 0x00..0x1f, a digest, not a key
+d6b4a9c8d7751507fd17cff7fbc2fc59ad7a18e8:api/internal/firewall/keyed_test.go:generic-api-key:43

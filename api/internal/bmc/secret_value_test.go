@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac/credmactest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup/setuptest"
@@ -146,27 +148,76 @@ func TestConfigureJob_CredentialReachesOnlyTheBus(t *testing.T) {
 	}
 }
 
-// TC-825-11: ConfigHash over a Value is byte-identical to the previous
-// release's ConfigHash over a string. The vectors were computed from that
-// release's formula (sha256 of kind, config and credential, newline-joined,
-// first 16 hex) outside Go, so they do not lean on the code under test.
-func TestConfigHash_UnchangedFromThePreviousRelease(t *testing.T) {
-	for _, v := range []struct{ kind, config, cred, want string }{
-		{"mock", `{"targets":["a"]}`, "", "2c142b67110bd031"},
-		{"bitscope", bitscopeConfig, "s3kr1t-unlock", "d305fd5a1713d3b5"},
-		{"turingpi", `{"endpoint":"https://turingpi.local","user":"root","targets":[{"node_id":"node-1","slot":1}]}`, "p@ss word", "6235f0aa1c80721b"},
-	} {
-		var cred secret.Value
-		if v.cred != "" {
-			cred = secret.New([]byte(v.cred))
-		}
-		if got := ConfigHash(v.kind, json.RawMessage(v.config), cred); got != v.want {
-			t.Errorf("ConfigHash(%s) = %s, want the previous release's %s", v.kind, got, v.want)
-		}
-	}
+// legacyBitscopeHash is the previous release's unkeyed ConfigHash for the
+// bitscope selection below with the unlock "s3kr1t-unlock": the first 16 hex
+// of sha256(kind, config and credential, newline-joined), computed outside Go.
+const legacyBitscopeHash = "d305fd5a1713d3b5"
 
-	// A host that advertises the hash the previous release computed is
-	// already converged: the reconcile submits nothing after the upgrade.
+// TC-827-07: ConfigHash is keyed: a pinned vector under the test key, still
+// moved by rotating only the credential, and not the previous release's
+// unkeyed value for the same inputs. The vectors were computed outside Go as
+// HMAC-SHA256 under credmactest's key over "bmc.config", the kind, the config
+// and the credential, each with a big-endian uint64 length prefix.
+func TestConfigHash_KeyedAndRotationSensitive(t *testing.T) {
+	const (
+		wantKeyed   = "k1-e810f60e516e16c21f348a9d86c4a6440d9aeae43b23f44ca1d7e35b0ea4e72b"
+		wantRotated = "k1-c3d0832f3bcf7fac266018d2445b502d12c021f318b76f83177ffa9d7ba4dc93"
+	)
+	mac := credmactest.Key(t)
+	cred := secret.New([]byte("s3kr1t-unlock"))
+	defer cred.Destroy()
+	got := ConfigHash(mac, "bitscope", json.RawMessage(bitscopeConfig), cred)
+	if got != wantKeyed {
+		t.Errorf("ConfigHash = %s, want %s", got, wantKeyed)
+	}
+	if !credmac.IsKeyed(got) {
+		t.Errorf("ConfigHash = %s is not keyed", got)
+	}
+	rotated := secret.New([]byte("rotated-unlock"))
+	defer rotated.Destroy()
+	gotRotated := ConfigHash(mac, "bitscope", json.RawMessage(bitscopeConfig), rotated)
+	if gotRotated == got || gotRotated != wantRotated {
+		t.Errorf("after rotating only the credential ConfigHash = %s, want %s (and not %s)", gotRotated, wantRotated, got)
+	}
+	if got == legacyBitscopeHash || strings.Contains(got, legacyBitscopeHash) {
+		t.Errorf("ConfigHash still carries the previous release's unkeyed value %s", legacyBitscopeHash)
+	}
+	// The Service's ConfigHash is the same function under its own key.
+	f := newFixture(t)
+	if svcGot := f.svc.ConfigHash("bitscope", json.RawMessage(bitscopeConfig), cred); svcGot != wantKeyed {
+		t.Errorf("Service.ConfigHash = %s, want %s", svcGot, wantKeyed)
+	}
+}
+
+// TC-827-08 (bmc): NewService refuses a Config with no MAC, and
+// StartReconcile refuses a nil Fingerprinter and subscribes to nothing.
+func TestBMC_RefusesANilFingerprinter(t *testing.T) {
+	f := newFixture(t)
+	if svc, err := NewService(Config{HostNodeID: "host-1"}, f.store, f.nc); err == nil || svc != nil {
+		t.Errorf("NewService with no MAC: svc %v, err %v; want nil and an error", svc, err)
+	}
+	before := f.nc.NumSubscriptions()
+	stop, err := StartReconcile(f.nc, newSetupStore(t),
+		func(context.Context) (bool, error) { return false, nil },
+		func(context.Context, string, json.RawMessage, string) error { return nil },
+		slog.New(slog.DiscardHandler), nil)
+	if err == nil || stop != nil {
+		if stop != nil {
+			stop()
+		}
+		t.Fatalf("StartReconcile with a nil Fingerprinter: stop-nil=%t err=%v; want a refusal", stop == nil, err)
+	}
+	if after := f.nc.NumSubscriptions(); after != before {
+		t.Errorf("a refused StartReconcile left %d new subscription(s)", after-before)
+	}
+}
+
+// TC-827-09: a host still advertising the previous release's unkeyed hash is
+// re-pushed exactly once with the keyed hash; the same registration inside
+// the debounce window and one advertising the keyed hash submit nothing. The
+// re-push is logged at INFO with the host, the kind and advertised_keyed, and
+// no record carries either hash.
+func TestReconcile_UpgradeRepushesOnceAndLogsNoHash(t *testing.T) {
 	st := newSetupStore(t)
 	ctx := context.Background()
 	for k, val := range map[string]string{
@@ -179,10 +230,56 @@ func TestConfigHash_UnchangedFromThePreviousRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	r, n := newReconciler(t, st, false)
-	r.onRegistered(regMsg(t, "host-1", map[string]any{proto.MetadataBMCConfigHash: "d305fd5a1713d3b5"}))
-	if *n != 0 {
-		t.Errorf("reconcile submitted %d job(s) for a host advertising the previous release's hash, want 0", *n)
+	logger, rec := logkittest.New()
+	var specs []ConfigureSpec
+	r := &reconciler{
+		st:   st,
+		busy: func(context.Context) (bool, error) { return false, nil },
+		submit: func(_ context.Context, kind string, spec json.RawMessage, _ string) error {
+			if kind != "bmc.configure" {
+				t.Errorf("submitted %q", kind)
+			}
+			var cs ConfigureSpec
+			if err := json.Unmarshal(spec, &cs); err != nil {
+				t.Fatal(err)
+			}
+			specs = append(specs, cs)
+			return nil
+		},
+		log: logger,
+		mac: credmactest.Key(t),
+	}
+	const desired = "k1-e810f60e516e16c21f348a9d86c4a6440d9aeae43b23f44ca1d7e35b0ea4e72b"
+
+	r.onRegistered(regMsg(t, "host-1", map[string]any{proto.MetadataBMCConfigHash: legacyBitscopeHash}))
+	if len(specs) != 1 || specs[0].ConfigHash != desired {
+		t.Fatalf("after the upgrade registration: %d submit(s) %+v, want one with configHash %s", len(specs), specs, desired)
+	}
+	r.onRegistered(regMsg(t, "host-1", map[string]any{proto.MetadataBMCConfigHash: legacyBitscopeHash}))
+	r.onRegistered(regMsg(t, "host-1", map[string]any{proto.MetadataBMCConfigHash: desired}))
+	if len(specs) != 1 {
+		t.Errorf("submitted %d job(s) in all, want exactly 1", len(specs))
+	}
+
+	infos := rec.AtLevel(slog.LevelInfo)
+	var repush []slog.Record
+	for _, r := range infos {
+		if strings.Contains(r.Message, "re-pushing") {
+			repush = append(repush, r)
+		}
+	}
+	if len(repush) != 1 {
+		t.Fatalf("want one INFO re-push record, got:\n%s", rec.Text())
+	}
+	for key, want := range map[string]string{"host": "host-1", "kind": "bitscope", "advertised_keyed": "false"} {
+		if got, ok := logkittest.Attr(repush[0], key); !ok || got != want {
+			t.Errorf("re-push record %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, h := range []string{legacyBitscopeHash, desired, strings.TrimPrefix(desired, "k1-")} {
+		if strings.Contains(rec.Text(), h) {
+			t.Errorf("a log record carries a hash value %s:\n%s", h, rec.Text())
+		}
 	}
 }
 
@@ -214,6 +311,7 @@ func TestReconcile_UnreadableCredentialSubmitsNothingAndLogs(t *testing.T) {
 				busy:   func(context.Context) (bool, error) { return false, nil },
 				submit: func(context.Context, string, json.RawMessage, string) error { submitted++; return nil },
 				log:    logger,
+				mac:    credmactest.Key(t),
 			}
 			r.onRegistered(regMsg(t, "host-1", nil))
 			if submitted != 0 {
@@ -241,7 +339,7 @@ func TestStartReconcile_RefusesANilLogger(t *testing.T) {
 	f := newFixture(t)
 	stop, err := StartReconcile(f.nc, newSetupStore(t),
 		func(context.Context) (bool, error) { return false, nil },
-		func(context.Context, string, json.RawMessage, string) error { return nil }, nil)
+		func(context.Context, string, json.RawMessage, string) error { return nil }, nil, credmactest.Key(t))
 	if err == nil {
 		stop()
 		t.Fatal("StartReconcile accepted a nil logger")
