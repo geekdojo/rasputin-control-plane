@@ -190,13 +190,34 @@ def advisories(doc):
                 "title": via.get("title") or "",
                 "url": url,
                 "range": via.get("range") or "",
-                "fix": False,
+                "fix": "none",
+                "major_fixes": set(),
             })
             # fixAvailable lives on the containing package entry, so an
-            # advisory reachable through several packages is fixable if any
-            # route to it is.
-            rec["fix"] = rec["fix"] or bool(fix)
+            # advisory reachable through several packages takes the best
+            # answer any route to it gives: a non-major fix anywhere wins.
+            kind = fix_kind(fix)
+            if FIX_RANK[kind] > FIX_RANK[rec["fix"]]:
+                rec["fix"] = kind
+            if kind == "major":
+                rec["major_fixes"].add(f"{fix.get('name')}@{fix.get('version')}")
     return out
+
+
+# npm's fixAvailable is false, true (`npm audit fix` resolves it within the
+# declared ranges), or {name, version, isSemVerMajor}: the one package change
+# that clears it. An isSemVerMajor object is NOT a fix in the sense this gate's
+# output means — it is `npm audit fix --force`, and the version can be a
+# DOWNGRADE (braces, GHSA-vfj7-8cjw-p6xm, was labelled "fix available" while the
+# only route npm offered was eslint-config-next 16 -> 14.2.35). Reporting that
+# as available sent a reader looking for an upgrade that does not exist.
+FIX_RANK = {"none": 0, "major": 1, "available": 2}
+
+
+def fix_kind(fix):
+    if isinstance(fix, dict):
+        return "major" if fix.get("isSemVerMajor") else "available"
+    return "available" if fix else "none"
 
 
 full_doc = load(sys.argv[1], "full")
@@ -253,7 +274,13 @@ if mode == "--print":
 for r in detected:
     mark = "BLOCKS" if r["severity"] in BLOCKING else "      "
     known = " [registered]" if r["advisory"] in existing else ""
-    fix = "fix available" if r["fix"] else "NO FIX AVAILABLE"
+    # Labelling only: no gate decision below reads the fix kind.
+    if r["fix"] == "available":
+        fix = "fix available"
+    elif r["fix"] == "major":
+        fix = "major-version fix only: " + ", ".join(sorted(r["major_fixes"]))
+    else:
+        fix = "NO FIX AVAILABLE"
     print(f"  {mark} {r['severity']:<8} {r['scope']:<7} {r['package']} {r['range']}"
           f" — {r['title']} ({fix}){known}")
     if r["url"]:
