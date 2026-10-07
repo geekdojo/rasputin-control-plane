@@ -249,9 +249,6 @@ jobs:
       # The real secret store for TestSecretStore_SmokeWriteReadKV: the release
       # and sha256 are read from api/internal/secretstoretest/pin.go, so this
       # downloads exactly what the Go const pins (docs/testing-secret-store.md).
-      - name: install the pinned secret store
-        run: ./scripts/install-openbao.sh "$RUNNER_TEMP/openbao"
-
       # Coverage profile only for api — it remains the module whose coverage we
       # trend, and that choice is deliberate rather than a list that drifts.
       # Every other module is still TESTED below; it just isn't profiled.
