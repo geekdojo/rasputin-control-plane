@@ -10,7 +10,7 @@
 //
 //   - positive (TC-672-17): Alloy presents a self-signed client pair made with
 //     the agent's parameters (ECDSA P-256, PKCS#8 "PRIVATE KEY" PEM, clientAuth
-//     EKU, 1970 to 9999), verifies the server leaf by chain to the Mesh CA via
+//     EKU, 1970 to 9999), verifies the server leaf by chain to the controlplane CA via
 //     ca_file, sends SNI = server_name, and delivers a remote_write POST to
 //     /api/obs/ingest. The server sees the generated key's SPKI.
 //   - no certificate pinned (TC-672-20): the server swaps in a re-minted leaf
@@ -18,7 +18,7 @@
 //     again under the new serial with no config change and no restart.
 //   - chain enforced (TC-672-18): a leaf from a foreign CA gets an x509: error
 //     in Alloy's log and no delivery.
-//   - name enforced (TC-672-19): a Mesh-CA leaf for other.rasputin.test gets an
+//   - name enforced (TC-672-19): a controlplane-CA leaf for other.rasputin.test gets an
 //     x509: name-mismatch error and no delivery.
 //
 // What it does not prove: the real fleet (the bench procedure in the doc),
@@ -55,8 +55,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
 const (
@@ -161,9 +162,9 @@ func (ps *probeServer) swap(next tls.Certificate) {
 	}
 }
 
-func probeLeaf(t *testing.T, ca *mesh.MeshCA, dnsName string) tls.Certificate {
+func probeLeaf(t *testing.T, ca *tlsca.CA, dnsName string) tls.Certificate {
 	t.Helper()
-	certPEM, keyPEM, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: "probe-api", DNSNames: []string{dnsName}})
+	certPEM, keyPEM, err := ca.MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "probe-api", DNSNames: []string{dnsName}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +196,7 @@ type probeAlloy struct {
 
 // runAlloy writes the config and certs for one case under dir and starts the
 // pinned image against the server at port.
-func runAlloy(t *testing.T, dir, name string, ca *mesh.MeshCA, port int) (*probeAlloy, []byte) {
+func runAlloy(t *testing.T, dir, name string, ca *tlsca.CA, port int) (*probeAlloy, []byte) {
 	t.Helper()
 	certDir := filepath.Join(dir, "certs")
 	// A client pair made the way the agent writes its collector key. 0644 (via
@@ -357,11 +358,11 @@ func TestAlloyProbe(t *testing.T) {
 	}
 	t.Logf("image %s", defaultAlloyImage)
 
-	ca, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "mesh"), "alloy-probe")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(t.TempDir(), "mesh"), "alloy-probe", tlscatest.Deps())
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreign, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "foreign"), "alloy-probe-foreign")
+	foreign, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(t.TempDir(), "foreign"), "alloy-probe-foreign", tlscatest.Deps())
 	if err != nil {
 		t.Fatal(err)
 	}

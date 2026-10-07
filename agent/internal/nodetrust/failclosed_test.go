@@ -1,4 +1,4 @@
-package tailscale
+package nodetrust
 
 import (
 	"os"
@@ -12,11 +12,11 @@ import (
 // .github/security-resolvers.tsv (gate 4, geekdojo/geekdojo-brain#491).
 //
 // Both answer a question with a security consequence — where tailscaled's
-// trust file lives, and whether this node trusts a mesh CA at all — from
+// trust file lives, and whether this node trusts a bundle at all — from
 // inputs that can be absent, empty, malformed or unreadable. Each case below
 // asserts the CLOSED outcome for one of those shapes.
 
-func TestCABundlePath_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+func TestBundlePath_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	custom := filepath.Join(t.TempDir(), "elsewhere.pem")
 
 	for _, tc := range []struct {
@@ -25,11 +25,11 @@ func TestCABundlePath_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		env  string
 		want string
 	}{
-		{"absent: the per-image default", false, "", defaultCABundlePath},
-		{"empty: the per-image default", true, "", defaultCABundlePath},
+		{"absent: the per-image default", false, "", defaultBundlePath},
+		{"empty: the per-image default", true, "", defaultBundlePath},
 		{"whitespace only: the per-image default, not a path that cannot exist",
-			true, "   ", defaultCABundlePath},
-		{"a tab: the per-image default", true, "\t", defaultCABundlePath},
+			true, "   ", defaultBundlePath},
+		{"a tab: the per-image default", true, "\t", defaultBundlePath},
 		{"a real path is honoured", true, custom, custom},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,18 +38,14 @@ func TestCABundlePath_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			} else {
 				os.Unsetenv("RASPUTIN_MESH_CA_BUNDLE")
 			}
-			if got := caBundlePath(); got != tc.want {
-				t.Fatalf("caBundlePath() = %q, want %q", got, tc.want)
-			}
-			if got := CABundlePath(); got != tc.want {
-				t.Fatalf("CABundlePath() = %q, want %q — the exported accessor must "+
-					"resolve identically, or the agent and tailscaled read different files", got, tc.want)
+			if got := BundlePath(); got != tc.want {
+				t.Fatalf("BundlePath() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+func TestStoreFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	dir := t.TempDir()
 
 	write := func(name string, data []byte, mode os.FileMode) string {
@@ -65,7 +61,7 @@ func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		t.Fatalf("chmod: %v", err)
 	}
 
-	// "none" means this node trusts no mesh CA. Every shape that leaves the
+	// "none" means this node trusts no controlplane CA. Every shape that leaves the
 	// agent without a usable bundle has to reach it, because the api's
 	// converge step re-enrols a node whose report does not match its own CA,
 	// and a node that answered anything else here would be left alone.
@@ -91,9 +87,9 @@ func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 
 	for _, tc := range none {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := InstalledCAFingerprint(tc.path); got != proto.MeshCAFingerprintNone {
-				t.Fatalf("InstalledCAFingerprint(%s) = %q, want %q", tc.name, got,
-					proto.MeshCAFingerprintNone)
+			if got := NewStore(tc.path).Fingerprint(); got != proto.TrustFingerprintNone {
+				t.Fatalf("NewStore(%s).Fingerprint() = %q, want %q", tc.name, got,
+					proto.TrustFingerprintNone)
 			}
 		})
 	}
@@ -103,8 +99,8 @@ func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	// validity check. The property that matters is that a bundle which is not
 	// the api's CA can never fingerprint equal to it, so the api re-enrols the
 	// node instead of leaving it alone.
-	realCA := []byte("-----BEGIN CERTIFICATE-----\nthe api's mesh CA\n-----END CERTIFICATE-----\n")
-	want := proto.MeshCAFingerprint(realCA)
+	realCA := []byte("-----BEGIN CERTIFICATE-----\nthe api's controlplane CA\n-----END CERTIFICATE-----\n")
+	want := proto.TrustFingerprint(realCA)
 	for _, tc := range []struct {
 		name    string
 		content []byte
@@ -115,13 +111,13 @@ func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	} {
 		t.Run("does not pass for the api's CA: "+tc.name, func(t *testing.T) {
 			p := write("case.pem", tc.content, 0o600)
-			got := InstalledCAFingerprint(p)
-			if got == proto.MeshCAFingerprintNone {
-				t.Fatalf("InstalledCAFingerprint = %q for a non-empty bundle; the api "+
+			got := NewStore(p).Fingerprint()
+			if got == proto.TrustFingerprintNone {
+				t.Fatalf("Fingerprint() = %q for a non-empty bundle; the api "+
 					"needs a fingerprint it can compare", got)
 			}
 			if got == want {
-				t.Fatalf("InstalledCAFingerprint = the api's own fingerprint for %s — "+
+				t.Fatalf("Fingerprint() = the api's own fingerprint for %s — "+
 					"the node would be left un-enrolled with a bundle that is not the CA",
 					tc.name)
 			}
@@ -132,8 +128,8 @@ func TestInstalledCAFingerprint_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	// every node would be re-enrolled on every reconcile.
 	t.Run("the real CA matches the api's fingerprint", func(t *testing.T) {
 		p := write("real.pem", realCA, 0o600)
-		if got := InstalledCAFingerprint(p); got != want {
-			t.Fatalf("InstalledCAFingerprint = %q, want %q", got, want)
+		if got := NewStore(p).Fingerprint(); got != want {
+			t.Fatalf("Fingerprint() = %q, want %q", got, want)
 		}
 	})
 }

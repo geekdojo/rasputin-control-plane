@@ -89,6 +89,18 @@ var verbMinAgentVersion = map[string]string{
 	// instead of "the node did not answer" — and so it can FAIL that node
 	// rather than skip it (#558: never silently skip).
 	ConsoleRootHashVerb: "2026.09.4-dev.172",
+	// trust.install (geekdojo/geekdojo-brain#741): entered when the verb was
+	// authored, before its release existed, as the NEXT release run after
+	// v2026.10.0-dev.190 (the newest published control-plane release at the
+	// time). If a release was cut between this entry and the one that ships
+	// the verb, an agent at that in-between version is reported as "should
+	// answer and did not" rather than "predates the verb"; confirm with
+	// `git tag --contains` once the release exists and correct the floor.
+	//
+	// Load-bearing: below this floor the api carries the trust bundle in
+	// mesh.enroll (MeshEnrollCmd.LegacyTrustBundlePEM) instead, and
+	// trust.converge leaves the node to the mesh reconcile.
+	TrustInstallVerb: "2026.10.0-dev.191",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose
@@ -181,7 +193,7 @@ var metadataMinAgentVersion = map[string]string{
 	// "should report and did not" rather than "predates the field"; confirm
 	// with `git tag --contains` once the release exists and correct the
 	// floor.
-	MetadataMeshCAFingerprint: "2026.08.5-dev.141",
+	MetadataTrustFingerprint: "2026.08.5-dev.141",
 	// nodeKeys (geekdojo/geekdojo-brain#514), methodology §7 4.0: a cutover
 	// fact, entered when it was authored, before its release existed, as the
 	// NEXT release run after v2026.09.4-dev.171 (the newest published

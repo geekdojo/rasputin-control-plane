@@ -62,7 +62,12 @@ func (s *Store) mesh(ctx context.Context) map[string]*proto.MeshMembership {
 // way. Twelve missed is when the flat OFFLINE used to appear, and that is the
 // word being replaced.
 func DeriveStatus(lastSeen time.Time, mesh *proto.MeshMembership) proto.NodeStatus {
-	st := ComputeStatus(lastSeen)
+	return deriveStatusAt(time.Now(), lastSeen, mesh)
+}
+
+// deriveStatusAt is DeriveStatus read at now rather than the wall clock.
+func deriveStatusAt(now, lastSeen time.Time, mesh *proto.MeshMembership) proto.NodeStatus {
+	st := computeStatusAt(now, lastSeen)
 	if st == proto.StatusOffline && mesh != nil && mesh.Online {
 		return proto.StatusOffBus
 	}
@@ -75,6 +80,11 @@ func DeriveStatus(lastSeen time.Time, mesh *proto.MeshMembership) proto.NodeStat
 // A node absent from a non-nil map has genuinely never enrolled — we looked,
 // and it was not there.
 func ApplyMesh(nodes []*proto.Node, byNode map[string]*proto.MeshMembership) {
+	applyMeshAt(time.Now(), nodes, byNode)
+}
+
+// applyMeshAt is ApplyMesh with every status read at now.
+func applyMeshAt(now time.Time, nodes []*proto.Node, byNode map[string]*proto.MeshMembership) {
 	for _, n := range nodes {
 		if n == nil {
 			continue
@@ -86,12 +96,22 @@ func ApplyMesh(nodes []*proto.Node, byNode map[string]*proto.MeshMembership) {
 				n.Mesh = &proto.MeshMembership{State: proto.MeshAbsent}
 			}
 		}
-		n.Status = DeriveStatus(n.LastSeen, n.Mesh)
+		n.Status = deriveStatusAt(now, n.LastSeen, n.Mesh)
 	}
 }
 
 // Presence annotates nodes with mesh membership and derived status through
 // the wired lookup — what a handler or a refusal wants after a List or Get.
+// Status is read at the store's clock (SetNow), so a caller that injects one
+// gets presence under it too; production leaves it the wall clock.
 func (s *Store) Presence(ctx context.Context, nodes []*proto.Node) {
-	ApplyMesh(nodes, s.mesh(ctx))
+	applyMeshAt(s.clock(), nodes, s.mesh(ctx))
+}
+
+// clock is the store's injected now, or the wall clock when none was set.
+func (s *Store) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }

@@ -30,7 +30,7 @@ import (
 // AuthCallout.Issuer. Persisted so the issuer identity is stable across api
 // restarts (an unstable issuer would invalidate nothing at rest — JWTs are
 // minted per-connection — but a stable seed keeps logs/debugging sane and
-// matches the EnsureMeshCA persistence idiom).
+// matches the tlsca.Ensure persistence idiom).
 const IssuerFileName = "issuer.nk"
 
 // Issuer is the account keypair that signs callout responses + the user JWTs
@@ -47,7 +47,7 @@ func (i *Issuer) PublicKey() string { return i.pubKey }
 func (i *Issuer) KeyPair() nkeys.KeyPair { return i.kp }
 
 // EnsureIssuer loads the account signing seed from dir/issuer.nk, generating
-// and persisting a fresh one (0600) on first run. Mirrors mesh.EnsureMeshCA.
+// and persisting a fresh one (0600) on first run. Mirrors tlsca.Ensure.
 func EnsureIssuer(dir string) (*Issuer, error) {
 	if dir == "" {
 		return nil, errors.New("busauth: EnsureIssuer: dir required")

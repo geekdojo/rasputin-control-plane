@@ -5,6 +5,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -38,7 +39,7 @@ func buildAppLeafCmd(clusterID string, app *apps.App, certPEM []byte) proto.AppL
 // renewed reports only whether the cert in it is new, which is what decides
 // the commit (apps.LeafRotator). The caller owns the returned key and
 // destroys it after commit.
-func newAppLeafRotator(meshCA *mesh.MeshCA, appLeafDir, clusterID string) apps.LeafRotator {
+func newAppLeafRotator(meshCA *tlsca.CA, appLeafDir, clusterID string) apps.LeafRotator {
 	return func(app *apps.App) (apps.Leaf, bool, func() error, error) {
 		dir := filepath.Join(appLeafDir, app.ID)
 		certPEM, key, renewed, err := mesh.PrepareAppLeaf(meshCA, dir, clusterID, app.Name)

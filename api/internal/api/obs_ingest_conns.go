@@ -24,7 +24,7 @@ import (
 // SubjectPublicKeyInfo against the registry: no chain, no name, no dates, for
 // the same reasons the bus pins a key rather than trusting a CA
 // (proto.BusPinPrefix). The certificate around the key is the node's own,
-// self-signed, and nothing issues it — so a certificate the mesh CA signed is
+// self-signed, and nothing issues it — so a certificate the controlplane CA signed is
 // worth nothing here unless its key is registered.
 //
 // The key's owner must also be a current inventory member holding a live

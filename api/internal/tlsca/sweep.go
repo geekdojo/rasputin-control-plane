@@ -1,4 +1,4 @@
-package mesh
+package tlsca
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
 
-// One renewal driver for every Mesh-CA leaf the controlplane holds.
+// One renewal driver for every CA leaf the controlplane holds.
 //
 // Renewal is decided by a fact — the leaf's NotAfter is within renewWindow, or
 // the spec it was minted for no longer describes the service — and the sweep
@@ -43,7 +43,9 @@ import (
 // which must reach a node before the on-disk copy advances) keep that contract
 // and are driven from this one sweep.
 
-// LeafSweepKind is the job kind of the sweep.
+// LeafSweepKind is the job kind of the sweep. Its value is a compatibility
+// name: the job ledger holds rows under it, so it keeps the mesh prefix it was
+// born with.
 const LeafSweepKind = "mesh.leaf_sweep"
 
 // DefaultLeafSweepInterval is the safety-net cadence. Leaves live a year and
@@ -51,7 +53,7 @@ const LeafSweepKind = "mesh.leaf_sweep"
 // cheap: in a steady state it reads each leaf's NotAfter and does nothing.
 const DefaultLeafSweepInterval = 24 * time.Hour
 
-// LeafConsumer is one holder of a Mesh-CA leaf the controlplane keeps in a
+// LeafConsumer is one holder of a CA leaf the controlplane keeps in a
 // directory of its own. Registered once; swept forever.
 type LeafConsumer struct {
 	// Name identifies the consumer in logs and in the job result. Unique.
@@ -70,28 +72,28 @@ type LeafConsumer struct {
 	Reload func(ctx context.Context, paths LeafPaths) error
 }
 
-// LeafSweeper renews the Mesh-CA leaves the controlplane holds.
+// LeafSweeper renews the leaves one CA signs that the controlplane holds.
 type LeafSweeper struct {
-	ca *MeshCA
+	ca *CA
 
 	mu    sync.Mutex
 	fixed []LeafConsumer
 }
 
 // NewLeafSweeper returns a sweeper for ca. A nil CA is allowed and makes every
-// sweep a no-op — dev runs with no mesh CA have no leaves to renew.
-func NewLeafSweeper(ca *MeshCA) *LeafSweeper { return &LeafSweeper{ca: ca} }
+// sweep a no-op — dev runs with no CA have no leaves to renew.
+func NewLeafSweeper(ca *CA) *LeafSweeper { return &LeafSweeper{ca: ca} }
 
 // Register adds a consumer whose leaf exists for the api's whole life.
 func (s *LeafSweeper) Register(c LeafConsumer) error {
 	if c.Name == "" || c.Dir == "" || c.Spec == nil {
-		return errors.New("mesh: LeafConsumer needs a Name, a Dir and a Spec")
+		return errors.New("tlsca: LeafConsumer needs a Name, a Dir and a Spec")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, existing := range s.fixed {
 		if existing.Name == c.Name {
-			return fmt.Errorf("mesh: leaf consumer %q is already registered", c.Name)
+			return fmt.Errorf("tlsca: leaf consumer %q is already registered", c.Name)
 		}
 	}
 	s.fixed = append(s.fixed, c)
@@ -151,14 +153,14 @@ func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) L
 			continue
 		}
 		paths := LeafPathsIn(c.Dir)
-		// THE fact. loadLeafIfUsable returns nil when the leaf is missing,
+		// THE fact. LeafUsable is false when the leaf is missing,
 		// unparseable, signed by another CA, minted for a different purpose,
 		// no longer covers the spec's names, or has less than renewWindow
-		// left. Anything else is a leaf that does not need touching.
-		if loadLeafIfUsable(paths, s.ca, spec) != nil {
+		// left. A true is a leaf that does not need touching.
+		if s.ca.LeafUsable(paths, spec) {
 			continue
 		}
-		if _, err := MintLeafToDisk(s.ca, c.Dir, spec); err != nil {
+		if _, err := s.ca.MintLeafToDisk(c.Dir, spec); err != nil {
 			report.Failed = append(report.Failed, c.Name)
 			logf("warn", fmt.Sprintf("leaf sweep: %s: mint: %v", c.Name, err))
 			continue

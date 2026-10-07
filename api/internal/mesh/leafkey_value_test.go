@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -30,7 +31,7 @@ func TestAppLeaf_KeyIsAValueFromMintToDisk(t *testing.T) {
 	if err := CommitAppLeaf(dir, certPEM, key); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	onDisk, err := os.ReadFile(LeafPathsIn(dir).KeyPath)
+	onDisk, err := os.ReadFile(tlsca.LeafPathsIn(dir).KeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,13 +58,13 @@ func TestAppLeaf_KeyIsAValueFromMintToDisk(t *testing.T) {
 }
 
 // TC-825-09: the failure rows. A nil CA is an error with the zero Value from
-// MintLeaf and PrepareAppLeaf, and writeKey under a path that is a file is an
-// error. An unreadable key FILE is not an error: loadLeafIfUsable treats it as
+// MintLeaf and PrepareAppLeaf, and writing a leaf key under a path that is a file is
+// an error. An unreadable key FILE is not an error: LeafUsable treats it as
 // no usable leaf, so PrepareAppLeaf mints a fresh one (renewed) instead of
 // returning bytes it could not read.
 func TestAppLeaf_FailuresReturnAZeroValue(t *testing.T) {
-	if _, key, err := MintLeaf(nil, LeafSpec{CommonName: "x", DNSNames: []string{"x"}}); err == nil || key.Len() != 0 {
-		t.Errorf("MintLeaf(nil CA): err=%v key bytes=%d, want an error and the zero Value", err, key.Len())
+	if _, key, err := (*tlsca.CA)(nil).MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "x", DNSNames: []string{"x"}}); err == nil || key.Len() != 0 {
+		t.Errorf("MintLeaf on a nil CA: err=%v key bytes=%d, want an error and the zero Value", err, key.Len())
 	}
 	if _, key, _, err := PrepareAppLeaf(nil, t.TempDir(), "home1", "app"); err == nil || key.Len() != 0 {
 		t.Errorf("PrepareAppLeaf(nil CA): err=%v key bytes=%d, want an error and the zero Value", err, key.Len())
@@ -72,8 +73,9 @@ func TestAppLeaf_FailuresReturnAZeroValue(t *testing.T) {
 	if err := os.WriteFile(notADir, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeKey(filepath.Join(notADir, "leaf.key"), secret.New([]byte("k"))); err == nil {
-		t.Error("writeKey under a path that is a file succeeded")
+	underAFile := tlsca.LeafPaths{CertPath: filepath.Join(t.TempDir(), "leaf.pem"), KeyPath: filepath.Join(notADir, "leaf.key")}
+	if err := tlsca.WriteLeafFiles(underAFile, []byte("c"), secret.New([]byte("k"))); err == nil {
+		t.Error("writing the key under a path that is a file succeeded")
 	}
 
 	if os.Geteuid() == 0 {
@@ -88,7 +90,7 @@ func TestAppLeaf_FailuresReturnAZeroValue(t *testing.T) {
 	if err := CommitAppLeaf(dir, certPEM, key); err != nil {
 		t.Fatal(err)
 	}
-	keyPath := LeafPathsIn(dir).KeyPath
+	keyPath := tlsca.LeafPathsIn(dir).KeyPath
 	if err := os.Chmod(keyPath, 0); err != nil {
 		t.Fatal(err)
 	}

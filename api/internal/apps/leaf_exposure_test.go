@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -18,7 +20,7 @@ import (
 // renewed=false looks identical to the real thing wrongly deciding the leaf is
 // still usable. This test drives the real one end to end and asserts on the
 // bytes that reach the node.
-func realRotator(t *testing.T, ca *mesh.MeshCA, dir, clusterID string) LeafRotator {
+func realRotator(t *testing.T, ca *tlsca.CA, dir, clusterID string) LeafRotator {
 	t.Helper()
 	return func(app *App) (Leaf, bool, func() error, error) {
 		leafDir := filepath.Join(dir, app.ID)
@@ -54,9 +56,9 @@ func TestRotateAppLeaf_RevokingExposureReachesTheNode(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	rotate := realRotator(t, ca, t.TempDir(), "home1")
 

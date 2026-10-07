@@ -38,7 +38,7 @@ const CertFileName = "bus.crt"
 //     it at all. Measured on grafana/alloy v1.4.2 against a certificate of
 //     exactly today's shape (geekdojo/geekdojo-brain#467).
 //   - No Rasputin client verifies this certificate by chain or pins its
-//     bytes. The collectors trust the api's Mesh-CA-signed leaf, which the
+//     bytes. The collectors trust the api's controlplane-CA-signed leaf, which the
 //     node listener serves in place of this certificate
 //     (geekdojo/geekdojo-brain#672).
 //

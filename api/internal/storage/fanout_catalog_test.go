@@ -154,7 +154,7 @@ func TestFanOutReadsTheCatalogInEffect(t *testing.T) {
 // between it and the archive is the missing classification.
 //
 // The run is not refused. It captures the identity set — the database, the
-// mesh CA, Headscale — which is what a cluster in this state most needs on a
+// controlplane CA, Headscale — which is what a cluster in this state most needs on a
 // disk, and it records Vaultwarden as not captured with a reason that names
 // the tile and the catalog, so the manifest says `complete: false` and the
 // job feed says why. A refusal would have left this cluster with no backup of

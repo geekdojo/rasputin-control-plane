@@ -21,8 +21,9 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -77,25 +78,27 @@ func collectorKeysOf(t *testing.T, nodes ...string) map[string]inventory.KeyOwne
 	return keys
 }
 
-// ingressTLS is a real mTLS node listener: a Mesh CA and the api's server
+// ingressTLS is a real mTLS node listener: a controlplane CA and the api's server
 // leaf, and per node a client presenting that node's stable key (nodeKeyTLS),
 // served by the real ObsIngestHandler behind the same RequireAnyClientCert
 // config main.go builds. The keys are registered by the caller: newIngestServer
 // does it for its seeded nodes, collectorKeysOf for the fake registry.
 type ingressTLS struct {
 	srv     *httptest.Server
-	ca      *mesh.MeshCA
+	ca      *tlsca.CA
+	caDir   string // the trust dir ca lives in, for a test that must sign with its key
 	roots   *x509.CertPool
 	clients map[string]tls.Certificate
 }
 
 func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string) *ingressTLS {
 	t.Helper()
-	ca, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "test")
+	caDir := filepath.Join(t.TempDir(), "trust")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), caDir, "test", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
-	serverCertPEM, serverKeyPEM, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: "api", IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}})
+	serverCertPEM, serverKeyPEM, err := ca.MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "api", IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}})
 	if err != nil {
 		t.Fatalf("server leaf: %v", err)
 	}
@@ -105,7 +108,7 @@ func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string)
 	}
 	pool := x509.NewCertPool()
 	pool.AddCert(ca.Cert)
-	it := &ingressTLS{ca: ca, roots: pool, clients: map[string]tls.Certificate{}}
+	it := &ingressTLS{ca: ca, caDir: caDir, roots: pool, clients: map[string]tls.Certificate{}}
 	for _, n := range nodes {
 		it.clients[n] = nodeKeyTLS(t, n)
 	}

@@ -12,7 +12,7 @@ import (
 // 2026-09-04). Until then the agent's primaryLanCidr was the interface
 // address with its mask — net.IPNet.String() of what net.InterfaceAddrs()
 // returns — so every operator-driven enroll that took the enroll-defaults
-// suggestion failed at `tailscale up`, after the mesh CA had already been
+// suggestion failed at `tailscale up`, after the controlplane CA had already been
 // installed. The agent now reports the network; this is the api's side of
 // the contract, applied to both operator input and the defaults.
 //

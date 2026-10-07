@@ -51,6 +51,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 const supervisorTestContainer = "rasputin-headscale-test"
@@ -78,7 +82,7 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 		_ = os.RemoveAll(stateDir)
 	})
 
-	// Mint a Mesh TLS CA in the same state tree so the supervisor renders
+	// Mint a controlplane TLS CA in the same state tree so the supervisor renders
 	// an HTTPS-enabled Headscale config end-to-end. The CA lives outside
 	// the per-container state dir so re-runs (which wipe stateDir) don't
 	// invalidate it; in real deployment it'd be at <trustDir>/mesh-ca.*.
@@ -86,9 +90,9 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 	if err := os.MkdirAll(caDir, 0o755); err != nil {
 		t.Fatalf("mkdir trust: %v", err)
 	}
-	ca, err := EnsureMeshCA(caDir, "supervisor-smoke")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), caDir, "supervisor-smoke", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 
 	sup, err := NewDockerSupervisor(DockerSupervisorConfig{
@@ -163,12 +167,12 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 			t.Fatalf("could not parse API key from CLI output:\n%s", raw)
 		}
 
-		// Trust config that ONLY contains our Mesh CA — proves the chain
+		// Trust config that ONLY contains our controlplane CA — proves the chain
 		// works without falling back to system roots (which wouldn't
 		// trust a per-installation CA anyway). Built by the one helper both
 		// backends use in main (CATLSConfig, geekdojo/geekdojo-brain#506),
 		// so this run exercises it against the real Headscale leaf.
-		tlsCfg, err := CATLSConfig(ca.CertPEM, "the Mesh CA")
+		tlsCfg, err := proto.CATLSConfig(ca.CertPEM, "the controlplane CA")
 		if err != nil {
 			t.Fatalf("CATLSConfig: %v", err)
 		}
@@ -337,9 +341,9 @@ func TestSupervisor_LiveSessionAPIKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "trust"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ca, err := EnsureMeshCA(filepath.Join(stateDir, "trust"), "apikey-smoke")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(stateDir, "trust"), "apikey-smoke", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 	newSup := func() *DockerSupervisor {
 		s, err := NewDockerSupervisor(DockerSupervisorConfig{

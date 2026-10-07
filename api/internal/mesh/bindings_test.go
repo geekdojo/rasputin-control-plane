@@ -238,13 +238,13 @@ func TestReaders_RefuseANodeBoundToTwoDevices(t *testing.T) {
 // ----- routes carried by automatic re-enrols -----------------------------
 
 // The firewall case: a node advertising a subnet route is re-enrolled by
-// converge_trust (CA re-delivery) — the enrol names the route, so the
+// converge_trust (CA re-delivery to an agent that predates trust.install) — the enrol names the route, so the
 // agent's `tailscale up --reset` keeps it.
 func TestConvergeTrust_ReenrolKeepsAdvertisedRoutes(t *testing.T) {
 	f := newTrustFixture(t).convergeFixture
 	now := time.Now().UTC()
-	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw", Role: proto.RoleFirewall, Hostname: "fw", FirstSeen: now, LastSeen: now,
-		Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "stale-fingerprint"}}); err != nil {
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw", Role: proto.RoleFirewall, Hostname: "fw", AgentVersion: legacyAgentVersion, FirstSeen: now, LastSeen: now,
+		Metadata: map[string]any{proto.MetadataTrustFingerprint: "stale-fingerprint"}}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	f.admit("fw")
@@ -345,8 +345,8 @@ func (f *convergeFixture) submittedSpecs(t *testing.T) []EnrollSpec {
 func TestConvergeTrust_SkipsANodeBoundToTwoDevices(t *testing.T) {
 	f := newTrustFixture(t).convergeFixture
 	now := time.Now().UTC()
-	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw", Role: proto.RoleFirewall, Hostname: "fw", FirstSeen: now, LastSeen: now,
-		Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "stale-fingerprint"}}); err != nil {
+	if err := f.inv.Insert(f.ctx, &proto.Node{ID: "fw", Role: proto.RoleFirewall, Hostname: "fw", AgentVersion: legacyAgentVersion, FirstSeen: now, LastSeen: now,
+		Metadata: map[string]any{proto.MetadataTrustFingerprint: "stale-fingerprint"}}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	f.admit("fw")

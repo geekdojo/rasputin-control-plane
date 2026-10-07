@@ -57,7 +57,7 @@ func TestDecodeNodeKeys(t *testing.T) {
 	other := testSPKIHash(t)
 
 	t.Run("absent is not an error", func(t *testing.T) {
-		keys, ok, err := DecodeNodeKeys(map[string]any{MetadataMeshCAFingerprint: "abc"})
+		keys, ok, err := DecodeNodeKeys(map[string]any{MetadataTrustFingerprint: "abc"})
 		if err != nil || ok || keys != nil {
 			t.Fatalf("got (%v, %v, %v), want (nil, false, nil)", keys, ok, err)
 		}

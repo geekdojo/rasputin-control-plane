@@ -15,7 +15,7 @@ import "time"
 // zeroed. §4.6's whole design is that the controlplane keeps no secret; a
 // restore that handed the private key to N nodes so each could open its own
 // member would put the key on N nodes. So THE API UNSEALS, and the node
-// receives the PLAINTEXT tar over the api's HTTPS — the same mesh-CA leaf and
+// receives the PLAINTEXT tar over the api's HTTPS — the same controlplane-CA leaf and
 // the same tailnet the OS update bundles already travel over — on a
 // credential the api minted for exactly this member, this node, this restore.
 // The trade is stated once, here: plaintext app data crosses the LAN inside

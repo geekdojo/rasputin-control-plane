@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -19,7 +20,12 @@ var (
 	trustInterimCA  = []byte("-----BEGIN CERTIFICATE-----\nINTERIM\n-----END CERTIFICATE-----\n")
 )
 
-// trustFixture is a convergeFixture whose Service ships a mesh CA.
+// fixedFP is a TrustFingerprinter that reports one value.
+type fixedFP string
+
+func (f fixedFP) Fingerprint() string { return string(f) }
+
+// trustFixture is a convergeFixture whose Service delivers a trust bundle.
 type trustFixture struct {
 	*convergeFixture
 	want string
@@ -28,17 +34,29 @@ type trustFixture struct {
 func newTrustFixture(t *testing.T) *trustFixture {
 	t.Helper()
 	f := newConvergeFixture(t)
-	f.svc = NewService(Config{MeshCAPEM: trustOriginalCA}, f.store, f.client, NewNoopSupervisor())
-	return &trustFixture{convergeFixture: f, want: proto.MeshCAFingerprint(trustOriginalCA)}
+	f.svc = NewService(Config{TrustFingerprint: fixedFP(proto.TrustFingerprint(trustOriginalCA)), LegacyTrustBundle: trustOriginalCA},
+		f.store, f.client, NewNoopSupervisor())
+	return &trustFixture{convergeFixture: f, want: proto.TrustFingerprint(trustOriginalCA)}
 }
 
 // addTrustNode inserts an online node reporting fp (or nothing when fp is
 // ""), enrolled (a rasputin device row) unless enrolled is false.
+//
+// The node's agent predates trust.install (legacyAgentVersion), which is what
+// puts it in converge_trust's scope at all; addTrustNodeAt names another.
 func (f *trustFixture) addTrustNode(t *testing.T, id string, role proto.NodeRole, fp string, enrolled bool, lastSeen time.Time) {
 	t.Helper()
-	n := &proto.Node{ID: id, Role: role, Hostname: id, AgentVersion: "2026.09.1-dev.150", FirstSeen: lastSeen, LastSeen: lastSeen}
+	f.addTrustNodeAt(t, id, role, legacyAgentVersion, fp, enrolled, lastSeen)
+}
+
+// legacyAgentVersion is an agent below the trust.install floor.
+const legacyAgentVersion = "2026.09.1-dev.150"
+
+func (f *trustFixture) addTrustNodeAt(t *testing.T, id string, role proto.NodeRole, version, fp string, enrolled bool, lastSeen time.Time) {
+	t.Helper()
+	n := &proto.Node{ID: id, Role: role, Hostname: id, AgentVersion: version, FirstSeen: lastSeen, LastSeen: lastSeen}
 	if fp != "" {
-		n.Metadata = map[string]any{proto.MetadataMeshCAFingerprint: fp}
+		n.Metadata = map[string]any{proto.MetadataTrustFingerprint: fp}
 	}
 	if err := f.inv.Insert(f.ctx, n); err != nil {
 		t.Fatalf("inv.Insert(%s): %v", id, err)
@@ -76,14 +94,14 @@ func (f *trustFixture) addTerminalEnroll(t *testing.T, id, nodeID string, status
 
 // run executes converge_trust and returns its result plus the node ids it
 // submitted re-deliveries for (the jobs it created, by creator).
-func (f *trustFixture) run(t *testing.T) (TrustConvergeResult, []string) {
+func (f *trustFixture) run(t *testing.T) (nodetrust.ConvergeResult, []string) {
 	t.Helper()
 	step := reconcileConvergeTrust(f.svc, f.inv, f.jstore, f.runner)
 	raw, err := step(stepCtx(f.ctx, f.nc, struct{}{}))
 	if err != nil {
 		t.Fatalf("converge_trust: %v", err)
 	}
-	var res TrustConvergeResult
+	var res nodetrust.ConvergeResult
 	if err := json.Unmarshal(raw, &res); err != nil {
 		t.Fatalf("result: %v", err)
 	}
@@ -108,9 +126,9 @@ func (f *trustFixture) run(t *testing.T) (TrustConvergeResult, []string) {
 func TestConvergeTrust_RedeliversToStaleEnrolledNodesOnly(t *testing.T) {
 	f := newTrustFixture(t)
 	now := time.Now().UTC()
-	interim := proto.MeshCAFingerprint(trustInterimCA)
+	interim := proto.TrustFingerprint(trustInterimCA)
 	f.addTrustNode(t, "compute1", proto.RoleCompute, interim, true, now)                   // stale → re-deliver
-	f.addTrustNode(t, "fw", proto.RoleFirewall, proto.MeshCAFingerprintNone, true, now)    // trusts nothing → re-deliver
+	f.addTrustNode(t, "fw", proto.RoleFirewall, proto.TrustFingerprintNone, true, now)     // trusts nothing → re-deliver
 	f.addTrustNode(t, "controlplane", proto.RoleControlPlane, interim, true, now)          // the CP is a node too → re-deliver
 	f.addTrustNode(t, "compute2", proto.RoleCompute, f.want, true, now)                    // current → nothing
 	f.addTrustNode(t, "compute3", proto.RoleCompute, "", true, now)                        // unreported → left alone
@@ -145,7 +163,7 @@ func TestConvergeTrust_RedeliversToStaleEnrolledNodesOnly(t *testing.T) {
 }
 
 func TestConvergeTrust_SubmitsOncePerNodeAndHonoursGuards(t *testing.T) {
-	interim := proto.MeshCAFingerprint(trustInterimCA)
+	interim := proto.TrustFingerprint(trustInterimCA)
 	now := time.Now().UTC()
 	cases := []struct {
 		name   string
@@ -190,14 +208,13 @@ func TestConvergeTrust_SubmitsOncePerNodeAndHonoursGuards(t *testing.T) {
 	}
 }
 
-// With no CA shipped (mock mesh, plain-HTTP dev, external Headscale with a
-// public cert) there is nothing to compare against and nothing to deliver —
-// a node reporting "none" is not stale, it is right.
+// With no trust configured (a mesh built without nodetrust) there is nothing
+// to compare against and nothing to deliver.
 func TestConvergeTrust_NoCAConfiguredDoesNothing(t *testing.T) {
 	f := newTrustFixture(t)
 	f.svc = NewService(Config{}, f.store, f.client, NewNoopSupervisor())
 	f.want = ""
-	f.addTrustNode(t, "n1", proto.RoleCompute, proto.MeshCAFingerprintNone, true, time.Now().UTC())
+	f.addTrustNode(t, "n1", proto.RoleCompute, proto.TrustFingerprintNone, true, time.Now().UTC())
 	res, submitted := f.run(t)
 	if len(submitted) != 0 || len(res.Stale) != 0 || res.CAFingerprint != "" {
 		t.Errorf("no CA: submitted=%v result=%+v", submitted, res)
@@ -216,33 +233,6 @@ func TestReconcileWorkflow_HasConvergeTrustAfterEnrollment(t *testing.T) {
 	want := []string{"fetch_observed", "compare", "converge_enrollment", "converge_trust", "reconcile_app_dns"}
 	if !slices.Equal(names, want) {
 		t.Errorf("steps = %v, want %v", names, want)
-	}
-}
-
-func TestNodeTrustFor(t *testing.T) {
-	want := proto.MeshCAFingerprint(trustOriginalCA)
-	cases := []struct {
-		name     string
-		want     string
-		node     *proto.Node
-		state    NodeTrustState
-		predates bool
-	}{
-		{"current", want, &proto.Node{ID: "a", Metadata: map[string]any{proto.MetadataMeshCAFingerprint: want}}, TrustCurrent, false},
-		{"stale", want, &proto.Node{ID: "a", Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "other"}}, TrustStale, false},
-		{"none is stale", want, &proto.Node{ID: "a", Metadata: map[string]any{proto.MetadataMeshCAFingerprint: proto.MeshCAFingerprintNone}}, TrustStale, false},
-		{"unreported, new agent", want, &proto.Node{ID: "a", AgentVersion: "2026.09.1-dev.150"}, TrustUnreported, false},
-		{"unreported, agent predates the field", want, &proto.Node{ID: "a", AgentVersion: "2026.08.4-dev.130"}, TrustUnreported, true},
-		{"unreported, unparseable version", want, &proto.Node{ID: "a", AgentVersion: "dev"}, TrustUnreported, false},
-		{"no CA shipped", "", &proto.Node{ID: "a", Metadata: map[string]any{proto.MetadataMeshCAFingerprint: "other"}}, TrustCurrent, false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := NodeTrustFor(tc.want, tc.node)
-			if got.State != tc.state || got.AgentPredatesField != tc.predates {
-				t.Errorf("got %+v, want state=%s predates=%v", got, tc.state, tc.predates)
-			}
-		})
 	}
 }
 
@@ -295,5 +285,28 @@ func TestEnrollRecord_PrunesSupersededRegistrations(t *testing.T) {
 	}
 	if f.client.deleteNodeCalls != before {
 		t.Error("pruned without finding the live registration")
+	}
+}
+
+// TC-741-17: converge_trust re-delivers by mesh.enroll_node only to enrolled
+// stale nodes whose agent predates trust.install; a stale node at or above the
+// floor is trust.converge's and is not looked at.
+func TestConvergeTrust_OnlyAgentsBelowTheTrustInstallFloor(t *testing.T) {
+	floor, ok := proto.VerbMinAgentVersion(proto.TrustInstallVerb)
+	if !ok {
+		t.Fatal("trust.install has no floor")
+	}
+	f := newTrustFixture(t)
+	now := time.Now().UTC()
+	interim := proto.TrustFingerprint(trustInterimCA)
+	f.addTrustNodeAt(t, "old", proto.RoleCompute, legacyAgentVersion, interim, true, now)
+	f.addTrustNodeAt(t, "at-floor", proto.RoleCompute, floor, interim, true, now)
+	f.addTrustNodeAt(t, "newer", proto.RoleCompute, "2027.01.0", interim, true, now)
+	res, submitted := f.run(t)
+	if !slices.Equal(submitted, []string{"old"}) {
+		t.Errorf("submitted = %v, want only the below-floor node", submitted)
+	}
+	if !slices.Equal(res.Stale, []string{"old"}) || !slices.Equal(res.Redelivered, []string{"old"}) {
+		t.Errorf("result stale=%v redelivered=%v, want only the below-floor node", res.Stale, res.Redelivered)
 	}
 }

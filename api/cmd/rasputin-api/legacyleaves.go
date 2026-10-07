@@ -15,7 +15,7 @@ func legacyCollectorLeafDir(dataDir string) string {
 }
 
 // removeLegacyCollectorLeaves deletes dir — dataDir/tls/collectors, where an
-// earlier release kept a Mesh-CA client leaf and its private key for each
+// earlier release kept a controlplane-CA client leaf and its private key for each
 // node's collector. Nothing mints, renews, places or admits one any more: a
 // collector presents its node's own registered key. The keys are the
 // controlplane's own, so they are removed rather than left on disk, and the
@@ -44,5 +44,5 @@ func removeLegacyCollectorLeaves(logger *slog.Logger, dir string) {
 		logger.Warn("legacy collector leaves: cannot remove the directory; leaving it", "dir", dir, "err", err.Error())
 		return
 	}
-	logger.Info("legacy collector leaves: removed the Mesh-CA client leaves an earlier release minted", "dir", dir, "removed", len(entries))
+	logger.Info("legacy collector leaves: removed the controlplane-CA client leaves an earlier release minted", "dir", dir, "removed", len(entries))
 }

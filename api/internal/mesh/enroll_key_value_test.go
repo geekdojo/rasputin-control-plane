@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -142,7 +143,7 @@ func TestEnrollCommand_CarriesTheKey(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if cmd.AuthKey != "tskey-auth-example" || cmd.LoginServer != "https://hs.example" || cmd.Hostname != "n1" ||
-		!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || !cmd.AcceptDNS || !cmd.AcceptRoutes || string(cmd.MeshCAPEM) != "CA" {
+		!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || !cmd.AcceptDNS || !cmd.AcceptRoutes || string(cmd.LegacyTrustBundlePEM) != "CA" {
 		t.Errorf("enroll command = %+v", cmd)
 	}
 }
@@ -151,17 +152,17 @@ func TestEnrollCommand_CarriesTheKey(t *testing.T) {
 // key file pairs with its certificate; a writeKey failure fails that leaf with
 // the wrapped error and the rest are still swept.
 func TestLeafSweep_KeysGoThroughWriteKey(t *testing.T) {
-	ca := sweepTestCA(t)
+	ca := newCAForTest(t)
 	dueA, dueB, keyBlocked := t.TempDir(), t.TempDir(), t.TempDir()
 	// writeKey cannot replace a directory with a file.
-	if err := os.Mkdir(LeafPathsIn(keyBlocked).KeyPath, 0o700); err != nil {
+	if err := os.Mkdir(tlsca.LeafPathsIn(keyBlocked).KeyPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	s := NewLeafSweeper(ca)
+	s := tlsca.NewLeafSweeper(ca)
 	for _, c := range []struct{ name, dir string }{{"a-due", dueA}, {"b-key-blocked", keyBlocked}, {"c-due", dueB}} {
 		cn := c.name + ".local"
-		if err := s.Register(LeafConsumer{Name: c.name, Dir: c.dir, Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: cn, DNSNames: []string{cn}}, nil
+		if err := s.Register(tlsca.LeafConsumer{Name: c.name, Dir: c.dir, Spec: func() (tlsca.LeafSpec, error) {
+			return tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: cn, DNSNames: []string{cn}}, nil
 		}}); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
@@ -175,7 +176,7 @@ func TestLeafSweep_KeysGoThroughWriteKey(t *testing.T) {
 		t.Errorf("failed = %v, want b-key-blocked", rep.Failed)
 	}
 	for _, dir := range []string{dueA, dueB} {
-		paths := LeafPathsIn(dir)
+		paths := tlsca.LeafPathsIn(dir)
 		if _, err := tls.LoadX509KeyPair(paths.CertPath, paths.KeyPath); err != nil {
 			t.Errorf("%s: the written key does not pair with its certificate: %v", dir, err)
 		}
@@ -188,7 +189,7 @@ func TestLeafSweep_KeysGoThroughWriteKey(t *testing.T) {
 		}
 	}
 	if !slices.ContainsFunc(logs, func(m string) bool {
-		return strings.Contains(m, "b-key-blocked: mint: mesh:")
+		return strings.Contains(m, "b-key-blocked: mint: tlsca:")
 	}) {
 		t.Errorf("the writeKey failure is not logged with its wrapped error: %v", logs)
 	}

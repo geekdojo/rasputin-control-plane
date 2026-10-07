@@ -167,7 +167,7 @@ func TestProtector_FollowsTheMountNotTheName(t *testing.T) {
 }
 
 // The persistent partition is protected as hard as the boot medium: losing
-// /var/lib/rasputin loses the SQLite DB, the trust dir and the mesh CA key.
+// /var/lib/rasputin loses the SQLite DB, the trust dir and the controlplane CA key.
 func TestProtector_PersistentPartitionOnItsOwnDisk(t *testing.T) {
 	sys := newFakeSys(t)
 	sys.addDisk("sda", "8:0")

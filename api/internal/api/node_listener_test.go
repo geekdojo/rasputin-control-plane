@@ -10,20 +10,23 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -167,12 +170,25 @@ func TestNodeListener_IdentityIsTheKeysOwner(t *testing.T) {
 	}
 }
 
-// meshChainClient is a client certificate the Mesh CA signed, for node, with
-// a fresh key nobody registered: the shape of a collector leaf the api minted
-// before node keys. Built with crypto/x509 directly; nothing in the product
-// mints one any more.
-func meshChainClient(t *testing.T, ca *mesh.MeshCA, node string) tls.Certificate {
+// meshChainClient is a client certificate the controlplane CA signed, for
+// node, with a fresh key nobody registered: the shape of a collector leaf the
+// api minted before node keys. Built with crypto/x509 directly, signed with
+// the CA key read from its file in caDir; nothing in the product mints one any
+// more, and the controlplane CA issues server leaves only.
+func meshChainClient(t *testing.T, ca *tlsca.CA, caDir, node string) tls.Certificate {
 	t.Helper()
+	caKeyPEM, err := os.ReadFile(filepath.Join(caDir, tlsca.ControlplaneKeyFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(caKeyPEM)
+	if block == nil {
+		t.Fatal("the CA key file is not PEM")
+	}
+	caKey, err := x509.ParseECPrivateKey(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +202,7 @@ func meshChainClient(t *testing.T, ca *mesh.MeshCA, node string) tls.Certificate
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), ca.Key)
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, key.Public(), caKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +214,7 @@ func meshChainClient(t *testing.T, ca *mesh.MeshCA, node string) tls.Certificate
 }
 
 // TC-516-09: the node listener admits registered keys only. A client
-// certificate the Mesh CA signed, naming an admitted node, is refused at the
+// certificate the controlplane CA signed, naming an admitted node, is refused at the
 // handshake with a structured WARN; that node's registered collector key, on
 // the same listener, pushes metrics that reach the backend as that node.
 func TestNodeListener_RefusesAMeshChainClient(t *testing.T) {
@@ -214,7 +230,7 @@ func TestNodeListener_RefusesAMeshChainClient(t *testing.T) {
 	it := startIngress(t, s, s.inv.Registry(), "c02")
 
 	// The Mesh-chain client: refused at the handshake.
-	chain := meshChainClient(t, it.ca, "c02")
+	chain := meshChainClient(t, it.ca, it.caDir, "c02")
 	raw, err := net.Dial("tcp", strings.TrimPrefix(it.srv.URL, "https://"))
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +245,7 @@ func TestNodeListener_RefusesAMeshChainClient(t *testing.T) {
 		_, err = conn.Read(make([]byte, 1))
 	}
 	if err == nil {
-		t.Fatal("a Mesh-CA-signed client certificate with an unregistered key was admitted")
+		t.Fatal("a controlplane-CA-signed client certificate with an unregistered key was admitted")
 	}
 	warns := records.Matching(slog.LevelWarn, "refusing a handshake")
 	if len(warns) != 1 {

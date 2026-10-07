@@ -4,7 +4,11 @@ package atrest_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -14,10 +18,13 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/docker"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/hostsync"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/tailscale"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 )
 
 // The at-rest inventory: every file and directory the agent writes, produced
@@ -119,30 +126,35 @@ func rows() []row {
 			},
 		},
 		{
-			name:      "mesh CA bundle and tailscale state",
+			name:      "trust bundle, reload-pending marker and tailscale state",
 			seedDirs:  []string{"mesh"},
-			seedFiles: []string{"mesh/tailscale.json", "mesh/tailscaled-ca.pem"},
+			seedFiles: []string{"mesh/tailscale.json", "mesh/tailscaled-ca.pem", "mesh/tailscaled-ca.pem.reload-pending"},
 			write: func(t *testing.T, d string) {
-				b, err := tailscale.NewMockBackend(filepath.Join(d, "mesh"))
+				store := nodetrust.NewStore(filepath.Join(d, "mesh", "tailscaled-ca.pem"))
+				if _, err := tailscale.NewMockBackend(filepath.Join(d, "mesh"), store); err != nil {
+					t.Fatal(err)
+				}
+				// TC-741-26 (F-741-14): the bundle is written by nodetrust.Store, through the
+				// trust.install handler — the directory in
+				// geekdojo/geekdojo-brain#144 — and a reload that fails leaves
+				// the reload-pending marker beside it.
+				h, err := nodetrust.NewHandler(store, []nodetrust.Reloader{failingReloader{}}, func() {}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 				if err != nil {
 					t.Fatal(err)
 				}
-				// Enroll is what installs a delivered Mesh CA, through the same
-				// installMeshCA the real backend uses (agent/internal/
-				// tailscale/trust.go) — the directory in
-				// geekdojo/geekdojo-brain#144.
-				if _, err := b.Enroll(context.Background(), tailscale.EnrollInput{
-					AuthKey:   "tskey-auth-test",
-					Hostname:  "node-1",
-					MeshCAPEM: []byte("-----BEGIN CERTIFICATE-----\nmesh\n-----END CERTIFICATE-----\n"),
-				}); err != nil {
+				cmd, err := json.Marshal(proto.TrustInstallCmd{BundlePEM: tlstest.NewCA(t, "cp").PEM})
+				if err != nil {
 					t.Fatal(err)
+				}
+				if ack := h.Handle(context.Background(), "node-1", cmd); ack.OK || ack.Fingerprint != proto.TrustFingerprintReloadPending {
+					t.Fatalf("ack %+v, want a pending reload", ack)
 				}
 			},
 			want: []want{
 				{"mesh", dirMode},
 				{"mesh/tailscale.json", secretMode},
 				{"mesh/tailscaled-ca.pem", publicMode}, // a CA certificate: public by construction
+				{"mesh/tailscaled-ca.pem.reload-pending", secretMode},
 			},
 		},
 		{
@@ -294,3 +306,8 @@ func waitForFile(t *testing.T, path, want string) {
 	}
 	t.Fatalf("%s never held %q", path, want)
 }
+
+// failingReloader is a tailscaled that will not reload.
+type failingReloader struct{}
+
+func (failingReloader) ReloadTrust(context.Context) error { return errors.New("reload refused") }

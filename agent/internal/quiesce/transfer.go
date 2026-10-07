@@ -45,7 +45,7 @@ import (
 // otherwise. The sealed digest the destination verifies is computed as the
 // bytes go out and declared in the request's trailer.
 
-// transport resolves a destination's transport over the node's mesh CA
+// transport resolves a destination's transport over the node's controlplane CA
 // trust, resolved afresh for this transfer. Seam for tests.
 //
 // The destination is classified before a trust failure is reported, so an

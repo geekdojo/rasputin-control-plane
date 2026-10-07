@@ -4,91 +4,167 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// After an identity restore: get the restored mesh CA back out to the nodes
-// now, not on the next scheduled tick.
+// After an identity restore: get the restored controlplane CA back out to the
+// nodes now, not on the next scheduled tick.
 //
 // The restore swapped trust/mesh-ca.pem under every node that enrolled since
 // the box was re-flashed; each of those still trusts the CA the restore
 // replaced, and every node→api TLS client on it fails until the restored CA
 // is delivered again (e3bench 2026-09-04 — the backup run after a restore
 // finalised FAILED for the app volume because compute1 could not verify the
-// api's leaf). mesh.reconcile's converge_trust step does the delivery from
-// data (each node's reported fingerprint against the api's); this only
-// brings the first pass forward from the scheduler's 90s initial delay plus
-// the mesh bring-up to "as soon as the mesh can take a reconcile", and
-// records what that pass found on the restore report so the storage page
-// can say which nodes the restored CA reached and which have not said what
-// they trust.
+// api's leaf). trust.converge does the delivery from data (each node's
+// reported fingerprint against the api's); this only brings the first pass
+// forward from the scheduler's initial delay to "as soon as the agents have
+// re-registered", and records what that pass found on the restore report so
+// the storage page can say which nodes the restored CA reached and which have
+// not said what they trust.
+//
+// Nodes whose agent predates trust.install are left by trust.converge to the
+// mesh bridge (converge_trust inside mesh.reconcile). When the pass counts any,
+// this also kicks mesh.reconcile once the mesh can take one, so they get the
+// restored CA as promptly as before (#516 "B1").
 //
 // Every wait here has a deadline. Nothing depends on this goroutine: the
-// scheduled reconcile converges the same nodes on its own tick.
+// scheduled trust.converge and mesh.reconcile converge the same nodes on their
+// own ticks.
 
 const (
 	// restoreTrustMeshDeadline bounds the wait for the mesh to come up after
-	// the restart. Self-hosted Headscale pulls nothing on a warm box and is
-	// up in seconds; a cold pull can take a minute or two.
+	// the restart, before the legacy bridge's reconcile. Self-hosted Headscale
+	// pulls nothing on a warm box and is up in seconds; a cold pull can take a
+	// minute or two.
 	restoreTrustMeshDeadline = 5 * time.Minute
-	// restoreTrustSettle is how long, after the mesh is ready, to let agents
+	// restoreTrustSettle is how long, after the restart, to let agents
 	// re-register (they reconnect within seconds of the api restart, and the
 	// registration is what carries the fingerprint) before comparing.
 	restoreTrustSettle = 10 * time.Second
-	// restoreTrustReconcileDeadline bounds the wait for the kicked reconcile
-	// to reach a terminal state.
+	// restoreTrustReconcileDeadline bounds the wait for each kicked job to
+	// reach a terminal state.
 	restoreTrustReconcileDeadline = 3 * time.Minute
 )
 
+// restoreTrustDeps is what the restore kick needs, passed in by main.
+type restoreTrustDeps struct {
+	Log *slog.Logger
+	// Now stamps the record's CheckedAt.
+	Now func() time.Time
+	// Submit submits a job (jobs.Runner.Submit).
+	Submit func(ctx context.Context, kind string, spec any, createdBy string) (*jobs.Job, error)
+	// Jobs reads a job and its steps back (*jobs.Store).
+	Jobs interface {
+		GetJob(ctx context.Context, id string) (*jobs.Job, error)
+		ListSteps(ctx context.Context, jobID string) ([]*jobs.JobStep, error)
+	}
+	// Record writes the report's trust record (storage.Store
+	// .RecordRestoreTrustRedelivery).
+	Record func(ctx context.Context, reportID string, rec *storage.TrustRedeliveryRecord) error
+	// MeshReady reports whether mesh.reconcile can run now.
+	MeshReady func() bool
+	// Fingerprint is the api's node trust bundle fingerprint.
+	Fingerprint func() string
+	// The bounds on each wait; main passes the consts above.
+	Settle, JobDeadline, MeshDeadline time.Duration
+}
+
 // kickTrustConvergenceAfterRestore runs in the background on the start that
 // applied an identity restore.
-func kickTrustConvergenceAfterRestore(ctx context.Context, meshSvc *mesh.Service, runner *jobs.Runner, jstore *jobs.Store, st *storage.Store, reportID string) {
+func kickTrustConvergenceAfterRestore(ctx context.Context, d restoreTrustDeps, reportID string) {
+	log := d.Log.With("restore_id", reportID)
 	record := func(rec *storage.TrustRedeliveryRecord) {
-		rec.CheckedAt = time.Now().UTC()
-		if err := st.RecordRestoreTrustRedelivery(ctx, reportID, rec); err != nil {
-			log.Printf("rasputin-api: restore %s: record trust re-delivery: %v", reportID, err)
+		rec.CheckedAt = d.Now().UTC()
+		if err := d.Record(ctx, reportID, rec); err != nil {
+			log.ErrorContext(ctx, "restore: trust re-delivery record not written", "err", err.Error())
 		}
 	}
 	fail := func(detail string) {
-		log.Printf("rasputin-api: restore %s: %s", reportID, detail)
-		record(&storage.TrustRedeliveryRecord{
-			CAFingerprint: meshSvc.MeshCAFingerprint(),
-			Redelivered:   []string{}, Stale: []string{}, Current: []string{}, Unreported: []string{},
-			Detail: detail,
-		})
+		log.WarnContext(ctx, "restore: trust re-delivery did not run", "detail", detail)
+		res := nodetrust.NewConvergeResult(d.Fingerprint())
+		record(recordOf(res, detail))
 	}
 
-	if !waitUntil(ctx, restoreTrustMeshDeadline, meshSvc.Ready) {
-		if ctx.Err() != nil {
-			return
-		}
-		fail(fmt.Sprintf("the mesh was not ready within %s of the restore; the scheduled mesh.reconcile will re-deliver the restored mesh CA to any node still trusting the replaced one once it is", restoreTrustMeshDeadline))
-		return
-	}
 	select {
 	case <-ctx.Done():
 		return
-	case <-time.After(restoreTrustSettle):
+	case <-time.After(d.Settle):
 	}
 
-	j, err := runner.Submit(ctx, "mesh.reconcile", nil, "restore-trust")
-	if err != nil {
-		fail(fmt.Sprintf("could not submit the post-restore mesh.reconcile: %v; the scheduled one will re-deliver the restored mesh CA", err))
+	res, detail, ok := runAndRead(ctx, d, nodetrust.ConvergeKind, "converge")
+	if !ok {
+		if ctx.Err() != nil {
+			return
+		}
+		fail(detail + "; the scheduled trust.converge will deliver the restored controlplane CA")
 		return
 	}
-	log.Printf("rasputin-api: restore %s: kicked mesh.reconcile %s to re-deliver the restored mesh CA (%s) to any node still trusting the replaced one",
-		reportID, j.ID, proto.ShortFingerprint(meshSvc.MeshCAFingerprint()))
+	var conv nodetrust.ConvergeResult
+	if err := json.Unmarshal(res, &conv); err != nil {
+		fail(fmt.Sprintf("the post-restore %s result could not be read: %v", nodetrust.ConvergeKind, err))
+		return
+	}
+	rec := recordOf(conv, detail)
+	record(rec)
+	log.InfoContext(ctx, "restore: restored controlplane CA delivered",
+		"fingerprint", proto.ShortFingerprint(conv.CAFingerprint), "installed", strings.Join(conv.Redelivered, ","),
+		"current", len(conv.Current), "unreported", strings.Join(conv.Unreported, ","), "skipped", fmt.Sprint(conv.Skipped))
 
+	legacy := conv.Skipped["legacy_agent"]
+	if legacy == 0 {
+		return
+	}
+	// Agents too old for trust.install take the CA only from mesh.enroll,
+	// which mesh.reconcile's converge_trust re-runs for them.
+	if !waitUntil(ctx, d.MeshDeadline, d.MeshReady) {
+		if ctx.Err() != nil {
+			return
+		}
+		bridgeFailed(ctx, log, record, rec, fmt.Sprintf("%d node(s) run an agent that predates %s, and the mesh was not ready within %s to re-deliver to them; the scheduled mesh.reconcile will",
+			legacy, proto.TrustInstallVerb, d.MeshDeadline))
+		return
+	}
+	if _, detail, ok := runAndRead(ctx, d, "mesh.reconcile", "converge_trust"); !ok {
+		if ctx.Err() != nil {
+			return
+		}
+		bridgeFailed(ctx, log, record, rec, fmt.Sprintf("%d node(s) run an agent that predates %s, and the mesh.reconcile kicked for them did not complete: %s",
+			legacy, proto.TrustInstallVerb, detail))
+		return
+	}
+	log.InfoContext(ctx, "restore: mesh.reconcile re-delivered to legacy agents", "legacy_agents", legacy)
+}
+
+// bridgeFailed appends why the legacy bridge did not run to the record and
+// writes it again.
+func bridgeFailed(ctx context.Context, log *slog.Logger, record func(*storage.TrustRedeliveryRecord), rec *storage.TrustRedeliveryRecord, why string) {
+	log.WarnContext(ctx, "restore: legacy trust bridge did not run", "detail", why)
+	if rec.Detail != "" {
+		rec.Detail += "; "
+	}
+	rec.Detail += why
+	record(rec)
+}
+
+// runAndRead submits kind, waits for it to finish, and returns step's result.
+// ok is false with detail saying why when the job could not be submitted, did
+// not finish in time, or finished without step's result; detail is set
+// alongside ok when the job finished unsucceeded after step ran.
+func runAndRead(ctx context.Context, d restoreTrustDeps, kind, step string) (result json.RawMessage, detail string, ok bool) {
+	j, err := d.Submit(ctx, kind, nil, "restore-trust")
+	if err != nil {
+		return nil, fmt.Sprintf("could not submit the post-restore %s: %v", kind, err), false
+	}
 	var final *jobs.Job
-	done := waitUntil(ctx, restoreTrustReconcileDeadline, func() bool {
-		got, err := jstore.GetJob(ctx, j.ID)
+	done := waitUntil(ctx, d.JobDeadline, func() bool {
+		got, err := d.Jobs.GetJob(ctx, j.ID)
 		if err != nil || got == nil {
 			return false
 		}
@@ -100,53 +176,41 @@ func kickTrustConvergenceAfterRestore(ctx context.Context, meshSvc *mesh.Service
 		return false
 	})
 	if !done {
-		if ctx.Err() != nil {
-			return
-		}
-		fail(fmt.Sprintf("the post-restore mesh.reconcile %s did not finish within %s; the scheduled one will re-deliver the restored mesh CA", j.ID, restoreTrustReconcileDeadline))
-		return
+		return nil, fmt.Sprintf("the post-restore %s %s did not finish within %s", kind, j.ID, d.JobDeadline), false
 	}
-
-	// The converge_trust step's result is the record, whether or not a later
-	// step of the reconcile failed.
-	steps, err := jstore.ListSteps(ctx, j.ID)
+	steps, err := d.Jobs.ListSteps(ctx, j.ID)
 	if err != nil {
-		fail(fmt.Sprintf("the post-restore mesh.reconcile %s finished %s but its steps could not be read: %v", j.ID, final.Status, err))
-		return
+		return nil, fmt.Sprintf("the post-restore %s %s finished %s but its steps could not be read: %v", kind, j.ID, final.Status, err), false
 	}
-	var res *mesh.TrustConvergeResult
 	for _, s := range steps {
-		if s.Name != "converge_trust" || len(s.Result) == 0 {
-			continue
-		}
-		var r mesh.TrustConvergeResult
-		if json.Unmarshal(s.Result, &r) == nil {
-			res = &r
+		if s.Name == step && len(s.Result) > 0 {
+			result = s.Result
 		}
 	}
-	if res == nil {
-		detail := fmt.Sprintf("the post-restore mesh.reconcile %s finished %s before its converge_trust step ran", j.ID, final.Status)
+	if result == nil {
+		detail = fmt.Sprintf("the post-restore %s %s finished %s before its %s step ran", kind, j.ID, final.Status, step)
 		if final.Error != "" {
 			detail += ": " + final.Error
 		}
-		fail(detail + "; the scheduled reconcile will re-deliver the restored mesh CA")
-		return
+		return nil, detail, false
 	}
-	rec := &storage.TrustRedeliveryRecord{
+	if final.Status != jobs.StatusSucceeded && final.Error != "" {
+		detail = fmt.Sprintf("the post-restore %s %s finished %s after %s: %s", kind, j.ID, final.Status, step, final.Error)
+	}
+	return result, detail, true
+}
+
+// recordOf is the restore report's record of a convergence pass.
+func recordOf(res nodetrust.ConvergeResult, detail string) *storage.TrustRedeliveryRecord {
+	return &storage.TrustRedeliveryRecord{
 		CAFingerprint: res.CAFingerprint,
 		Redelivered:   orEmpty(res.Redelivered),
 		Stale:         orEmpty(res.Stale),
 		Current:       orEmpty(res.Current),
 		Unreported:    orEmpty(res.Unreported),
 		Skipped:       res.Skipped,
+		Detail:        detail,
 	}
-	if final.Status != jobs.StatusSucceeded && final.Error != "" {
-		rec.Detail = fmt.Sprintf("the post-restore mesh.reconcile %s finished %s after converge_trust: %s", j.ID, final.Status, final.Error)
-	}
-	record(rec)
-	log.Printf("rasputin-api: restore %s: mesh CA %s re-delivered to %d node(s) [%s]; %d current; %d not yet reported [%s]; %d stale held back %v",
-		reportID, proto.ShortFingerprint(rec.CAFingerprint), len(rec.Redelivered), strings.Join(rec.Redelivered, ", "),
-		len(rec.Current), len(rec.Unreported), strings.Join(rec.Unreported, ", "), len(rec.Stale)-len(rec.Redelivered), rec.Skipped)
 }
 
 // waitUntil polls cond every second until it is true (returns true), the

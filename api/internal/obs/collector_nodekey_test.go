@@ -27,7 +27,7 @@ func nodeKeyCollectorSpec() CollectorSpec {
 		NodeID:          "c02",
 		IngressBaseURL:  "https://home1.local:8443",
 		ServerName:      "home1.local",
-		MeshCAPEM:       testMeshCA,
+		CAPEM:           testMeshCA,
 		NodeKeyCertPath: proto.NodeCertPath(proto.NodeKeyCollector),
 		NodeKeyPath:     proto.NodeKeyPath(proto.NodeKeyCollector),
 	}
@@ -69,7 +69,7 @@ func TestBuildCollectorCompose_NodeKeyShapeTrustsTheMeshChain(t *testing.T) {
 	}
 
 	if got := strings.TrimRight(cf.Configs["mesh_ca"].Content, "\n"); got != testMeshCA {
-		t.Errorf("mesh_ca config content = %q, want the Mesh CA", got)
+		t.Errorf("mesh_ca config content = %q, want the controlplane CA", got)
 	}
 	svc := cf.Services["alloy"]
 	mounted := false
@@ -112,17 +112,17 @@ func TestBuildCollectorCompose_NoCAPEMOnAnyPath(t *testing.T) {
 	}
 }
 
-// TC-672-03: a missing or blank Mesh CA is refused, with no compose
+// TC-672-03: a missing or blank controlplane CA is refused, with no compose
 // rendered, so Alloy never falls back to the system roots.
 func TestBuildCollectorCompose_RefusesWithNoMeshCA(t *testing.T) {
 	for name, spec := range map[string]CollectorSpec{
 		"keyed": nodeKeyCollectorSpec(),
 	} {
 		for _, ca := range []string{"", "  \n"} {
-			spec.MeshCAPEM = ca
+			spec.CAPEM = ca
 			out, err := BuildCollectorCompose(spec)
-			if out != "" || err == nil || !strings.Contains(err.Error(), "MeshCAPEM required") {
-				t.Errorf("%s, MeshCAPEM %q = (%d bytes, %v), want (\"\", MeshCAPEM required)", name, ca, len(out), err)
+			if out != "" || err == nil || !strings.Contains(err.Error(), "CAPEM required") {
+				t.Errorf("%s, CAPEM %q = (%d bytes, %v), want (\"\", CAPEM required)", name, ca, len(out), err)
 			}
 		}
 	}
@@ -130,7 +130,7 @@ func TestBuildCollectorCompose_RefusesWithNoMeshCA(t *testing.T) {
 
 // TC-516-13: the node key is the only shape. A spec without the node-key
 // paths is refused; one with them binds them read-only and carries no private
-// key, no leaf config or target, and exactly one certificate: the Mesh CA.
+// key, no leaf config or target, and exactly one certificate: the controlplane CA.
 func TestBuildCollectorCompose_RequiresTheNodeKey(t *testing.T) {
 	for name, blank := range map[string]func(*CollectorSpec){
 		"no NodeKeyCertPath": func(s *CollectorSpec) { s.NodeKeyCertPath = "" },
@@ -206,8 +206,8 @@ func TestCollectorTLSConfig_IsTheRenderedBlock(t *testing.T) {
 // TC-672-06: wantFor is the registered collector key (or none) and the Mesh
 // CA's fingerprint, whatever the shape; no CA gives no trust fingerprint.
 func TestCollectorDeployDeps_WantFor(t *testing.T) {
-	d := CollectorDeployDeps{MeshCAPEM: testMeshCA}
-	caFP := proto.MeshCAFingerprint([]byte(testMeshCA))
+	d := CollectorDeployDeps{CAPEM: testMeshCA}
+	caFP := proto.TrustFingerprint([]byte(testMeshCA))
 	keys := proto.NodeKeys{proto.NodeKeyCollector: "sha256/k", proto.NodeKeyAgent: "sha256/a"}
 	if got := d.wantFor(keys); got != (collectorWant{key: "sha256/k", trust: caFP}) {
 		t.Errorf("keyed want = %+v", got)
@@ -217,7 +217,7 @@ func TestCollectorDeployDeps_WantFor(t *testing.T) {
 		t.Errorf("no-collector-key want = %+v", got)
 	}
 	if got := (CollectorDeployDeps{}).wantFor(keys); got.trust != "" {
-		t.Errorf("want with no Mesh CA has trust %q, want empty", got.trust)
+		t.Errorf("want with no controlplane CA has trust %q, want empty", got.trust)
 	}
 }
 
@@ -227,9 +227,9 @@ func TestCollectorDeployDeps_WantFor(t *testing.T) {
 // keyed node waits until it is online.
 func TestDecideCollectorActions_UpgradeFromBusPin(t *testing.T) {
 	now := time.Now().UTC()
-	d := CollectorDeployDeps{MeshCAPEM: testMeshCA}
-	busFP := proto.MeshCAFingerprint([]byte(testBusCert))
-	caFP := proto.MeshCAFingerprint([]byte(testMeshCA))
+	d := CollectorDeployDeps{CAPEM: testMeshCA}
+	busFP := proto.TrustFingerprint([]byte(testBusCert))
+	caFP := proto.TrustFingerprint([]byte(testMeshCA))
 	keys := map[string]proto.NodeKeys{
 		"a": {proto.NodeKeyCollector: "sha256/a"},
 		"d": {proto.NodeKeyCollector: "sha256/d"},
@@ -327,7 +327,7 @@ func TestCollectorReconcileDeps_WantForHasNoAnswerWhenItCannotAsk(t *testing.T) 
 	ctx := context.Background()
 
 	// No inventory wired at all.
-	d := CollectorReconcileDeps{Deploy: CollectorDeployDeps{MeshCAPEM: testMeshCA}}
+	d := CollectorReconcileDeps{Deploy: CollectorDeployDeps{CAPEM: testMeshCA}}
 	if got, err := d.wantFor(ctx, "c02"); err == nil || got != (collectorWant{}) {
 		t.Errorf("no inventory: want = %+v, %v; want no answer and an error", got, err)
 	}
@@ -391,7 +391,7 @@ func TestCollectorConverge_LeavesNodesWithUnreadableKeysAlone(t *testing.T) {
 	t.Cleanup(func() { _ = js.Close() })
 	d := CollectorReconcileDeps{
 		Inv: inv, Jobs: js, Runner: jobs.NewRunner(js, nil),
-		Deploy: CollectorDeployDeps{Inv: inv, MeshCAPEM: testMeshCA},
+		Deploy: CollectorDeployDeps{Inv: inv, CAPEM: testMeshCA},
 	}
 	var feed []string
 	out, err := collectorConverge(d)(&jobs.StepCtx{Ctx: ctx, JobID: "j", Log: func(level, msg string) {
@@ -446,7 +446,7 @@ func TestCollectorConverge_CountsARefusedSubmit(t *testing.T) {
 	t.Cleanup(func() { _ = js.Close() })
 	d := CollectorReconcileDeps{
 		Inv: inv, Jobs: js, Runner: jobs.NewRunner(js, nil),
-		Deploy: CollectorDeployDeps{Inv: inv, MeshCAPEM: testMeshCA},
+		Deploy: CollectorDeployDeps{Inv: inv, CAPEM: testMeshCA},
 	}
 	var feed []string
 	out, err := collectorConverge(d)(&jobs.StepCtx{Ctx: ctx, JobID: "j", Log: func(level, msg string) {

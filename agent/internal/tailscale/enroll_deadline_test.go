@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 )
 
 // WALL-CLOCK IN THESE TESTS, AND WHY IT IS MEASURED RATHER THAN TYPED.
@@ -298,7 +299,7 @@ func TestRealBackend_EnrollKilledByDeadlineIsNamed(t *testing.T) {
 	cost := subprocessCost(t, bin)
 	deadline := enrollDeadlineFor(cost)
 
-	b := &RealBackend{binary: bin, caBundle: t.TempDir() + "/ca.pem", run: execRun}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog(), run: execRun}
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	const key = "tskey-auth-SECRET-VALUE"
@@ -390,7 +391,7 @@ func TestRealBackend_MissedKillWaitsOutTheWaitDelay(t *testing.T) {
 			upWaitDelay, upWaitDelay-early, cost, spawnCostCap, landed)
 	}
 
-	b := &RealBackend{binary: bin, caBundle: t.TempDir() + "/ca.pem", run: execRun}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog(), run: execRun}
 	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
 	// Enroll runs off the test goroutine only so that the upper edge of the
@@ -448,7 +449,7 @@ func TestRealBackend_EnrollSucceedsInsideTheBudget(t *testing.T) {
 	bin := slowUpBin(t, upTakes, "Running", "")
 	cost := subprocessCost(t, bin) // also warms it
 	budget := upTakes + 100*cost
-	b := &RealBackend{binary: bin, caBundle: t.TempDir() + "/ca.pem", run: execRun}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog(), run: execRun}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	st, err := b.Enroll(ctx, EnrollInput{LoginServer: "https://hs.example:8443", AuthKey: "tskey", Hostname: "node-1"})
@@ -461,7 +462,7 @@ func TestRealBackend_EnrollSucceedsInsideTheBudget(t *testing.T) {
 }
 
 // A restart that outlives the deadline is named as that, not as a bare
-// signal either: the mesh CA install and restart share the budget with the
+// signal either: the controlplane CA install and restart share the budget with the
 // login, and an operator reading the ack must be able to tell which one
 // ate it.
 func TestRealBackend_EnrollRestartPastDeadlineIsNamed(t *testing.T) {
@@ -470,11 +471,11 @@ func TestRealBackend_EnrollRestartPastDeadlineIsNamed(t *testing.T) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
-	b := &RealBackend{binary: "/nonexistent/tailscale", caBundle: t.TempDir() + "/ca.pem", run: run}
+	b := &RealBackend{binary: "/nonexistent/tailscale", trust: testTrust(t), log: discardLog(), run: run}
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	_, err := b.Enroll(ctx, EnrollInput{
-		LoginServer: "https://hs.example", AuthKey: "tskey", MeshCAPEM: []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"),
+		LoginServer: "https://hs.example", AuthKey: "tskey", LegacyTrustBundlePEM: tlstest.NewCA(t, "legacy").PEM,
 	})
 	if err == nil {
 		t.Fatal("Enroll succeeded with the restart blocked past the deadline")
@@ -512,7 +513,7 @@ func (c *captureBackend) Enroll(ctx context.Context, in EnrollInput) (Status, er
 // timeout is derived from, so the two cannot drift apart again.
 func TestHandleEnroll_RunsUnderTheNamedBudget(t *testing.T) {
 	nc := startNATS(t)
-	mb, err := NewMockBackend(t.TempDir())
+	mb, err := NewMockBackend(t.TempDir(), testTrust(t))
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
@@ -560,7 +561,7 @@ func TestHandleEnroll_DeadlineKillReachesTheAck(t *testing.T) {
 	t.Cleanup(func() { enrollBudget = old })
 
 	nc := startNATS(t)
-	b := &RealBackend{binary: bin, caBundle: t.TempDir() + "/ca.pem", run: execRun}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog(), run: execRun}
 	fired := make(chan struct{}, 1)
 	subs, err := RegisterHandlers(nc, "node-1", b, func() { fired <- struct{}{} })
 	if err != nil {

@@ -101,7 +101,7 @@
 // This process is root on the host and reads the host-side mountpoint of a
 // volume whose container may be running. A compromised app can plant a
 // symlink in its own volume — swap a file for a link to /etc/shadow or the
-// mesh CA key between the walk seeing it and the copy opening it, swap a
+// controlplane CA key between the walk seeing it and the copy opening it, swap a
 // directory for a link to /, or plant one in the scratch directory the
 // snapshot is written to, which the container controls outright. So the
 // walk is directory-fd relative with O_NOFOLLOW on every component, every

@@ -62,7 +62,7 @@ type OpenWrtABBackend struct {
 	// rebooter is the agent's one reboot function. Wired from main.go via
 	// SetRebooter; nil means this backend refuses to reboot.
 	rebooter Rebooter
-	// trust is the download's only trust root, the node's mesh CA bundle;
+	// trust is the download's only trust root, the node's controlplane CA bundle;
 	// see RAUCBackend.trust. Called once per Download, for the .sig and the
 	// artifact alike. Required by the constructor.
 	trust TrustSource
@@ -192,7 +192,7 @@ func (o *OpenWrtABBackend) Precheck(ctx context.Context) (*proto.UpdatePrecheckA
 	}, nil
 }
 
-// httpClient mirrors RAUCBackend.httpClient: exactly the mesh CA bundle
+// httpClient mirrors RAUCBackend.httpClient: exactly the controlplane CA bundle
 // trust returns, and a trust failure is returned, never degraded.
 func (o *OpenWrtABBackend) httpClient() (*http.Client, error) {
 	return trustedClient(o.trust)
@@ -243,7 +243,7 @@ func (o *OpenWrtABBackend) Download(ctx context.Context, bundleID, url, sigURL, 
 	}
 	// One client, from one trust call, for the .sig and the artifact both —
 	// resolved before anything is pruned or requested, so a node that
-	// trusts no mesh CA refuses here with the bundle path in the error.
+	// trusts no controlplane CA refuses here with the bundle path in the error.
 	client, err := o.httpClient()
 	if err != nil {
 		return "", "", fmt.Errorf("openwrt-ab download: %w", err)

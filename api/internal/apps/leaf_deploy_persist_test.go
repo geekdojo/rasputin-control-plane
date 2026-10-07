@@ -9,7 +9,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -22,7 +23,7 @@ import (
 // replacement when it finds none. So the first sweep after any deploy found an
 // empty directory for an app that was already serving a perfectly good
 // certificate, minted a second one and re-shipped it. Every deployed app on the
-// cluster was re-leafed exactly once, for nothing: needless Mesh CA issuance,
+// cluster was re-leafed exactly once, for nothing: needless controlplane CA issuance,
 // a needless push to the node, and a spurious apps.leaf_rotate in the ledger.
 //
 // It went unnoticed because nothing asserted it. sweep_test.go:341 covers the
@@ -39,9 +40,9 @@ func TestProvisionAppLeaf_DeployPersistsSoTheSweepDoesNotReMint(t *testing.T) {
 	_, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
 
 	caDir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(caDir, "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), caDir, "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	leafRoot := t.TempDir()
 	rotate := realRotator(t, ca, leafRoot, "home1")
@@ -60,7 +61,7 @@ func TestProvisionAppLeaf_DeployPersistsSoTheSweepDoesNotReMint(t *testing.T) {
 	deployed := receiveWithin(t, got, "no leaf reached the node on deploy")
 
 	// 2. The leaf is on disk. This is the whole bug: it used to not be.
-	certPath := mesh.LeafPathsIn(filepath.Join(leafRoot, "a")).CertPath
+	certPath := tlsca.LeafPathsIn(filepath.Join(leafRoot, "a")).CertPath
 	onDisk, err := os.ReadFile(certPath)
 	if err != nil {
 		t.Fatalf("deploy did not persist the app's leaf (%s): %v — "+
@@ -96,9 +97,9 @@ func TestProvisionAppLeaf_RejectedLeafIsNotPersisted(t *testing.T) {
 	nc := startNATS(t)
 	seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
 
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	leafRoot := t.TempDir()
 	rotate := realRotator(t, ca, leafRoot, "home1")
@@ -110,7 +111,7 @@ func TestProvisionAppLeaf_RejectedLeafIsNotPersisted(t *testing.T) {
 	if ok, _ := provisionAppLeaf(ctx, nc, rotate, app); ok {
 		t.Fatal("a refused leaf must not report the app as routed")
 	}
-	if _, err := os.Stat(mesh.LeafPathsIn(filepath.Join(leafRoot, "a")).CertPath); !os.IsNotExist(err) {
+	if _, err := os.Stat(tlsca.LeafPathsIn(filepath.Join(leafRoot, "a")).CertPath); !os.IsNotExist(err) {
 		t.Errorf("a leaf the node refused must not be persisted (stat err = %v)", err)
 	}
 }

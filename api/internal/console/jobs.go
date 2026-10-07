@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -368,7 +368,7 @@ func explainNoAnswer(n *proto.Node, err error) string {
 		return fmt.Sprintf("the node is %s — it will receive the console root password when it comes back and registers", n.Status)
 	}
 	floor, ok := proto.VerbMinAgentVersion(proto.ConsoleRootHashVerb)
-	if ok && agentPredatesVerb(n.AgentVersion, floor) {
+	if ok && inventory.AgentPredates(n.AgentVersion, floor) {
 		return fmt.Sprintf("the agent on this node is %s, which predates %s — the console root password needs %s or newer. Update the node; until then its console keeps the password its image shipped with.",
 			displayVersion(n.AgentVersion), proto.ConsoleRootHashVerb, floor)
 	}
@@ -385,19 +385,6 @@ func displayVersion(v string) string {
 		return "of an unreported version"
 	}
 	return v
-}
-
-// agentPredatesVerb reports whether agentVersion is older than floor. An
-// unparseable version is NOT called too old: the api does not accuse an
-// agent on the strength of a string it could not read (same rule as
-// mesh.agentPredatesField).
-func agentPredatesVerb(agentVersion, floor string) bool {
-	v := strings.TrimPrefix(strings.TrimSpace(agentVersion), "v")
-	if v == "" {
-		return false
-	}
-	c, err := releases.Compare(releases.SchemeCalVer, v, floor)
-	return err == nil && c < 0
 }
 
 func pushRecord(store *Store, clock func() time.Time) jobs.DoFn {

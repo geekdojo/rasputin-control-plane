@@ -1,9 +1,9 @@
 # Testing collector trust: the Alloy probe
 
 Every observability collector trusts the api the standard way every Rasputin HTTPS client
-does: **by chain to the Mesh CA, under the cluster name, with no certificate pinned**
+does: **by chain to the controlplane CA, under the cluster name, with no certificate pinned**
 ([geekdojo-brain#672](https://github.com/geekdojo/geekdojo-brain/issues/672)). The api's
-node listener (`RASPUTIN_OBS_INGEST_ADDR`, default `:8443`) serves the api's Mesh-CA-signed
+node listener (`RASPUTIN_OBS_INGEST_ADDR`, default `:8443`) serves the api's controlplane-CA-signed
 HTTPS leaf for every name. A collector presents its node's own self-signed key, and the api
 admits it by that key and nothing else.
 
@@ -29,7 +29,7 @@ certificate:
 
 - **Positive (TC-672-17).** Alloy presents a self-signed client pair made with the agent's
   parameters (ECDSA P-256, PKCS#8 `PRIVATE KEY` PEM, clientAuth EKU, dated 1970 to 9999),
-  verifies the server's leaf by chain to a throwaway Mesh CA through `ca_file`, sends SNI equal
+  verifies the server's leaf by chain to a throwaway controlplane CA through `ca_file`, sends SNI equal
   to `server_name`, and delivers a `remote_write` POST to `/api/obs/ingest`. The server sees
   the generated key's SPKI.
 - **No certificate pinned (TC-672-20).** The server swaps in a re-minted leaf (a fresh key,
@@ -37,7 +37,7 @@ certificate:
   serial, with no config change and no container restart.
 - **Chain enforced (TC-672-18).** A leaf from a different CA gets an `x509:` error in Alloy's
   log and no delivery.
-- **Name enforced (TC-672-19).** A Mesh-CA leaf for `other.rasputin.test` gets an `x509:`
+- **Name enforced (TC-672-19).** A controlplane-CA leaf for `other.rasputin.test` gets an `x509:`
   name-mismatch error and no delivery.
 
 ### What it does not prove

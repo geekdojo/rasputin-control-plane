@@ -14,9 +14,10 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	natsserver "github.com/nats-io/nats-server/v2/test"
 	"github.com/nats-io/nats.go"
@@ -201,12 +202,12 @@ func TestFollowLANPrimary(t *testing.T) {
 // SAN without restarting anything.
 func TestAPILeaf_FollowsLANAddress(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(dir, "test")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), dir, "test", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 	mints := 0
-	leaf := &apiLeaf{mint: func(ip net.IP) (mesh.LeafPaths, error) {
+	leaf := &apiLeaf{mint: func(ip net.IP) (tlsca.LeafPaths, error) {
 		mints++
 		return ensureAPILeaf(ca, dir, ip)
 	}}
@@ -327,7 +328,7 @@ func TestReconcileEntries_NoDNSForwardTick(t *testing.T) {
 	if !ok || fw.Interval != 5*time.Minute || fw.InitialDelay != 30*time.Second {
 		t.Fatalf("firewall.reconcile entry = %+v (present %v), want it unchanged", fw, ok)
 	}
-	for _, k := range []string{"apps.reconcile", "mesh.reconcile", mesh.LeafSweepKind} {
+	for _, k := range []string{"apps.reconcile", "mesh.reconcile", tlsca.LeafSweepKind} {
 		if _, ok := kinds[k]; !ok {
 			t.Errorf("%s missing from the schedule", k)
 		}

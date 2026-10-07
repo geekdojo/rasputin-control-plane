@@ -165,7 +165,7 @@ var (
 	ErrSwapFailed = errors.New("quiesce: the live volume could not be exchanged for the staged tree")
 )
 
-// fetcher resolves a source's fetcher over the node's mesh CA trust,
+// fetcher resolves a source's fetcher over the node's controlplane CA trust,
 // resolved afresh for this restore; ordered like transport, so an
 // unsupported scheme is refused as such. Seam for tests.
 func (s *Stager) fetcher(source string) (backupxfer.Fetcher, error) {

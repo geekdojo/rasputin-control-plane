@@ -12,11 +12,21 @@ type Backend interface {
 	Leave(ctx context.Context) error
 	// Status fetches the current daemon state.
 	Status(ctx context.Context) (Status, error)
-	// TrustFingerprint is proto.MeshCAFingerprint of the mesh CA bundle this
-	// backend has installed, or proto.MeshCAFingerprintNone when none is.
-	// Reported on every registration so the api can tell when the CA a node
-	// trusts is not the CA the api holds, and re-deliver it (converge_trust).
+	// TrustFingerprint is the fingerprint of the trust bundle the node holds
+	// after an enroll, for the enroll ack.
 	TrustFingerprint() string
+	// ReloadTrust makes the daemon re-read the trust bundle (tailscaled
+	// caches its cert pool at process start). nodetrust calls it after a
+	// changed trust.install.
+	ReloadTrust(ctx context.Context) error
+}
+
+// TrustInstaller is the node's trust bundle (nodetrust.Store), injected into
+// the backends. They install through it only for a legacy mesh.enroll that
+// carries a bundle from an api older than trust.install.
+type TrustInstaller interface {
+	Install(bundle []byte) (changed bool, err error)
+	Fingerprint() string
 }
 
 // EnrollInput captures the parameters for a fresh `tailscale up`.
@@ -27,12 +37,11 @@ type EnrollInput struct {
 	AdvertiseRoutes []string
 	AcceptDNS       bool
 	AcceptRoutes    bool
-	// MeshCAPEM, when non-empty, is the per-installation Mesh CA root the
-	// node must trust before tailscaled dials the self-hosted Headscale's
-	// HTTPS leaf. The real backend installs it into tailscaled's trust
-	// bundle (and restarts the daemon if the bundle changed) before
-	// `tailscale up`. Empty for plain-HTTP dev or a publicly trusted cert.
-	MeshCAPEM []byte
+	// LegacyTrustBundlePEM, when non-empty, is the trust bundle an api that
+	// predates trust.install carries in mesh.enroll; the backend installs it
+	// (and restarts tailscaled if it changed) before `tailscale up`. A current
+	// api sends the bundle on trust.install first and nothing here.
+	LegacyTrustBundlePEM []byte
 }
 
 // Status is the small projection of `tailscale status --json` we care about.

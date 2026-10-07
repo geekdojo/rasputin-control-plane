@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
 // The leaves a configuration must renew, and the refusal when one of them is on
@@ -87,19 +89,19 @@ func TestVerifyLeafConsumers_RefusesALeafNothingWillRenew(t *testing.T) {
 // registered, or the check above passes on a lie.
 func TestLeafSweeperRegisteredNames_ReportsWhatWasRegistered(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(dir, "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), dir, "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
-	s := mesh.NewLeafSweeper(ca)
+	s := tlsca.NewLeafSweeper(ca)
 
 	if got := s.RegisteredNames(); len(got) != 0 {
 		t.Errorf("a fresh sweeper renews nothing, got %v", got)
 	}
 
-	spec := func() (mesh.LeafSpec, error) { return mesh.LeafSpec{CommonName: "x"}, nil }
+	spec := func() (tlsca.LeafSpec, error) { return tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "x"}, nil }
 	for _, name := range []string{mesh.HeadscaleLeafName, "api-https"} {
-		if err := s.Register(mesh.LeafConsumer{Name: name, Dir: filepath.Join(dir, name), Spec: spec}); err != nil {
+		if err := s.Register(tlsca.LeafConsumer{Name: name, Dir: filepath.Join(dir, name), Spec: spec}); err != nil {
 			t.Fatalf("register %s: %v", name, err)
 		}
 	}

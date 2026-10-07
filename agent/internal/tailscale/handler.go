@@ -18,8 +18,8 @@ import (
 //
 // onEnrolled hooks run after every enroll that succeeded, once the ack has
 // gone back. main passes its re-register closure: the registration event is
-// what carries the CA fingerprint this node trusts (proto
-// MetadataMeshCAFingerprint), and it otherwise fires only on a NATS
+// what carries the trust fingerprint this node reports (proto
+// MetadataTrustFingerprint), and it otherwise fires only on a NATS
 // (re)connect — so without this the api would keep seeing the OLD
 // fingerprint after a re-delivery, until the next reconnect, and keep
 // re-delivering to a node that had already converged.
@@ -73,7 +73,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, backend Backend, onEnrolled 
 }
 
 // enrollBudget is how long one mesh.enroll may run before the agent answers:
-// the mesh CA install, the tailscaled restart and `tailscale up` together.
+// the controlplane CA install, the tailscaled restart and `tailscale up` together.
 // A NATS request carries no deadline of its own, so this is the ONLY clock
 // on the agent side — the one that killed `tailscale up` on e3bench-compute1
 // when it was a hand-typed 30 s (geekdojo/geekdojo-brain#402). A var only so
@@ -91,13 +91,13 @@ func handleEnroll(backend Backend, m *nats.Msg) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), enrollBudget)
 	defer cancel()
 	st, err := backend.Enroll(ctx, EnrollInput{
-		LoginServer:     cmd.LoginServer,
-		AuthKey:         cmd.AuthKey,
-		Hostname:        cmd.Hostname,
-		AdvertiseRoutes: cmd.AdvertiseRoutes,
-		AcceptDNS:       cmd.AcceptDNS,
-		AcceptRoutes:    cmd.AcceptRoutes,
-		MeshCAPEM:       cmd.MeshCAPEM,
+		LoginServer:          cmd.LoginServer,
+		AuthKey:              cmd.AuthKey,
+		Hostname:             cmd.Hostname,
+		AdvertiseRoutes:      cmd.AdvertiseRoutes,
+		AcceptDNS:            cmd.AcceptDNS,
+		AcceptRoutes:         cmd.AcceptRoutes,
+		LegacyTrustBundlePEM: cmd.LegacyTrustBundlePEM,
 	})
 	if err != nil {
 		bus.Respond(m, proto.MeshEnrollAck{OK: false, Backend: backend.Name(), Detail: err.Error()})

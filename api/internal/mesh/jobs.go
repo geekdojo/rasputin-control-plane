@@ -17,7 +17,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -494,7 +494,7 @@ type EnrollSpec struct {
 }
 
 // enrollDispatchTimeout bounds the dispatch step: the agent's whole enroll
-// budget (proto.MeshEnrollWork — mesh CA install, tailscaled restart,
+// budget (proto.MeshEnrollWork — trust bundle install, tailscaled restart,
 // `tailscale up`) plus the bus round trip and a queued ack. The api must
 // LOSE this race on purpose. An agent that used its whole budget answers
 // with a real verdict — which command it was in, for how long, what
@@ -574,7 +574,7 @@ func enrollSessionFrom(sc *jobs.StepCtx, priorStep string) (*enrollSession, erro
 
 // enrollValidate fails the job on a spec the agent's `tailscale up` would
 // fail on anyway — but here, before a preauth key is minted and before the
-// agent has installed the mesh CA and restarted tailscaled for nothing.
+// agent has installed a trust bundle and restarted tailscaled for nothing.
 // Today that is an advertised route that is not a canonical network
 // (192.168.1.149/24 for 192.168.1.0/24; e3bench-compute1 2026-09-04, where
 // the enroll-defaults suggestion itself carried the host form). The
@@ -614,20 +614,41 @@ func enrollValidate(inv *inventory.Store) jobs.DoFn {
 }
 
 // enrollCommand builds the MeshEnrollCmd bus payload: the one place the
-// node's pre-auth key leaves its secret.Value. meshCA is shipped so the node
-// trusts the self-hosted Headscale's HTTPS leaf before tailscaled dials it;
-// it is nil/empty in mock and HTTP dev, and when Headscale is externally
-// managed with a public cert.
-func enrollCommand(loginServer string, key secret.Value, spec EnrollSpec, meshCA []byte) ([]byte, error) {
+// node's pre-auth key leaves its secret.Value. legacyBundle is the trust
+// bundle for an agent that predates trust.install, and nil for every other
+// agent, which received the bundle on trust.install before this.
+func enrollCommand(loginServer string, key secret.Value, spec EnrollSpec, legacyBundle []byte) ([]byte, error) {
 	return json.Marshal(proto.MeshEnrollCmd{
-		LoginServer:     loginServer,
-		AuthKey:         string(key.Reveal()),
-		Hostname:        spec.NodeID,
-		AdvertiseRoutes: spec.AdvertiseRoutes,
-		AcceptDNS:       true,
-		AcceptRoutes:    true,
-		MeshCAPEM:       meshCA,
+		LoginServer:          loginServer,
+		AuthKey:              string(key.Reveal()),
+		Hostname:             spec.NodeID,
+		AdvertiseRoutes:      spec.AdvertiseRoutes,
+		AcceptDNS:            true,
+		AcceptRoutes:         true,
+		LegacyTrustBundlePEM: legacyBundle,
 	})
+}
+
+// deliverEnrollTrust installs the trust bundle on nodeID before its enroll:
+// tailscaled must trust Headscale's leaf before `tailscale up` dials it. It
+// returns the bundle mesh.enroll must carry — the legacy bundle for an agent
+// that predates trust.install, nil for one that took it on the verb. Any other
+// failure fails the step before a key is minted (ERR-CLOSED): an enroll to a
+// node that does not trust Headscale can only fail later and less clearly.
+func deliverEnrollTrust(sc *jobs.StepCtx, svc *Service, nodeID string) ([]byte, error) {
+	if svc.cfg.Trust == nil {
+		return nil, nil
+	}
+	ack, err := svc.cfg.Trust.Deliver(sc.Ctx, sc.NATS, nodeID)
+	switch {
+	case errors.Is(err, nodetrust.ErrAgentPredatesVerb):
+		sc.Log("info", fmt.Sprintf("%s: %v — carrying the trust bundle in mesh.enroll instead", nodeID, err))
+		return svc.cfg.LegacyTrustBundle, nil
+	case err != nil:
+		return nil, fmt.Errorf("deliver trust to %s: %w", nodeID, err)
+	}
+	sc.Log("info", fmt.Sprintf("%s trusts %s (trust.install, changed=%v)", nodeID, proto.ShortFingerprint(ack.Fingerprint), ack.Changed))
+	return nil, nil
 }
 
 func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
@@ -664,6 +685,10 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 				sc.Log("info", fmt.Sprintf("%s is the control plane — enrolling against %s so its own tailscaled needs no name resolution", s.NodeID, loginServer))
 			}
 		}
+		legacyBundle, err := deliverEnrollTrust(sc, svc, s.NodeID)
+		if err != nil {
+			return nil, err
+		}
 		key, err := svc.MintPreAuthKey(sc.Ctx, PreAuthNode, PreAuthKeyRequest{})
 		if err != nil {
 			return nil, fmt.Errorf("mint key: %w", err)
@@ -679,7 +704,7 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		// sent but not consumed does not stay valid for its safety-net TTL.
 		defer expireEnrolKey(sc, svc, s.NodeID, key.ID)
 
-		cmd, err := enrollCommand(loginServer, key.Value, s.EnrollSpec, svc.cfg.MeshCAPEM)
+		cmd, err := enrollCommand(loginServer, key.Value, s.EnrollSpec, legacyBundle)
 		if err != nil {
 			return nil, err
 		}
@@ -731,9 +756,9 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		// is a real fault (the agent installed something other than what it
 		// was handed); a pre-fingerprint agent reports nothing and is not
 		// called out for it.
-		if want := svc.MeshCAFingerprint(); want != "" && ack.TrustFingerprint != "" {
+		if want := svc.trustFingerprint(); want != "" && ack.TrustFingerprint != "" {
 			if ack.TrustFingerprint == want {
-				sc.Log("info", fmt.Sprintf("%s now trusts mesh CA %s", s.NodeID, proto.ShortFingerprint(want)))
+				sc.Log("info", fmt.Sprintf("%s now trusts bundle %s", s.NodeID, proto.ShortFingerprint(want)))
 			} else {
 				sc.Log("warn", fmt.Sprintf("%s reports trusting %s after enroll, but the api delivered %s",
 					s.NodeID, proto.ShortFingerprint(ack.TrustFingerprint), proto.ShortFingerprint(want)))
@@ -776,7 +801,7 @@ func expireEnrolKey(sc *jobs.StepCtx, svc *Service, nodeID, keyID string) {
 func enrollDispatchError(ctx context.Context, inv *inventory.Store, nodeID, subject string, err error, waited time.Duration) error {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("dispatch timed out after %s with no ack from %s: its agent is budgeted %s for the enroll (mesh CA install, tailscaled restart, tailscale up) and should have answered by now — either it was still running tailscale up past that budget, or it went away mid-enroll, or its ack was lost on the bus; the next reconcile pass retries after backoff",
+		return fmt.Errorf("dispatch timed out after %s with no ack from %s: its agent is budgeted %s for the enroll (trust bundle install, tailscaled restart, tailscale up) and should have answered by now — either it was still running tailscale up past that budget, or it went away mid-enroll, or its ack was lost on the bus; the next reconcile pass retries after backoff",
 			waited.Round(time.Second), nodeID, proto.MeshEnrollWork)
 	case errors.Is(err, nats.ErrNoResponders) && inv != nil:
 		return fmt.Errorf("enroll rpc: %s", inv.ExplainNoResponder(ctx, subject))
@@ -797,10 +822,8 @@ func enrollRejected(ctx context.Context, inv *inventory.Store, nodeID string, ac
 		return fmt.Errorf("agent rejected enroll: %s", ack.Detail)
 	}
 	version := nodeAgentVersion(ctx, inv, nodeID)
-	if version != "" {
-		if c, err := releases.Compare(releases.SchemeCalVer, version, proto.MeshEnrollDeadlineMinAgentVersion); err == nil && c >= 0 {
-			return fmt.Errorf("agent rejected enroll: %s", ack.Detail)
-		}
+	if version != "" && !inventory.AgentPredates(version, proto.MeshEnrollDeadlineMinAgentVersion) {
+		return fmt.Errorf("agent rejected enroll: %s", ack.Detail)
 	}
 	who := "an agent that reported no version"
 	if version != "" {

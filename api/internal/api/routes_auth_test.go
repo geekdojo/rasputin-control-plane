@@ -55,9 +55,9 @@ var openRoutes = map[string]string{
 
 	"GET /api/setup/state": "the setup wizard reads step state before any passkey exists; carries no secrets",
 
-	"GET /api/mesh/ios-profile": "Mesh CA public cert (iOS profile envelope); must install before the first HTTPS passkey ceremony",
-	"GET /mesh-ca.pem":          "Mesh CA public cert; must install before the first HTTPS passkey ceremony",
-	"GET /mesh-ca.crt":          "Mesh CA public cert (Windows envelope); must install before the first HTTPS passkey ceremony",
+	"GET /api/mesh/ios-profile": "controlplane CA public cert (iOS profile envelope); must install before the first HTTPS passkey ceremony",
+	"GET /mesh-ca.pem":          "controlplane CA public cert; must install before the first HTTPS passkey ceremony",
+	"GET /mesh-ca.crt":          "controlplane CA public cert (Windows envelope); must install before the first HTTPS passkey ceremony",
 
 	"GET /flash.sh":                   "static, secret-free node flasher script run from a laptop with no session",
 	"GET /api/cluster/node-image":     "public OS image URL + checksum for the laptop-side flasher",
@@ -243,10 +243,10 @@ func TestBootstrapListenerServesNoGatedRoute(t *testing.T) {
 
 	bootstrapOpen := map[string]string{
 		"GET /healthz":              "liveness over plain HTTP for the QEMU smoke and TLS-less probes",
-		"GET /api/setup/state":      "the /trust page reads the cluster name before the Mesh CA is trusted (bootstrap.go); carries no secrets",
-		"GET /mesh-ca.pem":          "Mesh CA public cert for the first-run trust page",
-		"GET /mesh-ca.crt":          "Mesh CA public cert (Windows envelope) for the first-run trust page",
-		"GET /api/mesh/ios-profile": "Mesh CA public cert (iOS profile) for the first-run trust page",
+		"GET /api/setup/state":      "the /trust page reads the cluster name before the controlplane CA is trusted (bootstrap.go); carries no secrets",
+		"GET /mesh-ca.pem":          "controlplane CA public cert for the first-run trust page",
+		"GET /mesh-ca.crt":          "controlplane CA public cert (Windows envelope) for the first-run trust page",
+		"GET /api/mesh/ios-profile": "controlplane CA public cert (iOS profile) for the first-run trust page",
 		"/":                         "fallback: the /trust page and static assets, otherwise a 302 to https",
 	}
 	for _, p := range f.srv.bootstrapRoutes().Patterns() {

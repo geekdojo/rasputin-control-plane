@@ -40,7 +40,7 @@ func (s *Store) RecordRestore(ctx context.Context, r *RestoreReport) error {
 	return err
 }
 
-// RecordRestoreTrustRedelivery amends the report id with the mesh-CA
+// RecordRestoreTrustRedelivery amends the report id with the controlplane-CA
 // re-delivery its kick found. The one field of a report that is written
 // after the record: the kick can only run once the mesh is up, minutes after
 // the report was recorded. Overwrites a previous amendment (a re-run says

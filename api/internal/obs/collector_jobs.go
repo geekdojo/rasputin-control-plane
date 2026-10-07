@@ -108,7 +108,7 @@ type CollectorReconcileDeps struct {
 	// reconcile derives what a node's collector SHOULD carry with exactly the
 	// function that decides what it WILL carry. One derivation, so the two
 	// cannot disagree and leave a node redeploying forever. It also carries
-	// the Mesh CA, so there is one source of what a collector trusts.
+	// the controlplane CA, so there is one source of what a collector trusts.
 	Deploy CollectorDeployDeps
 }
 
@@ -390,10 +390,10 @@ type CollectorDeployDeps struct {
 	IngressBaseURL string // from DeriveIngressEndpoint (canonical hostname, not hardcoded)
 	ServerName     string
 	AlloyImage     string // optional; defaults to the pinned collector image
-	// MeshCAPEM is the CA every collector verifies the api's leaf against,
+	// CAPEM is the CA every collector verifies the api's leaf against,
 	// by chain and under ServerName — the one source of what a collector
 	// trusts. Empty refuses every deploy (fail closed).
-	MeshCAPEM string
+	CAPEM string
 }
 
 // collectorWant is the pair of facts a node's deployed collector must match.
@@ -404,11 +404,11 @@ type collectorWant struct {
 
 // wantFor decides what a node's collector should be carrying right now: its
 // registered collector key (empty when it has none, which no deploy accepts)
-// and the Mesh CA it trusts the api by. A collector recorded with any other trust fingerprint —
+// and the controlplane CA it trusts the api by. A collector recorded with any other trust fingerprint —
 // one deployed by a release that pinned the bus certificate — no longer
 // matches, and the reconcile redeploys it.
 func (d CollectorDeployDeps) wantFor(keys proto.NodeKeys) collectorWant {
-	return collectorWant{key: keys[proto.NodeKeyCollector], trust: proto.MeshCAFingerprint([]byte(d.MeshCAPEM))}
+	return collectorWant{key: keys[proto.NodeKeyCollector], trust: proto.TrustFingerprint([]byte(d.CAPEM))}
 }
 
 // CollectorDeployWorkflow renders the node's collector compose, presenting
@@ -456,7 +456,7 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 		}
 
 		// The collector presents the node's registered collector key and
-		// trusts the api by chain to the Mesh CA, under the cluster name. A
+		// trusts the api by chain to the controlplane CA, under the cluster name. A
 		// node with no registered collector key gets no collector: there is
 		// no other credential to give it.
 		keys, err := d.Inv.NodeKeys(sc.Ctx, spec.NodeID)
@@ -475,7 +475,7 @@ func collectorDeploy(d CollectorDeployDeps) jobs.DoFn {
 			IngressBaseURL:  d.IngressBaseURL,
 			ServerName:      d.ServerName,
 			AlloyImage:      d.AlloyImage,
-			MeshCAPEM:       d.MeshCAPEM,
+			CAPEM:           d.CAPEM,
 			NodeKeyCertPath: proto.NodeCertPath(proto.NodeKeyCollector),
 			NodeKeyPath:     proto.NodeKeyPath(proto.NodeKeyCollector),
 		})

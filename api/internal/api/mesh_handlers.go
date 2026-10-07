@@ -7,12 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/oklog/ulid/v2"
@@ -66,23 +65,26 @@ func (s *Server) handleMeshState(w http.ResponseWriter, r *http.Request) {
 
 // GET /api/mesh/devices
 //
-// Each Rasputin device carries `trust`: how the CA its agent reports trusting
-// compares with the api's current mesh CA (mesh.NodeTrustFor). "stale" means
-// the next mesh.reconcile re-delivers it; "unreported" means the agent has
-// not said. User devices carry none — the api does not deliver a CA to them.
+// Each Rasputin device carries `trust`: how the bundle its agent reports
+// trusting compares with the api's (nodetrust.StateFor). "stale" means the
+// next trust.converge installs it; "unreported" means the agent has not said.
+// User devices carry none — the api does not deliver a CA to them.
 func (s *Server) handleListMeshDevices(w http.ResponseWriter, r *http.Request) {
 	devices, err := s.mesh.Store().ListDevices(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	want := s.mesh.MeshCAFingerprint()
+	want := ""
+	if s.nodeTrust != nil {
+		want = s.nodeTrust.Fingerprint()
+	}
 	out := make([]meshDeviceView, 0, len(devices))
 	for _, d := range devices {
 		v := meshDeviceView{Device: d}
 		if d.Kind == "rasputin" && d.RasputinNodeID != "" {
 			if n, err := s.inv.Get(r.Context(), d.RasputinNodeID); err == nil && n != nil {
-				t := mesh.NodeTrustFor(want, n)
+				t := nodetrust.StateFor(want, n)
 				v.Trust = &t
 			}
 		}
@@ -94,8 +96,19 @@ func (s *Server) handleListMeshDevices(w http.ResponseWriter, r *http.Request) {
 // meshDeviceView is a mesh_devices row plus the node's trust reading.
 type meshDeviceView struct {
 	*mesh.Device
-	Trust *mesh.NodeTrust `json:"trust,omitempty"`
+	Trust *nodetrust.NodeTrust `json:"trust,omitempty"`
 }
+
+// trustFingerprinter is the one thing the devices view needs from node trust
+// delivery: the api's bundle fingerprint.
+type trustFingerprinter interface {
+	Fingerprint() string
+}
+
+// SetNodeTrust wires the node trust service the devices view compares each
+// node's report against. Unset, every node reads as current: there is no
+// bundle to compare with.
+func (s *Server) SetNodeTrust(t trustFingerprinter) { s.nodeTrust = t }
 
 // DELETE /api/mesh/devices/{hsId} — removes the device from Headscale and
 // drops the local cache row. Headscale.DeleteNode is idempotent (a missing
@@ -192,114 +205,6 @@ func firstOrEmpty(s []string) string {
 		return ""
 	}
 	return s[0]
-}
-
-// GET /api/mesh/ios-profile — returns an Apple .mobileconfig that installs
-// the per-installation Mesh TLS CA on the operator's device. iOS Safari
-// recognises the content-type and disposition and offers to install the
-// profile in Settings → General → VPN & Device Management. Required so
-// the iOS Tailscale client trusts Headscale's TLS endpoint (signed by
-// the Mesh CA — see design/control-plane/certificates.md).
-//
-// Unauthenticated BY DESIGN (see Handler): the CA public cert is not a
-// secret, and the first-run flow needs it before any passkey exists —
-// the operator installs the CA over plain HTTP, then registers their
-// first credential over HTTPS on a now-trusted connection.
-//
-// NOTE: this serves <trustDir>/mesh-ca.pem (the Mesh TLS CA), NOT
-// root-ca.pem (the bundle-signing root). The two CAs are deliberately
-// separate; an earlier revision of this handler delivered root-ca.pem
-// by mistake, which would have made operator devices trust the wrong
-// CA for the wrong purpose.
-//
-// 404 with a clear message if the Mesh CA isn't yet provisioned —
-// EnsureMeshCA runs at api startup so this should only happen if the
-// trust dir got wiped between startup and the request.
-func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
-	if s.trustDir == "" {
-		writeError(w, http.StatusNotFound, "trust dir not configured")
-		return
-	}
-	caPath := filepath.Join(s.trustDir, mesh.MeshCAFileName)
-	pem, err := os.ReadFile(caPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "Mesh TLS CA not yet provisioned — restart the api to regenerate")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	profile, err := mesh.BuildIOSMobileConfig(pem, "Rasputin Mesh TLS CA", "Rasputin")
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "build mobileconfig: "+err.Error())
-		return
-	}
-	// content-type that iOS Safari recognises; disposition triggers the
-	// install prompt instead of rendering inline.
-	w.Header().Set("Content-Type", "application/x-apple-aspen-config")
-	w.Header().Set("Content-Disposition", `attachment; filename="rasputin-trust.mobileconfig"`)
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(profile)
-}
-
-// GET /mesh-ca.pem — the Mesh TLS CA public cert as raw PEM. The non-Apple
-// counterpart to /api/mesh/ios-profile above: laptops curl this straight
-// into their OS trust store (the /trust page shows the per-OS one-liners).
-// Same auth posture and 404 semantics as the ios-profile handler —
-// unauthenticated by design, 404 when the CA hasn't been provisioned.
-//
-// Windows uses /mesh-ca.crt instead — same bytes, different envelope. See
-// handleMeshCACRT.
-func (s *Server) handleMeshCAPEM(w http.ResponseWriter, r *http.Request) {
-	s.serveMeshCA(w, "application/x-pem-file", "rasputin-mesh-ca.pem")
-}
-
-// GET /mesh-ca.crt — the SAME CA bytes as /mesh-ca.pem, wrapped for Windows.
-//
-// Windows has no shell association for .pem: double-clicking one opens the
-// "How do you want to open this file?" picker, which offers no "Install
-// Certificate…" verb, so the /trust page's documented Windows steps used to
-// dead-end (found 2026-09-15 bringing up a Windows workstation).
-//
-// This is deliberately NOT a format conversion. Windows crypt32 opens .cer
-// and .crt with the Certificate Import Wizard and accepts base64 (PEM) inside
-// them just as readily as DER, so the delivered bytes are already correct —
-// only the extension and content-type were wrong. The same page's Debian
-// one-liner has always renamed to .crt on the way down; Windows simply never
-// got the same treatment.
-//
-// PKCS#12 (.pfx) would be the wrong shape: it is a private-key container, and
-// the import wizard defaults it into the Personal store rather than Trusted
-// Root — the wrong store for a public CA root.
-//
-// Byte-identical to /mesh-ca.pem by construction (both go through
-// serveMeshCA), so the two routes cannot drift into advertising different CAs.
-func (s *Server) handleMeshCACRT(w http.ResponseWriter, r *http.Request) {
-	s.serveMeshCA(w, "application/x-x509-ca-cert", "rasputin-mesh-ca.crt")
-}
-
-// serveMeshCA writes the Mesh TLS CA public cert with the given content-type
-// and download filename. The bytes are read from the trust dir on every
-// request so a CA rotation is picked up without a restart.
-func (s *Server) serveMeshCA(w http.ResponseWriter, contentType, filename string) {
-	if s.trustDir == "" {
-		writeError(w, http.StatusNotFound, "trust dir not configured")
-		return
-	}
-	caPEM, err := os.ReadFile(filepath.Join(s.trustDir, mesh.MeshCAFileName))
-	if err != nil {
-		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "Mesh TLS CA not yet provisioned — restart the api to regenerate")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(caPEM)
 }
 
 // GET /api/mesh/keys — list preauth_key intents. A key's value is never

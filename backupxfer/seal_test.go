@@ -56,7 +56,7 @@ func open(t *testing.T, sealed []byte, priv *ecdh.PrivateKey) ([]byte, backupxfe
 
 func TestSealRoundTripsAndDigestMatches(t *testing.T) {
 	key := newTestKeypair(t)
-	plaintext := bytes.Repeat([]byte("the mesh CA and every bus token, in clear. "), 5000)
+	plaintext := bytes.Repeat([]byte("the controlplane CA and every bus token, in clear. "), 5000)
 
 	var out bytes.Buffer
 	res, err := backupxfer.Seal(&out, bytes.NewReader(plaintext), key.publicB64, "key-1", proto.BackupScopeFull)

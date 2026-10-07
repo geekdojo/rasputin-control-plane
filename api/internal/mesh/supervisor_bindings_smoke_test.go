@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -55,9 +57,9 @@ func TestSupervisor_LiveBindingsAndRoutes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "trust"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ca, err := EnsureMeshCA(filepath.Join(stateDir, "trust"), "bindings-smoke")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(stateDir, "trust"), "bindings-smoke", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 	sup, err := NewDockerSupervisor(DockerSupervisorConfig{
 		StateDir: filepath.Join(stateDir, "hs"), ContainerName: bindingsTestContainer,
@@ -78,7 +80,7 @@ func TestSupervisor_LiveBindingsAndRoutes(t *testing.T) {
 	}
 	// The one helper main uses for both Headscale backends (#506), here
 	// against the real container's leaf.
-	tlsCfg, err := CATLSConfig(ca.CertPEM, "the Mesh CA")
+	tlsCfg, err := proto.CATLSConfig(ca.CertPEM, "the controlplane CA")
 	if err != nil {
 		t.Fatalf("CATLSConfig: %v", err)
 	}

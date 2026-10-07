@@ -49,7 +49,7 @@ import (
 // and lent to this api once, over TLS, for this one restore (RestoreSessions
 // — never the job spec). THE API UNSEALS; THE KEY DOES NOT FAN OUT. Each
 // node fetches its volume's PLAINTEXT tar from this api's restore-stream
-// endpoint over the api's HTTPS — the mesh-CA leaf and the tailnet the OS
+// endpoint over the api's HTTPS — the controlplane-CA leaf and the tailnet the OS
 // update bundles already travel over — on a credential minted for that one
 // member, that one node, this one restore, with a TTL. The trade, stated
 // once: plaintext app data crosses the LAN inside TLS, as update bundles

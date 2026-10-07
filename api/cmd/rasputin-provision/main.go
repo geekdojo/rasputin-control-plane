@@ -306,7 +306,7 @@ func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshK
 	}
 
 	// The set's bus key: offline, before any controlplane exists — which is
-	// one of the reasons #448 pins a key instead of chaining to the mesh CA.
+	// one of the reasons #448 pins a key instead of chaining to the controlplane CA.
 	busSigner, err := bustls.GenerateKey()
 	if err != nil {
 		return manifest{}, err

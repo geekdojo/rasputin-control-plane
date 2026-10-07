@@ -8,16 +8,17 @@ import (
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
 // TC-825-08: the rotator main wires hands the leaf key beside the command, as
 // a secret.Value, never inside it; and the commit it returns writes exactly
 // that Value's bytes to the app's key file.
 func TestAppLeafRotator_KeyTravelsBesideTheCommand(t *testing.T) {
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	leafRoot := t.TempDir()
 	rotate := newAppLeafRotator(ca, leafRoot, "home1")
@@ -47,7 +48,7 @@ func TestAppLeafRotator_KeyTravelsBesideTheCommand(t *testing.T) {
 	if err := commit(); err != nil {
 		t.Fatalf("commit: %v", err)
 	}
-	onDisk, err := os.ReadFile(mesh.LeafPathsIn(filepath.Join(leafRoot, app.ID)).KeyPath)
+	onDisk, err := os.ReadFile(tlsca.LeafPathsIn(filepath.Join(leafRoot, app.ID)).KeyPath)
 	if err != nil {
 		t.Fatal(err)
 	}

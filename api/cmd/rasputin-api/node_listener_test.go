@@ -15,31 +15,32 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"log/slog"
 )
 
-// The node listener serves the api's Mesh-CA-signed leaf for every name, and a
+// The node listener serves the api's controlplane-CA-signed leaf for every name, and a
 // collector verifies it by chain (geekdojo/geekdojo-brain#672). The bus
 // certificate is never served here.
 
 // meshLeafOnDisk is an apiLeaf whose mint writes a FRESH leaf (new key, new
 // serial) under ca for the cluster "home1" on every call, so refresh swaps in
 // a genuinely re-minted certificate the way the leaf sweep's renewal does.
-func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
+func meshLeafOnDisk(t *testing.T, ca *tlsca.CA) *apiLeaf {
 	t.Helper()
 	dir := t.TempDir()
 	var n atomic.Int32
-	return &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
-		certPEM, keyPEM, err := mesh.MintLeaf(ca, apiLeafSpec("home1", lanIP))
+	return &apiLeaf{mint: func(lanIP net.IP) (tlsca.LeafPaths, error) {
+		certPEM, keyPEM, err := ca.MintLeaf(apiLeafSpec("home1", lanIP))
 		if err != nil {
-			return mesh.LeafPaths{}, err
+			return tlsca.LeafPaths{}, err
 		}
 		i := n.Add(1)
-		p := mesh.LeafPaths{
+		p := tlsca.LeafPaths{
 			CertPath: filepath.Join(dir, fmt.Sprintf("leaf%d.pem", i)),
 			KeyPath:  filepath.Join(dir, fmt.Sprintf("leaf%d.key", i)),
 		}
@@ -50,9 +51,9 @@ func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
 	}}
 }
 
-func testMeshCA(t *testing.T) *mesh.MeshCA {
+func testMeshCA(t *testing.T) *tlsca.CA {
 	t.Helper()
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "test")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "test", tlscatest.Deps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func testMeshCA(t *testing.T) *mesh.MeshCA {
 }
 
 // TC-672-11: with the leaf loaded, every SNI — the cluster name, the old bus
-// name, and none at all — gets the same Mesh leaf, and it chains to the Mesh CA.
+// name, and none at all — gets the same Mesh leaf, and it chains to the controlplane CA.
 func TestNodeListenerCert_ServesTheMeshLeafForEveryName(t *testing.T) {
 	ca := testMeshCA(t)
 	leaf := meshLeafOnDisk(t, ca)
@@ -84,7 +85,7 @@ func TestNodeListenerCert_ServesTheMeshLeafForEveryName(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := x.Verify(x509.VerifyOptions{Roots: roots}); err != nil {
-			t.Errorf("SNI %q: served certificate does not chain to the Mesh CA: %v", sni, err)
+			t.Errorf("SNI %q: served certificate does not chain to the controlplane CA: %v", sni, err)
 		}
 	}
 }
@@ -165,7 +166,7 @@ func handshake(t *testing.T, server, client *tls.Config) (tls.ConnectionState, [
 	return tc.ConnectionState(), seen, err
 }
 
-// TC-672-14: the collector's trust, end to end in-process. Mesh CA as the only
+// TC-672-14: the collector's trust, end to end in-process. controlplane CA as the only
 // root plus the cluster name verifies the served leaf, and the server sees the
 // client's own SPKI. A re-minted leaf (new key, same CA) is accepted with the
 // client config untouched: nothing is pinned. A client that trusts only the

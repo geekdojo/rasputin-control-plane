@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 	natsserver "github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -61,7 +62,7 @@ func request[T any](t *testing.T, nc *nats.Conn, subj string, cmd any, out *T) {
 func newRegistered(t *testing.T) (*nats.Conn, *MockBackend) {
 	t.Helper()
 	nc := startNATS(t)
-	mb, err := NewMockBackend(t.TempDir())
+	mb, err := NewMockBackend(t.TempDir(), testTrust(t))
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
@@ -183,7 +184,8 @@ func (errBackend) Leave(_ context.Context) error { return errStr("leave bad") }
 func (errBackend) Status(_ context.Context) (Status, error) {
 	return Status{}, errStr("status bad")
 }
-func (errBackend) TrustFingerprint() string { return proto.MeshCAFingerprintNone }
+func (errBackend) TrustFingerprint() string          { return proto.TrustFingerprintNone }
+func (errBackend) ReloadTrust(context.Context) error { return errStr("reload bad") }
 
 type errStr string
 
@@ -230,7 +232,7 @@ func TestRegisterHandlers_AllErrorPaths(t *testing.T) {
 // NewRealBackend without requiring tailscale to be installed.
 func TestNewRealBackend_NoCLI(t *testing.T) {
 	t.Setenv("PATH", "")
-	_, err := NewRealBackend()
+	_, err := NewRealBackend(testTrust(t), discardLog())
 	if err == nil {
 		t.Error("expected NewRealBackend to fail with empty PATH")
 	}
@@ -240,7 +242,7 @@ func TestNewRealBackend_NoCLI(t *testing.T) {
 // branches of the real backend so the constructor and early-return validation
 // in Enroll get coverage without requiring the tailscale CLI.
 func TestRealBackend_NameAndEnrollValidation(t *testing.T) {
-	b := &RealBackend{binary: "/nonexistent/tailscale"}
+	b := &RealBackend{binary: "/nonexistent/tailscale", trust: testTrust(t), log: discardLog()}
 	if b.Name() != "tailscale" {
 		t.Errorf("Name: %q want tailscale", b.Name())
 	}
@@ -299,7 +301,7 @@ func writeExecutable(path, body string) error {
 
 func TestRealBackend_StatusWithFakeBinary(t *testing.T) {
 	bin := fakeTSBin(t, "ok-status")
-	b := &RealBackend{binary: bin}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog()}
 	st, err := b.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -320,7 +322,7 @@ func TestRealBackend_StatusWithFakeBinary(t *testing.T) {
 
 func TestRealBackend_StatusBinaryFailure(t *testing.T) {
 	bin := fakeTSBin(t, "fail")
-	b := &RealBackend{binary: bin}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog()}
 	if _, err := b.Status(context.Background()); err == nil {
 		t.Error("expected error when fake tailscale exits non-zero")
 	}
@@ -328,13 +330,13 @@ func TestRealBackend_StatusBinaryFailure(t *testing.T) {
 
 func TestRealBackend_LeaveSuccessAndFailure(t *testing.T) {
 	okBin := fakeTSBin(t, "ok")
-	b := &RealBackend{binary: okBin}
+	b := &RealBackend{binary: okBin, trust: testTrust(t), log: discardLog()}
 	if err := b.Leave(context.Background()); err != nil {
 		t.Errorf("Leave with ok binary: %v", err)
 	}
 
 	failBin := fakeTSBin(t, "fail")
-	b2 := &RealBackend{binary: failBin}
+	b2 := &RealBackend{binary: failBin, trust: testTrust(t), log: discardLog()}
 	if err := b2.Leave(context.Background()); err == nil {
 		t.Error("Leave should error when fake binary exits non-zero")
 	}
@@ -345,7 +347,7 @@ func TestRealBackend_EnrollSuccessAndFailureViaFakeBin(t *testing.T) {
 	// valid JSON document for `status --json`. So Enroll's whole happy path
 	// runs end-to-end without a real tailscaled.
 	bin := fakeTSBin(t, "ok-status")
-	b := &RealBackend{binary: bin}
+	b := &RealBackend{binary: bin, trust: testTrust(t), log: discardLog()}
 	st, err := b.Enroll(context.Background(), EnrollInput{
 		LoginServer:     "http://hs.example",
 		AuthKey:         "tskey",
@@ -362,7 +364,7 @@ func TestRealBackend_EnrollSuccessAndFailureViaFakeBin(t *testing.T) {
 	}
 
 	failBin := fakeTSBin(t, "fail")
-	b2 := &RealBackend{binary: failBin}
+	b2 := &RealBackend{binary: failBin, trust: testTrust(t), log: discardLog()}
 	if _, err := b2.Enroll(context.Background(), EnrollInput{
 		LoginServer: "x", AuthKey: "y",
 	}); err == nil {
@@ -376,7 +378,7 @@ func TestRealBackend_EnrollSuccessAndFailureViaFakeBin(t *testing.T) {
 // reconnect. A failed enroll fires nothing.
 func TestRegisterHandlers_EnrollReportsTrustAndFiresHook(t *testing.T) {
 	nc := startNATS(t)
-	mb, err := NewMockBackend(t.TempDir())
+	mb, err := NewMockBackend(t.TempDir(), testTrust(t))
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
@@ -390,22 +392,22 @@ func TestRegisterHandlers_EnrollReportsTrustAndFiresHook(t *testing.T) {
 			_ = s.Unsubscribe()
 		}
 	})
-	if got := mb.TrustFingerprint(); got != proto.MeshCAFingerprintNone {
+	if got := mb.TrustFingerprint(); got != proto.TrustFingerprintNone {
 		t.Fatalf("before enroll: trust = %q, want none", got)
 	}
 
-	ca := []byte("-----BEGIN CERTIFICATE-----\nCCCC\n-----END CERTIFICATE-----\n")
+	ca := tlstest.NewCA(t, "legacy").PEM
 	var ack proto.MeshEnrollAck
 	request(t, nc, proto.MeshEnrollSubject("node-1"), proto.MeshEnrollCmd{
-		LoginServer: "https://hs", AuthKey: "k", Hostname: "node-1", MeshCAPEM: ca,
+		LoginServer: "https://hs", AuthKey: "k", Hostname: "node-1", LegacyTrustBundlePEM: ca,
 	}, &ack)
 	if !ack.OK {
 		t.Fatalf("enroll failed: %s", ack.Detail)
 	}
-	if ack.TrustFingerprint != proto.MeshCAFingerprint(ca) {
+	if ack.TrustFingerprint != proto.TrustFingerprint(ca) {
 		t.Errorf("ack trust = %q, want fingerprint of the delivered CA", ack.TrustFingerprint)
 	}
-	if got := mb.TrustFingerprint(); got != proto.MeshCAFingerprint(ca) {
+	if got := mb.TrustFingerprint(); got != proto.TrustFingerprint(ca) {
 		t.Errorf("backend trust after enroll = %q", got)
 	}
 	select {

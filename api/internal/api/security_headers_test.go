@@ -137,7 +137,7 @@ func TestObsIngestHandlerSecurityHeaders(t *testing.T) {
 }
 
 // No listener ever sends Strict-Transport-Security, over plain HTTP or TLS:
-// it would lock a browser out of a re-flashed controlplane's new Mesh CA and
+// it would lock a browser out of a re-flashed controlplane's new controlplane CA and
 // of the plain-HTTP /trust page that installs it (see securityHeaders).
 func TestNoListenerSendsHSTS(t *testing.T) {
 	f := headersFixture(t)

@@ -30,6 +30,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nameguard"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodekeys"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/openwrt"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/proxy"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/quiesce"
@@ -124,26 +125,29 @@ func main() {
 	}
 	log.Printf("rasputin-agent: state dir %s", stateDir)
 
-	// The mesh CA bundle's directory sits OUTSIDE the state tree (it is
-	// per-image: /var/lib/rasputin/mesh on Rasputin OS, /etc/rasputin/... on
-	// the firewall), and on a controlplane it is the same directory the api
-	// keeps its mesh state in. An older agent created it 0755, and the code
-	// that writes into it (tailscale.installMeshCA) only runs when the CA
-	// changes — so a node already holding the right CA would keep the wide
-	// directory forever. Tighten it here instead
-	// (geekdojo/geekdojo-brain#144). Not fatal: an image with a read-only
-	// path here still runs, and the enroll that needs the directory reports
-	// its own error.
-	if meshDir := filepath.Dir(tailscale.CABundlePath()); meshDir != "" {
-		if err := atrest.EnsureSecretDir(meshDir); err != nil {
-			log.Printf("rasputin-agent: mesh CA directory %s: %v", meshDir, err)
+	// The node's trust bundle: the one trust root the agent's own HTTPS
+	// clients (the OS update download, the backup transfer, the restore
+	// fetch) verify the api with, re-read on every call
+	// (geekdojo/geekdojo-brain#590), and the file tailscaled is pointed at.
+	// Each client gets it by constructor. The tailscale backend is chosen
+	// here, ahead of the rest, because the mock keeps its bundle in the
+	// agent's own state dir (trustBundlePath).
+	tailscaleChoice := tailscaleBackendFromEnv(autodetectTailscaleBackend)
+	trustStore := nodetrust.NewStore(trustBundlePath(tailscaleChoice, stateDir))
+	// The bundle's directory sits OUTSIDE the state tree (it is per-image:
+	// /var/lib/rasputin/mesh on Rasputin OS, /etc/rasputin/... on the
+	// firewall), and on a controlplane it is the same directory the api keeps
+	// its mesh state in. An older agent created it 0755, and the code that
+	// writes into it only runs when the bundle changes — so a node already
+	// holding the right one would keep the wide directory forever. Tighten it
+	// here instead (geekdojo/geekdojo-brain#144). Not fatal: an image with a
+	// read-only path here still runs, and the install that needs the
+	// directory reports its own error.
+	if dir := filepath.Dir(trustStore.Path()); dir != "" {
+		if err := atrest.EnsureSecretDir(dir); err != nil {
+			logger.Warn("rasputin-agent: trust bundle directory", "dir", dir, "err", err.Error())
 		}
 	}
-	// The one trust root the agent's own HTTPS clients (the OS update
-	// download, the backup transfer, the restore fetch) verify the api with:
-	// the node's mesh CA bundle and nothing else, re-read on every call
-	// (geekdojo/geekdojo-brain#590). Each client gets it by constructor.
-	meshTrust := tailscale.NewMeshTrust(tailscale.CABundlePath())
 
 	// The node's own TLS keys: one for the agent, one for the collector,
 	// generated once here and never leaving the node
@@ -318,15 +322,18 @@ func main() {
 	// registration is gated on handlersReady, which flips after the backend
 	// selection that may replace this.
 	lanAddr := func() (ip, cidr string) { return host.PrimaryLANIP(), host.PrimaryLanCIDR() }
-	// The mesh backend, chosen below (before handlersReady flips, so every
-	// registration can ask it which mesh CA this node trusts). nil when mesh
-	// join is disabled on this node, which reports as trusting none.
+	// The mesh backend, chosen below. nil when mesh join is disabled on this
+	// node; the trust this node reports comes from its trust bundle either
+	// way (trustHandler, below), not from the backend.
 	var tsBackend tailscale.Backend
+	// trustHandler answers trust.install; built once the backend (its one
+	// Reloader) is known. Every registration asks it what this node reports.
+	var trustHandler *nodetrust.Handler
 	trustFingerprint := func() string {
-		if tsBackend == nil {
-			return proto.MeshCAFingerprintNone
+		if trustHandler == nil {
+			return trustStore.Fingerprint()
 		}
-		return tsBackend.TrustFingerprint()
+		return trustHandler.ReportedFingerprint()
 	}
 	reregister := func(c *nats.Conn) {
 		publishRegistered(c, nodeID, role, host.Storage(storageDataPath, growpartLogPath), bmcHost.Advertisement(), &faults, lanAddr,
@@ -499,10 +506,10 @@ func main() {
 				log.Printf("rasputin-agent: swept %d orphaned staged file(s) from %s (%d bytes)", n, stagingRoot, freed)
 			}
 			// The transfer verb uploads sealed volumes to the api's ingest
-			// endpoint over the api's mesh-CA HTTPS leaf; the same trust the
+			// endpoint over the api's controlplane-CA HTTPS leaf; the same trust the
 			// updater's download client has. It presents the node's agent
 			// key, which the api's node listener admits it by.
-			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir), meshTrust.ClientTLSConfig, agentCert)
+			stager := quiesce.New(rt, stagingRoot, quiesce.MarkerDir(stateDir), trustStore.ClientTLSConfig, agentCert)
 			// The restore verb (#291 phase 2) stages beside each volume and
 			// records where, so a tree a dying process left is swept here —
 			// the previous contents a restore keeps aside are never touched.
@@ -700,15 +707,15 @@ func main() {
 		var upBackend updater.Backend
 		switch backendChoice {
 		case "rauc":
-			// Bundles are pulled from the api over its mesh-CA HTTPS leaf.
-			rb, err := updater.NewRAUCBackend(updaterDir, meshTrust.ClientTLSConfig)
+			// Bundles are pulled from the api over its controlplane-CA HTTPS leaf.
+			rb, err := updater.NewRAUCBackend(updaterDir, trustStore.ClientTLSConfig)
 			if err != nil {
 				log.Fatalf("rasputin-agent: rauc backend: %v", err)
 			}
 			rb.SetRebooter(rebooter)
 			upBackend = rb
 		case "openwrt-ab":
-			ab, err := updater.NewOpenWrtABBackend(updaterDir, meshTrust.ClientTLSConfig)
+			ab, err := updater.NewOpenWrtABBackend(updaterDir, trustStore.ClientTLSConfig)
 			if err != nil {
 				log.Fatalf("rasputin-agent: openwrt-ab backend: %v", err)
 			}
@@ -878,16 +885,16 @@ func main() {
 	// rather than mocked into looking joined. Force via
 	// RASPUTIN_TAILSCALE_BACKEND=mock|tailscale.
 	{
-		backendChoice := tailscaleBackendFromEnv(autodetectTailscaleBackend)
+		backendChoice := tailscaleChoice
 		switch backendChoice {
 		case "tailscale":
-			rb, err := tailscale.NewRealBackend()
+			rb, err := tailscale.NewRealBackend(trustStore, logger)
 			if err != nil {
 				log.Fatalf("rasputin-agent: tailscale real backend: %v", err)
 			}
 			tsBackend = rb
 		case "mock":
-			mb, err := tailscale.NewMockBackend(filepath.Join(stateDir, "tailscale"))
+			mb, err := tailscale.NewMockBackend(filepath.Join(stateDir, "tailscale"), trustStore)
 			if err != nil {
 				log.Fatalf("rasputin-agent: tailscale mock backend: %v", err)
 			}
@@ -913,6 +920,29 @@ func main() {
 			})
 			log.Printf("rasputin-agent: tailscale backend=%s", tsBackend.Name())
 		}
+	}
+
+	// trust.install, on every node whatever its mesh backend: the bundle is
+	// what the agent's HTTPS clients trust, so a node with mesh join disabled
+	// still takes it. tailscaled is the one consumer that must be told.
+	{
+		var reloaders []nodetrust.Reloader
+		if tsBackend != nil {
+			reloaders = append(reloaders, tsBackend)
+		}
+		h, err := nodetrust.NewHandler(trustStore, reloaders, rereg, logger)
+		if err != nil {
+			logger.Log(ctx, logkit.LevelFatal, "rasputin-agent: trust.install handler", "err", err.Error())
+			os.Exit(1)
+		}
+		trustHandler = h
+		subscribe(func(c *nats.Conn) error {
+			if _, err := trustHandler.Subscribe(c, nodeID); err != nil {
+				return err
+			}
+			return nil
+		})
+		logger.Info("rasputin-agent: trust bundle", "bundle", trustStore.Path(), "reports", trustHandler.ReportedFingerprint())
 	}
 
 	// BMC handlers — the backend itself was constructed before the bus
@@ -1030,8 +1060,8 @@ func uciLANAddr(lookup func(context.Context) (string, string, error), fallback f
 // publishRegistered's metadata block — never a second reporting site, which is
 // how two facts about the same node start disagreeing.
 type registrationFacts struct {
-	// TrustFingerprint reports which mesh CA this node trusts, or nil when
-	// it cannot say.
+	// TrustFingerprint reports which trust bundle this node holds (or that a
+	// reload is pending), or nil when it cannot say.
 	TrustFingerprint func() string
 	// NodeKeys are this node's registered key SPKI hashes.
 	NodeKeys proto.NodeKeys
@@ -1047,13 +1077,13 @@ func publishRegistered(nc *nats.Conn, nodeID string, role proto.NodeRole, storag
 	if len(facts.NodeKeys) > 0 {
 		meta[proto.MetadataNodeKeys] = facts.NodeKeys
 	}
-	// Which mesh CA this node trusts, as a fingerprint — never the PEM. The
+	// Which controlplane CA this node trusts, as a fingerprint — never the PEM. The
 	// api compares it with its own on every mesh.reconcile and re-delivers
 	// the CA when they differ (converge_trust; e3bench 2026-09-04, where an
 	// identity restore changed the api's CA under an enrolled node).
 	if facts.TrustFingerprint != nil {
 		if fp := facts.TrustFingerprint(); fp != "" {
-			meta[proto.MetadataMeshCAFingerprint] = fp
+			meta[proto.MetadataTrustFingerprint] = fp
 		}
 	}
 	lanIP, lanCIDR := lanAddr()
@@ -1636,6 +1666,17 @@ func uciMissingPrereqAt(firewallConfig string) string {
 	}
 	return firewallConfig + " is not present, so this is not a real OpenWrt root " +
 		"(a stray uci binary on a dev box is not enough)"
+}
+
+// trustBundlePath is where this agent keeps its trust bundle: the per-image
+// path (nodetrust.BundlePath) on every backend but the mock, which keeps it
+// in the agent's own state dir as it always has, so a dev agent run as an
+// ordinary user can install one (it cannot write /var/lib/rasputin/mesh).
+func trustBundlePath(tailscaleBackend, stateDir string) string {
+	if tailscaleBackend == "mock" {
+		return filepath.Join(stateDir, "tailscale", "tailscaled-ca.pem")
+	}
+	return nodetrust.BundlePath()
 }
 
 // autodetectTailscaleBackend returns "tailscale" if the tailscale CLI is

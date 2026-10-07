@@ -14,17 +14,17 @@ import (
 // that point plain HTTP stops being the primary surface and becomes a
 // bootstrap/escape hatch with three jobs:
 //
-//  1. First-run trust bootstrap: a fresh appliance's Mesh CA isn't in any
+//  1. First-run trust bootstrap: a fresh appliance's controlplane CA isn't in any
 //     browser yet, so https:// greets the operator with a cert warning.
 //     Instead, http://rasputin.local lands on the UI's /trust page (no
 //     warning possible over plain HTTP), which serves the CA-download
 //     endpoints and walks the operator through installing it. The page's
 //     "Continue securely" link then crosses over to https://.
 //  2. GET /healthz stays reachable over HTTP for the QEMU smoke test and
-//     dumb LB probes that don't speak TLS or trust the Mesh CA.
+//     dumb LB probes that don't speak TLS or trust the controlplane CA.
 //  3. GET /api/setup/state, which the /trust page reads for the cluster's
 //     name. Redirected to https:// it would fail on exactly the device the
-//     page exists for — one that does not trust the Mesh CA yet.
+//     page exists for — one that does not trust the controlplane CA yet.
 //  4. Everything else 302s to the same path on https:// (port stripped),
 //     so bookmarks and API clients migrate themselves.
 //

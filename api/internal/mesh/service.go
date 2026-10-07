@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -31,12 +30,17 @@ type Config struct {
 	// ReconcileInterval — how often to drift-check against Headscale.
 	// Default 5 min if zero.
 	ReconcileInterval time.Duration
-	// MeshCAPEM is the per-installation Mesh CA root (PEM). Shipped to nodes
-	// in the enroll command so they can trust the self-hosted Headscale's
-	// HTTPS leaf before `tailscale up`. Empty when Headscale is plain HTTP
-	// or externally managed with a publicly trusted cert (no extra trust
-	// needed node-side). See proto.MeshEnrollCmd.MeshCAPEM.
-	MeshCAPEM []byte
+	// Trust delivers the node trust bundle on trust.install, which enroll
+	// does before it mints a key, and TrustFingerprint is that bundle's
+	// fingerprint. Both are the nodetrust service in production. nil means
+	// this mesh delivers no trust (tests that do not exercise it).
+	Trust            TrustDeliverer
+	TrustFingerprint TrustFingerprinter
+	// LegacyTrustBundle is the same bundle, carried in mesh.enroll to an
+	// agent that predates trust.install (proto.MeshEnrollCmd
+	// .LegacyTrustBundlePEM) and re-delivered to those agents alone by
+	// converge_trust. Never sent to a current agent.
+	LegacyTrustBundle []byte
 	// ClusterID is the bare cluster id (RASPUTIN_CLUSTER_ID, e.g. "home1"),
 	// used to derive the MagicDNS base domain for the tailnet app-name
 	// projection (<app>.<cluster-id>.internal). "" → the baseDomainFor dev
@@ -64,11 +68,6 @@ type Service struct {
 	// nil (default) means project nothing. main backs it with the apps store.
 	appLister func() []AppDNS
 
-	// caFingerprint is proto.MeshCAFingerprint(cfg.MeshCAPEM), computed once:
-	// what every enrolled node's reported fingerprint is compared against
-	// (converge_trust). "" when no CA is shipped.
-	caFingerprint string
-
 	// ready flips once bringUp completes (client swapped in, user ensured).
 	// Read by main to kick a reconcile the moment the mesh can take one,
 	// rather than on a timer.
@@ -88,7 +87,7 @@ func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Servic
 	if cfg.DefaultUser == "" {
 		cfg.DefaultUser = "rasputin-operator"
 	}
-	return &Service{cfg: cfg, store: store, client: client, sup: sup, caFingerprint: proto.MeshCAFingerprint(cfg.MeshCAPEM)}
+	return &Service{cfg: cfg, store: store, client: client, sup: sup}
 }
 
 // Ready reports whether bring-up has completed: the real client is in place
