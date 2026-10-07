@@ -56,9 +56,9 @@ Around it:
 
 - **arm64, or the appliance.** Nothing here covers the rasputin-os package, its unit,
   `MemoryMax=`, `LoadCredential=`, or the seal-key oneshot.
-- **mlock.** It is not exercised. The config carries `disable_mlock = true`, but OpenBao
-  v2.7.0 logs `unknown or unsupported field disable_mlock` at start (seen on linux/amd64 and
-  darwin/arm64), so the line has no effect.
+- **mlock.** OpenBao v2 removed mlock ([GH-363](https://github.com/openbao/openbao/pull/363),
+  noted in the v2.7.0 changelog), so nothing here exercises it, and the config carries no
+  `disable_mlock` key.
 - **The rest of the listener matrix.** A foreign-CA client, a wrong-EKU leaf and
   `sys/rekey/init` are not run here. They rest on #679's evidence (rows T20 and T21).
 - **Production use of the store.** It does not cover the api's production client

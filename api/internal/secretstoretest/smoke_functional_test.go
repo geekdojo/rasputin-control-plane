@@ -72,7 +72,11 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	}
 	// t.Context() is cancelled before Cleanup runs, which would turn the
 	// SIGTERM wait into a SIGKILL; Background lets the store stop cleanly.
-	t.Cleanup(func() { _ = s.Close(context.Background()) })
+	t.Cleanup(func() {
+		if err := s.Close(context.Background()); err != nil {
+			t.Errorf("cleanup Close: %v", err)
+		}
+	})
 	pid, root := s.cmd.Process.Pid, s.root
 	sealKey, err := os.ReadFile(filepath.Join(root, "seal-key"))
 	if err != nil {
@@ -105,7 +109,9 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 		t.Fatalf("handshake with the client leaf: %v", err)
 	}
 	cs := conn.ConnectionState()
-	_ = conn.Close()
+	if err := conn.Close(); err != nil {
+		t.Errorf("close the handshake connection: %v", err)
+	}
 	srv := cs.PeerCertificates[0]
 	if !slices.Equal(srv.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}) {
 		t.Errorf("served leaf EKU = %v, want serverAuth only", srv.ExtKeyUsage)
@@ -128,7 +134,9 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	noCert.Certificates = nil
 	resp, err := (&http.Client{Transport: &http.Transport{TLSClientConfig: noCert}}).Get(s.URL() + "/v1/sys/health")
 	if err == nil {
-		_ = resp.Body.Close()
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close the response body: %v", err)
+		}
 		t.Errorf("a client with no certificate got HTTP %d, want a TLS failure", resp.StatusCode)
 	} else if !strings.Contains(err.Error(), "tls: ") {
 		t.Errorf("a client with no certificate failed with %v, want a TLS error", err)
@@ -244,7 +252,11 @@ func call(t *testing.T, c *http.Client, method, url, token string, payload any) 
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, strings.TrimPrefix(url, "https://"), err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close the response body: %v", err)
+		}
+	}()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)

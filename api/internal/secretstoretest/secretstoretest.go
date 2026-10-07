@@ -400,6 +400,9 @@ func (s *Store) checkHealth(ctx context.Context, client *http.Client) (ok bool, 
 	if err != nil {
 		return false, "", err
 	}
+	// The close error is dropped on purpose: the body has been read (or its
+	// read error is reported below), so there is nothing left to lose, and a
+	// failed close only makes the transport discard the connection.
 	defer func() { _ = resp.Body.Close() }()
 	var hb health
 	if err := json.NewDecoder(resp.Body).Decode(&hb); err != nil {

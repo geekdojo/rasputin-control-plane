@@ -28,13 +28,9 @@ type serverPaths struct {
 //   - PebbleDB with clustering disabled opens only the API listener
 //     (D679-07).
 //   - The static seal reads a file:// key at a literal path (D679-08).
-//   - disable_mlock is carried as the approved plan specified, but OpenBao
-//     v2.7.0 logs it as an unknown field and ignores it. mlock is not
-//     exercised here.
 func renderServerHCL(p serverPaths, port int) string {
 	return fmt.Sprintf(`api_addr           = "https://127.0.0.1:%[1]d"
 disable_clustering = true
-disable_mlock      = true
 
 listener "tcp" {
   address                                  = "127.0.0.1:%[1]d"

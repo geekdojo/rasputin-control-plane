@@ -215,14 +215,13 @@ func TestRenderServerHCL(t *testing.T) {
 		{"disable_clustering", "true"},
 		{"current_key_id", `"secretstoretest"`},
 		{"current_key", `"file:///t/seal-key"`},
-		{"disable_mlock", "true"},
 		{"api_addr", `"https://127.0.0.1:18299"`},
 	} {
 		if !hasSetting(hcl, kv[0], kv[1]) {
 			t.Errorf("config lacks %s = %s:\n%s", kv[0], kv[1], hcl)
 		}
 	}
-	for _, banned := range []string{"unix", "raft", "cluster_addr", "0.0.0.0", "audit"} {
+	for _, banned := range []string{"unix", "raft", "cluster_addr", "0.0.0.0", "audit", "disable_mlock"} {
 		if strings.Contains(hcl, banned) {
 			t.Errorf("config contains %q:\n%s", banned, hcl)
 		}
@@ -459,12 +458,14 @@ func (h *signalOn) Handle(ctx context.Context, r slog.Record) error {
 func (h *signalOn) WithAttrs(as []slog.Attr) slog.Handler { return h }
 func (h *signalOn) WithGroup(string) slog.Handler         { return h }
 
-// launched starts body as a store process under a fresh root, waits until it
-// has written its PID (a fact), and returns the Store, the PID and the root.
-func launched(t *testing.T, log *slog.Logger, body string) (*Store, int, string) {
+// launched starts a store process under a fresh root that runs setup, then
+// writes its PID, then runs body. It waits until the PID is written (a fact),
+// so whatever setup does is in force before the test can signal the process.
+// It returns the Store, the PID and the root.
+func launched(t *testing.T, log *slog.Logger, setup, body string) (*Store, int, string) {
 	t.Helper()
 	pidPipe := fifo(t)
-	bin := writeFake(t, `echo $$ > "`+pidPipe+`"
+	bin := writeFake(t, setup+`echo $$ > "`+pidPipe+`"
 `+body)
 	root := filepath.Join(t.TempDir(), "root")
 	if err := os.Mkdir(root, 0o700); err != nil {
@@ -490,7 +491,7 @@ func launched(t *testing.T, log *slog.Logger, body string) (*Store, int, string)
 // F-753-10).
 func TestClose_KillsAStoreThatIgnoresSIGTERM(t *testing.T) {
 	log, rec := logkittest.New()
-	s, pid, root := launched(t, log, "trap '' TERM\nexec tail -f /dev/null\n")
+	s, pid, root := launched(t, log, "trap '' TERM\n", "exec tail -f /dev/null\n")
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
@@ -514,7 +515,7 @@ func TestClose_KillsAStoreThatIgnoresSIGTERM(t *testing.T) {
 // and logs nothing.
 func TestClose_Idempotent(t *testing.T) {
 	log, rec := logkittest.New()
-	s, pid, _ := launched(t, log, "exec tail -f /dev/null\n")
+	s, pid, _ := launched(t, log, "", "exec tail -f /dev/null\n")
 
 	first := s.Close(context.Background())
 	assertReaped(t, pid)
@@ -538,7 +539,7 @@ func TestClose_ReportsResidue(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Fatal("this case needs a non-root user: root ignores directory modes, so the residue cannot be made")
 	}
-	s, pid, root := launched(t, slog.New(slog.DiscardHandler), "exec tail -f /dev/null\n")
+	s, pid, root := launched(t, slog.New(slog.DiscardHandler), "", "exec tail -f /dev/null\n")
 	locked := filepath.Join(root, "locked")
 	if err := os.Mkdir(locked, 0o700); err != nil {
 		t.Fatal(err)
@@ -549,7 +550,11 @@ func TestClose_ReportsResidue(t *testing.T) {
 	if err := os.Chmod(locked, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o700); err != nil {
+			t.Errorf("unlock %s for cleanup: %v", locked, err)
+		}
+	})
 
 	err := s.Close(context.Background())
 	if err == nil {
@@ -606,7 +611,9 @@ func TestCheckHealth(t *testing.T) {
 					return
 				}
 				w.WriteHeader(tc.code)
-				_, _ = io.WriteString(w, tc.body)
+				if _, err := io.WriteString(w, tc.body); err != nil {
+					t.Errorf("write the health body: %v", err)
+				}
 			}))
 			defer srv.Close()
 			s := &Store{url: srv.URL}
