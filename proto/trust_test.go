@@ -42,4 +42,10 @@ func TestShortFingerprint(t *testing.T) {
 	if got := ShortFingerprint("abc"); got != "abc" {
 		t.Errorf("short short = %q", got)
 	}
+	if got := ShortFingerprint("0123456789ab"); got != "0123456789ab" {
+		t.Errorf("exactly twelve = %q", got)
+	}
+	if got := ShortFingerprint(""); got != "" {
+		t.Errorf("empty = %q", got)
+	}
 }

@@ -257,12 +257,65 @@ func TestBundle_GoldenAgainstThePreTLSCARelease(t *testing.T) {
 	}{
 		{"controlplane only", "bundle-controlplane.pem", "controlplane", Bundle(cp)},
 		{"controlplane and operator", "bundle-controlplane-operator.pem", "controlplane+operator", Bundle(cp, op)},
+		// TC-741-32 (b): the api now parses the operator's file before
+		// bundling it; a standard PEM file must not move the fingerprint.
+		{"controlplane and the parsed operator file", "bundle-controlplane-operator.pem", "controlplane+operator", Bundle(cp, mustCertificatesOnly(t, op))},
 	} {
 		if want := read(tc.golden); !bytes.Equal(tc.got, want) {
 			t.Errorf("%s: bundle bytes differ from the golden", tc.name)
 		}
 		if got := proto.TrustFingerprint(tc.got); got != fps[tc.fpKey] {
 			t.Errorf("%s: fingerprint %s, want %s", tc.name, got, fps[tc.fpKey])
+		}
+	}
+}
+
+func mustCertificatesOnly(t *testing.T, data []byte) []byte {
+	t.Helper()
+	out, err := CertificatesOnly(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// TC-741-32 (F-741-18): CertificatesOnly keeps the certificates in a CA file
+// and nothing else. A standard file comes back byte-identical, openssl's text
+// around the blocks is dropped, and a key, an unparseable certificate or a
+// certificate-less file is refused naming the block, never its content.
+func TestCertificatesOnly(t *testing.T) {
+	a, b := newCA(t, "a").CertPEM, newCA(t, "b").CertPEM
+	two := append(append([]byte{}, a...), b...)
+	if got := mustCertificatesOnly(t, two); !bytes.Equal(got, two) {
+		t.Error("a standard two-certificate file did not come back byte-identical")
+	}
+	annotated := "Bag Attributes\n    localKeyID: 01 02\nsubject=/CN=a\nissuer=/CN=a\n" + string(a) +
+		"Bag Attributes\nsubject=/CN=b\nissuer=/CN=b\n" + string(b) + "trailing words\n"
+	got := mustCertificatesOnly(t, []byte(annotated))
+	if !bytes.Equal(got, two) {
+		t.Errorf("openssl text was not dropped:\n%s", got)
+	}
+	if err := proto.ValidateTrustBundle(Bundle(got)); err != nil {
+		t.Errorf("a node would refuse the parsed file: %v", err)
+	}
+
+	key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("secret-key-material")})
+	for name, tc := range map[string]struct {
+		in   []byte
+		want string
+	}{
+		"a private key after a certificate": {append(append([]byte{}, a...), key...), `PEM block 2 is a "PRIVATE KEY" block`},
+		"an unparseable certificate":        {[]byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"), "PEM block 1 is a certificate that does not parse"},
+		"no certificate":                    {[]byte("subject=/CN=a\n"), "no CERTIFICATE block"},
+		"empty":                             {nil, "no CERTIFICATE block"},
+	} {
+		out, err := CertificatesOnly(tc.in)
+		if err == nil || out != nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: out %q err %v, want a refusal saying %q", name, out, err, tc.want)
+			continue
+		}
+		if b64 := strings.Split(string(key), "\n")[1]; strings.Contains(err.Error(), b64) || strings.Contains(err.Error(), "secret-key-material") {
+			t.Errorf("%s: the refusal carries block content: %v", name, err)
 		}
 	}
 }

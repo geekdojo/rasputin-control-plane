@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/nats-io/nats.go"
@@ -82,10 +83,10 @@ func (h *Handler) Subscribe(nc *nats.Conn, nodeID string) (*nats.Subscription, e
 	return sub, nil
 }
 
-// Handle runs one trust.install: validate, install, reload when the content
-// changed or a reload is pending, re-register when anything changed or a
-// reload was attempted, then answer. OK is true only when nothing is left
-// pending.
+// Handle runs one trust.install: validate, mark a changed bundle
+// reload-pending, install it, reload when the content changed or a reload is
+// pending, re-register when anything changed or a reload was attempted, then
+// answer. OK is true only when nothing is left pending.
 func (h *Handler) Handle(ctx context.Context, nodeID string, data []byte) proto.TrustInstallAck {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -96,21 +97,36 @@ func (h *Handler) Handle(ctx context.Context, nodeID string, data []byte) proto.
 		ack.Fingerprint = h.ReportedFingerprint()
 		return ack
 	}
-	changed, err := h.store.Install(cmd.BundlePEM)
+	changed, err := h.store.Differs(cmd.BundlePEM)
 	if err != nil {
 		h.log.WarnContext(ctx, "nodetrust: trust bundle refused", "bundle", h.store.Path(), "err", err.Error())
 		ack.Detail = "trust bundle not installed: " + err.Error()
 		ack.Fingerprint = h.ReportedFingerprint()
 		return ack
 	}
-	ack.Changed = changed
 	if changed {
-		// Written before the reload, so a reload that fails — or an agent
-		// that dies mid-reload — leaves the fact on disk for the next install.
-		if err := atrest.WriteSecretFile(h.markerPath(), []byte(proto.TrustFingerprint(cmd.BundlePEM)+"\n")); err != nil {
-			h.log.ErrorContext(ctx, "nodetrust: reload-pending marker not written", "bundle", h.store.Path(), "err", err.Error())
+		// The marker is a precondition of changing the bundle: written first,
+		// so a reload that fails — or an agent that dies mid-reload — leaves
+		// the fact on disk for the next install. A marker that cannot be
+		// written leaves the bundle as it was and is refused (ERR-CLOSED):
+		// installing anyway would let a failed reload report the new
+		// fingerprint as current, and trust.converge would never send again.
+		if err := h.markReloadPending(cmd.BundlePEM); err != nil {
+			h.log.ErrorContext(ctx, "nodetrust: reload-pending marker not written; trust bundle left as it was", "bundle", h.store.Path(), "err", err.Error())
+			ack.Detail = "trust bundle not installed: the reload-pending marker could not be written: " + err.Error()
+			ack.Fingerprint = h.ReportedFingerprint()
+			return ack
+		}
+		// A write that fails here leaves the marker behind, so the node
+		// reports reload-pending and the api sends again: closed, not open.
+		if _, err := h.store.Install(cmd.BundlePEM); err != nil {
+			h.log.WarnContext(ctx, "nodetrust: trust bundle not written", "bundle", h.store.Path(), "err", err.Error())
+			ack.Detail = "trust bundle not installed: " + err.Error()
+			ack.Fingerprint = h.ReportedFingerprint()
+			return ack
 		}
 	}
+	ack.Changed = changed
 	var reloadErr error
 	if changed || h.reloadPending() {
 		reloadErr = h.reload(ctx)
@@ -126,6 +142,15 @@ func (h *Handler) Handle(ctx context.Context, nodeID string, data []byte) proto.
 	}
 	ack.OK = true
 	return ack
+}
+
+// markReloadPending writes the marker for bundle, creating the bundle's
+// directory as Install would (0700) so a first install can mark it too.
+func (h *Handler) markReloadPending(bundle []byte) error {
+	if err := atrest.EnsureSecretDir(filepath.Dir(h.markerPath())); err != nil {
+		return err
+	}
+	return atrest.WriteSecretFile(h.markerPath(), []byte(proto.TrustFingerprint(bundle)+"\n"))
 }
 
 // reload calls every Reloader and clears the marker only when all succeed.

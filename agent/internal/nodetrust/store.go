@@ -3,9 +3,6 @@ package nodetrust
 import (
 	"bytes"
 	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,52 +25,31 @@ func NewStore(path string) *Store { return &Store{path: path} }
 // Path is where the bundle lives.
 func (s *Store) Path() string { return s.path }
 
-// Validate refuses anything that is not a bundle of CA certificates: no PEM
-// at all, a block that is not a CERTIFICATE (a private key, say — this file is
-// written 0644), a CERTIFICATE that does not parse, or non-whitespace bytes
-// outside the blocks.
-func Validate(bundle []byte) error {
-	rest := bundle
-	n := 0
-	for {
-		rest = bytes.TrimLeft(rest, " \t\r\n")
-		if len(rest) == 0 {
-			break
-		}
-		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
-			return errors.New("trust bundle carries bytes outside a PEM block")
-		}
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			return errors.New("trust bundle carries a malformed PEM block")
-		}
-		if block.Type != "CERTIFICATE" {
-			return fmt.Errorf("trust bundle carries a %q block; only certificates belong in it", block.Type)
-		}
-		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return fmt.Errorf("trust bundle carries a certificate that does not parse: %w", err)
-		}
-		n++
+// Differs validates bundle and reports whether installing it would change
+// the on-disk content, writing nothing. The trust.install handler asks before
+// it installs, so the reload-pending marker is on disk before the bundle
+// changes.
+func (s *Store) Differs(bundle []byte) (bool, error) {
+	if err := proto.ValidateTrustBundle(bundle); err != nil {
+		return false, err
 	}
-	if n == 0 {
-		return errors.New("trust bundle carries no certificate")
-	}
-	return nil
+	existing, err := os.ReadFile(s.path)
+	return err != nil || !bytes.Equal(existing, normalize(bundle)), nil
 }
+
+// normalize is the bundle as the file holds it: trimmed, then exactly one
+// trailing newline.
+func normalize(bundle []byte) []byte { return append(bytes.TrimSpace(bundle), '\n') }
 
 // Install validates bundle and writes it, atomically, reporting whether the
 // on-disk content changed. Idempotent: an identical bundle is a no-op
 // (changed=false), so the caller skips the tailscaled reload. A refused
 // bundle or a failed write leaves the file as it was.
 func (s *Store) Install(bundle []byte) (changed bool, err error) {
-	if err := Validate(bundle); err != nil {
+	if changed, err := s.Differs(bundle); err != nil || !changed {
 		return false, err
 	}
-	want := append(bytes.TrimSpace(bundle), '\n')
-	if existing, e := os.ReadFile(s.path); e == nil && bytes.Equal(existing, want) {
-		return false, nil
-	}
+	want := normalize(bundle)
 	// 0700, tightening an existing install's 0755 (geekdojo/geekdojo-brain#144).
 	// On a controlplane this is the same /var/lib/rasputin/mesh the api keeps
 	// its mesh state in — pre-auth keys among it. Everything that reads what

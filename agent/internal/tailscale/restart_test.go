@@ -3,6 +3,7 @@ package tailscale
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -123,5 +124,17 @@ func TestRestartTailscaled_BothFail(t *testing.T) {
 	}
 	if err := restartTailscaled(context.Background(), run); err == nil {
 		t.Fatal("expected error when neither init system works")
+	}
+}
+
+// The default init-system probe is a plain existence check: a path that is
+// there is present, one that is not is absent.
+func TestInitSystemPresent_Default(t *testing.T) {
+	dir := t.TempDir()
+	if !initSystemPresent(dir) {
+		t.Error("an existing path read as absent")
+	}
+	if initSystemPresent(filepath.Join(dir, "absent")) {
+		t.Error("a missing path read as present")
 	}
 }

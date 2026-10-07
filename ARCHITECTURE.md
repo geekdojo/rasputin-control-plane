@@ -248,7 +248,8 @@ controlplane serves (the api, Headscale, the app leaves); operator devices
 install it once, and every node is given it. The **store CA** is trusted by the
 secret store's listener alone and enters no node, browser or collector trust.
 Every leaf carries exactly one explicit EKU. A node's trust bundle (the
-controlplane CA, plus the operator's CA on an external Headscale) reaches it on
+controlplane CA, plus the certificates parsed from the operator's CA file on an
+external Headscale) reaches it on
 its own verb, `trust.install`, and `trust.converge` re-sends it to every online
 node whose reported fingerprint differs (`api/internal/nodetrust`,
 `agent/internal/nodetrust`); `mesh.enroll` carries it only for an agent too old

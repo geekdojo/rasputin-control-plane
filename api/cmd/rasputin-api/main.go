@@ -300,7 +300,7 @@ func main() {
 	// It is opened and loaded BEFORE the auth-callout responder starts, because
 	// an unloaded registry admits nobody: a node connecting first would be
 	// refused rather than served from a database read.
-	invStore, err := inventory.OpenStore(ctx, dbPath)
+	invStore, err := openInventory(ctx, dbPath, time.Now)
 	if err != nil {
 		log.Fatalf("rasputin-api: inventory store: %v", err)
 	}
@@ -2557,30 +2557,39 @@ func wireMockMesh(stateDir, defaultLogin string) (meshWiring, error) {
 // wireExternalMesh talks to a Headscale the operator runs themselves. We
 // trust the system pool unless RASPUTIN_HEADSCALE_CA_FILE points at a PEM
 // bundle (e.g. their internal CA) — in which case nodes need that CA too, so
-// it is APPENDED to the controlplane CA in the node trust bundle
-// (nodeTrustBundle; geekdojo/geekdojo-brain#506). The controlplane CA goes to
-// every node whoever runs Headscale: it also signs the api's own HTTPS leaf
-// and the app leaves. The container lifecycle is theirs (noop supervisor)
-// unless they explicitly asked us to drive it. Eager: the client is
-// constructed up front (EnsureUser still runs in the background Start).
+// its certificates (tlsca.CertificatesOnly) are APPENDED to the controlplane
+// CA in the node trust bundle (nodeTrustBundle; geekdojo/geekdojo-brain#506).
+// The controlplane CA goes to every node whoever runs Headscale: it also signs
+// the api's own HTTPS leaf and the app leaves. The container lifecycle is
+// theirs (noop supervisor) unless they explicitly asked us to drive it. Eager:
+// the client is constructed up front (EnsureUser still runs in the background
+// Start).
 func wireExternalMesh(stateDir string, cpCA *tlsca.CA, defaultLogin, url, key string) (meshWiring, error) {
 	cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
 	var operatorCA []byte
 	if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
-		pem, err := os.ReadFile(caFile)
+		raw, err := os.ReadFile(caFile)
 		if err != nil {
 			return meshWiring{}, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
 		}
-		// One helper for both backends. Read once: the file the api trusts
-		// and the CA the nodes are shipped are the same bytes, and a file
-		// that cannot be read fails the start rather than quietly shipping
-		// nodes a CA the api itself does not trust.
-		tlsCfg, cerr := proto.CATLSConfig(pem, "RASPUTIN_HEADSCALE_CA_FILE="+caFile)
+		// Parsed into its certificates before anything uses it: the nodes are
+		// shipped CERTIFICATE blocks only, and a key or a broken block fails
+		// the start, naming the file and the block (F-741-18). The error names
+		// the block's type and position, never its content.
+		certs, err := tlsca.CertificatesOnly(raw)
+		if err != nil {
+			return meshWiring{}, fmt.Errorf("RASPUTIN_HEADSCALE_CA_FILE=%s: %w", caFile, err)
+		}
+		// One helper for both backends. Read once: the certificates the api
+		// trusts and the CA the nodes are shipped are the same ones, and a
+		// file that cannot be read fails the start rather than quietly
+		// shipping nodes a CA the api itself does not trust.
+		tlsCfg, cerr := proto.CATLSConfig(certs, "RASPUTIN_HEADSCALE_CA_FILE="+caFile)
 		if cerr != nil {
 			return meshWiring{}, cerr
 		}
 		cfg.TLSConfig = tlsCfg
-		operatorCA = pem
+		operatorCA = certs
 	}
 	c, err := mesh.NewRealClient(cfg)
 	if err != nil {

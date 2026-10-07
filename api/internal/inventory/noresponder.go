@@ -136,9 +136,9 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 
 // SetNow wires the clock the readings from this store render elapsed times
 // against — the off-bus sentence's "(seen 20s ago)" — and that Presence derives
-// status at. Nil (what production leaves it) is time.Now. Set before the reader runs, as SetMeshLookup is;
-// it exists so a caller in another package — the storage fan-out's tests
-// hold the store and nothing else — can pin that string.
+// status at. The composition root sets it (openInventory in rasputin-api);
+// unset, as in a test that builds a bare store, it is the wall clock. Set it
+// before any reader runs, as SetMeshLookup is.
 func (s *Store) SetNow(fn func() time.Time) { s.now = fn }
 
 // ExplainNoResponder is ExplainNoResponder against this store's row for the

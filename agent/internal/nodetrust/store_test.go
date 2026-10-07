@@ -69,7 +69,7 @@ func TestStore_InstallFingerprintAndModes(t *testing.T) {
 	}
 }
 
-// Validate refuses everything that is not a bundle of CA certificates, and
+// proto.ValidateTrustBundle refuses everything that is not a bundle of CA certificates, and
 // Install leaves the file as it was when it does.
 func TestStore_InstallRefusesAndLeavesTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tailscaled-ca.pem")

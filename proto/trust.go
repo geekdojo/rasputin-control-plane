@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
+	"errors"
 	"fmt"
 )
 
@@ -66,14 +68,46 @@ func TrustFingerprint(pem []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ValidateTrustBundle refuses anything that is not a bundle of CA certificates: no PEM
+// at all, a block that is not a CERTIFICATE (a private key, say — this file is
+// written 0644), a CERTIFICATE that does not parse, or non-whitespace bytes
+// outside the blocks. The agent's trust.install refuses on it, and the api's
+// node bundle is built to pass it (geekdojo/geekdojo-brain#741).
+func ValidateTrustBundle(bundle []byte) error {
+	rest := bundle
+	sawCert := false
+	for {
+		rest = bytes.TrimLeft(rest, " \t\r\n")
+		if len(rest) == 0 {
+			break
+		}
+		if !bytes.HasPrefix(rest, []byte("-----BEGIN ")) {
+			return errors.New("trust bundle carries bytes outside a PEM block")
+		}
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			return errors.New("trust bundle carries a malformed PEM block")
+		}
+		if block.Type != "CERTIFICATE" {
+			return fmt.Errorf("trust bundle carries a %q block; only certificates belong in it", block.Type)
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return fmt.Errorf("trust bundle carries a certificate that does not parse: %w", err)
+		}
+		sawCert = true
+	}
+	if !sawCert {
+		return errors.New("trust bundle carries no certificate")
+	}
+	return nil
+}
+
 // ShortFingerprint is the leading 12 hex characters of a fingerprint, for
 // logs and UI where the whole digest is noise. A short or empty input is
 // returned as it is.
 func ShortFingerprint(fp string) string {
-	if len(fp) > 12 {
-		return fp[:12]
-	}
-	return fp
+	return fp[:min(len(fp), 12)]
 }
 
 // CATLSConfig is the TLS client config that trusts exactly caPEM and nothing

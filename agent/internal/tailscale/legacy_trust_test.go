@@ -122,7 +122,14 @@ func TestRealBackend_ReloadTrust(t *testing.T) {
 	if err := b.ReloadTrust(context.Background()); err == nil {
 		t.Error("ReloadTrust with no init system succeeded")
 	}
-	if _, err := NewRealBackend(nil, discardLog()); err == nil {
-		t.Error("NewRealBackend accepted a nil installer")
+	// The refusal names the collaborators, so it is the nil check that
+	// answered and not the PATH lookup behind it.
+	for name, build := range map[string]func() (*RealBackend, error){
+		"nil installer": func() (*RealBackend, error) { return NewRealBackend(nil, discardLog()) },
+		"nil logger":    func() (*RealBackend, error) { return NewRealBackend(testTrust(t), nil) },
+	} {
+		if _, err := build(); err == nil || !strings.Contains(err.Error(), "needs a TrustInstaller and a logger") {
+			t.Errorf("%s: err %v, want the collaborator refusal", name, err)
+		}
 	}
 }

@@ -259,6 +259,86 @@ func TestHandler_TrustInstall(t *testing.T) {
 	})
 }
 
+// TC-741-31 (F-741-17, F-741-02): a reload-pending marker that cannot be
+// written fails closed. The bundle is left as it was, the ack is OK=false
+// naming the failure, nothing reloads, and the node never reports the new
+// bundle's fingerprint, so the api reads it as stale and sends again. Once the
+// marker can be written, the same bundle installs, reloads and reports.
+func TestHandler_UnwritableMarkerFailsClosed(t *testing.T) {
+	a := tlstest.NewCA(t, "a").PEM
+	b := tlstest.NewCA(t, "b").PEM
+	f := newHandlerFixture(t, true)
+	if ack := f.install(t, a); !ack.OK {
+		t.Fatalf("first install %+v", ack)
+	}
+	f.ev.take()
+	before, err := os.ReadFile(f.store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the marker belongs: WriteSecretFile cannot replace it.
+	if err := os.MkdirAll(filepath.Join(f.marker(), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.reload.fail = errors.New("systemctl exited 1")
+
+	ack := f.install(t, b)
+	if ack.OK || ack.Changed || !strings.Contains(ack.Detail, "reload-pending marker could not be written") {
+		t.Errorf("ack %+v, want OK=false naming the marker", ack)
+	}
+	newFP := proto.TrustFingerprint(b)
+	if ack.Fingerprint == newFP || f.h.ReportedFingerprint() == newFP {
+		t.Errorf("reports %q / %q: the new bundle's fingerprint before any reload", ack.Fingerprint, f.h.ReportedFingerprint())
+	}
+	if got, _ := os.ReadFile(f.store.Path()); !bytes.Equal(got, before) {
+		t.Error("the bundle changed although its marker could not be written")
+	}
+	if got := f.ev.take(); !eq(got, []string{"ack"}) {
+		t.Errorf("events %v, want no reload and no re-register", got)
+	}
+	errs := f.logs.errors()
+	if len(errs) != 1 || errs[0]["bundle"] != f.store.Path() || errs[0]["err"] == "" {
+		t.Errorf("ERROR records %v, want one naming the bundle and err", errs)
+	}
+
+	// The marker can be written again and tailscaled reloads.
+	if err := os.RemoveAll(f.marker()); err != nil {
+		t.Fatal(err)
+	}
+	f.reload.fail = nil
+	ack = f.install(t, b)
+	if !ack.OK || !ack.Changed || ack.Fingerprint != newFP || f.h.ReportedFingerprint() != newFP {
+		t.Errorf("retry ack %+v, reports %q", ack, f.h.ReportedFingerprint())
+	}
+	if got := f.ev.take(); !eq(got, []string{"reload", "reregister", "ack"}) {
+		t.Errorf("retry events %v", got)
+	}
+	if got, _ := os.ReadFile(f.store.Path()); !bytes.Equal(got, append(bytes.TrimSpace(b), '\n')) {
+		t.Error("the retry did not install the bundle")
+	}
+}
+
+// A bundle write that fails after its marker is written leaves the marker, so
+// the node reports reload-pending and the api sends again.
+func TestHandler_BundleWriteFailureAfterTheMarkerStaysPending(t *testing.T) {
+	f := newHandlerFixture(t, true)
+	// A directory where the bundle belongs: the marker beside it can be
+	// written, the bundle cannot.
+	if err := os.MkdirAll(filepath.Join(f.store.Path(), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ack := f.install(t, tlstest.NewCA(t, "a").PEM)
+	if ack.OK || ack.Changed || !strings.HasPrefix(ack.Detail, "trust bundle not installed: write ") {
+		t.Errorf("ack %+v, want a refused write", ack)
+	}
+	if ack.Fingerprint != proto.TrustFingerprintReloadPending || f.h.ReportedFingerprint() != proto.TrustFingerprintReloadPending {
+		t.Errorf("reports %q / %q, want reload-pending", ack.Fingerprint, f.h.ReportedFingerprint())
+	}
+	if got := f.ev.take(); !eq(got, []string{"ack"}) {
+		t.Errorf("events %v, want no reload", got)
+	}
+}
+
 func TestNewHandler_RefusesMissingCollaborators(t *testing.T) {
 	s := NewStore(filepath.Join(t.TempDir(), "ca.pem"))
 	log := slog.New(&logRecords{})

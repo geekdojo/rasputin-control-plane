@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -214,6 +215,87 @@ func TestBundle_PerBackend(t *testing.T) {
 		}
 		if _, err := wired["external"](); err == nil {
 			t.Error("external: an unreadable RASPUTIN_HEADSCALE_CA_FILE was accepted")
+		}
+	})
+}
+
+// TC-741-32 (F-741-18): on the external backend the operator's CA file is
+// parsed at the api and never shipped raw. (a) openssl text around the
+// certificate is dropped: the bundle is CERTIFICATE blocks a node accepts, and
+// the api's own client still trusts the operator's Headscale. (b) a standard
+// file gives the TC-741-11 controlplane+operator golden, byte for byte. (c) a
+// PRIVATE KEY block fails the start, naming the file and the block type and
+// carrying none of the block.
+func TestWireExternalMesh_ParsesTheOperatorCAFile(t *testing.T) {
+	t.Setenv("RASPUTIN_HEADSCALE_SUPERVISOR", "noop")
+	writeCA := func(t *testing.T, b []byte) string {
+		t.Helper()
+		p := filepath.Join(t.TempDir(), "operator-ca.pem")
+		if err := os.WriteFile(p, b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	t.Run("(a) openssl text around the certificate", func(t *testing.T) {
+		cp := tlscatest.Controlplane(t, "")
+		op := tlscatest.Controlplane(t, "")
+		hs := operatorHeadscale(t, op)
+		annotated := "Bag Attributes\n    localKeyID: 01 00 00 00\nsubject=/CN=operator\nissuer=/CN=operator\n" + string(op.CertPEM)
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", writeCA(t, []byte(annotated)))
+		mw, err := wireExternalMesh(t.TempDir(), cp, "dev@example.com", hs.URL, "hskey-test")
+		if err != nil {
+			t.Fatalf("wire: %v", err)
+		}
+		bundle := nodeTrustBundle(cp, mw)
+		if err := proto.ValidateTrustBundle(bundle); err != nil {
+			t.Errorf("a node would refuse the bundle: %v", err)
+		}
+		if bytes.Contains(bundle, []byte("Bag Attributes")) || bytes.Contains(bundle, []byte("subject=")) {
+			t.Error("the bundle carries the file's text")
+		}
+		if got := certsIn(t, bundle); len(got) != 2 || !bytes.Equal(got[0].Raw, cp.Cert.Raw) || !bytes.Equal(got[1].Raw, op.Cert.Raw) {
+			t.Errorf("bundle holds %d certificates, want the controlplane CA then the operator's", len(got))
+		}
+		if _, err := mw.client.ListNodes(context.Background()); err != nil {
+			t.Errorf("the external client does not trust the operator's certificate: %v", err)
+		}
+	})
+
+	t.Run("(b) a standard file is the golden", func(t *testing.T) {
+		golden := func(name string) []byte {
+			b, err := os.ReadFile(filepath.Join("..", "..", "internal", "tlsca", "testdata", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b
+		}
+		cp := &tlsca.CA{CertPEM: golden("controlplane-ca.pem")}
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", writeCA(t, golden("operator-ca.pem")))
+		mw, err := wireExternalMesh(t.TempDir(), cp, "dev@example.com", "https://127.0.0.1:18080", "hskey-test")
+		if err != nil {
+			t.Fatalf("wire: %v", err)
+		}
+		if !bytes.Equal(nodeTrustBundle(cp, mw), golden("bundle-controlplane-operator.pem")) {
+			t.Error("the bundle differs from the pre-tlsca golden; every node's fingerprint would move")
+		}
+	})
+
+	t.Run("(c) a private key fails the start", func(t *testing.T) {
+		cp := tlscatest.Controlplane(t, "")
+		key := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("operator-secret-key-bytes")})
+		file := writeCA(t, append(append([]byte{}, cp.CertPEM...), key...))
+		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", file)
+		_, err := wireExternalMesh(t.TempDir(), cp, "dev@example.com", "https://127.0.0.1:18080", "hskey-test")
+		if err == nil {
+			t.Fatal("a CA file carrying a private key was accepted")
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, file) || !strings.Contains(msg, `"PRIVATE KEY"`) {
+			t.Errorf("err %q, want the file and the block type named", msg)
+		}
+		if body := strings.Split(string(key), "\n")[1]; strings.Contains(msg, body) || strings.Contains(msg, "operator-secret-key-bytes") {
+			t.Errorf("err %q carries the block's content", msg)
 		}
 	})
 }
