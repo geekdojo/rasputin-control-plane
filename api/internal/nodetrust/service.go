@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -22,7 +24,8 @@ const ConvergeKind = "trust.converge"
 
 // convergeStepTimeout bounds the one step of a pass. Every per-node request
 // runs on the step's context, so this is the whole pass's budget, as the
-// console root push's deliver step is.
+// console root push's deliver step is. A pass it ends still returns its
+// result (Converge).
 const convergeStepTimeout = 2 * time.Minute
 
 // ErrAgentPredatesVerb is Deliver's answer for an online node whose agent is
@@ -152,8 +155,17 @@ func (s *Service) convergeStep(sc *jobs.StepCtx) (json.RawMessage, error) {
 
 // Converge is one pass. A node qualifies when its reported fingerprint is not
 // the api's ("none" and "reload-pending" both count), it is online by
-// inventory's presence, and its agent answers trust.install. One node's
+// inventory's presence, and its agent answers trust.install. Qualifying nodes
+// are asked in parallel, at most deliverFanout at once, as the console root
+// push's deliver step does: a changed install restarts tailscaled before the
+// agent answers, so one slow node must not hold up the rest. One node's
 // failure is logged and counted, and the pass goes on to the rest.
+//
+// When ctx ends first — the step's deadline — the pass still returns what it
+// found and did. Every node whose delivery the end cut off is counted under
+// Skipped["deadline"] and named in one WARN, and the result is returned
+// without an error, so the job records it rather than dropping it; the next
+// pass sends to those nodes again.
 //
 // feed, when non-nil, receives the job-feed lines; it may be nil.
 func (s *Service) Converge(ctx context.Context, req Requester, feed func(level, msg string)) (ConvergeResult, error) {
@@ -167,10 +179,8 @@ func (s *Service) Converge(ctx context.Context, req Requester, feed func(level, 
 	}
 	s.nodes.Presence(ctx, nodes)
 	floor, _ := proto.VerbMinAgentVersion(proto.TrustInstallVerb)
+	var send []delivery
 	for _, n := range nodes {
-		if err := ctx.Err(); err != nil {
-			return res, err
-		}
 		t := StateFor(s.fingerprint, n)
 		switch t.State {
 		case TrustCurrent:
@@ -189,16 +199,31 @@ func (s *Service) Converge(ctx context.Context, req Requester, feed func(level, 
 			res.Skipped["legacy_agent"]++
 			continue
 		}
-		ack, err := s.Deliver(ctx, req, n.ID)
-		if err != nil {
+		send = append(send, delivery{node: n.ID, was: t.Fingerprint})
+	}
+	s.deliverAll(ctx, req, send)
+
+	var cut []string
+	for _, d := range send {
+		switch {
+		case d.err == nil:
+			feed("info", fmt.Sprintf("%s: trusted %s, now %s (changed=%v)",
+				d.node, proto.ShortFingerprint(d.was), proto.ShortFingerprint(d.ack.Fingerprint), d.ack.Changed))
+			res.Redelivered = append(res.Redelivered, d.node)
+		case d.cut:
+			res.Skipped["deadline"]++
+			cut = append(cut, d.node)
+		default:
 			res.Skipped["delivery_failed"]++
-			s.log.WarnContext(ctx, "nodetrust: trust.install failed", "node", n.ID, "err", err.Error())
-			feed("warn", fmt.Sprintf("%s: %v", n.ID, err))
-			continue
+			s.log.WarnContext(ctx, "nodetrust: trust.install failed", "node", d.node, "err", d.err.Error())
+			feed("warn", fmt.Sprintf("%s: %v", d.node, d.err))
 		}
-		feed("info", fmt.Sprintf("%s: trusted %s, now %s (changed=%v)",
-			n.ID, proto.ShortFingerprint(t.Fingerprint), proto.ShortFingerprint(ack.Fingerprint), ack.Changed))
-		res.Redelivered = append(res.Redelivered, n.ID)
+	}
+	if len(cut) > 0 {
+		sort.Strings(cut)
+		s.log.WarnContext(ctx, "nodetrust: trust converge ended before every delivery finished",
+			"nodes", strings.Join(cut, ","), "count", len(cut), "err", context.Cause(ctx).Error())
+		feed("warn", fmt.Sprintf("pass ended before %d node(s) answered: %s", len(cut), strings.Join(cut, ", ")))
 	}
 	for _, l := range [][]string{res.Redelivered, res.Stale, res.Current, res.Unreported} {
 		sort.Strings(l)
@@ -209,4 +234,37 @@ func (s *Service) Converge(ctx context.Context, req Requester, feed func(level, 
 	feed("info", fmt.Sprintf("trust: %d installed, %d stale, %d current, %d unreported (skipped: %v)",
 		len(res.Redelivered), len(res.Stale), len(res.Current), len(res.Unreported), res.Skipped))
 	return res, nil
+}
+
+// deliverFanout bounds how many nodes one pass asks at once, as the console
+// root push's deliver step does.
+const deliverFanout = 8
+
+// delivery is one node's trust.install within a pass and how it ended.
+type delivery struct {
+	node string
+	was  string // the fingerprint the node reported before the pass
+	ack  proto.TrustInstallAck
+	err  error
+	cut  bool // the pass's context ended before this delivery succeeded
+}
+
+// deliverAll runs every delivery, at most deliverFanout at once, and returns
+// when all have ended. A delivery that fails once ctx has ended — including
+// one that only started after it had, which fails at once — is marked cut
+// rather than failed: the node refused nothing, the pass ran out of time.
+func (s *Service) deliverAll(ctx context.Context, req Requester, ds []delivery) {
+	sem := make(chan struct{}, deliverFanout)
+	var wg sync.WaitGroup
+	for i := range ds {
+		wg.Add(1)
+		go func(d *delivery) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			d.ack, d.err = s.Deliver(ctx, req, d.node)
+			d.cut = d.err != nil && ctx.Err() != nil
+		}(&ds[i])
+	}
+	wg.Wait()
 }

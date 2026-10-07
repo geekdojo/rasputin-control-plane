@@ -301,6 +301,81 @@ func TestConverge_Selection(t *testing.T) {
 	}
 }
 
+// answered is a Requester over nc that reports each subject whose request
+// came back with an answer.
+type answered struct {
+	nc   *nats.Conn
+	done chan string
+}
+
+func (a answered) RequestWithContext(ctx context.Context, subj string, data []byte) (*nats.Msg, error) {
+	m, err := a.nc.RequestWithContext(ctx, subj, data)
+	if err == nil {
+		a.done <- subj
+	}
+	return m, err
+}
+
+// TC-741-15 (F-741-20): one slow node does not starve the rest, and a pass
+// its context ends still returns its result. The slow node is first in
+// inventory order and does not answer until the test lets it; the other two
+// are delivered to while it hangs. Once both have answered, the pass's
+// context ends, as the step deadline would: the slow node is counted under
+// Skipped["deadline"] and named in one WARN, not counted as a failure, and
+// Converge returns the partial result with no error.
+func TestConverge_SlowNodeDoesNotStarveTheRest(t *testing.T) {
+	f := newFixture(t)
+	at := time.Now().UTC().Truncate(time.Second)
+	f.inv.SetNow(func() time.Time { return at })
+	fl := floor(t)
+	f.node(t, "a-slow", fl, "some-other-bundle", at.Add(-2*time.Second))
+	f.node(t, "b-fast", fl, "some-other-bundle", at.Add(-time.Second))
+	f.node(t, "c-fast", fl, "some-other-bundle", at)
+	release := make(chan struct{})
+	f.agent(t, "a-slow", func(c proto.TrustInstallCmd) any { <-release; return okAck("a-slow")(c) })
+	defer close(release)
+	f.agent(t, "b-fast", okAck("b-fast"))
+	f.agent(t, "c-fast", okAck("c-fast"))
+
+	ctx, end := context.WithCancelCause(f.ctx)
+	req := answered{nc: f.nc, done: make(chan string, 3)}
+	go func() {
+		// Ends the pass once both fast nodes have answered. The bound only
+		// turns a serial regression into a failure instead of a hang.
+		bound := time.After(30 * time.Second)
+		for n := 0; n < 2; n++ {
+			select {
+			case <-req.done:
+			case <-bound:
+				end(errors.New("test bound: the fast nodes never answered"))
+				return
+			}
+		}
+		end(errors.New("step deadline"))
+	}()
+
+	res, err := f.svc.Converge(ctx, req, nil)
+	if err != nil {
+		t.Fatalf("a pass its context ended returned %v, want its result and no error", err)
+	}
+	if want := []string{"b-fast", "c-fast"}; !slices.Equal(res.Redelivered, want) {
+		t.Errorf("redelivered %v, want %v: the slow node starved the rest", res.Redelivered, want)
+	}
+	if want := []string{"a-slow", "b-fast", "c-fast"}; !slices.Equal(res.Stale, want) {
+		t.Errorf("stale %v, want %v", res.Stale, want)
+	}
+	if res.Skipped["deadline"] != 1 || res.Skipped["delivery_failed"] != 0 {
+		t.Errorf("skipped %v, want the slow node under deadline only", res.Skipped)
+	}
+	warns := f.log.at(slog.LevelWarn)
+	if len(warns) != 1 || warns[0]["nodes"] != "a-slow" || warns[0]["count"] != "1" || warns[0]["err"] != "step deadline" {
+		t.Errorf("WARN records %v, want one naming the cut-off node and the cause", warns)
+	}
+	if infos := f.log.at(slog.LevelInfo); len(infos) != 1 || infos[0]["installed"] != "2" {
+		t.Errorf("INFO records %v, want the summary", infos)
+	}
+}
+
 // The workflow is one step, converge, of kind trust.converge, and its result
 // is the ConvergeResult.
 func TestConvergeWorkflow(t *testing.T) {
