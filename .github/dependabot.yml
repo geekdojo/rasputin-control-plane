@@ -12,7 +12,7 @@
 # into one PR per ecosystem; MAJOR updates are deliberately left ungrouped so
 # each arrives alone, with its own changelog to read.
 #
-# ⚠ CLA GATE: cla.yml allowlists `BryceAshey,bot*`. Dependabot authors PRs as
+# ⚠ CLA GATE: cla.yml allowlists `hoodoo5x5,bot*`. Dependabot authors PRs as
 # `dependabot[bot]`, which does not begin with "bot", so these PRs are likely
 # to sit blocked on the CLA check until that allowlist includes
 # `dependabot[bot]`. That is a one-line change to cla.yml, but it changes who

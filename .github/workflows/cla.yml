@@ -36,6 +36,6 @@ jobs:
           path-to-signatures: 'signatures/version1/cla.json'
           path-to-document: 'https://github.com/geekdojo/rasputin-control-plane/blob/main/CLA.md'
           branch: 'main'
-          allowlist: BryceAshey,bot*
+          allowlist: hoodoo5x5,bot*
           remote-organization-name: geekdojo
           remote-repository-name: cla-signatures
