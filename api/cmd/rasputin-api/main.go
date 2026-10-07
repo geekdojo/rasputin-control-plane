@@ -70,7 +70,7 @@ func main() {
 	// into every component that logs through it (logkit, ARCH-COMMON's
 	// interim reference). Code this change did not touch still uses the
 	// standard log package.
-	logger := logkit.New(os.Stderr)
+	logger := logkit.New(os.Stderr, logkit.RedactSecrets())
 
 	dataDir := envOr("RASPUTIN_DATA_DIR", "./data")
 	httpAddr := envOr("RASPUTIN_HTTP_ADDR", ":8080")

@@ -19,6 +19,7 @@ require (
 	github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/geekdojo/rasputin-control-plane/secret v0.0.0-00010101000000-000000000000 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/klauspost/compress v1.19.2 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
@@ -42,5 +43,7 @@ replace github.com/geekdojo/rasputin-control-plane/artifactsig => ../artifactsig
 replace github.com/geekdojo/rasputin-control-plane/backupxfer => ../backupxfer
 
 replace github.com/geekdojo/rasputin-control-plane/logkit => ../logkit
+
+replace github.com/geekdojo/rasputin-control-plane/secret => ../secret
 
 replace github.com/geekdojo/rasputin-control-plane/tileschema => ../tileschema

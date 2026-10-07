@@ -801,3 +801,28 @@ func TestPublishRegistered_AdvertisesKeyBoundTransferOnEveryRole(t *testing.T) {
 		}
 	}
 }
+
+// TC-733-10: the process logger built at this composition root redacts
+// secrets. Every logkit.New call in main.go must pass logkit.RedactSecrets();
+// a logger built without it would write a self-rendering secret holder's
+// bytes (geekdojo/geekdojo-brain#733). Comment lines are not calls.
+func TestProcessLoggerRedactsSecrets(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	calls := 0
+	for _, line := range strings.Split(string(src), "\n") {
+		code := strings.TrimSpace(line)
+		if strings.HasPrefix(code, "//") || !strings.Contains(code, "logkit.New(") {
+			continue
+		}
+		calls++
+		if !strings.Contains(code, "logkit.RedactSecrets()") {
+			t.Errorf("main.go builds a logger without logkit.RedactSecrets() (#733):\n\t%s", code)
+		}
+	}
+	if calls == 0 {
+		t.Fatal("main.go has no logkit.New( call; the process logger must be built there with logkit.RedactSecrets() (#733)")
+	}
+}
