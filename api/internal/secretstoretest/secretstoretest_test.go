@@ -5,7 +5,10 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -574,5 +577,46 @@ func TestLineLogTail(t *testing.T) {
 	l.consume(strings.NewReader("a\nb\r\nc\npartial"))
 	if got := l.tail(); got != "b | c | partial" {
 		t.Errorf("tail = %q, want %q", got, "b | c | partial")
+	}
+}
+
+// checkHealth calls the store healthy only on 200 with initialized=true and
+// sealed=false. A sealed or uninitialized store, any other status, or an
+// unreadable body is not healthy, and the status names what was seen.
+func TestCheckHealth(t *testing.T) {
+	cases := []struct {
+		name   string
+		code   int
+		body   string
+		ok     bool
+		status string
+	}{
+		{"healthy", 200, `{"initialized":true,"sealed":false}`, true, "200 initialized=true sealed=false"},
+		{"sealed", 200, `{"initialized":true,"sealed":true}`, false, "200 initialized=true sealed=true"},
+		{"uninitialized", 200, `{"initialized":false,"sealed":false}`, false, "200 initialized=false sealed=false"},
+		{"sealed 503", 503, `{"initialized":true,"sealed":true}`, false, "503 initialized=true sealed=true"},
+		{"standby 429", 429, `{"initialized":true,"sealed":false}`, false, "429 initialized=true sealed=false"},
+		{"unreadable", 200, `not json`, false, "200, unreadable body"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/sys/health" {
+					http.NotFound(w, r)
+					return
+				}
+				w.WriteHeader(tc.code)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			s := &Store{url: srv.URL}
+			ok, status, err := s.checkHealth(t.Context(), srv.Client())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ok != tc.ok || !strings.HasPrefix(status, tc.status) {
+				t.Errorf("checkHealth = %t, %q; want %t, %q", ok, status, tc.ok, tc.status)
+			}
+		})
 	}
 }
