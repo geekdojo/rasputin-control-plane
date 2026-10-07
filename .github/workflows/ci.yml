@@ -28,6 +28,11 @@ name: ci
 #              step sets RASPUTIN_APPSECRET_FUNCTIONAL=required, so the
 #              appsecret Compose functional test must run against the runner's
 #              real Compose and pass rather than skip (geekdojo-brain#695).
+#              It also installs the pinned secret store with
+#              scripts/install-openbao.sh and sets
+#              RASPUTIN_SECRETSTORE_FUNCTIONAL=required, so the secret store
+#              smoke test must run against the real OpenBao and pass rather
+#              than skip (geekdojo-brain#753, docs/testing-secret-store.md).
 #
 #   caddy-admin-socket — the agent's Caddy supervisor against the real Caddy
 #              the OS image ships, run as root: the admin API is reachable
@@ -241,6 +246,12 @@ jobs:
             echo "::endgroup::"
           done
 
+      # The real secret store for TestSecretStore_SmokeWriteReadKV: the release
+      # and sha256 are read from api/internal/secretstoretest/pin.go, so this
+      # downloads exactly what the Go const pins (docs/testing-secret-store.md).
+      - name: install the pinned secret store
+        run: ./scripts/install-openbao.sh "$RUNNER_TEMP/openbao"
+
       # Coverage profile only for api — it remains the module whose coverage we
       # trend, and that choice is deliberate rather than a list that drifts.
       # Every other module is still TESTED below; it just isn't profiled.
@@ -251,6 +262,11 @@ jobs:
           # instead of passing having tested nothing (geekdojo-brain#695,
           # docs/testing-appsecret-compose.md).
           RASPUTIN_APPSECRET_FUNCTIONAL: required
+          # The same for the secret store smoke test: the binary the step
+          # above installed, and a missing one fails this required job
+          # (geekdojo-brain#753, docs/testing-secret-store.md).
+          RASPUTIN_SECRETSTORE_BIN: ${{ runner.temp }}/openbao/bao
+          RASPUTIN_SECRETSTORE_FUNCTIONAL: required
         run: |
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
