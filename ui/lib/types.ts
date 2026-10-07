@@ -998,19 +998,19 @@ export interface MeshDevice {
   kind: 'rasputin' | 'user';
   firstSeen: string;
   lastSeen: string;
-  /** Rasputin devices only: how the mesh CA the node's agent reports trusting compares with the api's current one. */
+  /** Rasputin devices only: how the controlplane CA the node's agent reports trusting compares with the api's current one. */
   trust?: MeshDeviceTrust;
 }
 
 /**
- * A node's trust reading. "stale": the node trusts a different CA (or none) —
- * the next mesh.reconcile re-delivers the current one. "unreported": the agent
- * has not said what it trusts (older agent); left alone.
+ * A node's trust reading. "stale": the node trusts a different CA (or none, or
+ * has not reloaded the current one) — the next trust.converge re-delivers it.
+ * "unreported": the agent has not said what it trusts (older agent); left alone.
  */
 export interface MeshDeviceTrust {
   nodeId: string;
   state: 'current' | 'stale' | 'unreported';
-  /** What the node reported: a sha256 fingerprint, or "none". Never a PEM. */
+  /** What the node reported: a sha256 fingerprint, "none", or "reload-pending". Never a PEM. */
   fingerprint?: string;
   agentPredatesField?: boolean;
 }
@@ -1447,7 +1447,7 @@ export type BackupRunStatus = 'running' | 'succeeded' | 'failed';
 /**
  * The scope of a generation (design/storage.md §4.5) — the generation's REACH.
  *
- * `full` is what this build writes: the control-plane database, the mesh CA
+ * `full` is what this build writes: the control-plane database, the controlplane CA
  * and Headscale state, PLUS every volume classed `critical` or `state` of
  * every installed app on EVERY node — each sealed on the node that hosts it
  * and landed as its own member of the generation through the api's ingest
@@ -1719,11 +1719,11 @@ export interface RestoreReport {
   preparedAt: string;
   appliedAt?: string;
   recordedAt?: string;
-  /** Identity restores: the mesh-CA re-delivery the restore kicked once the mesh came up; absent until then. */
+  /** Identity restores: the controlplane-CA re-delivery the restore kicked once agents re-registered; absent until then. */
   trustRedelivery?: TrustRedeliveryRecord;
 }
 
-/** What the post-restore reconcile found: which enrolled nodes were re-delivered the restored mesh CA, and which had not yet said what they trust. */
+/** What the post-restore trust convergence found: which nodes were re-delivered the restored controlplane CA, and which had not yet said what they trust. */
 export interface TrustRedeliveryRecord {
   checkedAt: string;
   caFingerprint?: string;

@@ -99,13 +99,13 @@ it by **pin**: the SHA-256 of that key, carried in their seed as
 the controlplane's own agent — in `bus/agent.pin`, which the api writes at
 every start. An agent with no pin does not dial. The check is the
 key and nothing else — no CA chain, no hostname, no validity dates — so a node
-with a wrong clock still joins, and a mesh CA change cannot lock the fleet out.
+with a wrong clock still joins, and a controlplane CA change cannot lock the fleet out.
 The certificate that key is served in is **persisted** as `bus/bus.crt` and
 carries one fixed DNS name, `rasputin-bus`. A node ignores it; it is there for
 clients that do verify a name, which is every stock TLS client — Go matches the
 SAN and never the Common Name. Nothing pins its bytes. The node listener
-(`:8443`) does not serve it: it serves the api's Mesh-CA-signed HTTPS leaf, and
-every observability collector verifies that leaf by chain to the Mesh CA under
+(`:8443`) does not serve it: it serves the api's controlplane-CA-signed HTTPS leaf, and
+every observability collector verifies that leaf by chain to the controlplane CA under
 the cluster name (geekdojo/geekdojo-brain#672).
 The node listener also carries backup transfer, and is its only route: an
 agent uploads backup members and fetches restore streams there, admitted by
@@ -241,6 +241,18 @@ inter-node traffic and remote UI access ride the tailnet. The coordinator
 runs as a container on the controlplane, with its image baked into the OS so
 the mesh forms with zero internet — important because the controlplane
 usually gets its internet *through* the firewall it's bootstrapping.
+
+The api holds two TLS CAs, both created by one code path (`api/internal/tlsca`)
+and kept in `trust/`. The **controlplane CA** signs every HTTPS leaf the
+controlplane serves (the api, Headscale, the app leaves); operator devices
+install it once, and every node is given it. The **store CA** is trusted by the
+secret store's listener alone and enters no node, browser or collector trust.
+Every leaf carries exactly one explicit EKU. A node's trust bundle (the
+controlplane CA, plus the operator's CA on an external Headscale) reaches it on
+its own verb, `trust.install`, and `trust.converge` re-sends it to every online
+node whose reported fingerprint differs (`api/internal/nodetrust`,
+`agent/internal/nodetrust`); `mesh.enroll` carries it only for an agent too old
+for the verb.
 
 The stack is deliberately **IPv4-only** for now; IPv6 is disabled across the
 OS, firewall, and APIs. (One inert exception: Headscale currently requires a

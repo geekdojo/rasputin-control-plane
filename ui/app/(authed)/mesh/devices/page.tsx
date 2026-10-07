@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { enrollMeshNode, getJob, listMeshDevices, listNodes } from '../../../../lib/api';
 import { parseAdvertiseRoutes } from '../../../../lib/cidr';
 import { useMeshStateRefresh } from '../../../../lib/mesh-state-context';
+import { staleTrustTitle } from '../../../../lib/node-trust';
 import type { MeshDevice, Node } from '../../../../lib/types';
 import {
   Badge,
@@ -91,11 +92,11 @@ export default function DevicesPage() {
   );
 }
 
-// A node whose agent reports trusting a mesh CA other than the api's current
-// one cannot verify anything the api serves over the mesh-CA listener (backup
-// transfer, bundle downloads) until the CA is re-delivered — which the next
-// mesh.reconcile does on its own. Say so on the row; an "unreported" node's
-// agent has not said what it trusts (older agent), and the api leaves it alone.
+// A node whose agent reports trusting a controlplane CA other than the api's
+// current one cannot verify anything the api serves (backup transfer, bundle
+// downloads) until the CA is re-delivered — which the next trust convergence
+// does on its own. Say so on the row; an "unreported" node's agent has not said
+// what it trusts (older agent), and the api leaves it alone.
 function TrustMarker({ trust }: { trust?: MeshDevice['trust'] }) {
   if (!trust || trust.state === 'current') return null;
   if (trust.state === 'stale') {
@@ -103,7 +104,7 @@ function TrustMarker({ trust }: { trust?: MeshDevice['trust'] }) {
       <span style={{ marginLeft: 8 }}>
         <Badge
           color={WARN}
-          title={`this node trusts mesh CA ${trust.fingerprint === 'none' ? 'NONE' : (trust.fingerprint ?? '?').slice(0, 12)}, not the current one — the next mesh reconcile re-delivers it`}
+          title={staleTrustTitle(trust)}
         >
           TRUST STALE · re-delivering
         </Badge>
@@ -116,8 +117,8 @@ function TrustMarker({ trust }: { trust?: MeshDevice['trust'] }) {
         color={DIM}
         title={
           trust.agentPredatesField
-            ? 'this node\'s agent predates trust reporting — update the node to have it report which mesh CA it trusts'
-            : 'this node has not reported which mesh CA it trusts; it is left alone until it does'
+            ? 'this node\'s agent predates trust reporting — update the node to have it report which controlplane CA it trusts'
+            : 'this node has not reported which controlplane CA it trusts; it is left alone until it does'
         }
       >
         TRUST UNREPORTED
@@ -150,7 +151,7 @@ function EnrollNodeForm({
   const selectedNodeId = nodeId || (candidates[0]?.id ?? '');
   // Checked as typed, and the api applies the same rule: a route with host
   // bits set (192.168.1.149/24) is what `tailscale up` refuses on the node,
-  // after the mesh CA is already installed (e3bench 2026-09-04). Refuse it
+  // after the controlplane CA is already installed (e3bench 2026-09-04). Refuse it
   // here, naming the network — never rewrite what the operator typed.
   const parsedRoutes = parseAdvertiseRoutes(routes);
 

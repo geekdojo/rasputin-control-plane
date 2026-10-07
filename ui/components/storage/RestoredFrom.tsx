@@ -68,16 +68,16 @@ export function RestoredFrom() {
   );
 }
 
-// The restore swapped the mesh CA under every node enrolled since the box was
-// re-flashed; each of those kept trusting the replaced CA, and every node→api
-// TLS client on it failed, until the restored CA was delivered again. The
-// api kicks that re-delivery once the mesh is up and records what it found
-// here; the live per-node state is on Mesh → Devices.
+// The restore swapped the controlplane CA under every node enrolled since the
+// box was re-flashed; each of those kept trusting the replaced CA, and every
+// node→api TLS client on it failed, until the restored CA was delivered again.
+// The api kicks that re-delivery once agents have re-registered and records
+// what it found here; the live per-node state is on Mesh → Devices.
 function TrustRedeliveryLine({ rec }: { rec?: RestoreReport['trustRedelivery'] }) {
   if (!rec) {
     return (
       <div style={{ color: DIM }}>
-        Mesh CA re-delivery to enrolled nodes: pending — checked once the mesh is up after the restart.
+        Controlplane CA re-delivery to nodes: pending — checked once agents have re-registered after the restart.
       </div>
     );
   }
@@ -101,7 +101,7 @@ function TrustRedeliveryLine({ rec }: { rec?: RestoreReport['trustRedelivery'] }
   const attention = heldBack.length > 0 || rec.unreported.length > 0 || !!rec.detail;
   return (
     <div style={{ color: attention ? WARN : DIM }}>
-      Mesh CA{rec.caFingerprint ? ` ${rec.caFingerprint.slice(0, 12)}` : ''}{' '}
+      Controlplane CA{rec.caFingerprint ? ` ${rec.caFingerprint.slice(0, 12)}` : ''}{' '}
       <span title={rec.checkedAt}>{timeAgo(rec.checkedAt)}</span>: {parts.join(' · ')}.
       {rec.detail ? ` ${rec.detail}` : ''}
     </div>
