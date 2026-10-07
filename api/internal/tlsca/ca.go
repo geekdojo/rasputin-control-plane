@@ -1,4 +1,4 @@
-package mesh
+package tlsca
 
 import (
 	"crypto/ecdsa"
@@ -281,7 +281,7 @@ type LeafSpec struct {
 
 // leafEKU is the single ExtKeyUsage every leaf carries: a server leaf. The
 // controlplane mints no client leaf; a node authenticates by its own key.
-// One constant, so MintLeaf (which stamps it) and loadLeafIfUsable (which
+// One constant, so MintLeaf (which stamps it) and LoadLeafIfUsable (which
 // must re-mint on a mismatch) can never disagree.
 const leafEKU = x509.ExtKeyUsageServerAuth
 
@@ -312,7 +312,7 @@ func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error)
 		return LeafPaths{}, fmt.Errorf("mesh: leaf dir: %w", err)
 	}
 	paths := LeafPathsIn(outDir)
-	if existing := loadLeafIfUsable(paths, ca, spec); existing != nil {
+	if existing := LoadLeafIfUsable(paths, ca, spec); existing != nil {
 		return paths, nil
 	}
 	certPEM, key, err := MintLeaf(ca, spec)
@@ -394,11 +394,11 @@ func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM []byte, key secret.Value, err 
 	return certPEM, key, nil
 }
 
-// loadLeafIfUsable returns a non-nil cert when the on-disk leaf matches
+// LoadLeafIfUsable returns a non-nil cert when the on-disk leaf matches
 // the spec well enough to skip re-issuing. Returns nil on any of:
 // missing files, parse error, wrong issuer, missing SAN, near-expiry,
 // or unreadable key. Caller treats nil as "mint a fresh one."
-func loadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certificate {
+func LoadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certificate {
 	certPEM, err := os.ReadFile(paths.CertPath)
 	if err != nil {
 		return nil
@@ -498,6 +498,16 @@ func writeKey(path string, key secret.Value) error {
 		return fmt.Errorf("mesh: %w", err)
 	}
 	return nil
+}
+
+// WriteLeafFiles persists a leaf's certificate (0644) and key (0600) at paths,
+// each atomically. For a caller that mints in memory and commits only once the
+// leaf has been accepted (mesh.CommitAppLeaf). The caller still owns key.
+func WriteLeafFiles(paths LeafPaths, certPEM []byte, key secret.Value) error {
+	if err := writeCert(paths.CertPath, certPEM); err != nil {
+		return err
+	}
+	return writeKey(paths.KeyPath, key)
 }
 
 // randomSerial generates a 128-bit positive integer for cert serials.

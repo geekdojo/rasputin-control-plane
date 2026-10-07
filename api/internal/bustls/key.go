@@ -58,7 +58,7 @@ func (k *Key) Signer() crypto.Signer { return k.signer }
 
 // EnsureKey loads dir/bus.key, generating and persisting a fresh ECDSA P-256
 // key (0600) when there is none — the same idiom as busauth.EnsureIssuer and
-// mesh.EnsureMeshCA. generated reports which happened, so the caller can say
+// tlsca.EnsureMeshCA. generated reports which happened, so the caller can say
 // so: a generated key on a cluster whose nodes already carry a pin is a
 // stranded fleet, and the log line is where that is first visible.
 //

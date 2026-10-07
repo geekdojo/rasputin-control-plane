@@ -21,9 +21,9 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -171,7 +171,7 @@ func TestNodeListener_IdentityIsTheKeysOwner(t *testing.T) {
 // a fresh key nobody registered: the shape of a collector leaf the api minted
 // before node keys. Built with crypto/x509 directly; nothing in the product
 // mints one any more.
-func meshChainClient(t *testing.T, ca *mesh.MeshCA, node string) tls.Certificate {
+func meshChainClient(t *testing.T, ca *tlsca.MeshCA, node string) tls.Certificate {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

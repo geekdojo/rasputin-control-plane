@@ -1,4 +1,4 @@
-package mesh
+package api
 
 import (
 	"crypto/ecdsa"

@@ -14,6 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/oklog/ulid/v2"
 )
@@ -220,7 +221,7 @@ func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "trust dir not configured")
 		return
 	}
-	caPath := filepath.Join(s.trustDir, mesh.MeshCAFileName)
+	caPath := filepath.Join(s.trustDir, tlsca.MeshCAFileName)
 	pem, err := os.ReadFile(caPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -230,7 +231,7 @@ func (s *Server) handleMeshIOSProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	profile, err := mesh.BuildIOSMobileConfig(pem, "Rasputin Mesh TLS CA", "Rasputin")
+	profile, err := BuildIOSMobileConfig(pem, "Rasputin Mesh TLS CA", "Rasputin")
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "build mobileconfig: "+err.Error())
 		return
@@ -287,7 +288,7 @@ func (s *Server) serveMeshCA(w http.ResponseWriter, contentType, filename string
 		writeError(w, http.StatusNotFound, "trust dir not configured")
 		return
 	}
-	caPEM, err := os.ReadFile(filepath.Join(s.trustDir, mesh.MeshCAFileName))
+	caPEM, err := os.ReadFile(filepath.Join(s.trustDir, tlsca.MeshCAFileName))
 	if err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, "Mesh TLS CA not yet provisioned — restart the api to regenerate")

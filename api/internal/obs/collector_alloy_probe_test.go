@@ -57,6 +57,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 const (
@@ -161,9 +162,9 @@ func (ps *probeServer) swap(next tls.Certificate) {
 	}
 }
 
-func probeLeaf(t *testing.T, ca *mesh.MeshCA, dnsName string) tls.Certificate {
+func probeLeaf(t *testing.T, ca *tlsca.MeshCA, dnsName string) tls.Certificate {
 	t.Helper()
-	certPEM, keyPEM, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: "probe-api", DNSNames: []string{dnsName}})
+	certPEM, keyPEM, err := tlsca.MintLeaf(ca, tlsca.LeafSpec{CommonName: "probe-api", DNSNames: []string{dnsName}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +196,7 @@ type probeAlloy struct {
 
 // runAlloy writes the config and certs for one case under dir and starts the
 // pinned image against the server at port.
-func runAlloy(t *testing.T, dir, name string, ca *mesh.MeshCA, port int) (*probeAlloy, []byte) {
+func runAlloy(t *testing.T, dir, name string, ca *tlsca.MeshCA, port int) (*probeAlloy, []byte) {
 	t.Helper()
 	certDir := filepath.Join(dir, "certs")
 	// A client pair made the way the agent writes its collector key. 0644 (via
@@ -357,11 +358,11 @@ func TestAlloyProbe(t *testing.T) {
 	}
 	t.Logf("image %s", defaultAlloyImage)
 
-	ca, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "mesh"), "alloy-probe")
+	ca, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "mesh"), "alloy-probe")
 	if err != nil {
 		t.Fatal(err)
 	}
-	foreign, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "foreign"), "alloy-probe-foreign")
+	foreign, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "foreign"), "alloy-probe-foreign")
 	if err != nil {
 		t.Fatal(err)
 	}

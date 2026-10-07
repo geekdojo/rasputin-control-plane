@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -55,7 +56,7 @@ func TestSupervisor_LiveBindingsAndRoutes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "trust"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ca, err := EnsureMeshCA(filepath.Join(stateDir, "trust"), "bindings-smoke")
+	ca, err := tlsca.EnsureMeshCA(filepath.Join(stateDir, "trust"), "bindings-smoke")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}

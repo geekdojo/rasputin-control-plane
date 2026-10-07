@@ -51,6 +51,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 const supervisorTestContainer = "rasputin-headscale-test"
@@ -86,7 +88,7 @@ func TestSupervisor_LiveDockerLifecycle(t *testing.T) {
 	if err := os.MkdirAll(caDir, 0o755); err != nil {
 		t.Fatalf("mkdir trust: %v", err)
 	}
-	ca, err := EnsureMeshCA(caDir, "supervisor-smoke")
+	ca, err := tlsca.EnsureMeshCA(caDir, "supervisor-smoke")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
@@ -337,7 +339,7 @@ func TestSupervisor_LiveSessionAPIKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(stateDir, "trust"), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	ca, err := EnsureMeshCA(filepath.Join(stateDir, "trust"), "apikey-smoke")
+	ca, err := tlsca.EnsureMeshCA(filepath.Join(stateDir, "trust"), "apikey-smoke")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}

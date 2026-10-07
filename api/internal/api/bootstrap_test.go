@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 // provisionMeshCA drops a real Mesh CA into the fixture's trust dir (the
@@ -17,7 +17,7 @@ import (
 // something to serve.
 func provisionMeshCA(t *testing.T, f *apiFixture) {
 	t.Helper()
-	if _, err := mesh.EnsureMeshCA(f.dir, "test-install"); err != nil {
+	if _, err := tlsca.EnsureMeshCA(f.dir, "test-install"); err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
 }

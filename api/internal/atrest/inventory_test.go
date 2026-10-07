@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -126,14 +127,14 @@ func rows() []row {
 			name:     "mesh CA",
 			seedDirs: []string{"trust"},
 			write: func(t *testing.T, d string) {
-				if _, err := mesh.EnsureMeshCA(filepath.Join(d, "trust"), "test"); err != nil {
+				if _, err := tlsca.EnsureMeshCA(filepath.Join(d, "trust"), "test"); err != nil {
 					t.Fatal(err)
 				}
 			},
 			want: []want{
 				{"trust", dirMode},
-				{"trust/" + mesh.MeshCAKeyFileName, secretMode},
-				{"trust/" + mesh.MeshCAFileName, publicMode}, // a certificate: public by construction
+				{"trust/" + tlsca.MeshCAKeyFileName, secretMode},
+				{"trust/" + tlsca.MeshCAFileName, publicMode}, // a certificate: public by construction
 			},
 		},
 		{
@@ -142,7 +143,7 @@ func rows() []row {
 			write: func(t *testing.T, d string) {
 				ca := meshCA(t)
 				for _, sub := range []string{"tls/api", "tls/collectors/n1"} {
-					if _, err := mesh.MintLeafToDisk(ca, filepath.Join(d, sub), mesh.LeafSpec{CommonName: "x", DNSNames: []string{"x"}}); err != nil {
+					if _, err := tlsca.MintLeafToDisk(ca, filepath.Join(d, sub), tlsca.LeafSpec{CommonName: "x", DNSNames: []string{"x"}}); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -159,7 +160,7 @@ func rows() []row {
 			name:     "app leaf",
 			seedDirs: []string{"tls", "tls/apps", "tls/apps/web"},
 			write: func(t *testing.T, d string) {
-				cert, key, err := mesh.MintLeaf(meshCA(t), mesh.LeafSpec{CommonName: "web", DNSNames: []string{"web"}})
+				cert, key, err := tlsca.MintLeaf(meshCA(t), tlsca.LeafSpec{CommonName: "web", DNSNames: []string{"web"}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -290,9 +291,9 @@ func openBusStore(t *testing.T, dataDir string) *busauth.Store {
 	return st
 }
 
-func meshCA(t *testing.T) *mesh.MeshCA {
+func meshCA(t *testing.T) *tlsca.MeshCA {
 	t.Helper()
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "test")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

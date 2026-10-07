@@ -1,4 +1,4 @@
-package mesh
+package tlsca
 
 import (
 	"context"
@@ -236,63 +236,6 @@ func TestLeafPathsIn(t *testing.T) {
 	got := LeafPathsIn("/data/tls/api")
 	if got.CertPath != filepath.Join("/data/tls/api", "leaf.pem") || got.KeyPath != filepath.Join("/data/tls/api", "leaf.key") {
 		t.Errorf("LeafPathsIn = %+v", got)
-	}
-}
-
-// Headscale reads its certificate at container start, so its reload hook
-// restarts the container — and only when it is actually running.
-func TestHeadscaleLeafConsumer_RestartsOnlyARunningContainer(t *testing.T) {
-	ca := sweepTestCA(t)
-	fd := newFakeDocker()
-	s := newTestSupervisor(t, fd, func(c *DockerSupervisorConfig) {
-		c.MeshCA = ca
-		c.ListenAddr = "127.0.0.1:18080"
-	})
-	c := s.LeafConsumer()
-	if c.Name != headscaleLeafName || c.Spec == nil || c.Reload == nil {
-		t.Fatalf("LeafConsumer = %+v, want a named consumer with a spec and a reload hook", c)
-	}
-	if want := filepath.Join(s.cfg.StateDir, "certs"); c.Dir != want {
-		t.Errorf("Dir = %q, want %q", c.Dir, want)
-	}
-
-	// No container yet: nothing to restart, and that is not an error — the
-	// next Start creates it and reads the leaf then.
-	if err := c.Reload(context.Background(), LeafPathsIn(c.Dir)); err != nil {
-		t.Fatalf("reload with no container: %v", err)
-	}
-	if slices.Contains(fd.cmdNames(), "restart") {
-		t.Error("restarted a container that does not exist")
-	}
-
-	fd.containerExists, fd.containerState = true, "running"
-	if err := c.Reload(context.Background(), LeafPathsIn(c.Dir)); err != nil {
-		t.Fatalf("reload with a running container: %v", err)
-	}
-	if !slices.Contains(fd.cmdNames(), "restart") {
-		t.Errorf("a running container was not restarted; calls = %v", fd.cmdNames())
-	}
-}
-
-// The spec the sweep checks against is the one Start mints with, so a leaf
-// Start is happy with is not re-minted on every sweep.
-func TestHeadscaleLeafConsumer_SpecMatchesWhatStartMints(t *testing.T) {
-	ca := sweepTestCA(t)
-	fd := newFakeDocker()
-	s := newTestSupervisor(t, fd, func(c *DockerSupervisorConfig) {
-		c.MeshCA = ca
-		c.ListenAddr = "127.0.0.1:18080"
-	})
-	if err := s.Start(context.Background()); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	sweeper := NewLeafSweeper(ca)
-	if err := sweeper.Register(s.LeafConsumer()); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
-	rep := sweeper.Sweep(context.Background(), nil)
-	if rep.Checked != 1 || len(rep.Renewed) != 0 {
-		t.Errorf("report = %+v, want the freshly-minted leaf left alone", rep)
 	}
 }
 

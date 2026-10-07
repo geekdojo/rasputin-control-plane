@@ -50,6 +50,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
@@ -405,7 +406,7 @@ func main() {
 
 	// Trust material lives at <trustDir>/. Used by:
 	//   - updater.Verifier (root-ca.pem; bundle signatures)
-	//   - mesh.EnsureMeshCA (mesh-ca.{key,pem}; per-installation TLS CA)
+	//   - tlsca.EnsureMeshCA (mesh-ca.{key,pem}; per-installation TLS CA)
 	//   - the .mobileconfig endpoint (serves mesh-ca.pem to operator devices)
 	// Set up ahead of mesh because the docker supervisor needs the Mesh CA
 	// at construction time. See wiki design/control-plane/certificates.md.
@@ -473,7 +474,7 @@ func main() {
 	// of them can be anchored in a bogus pre-NTP window and read as expired
 	// once the clock corrects. It waits at most once; see trustedClock.
 	clockGate := newTrustedClock(ctx, clockGateTimeout)
-	meshCA, err := mesh.EnsureMeshCA(trustDir, installName, mesh.WithLeafClockGate(clockGate.ok))
+	meshCA, err := tlsca.EnsureMeshCA(trustDir, installName, tlsca.WithLeafClockGate(clockGate.ok))
 	if err != nil {
 		log.Fatalf("rasputin-api: mesh CA: %v", err)
 	}
@@ -483,7 +484,7 @@ func main() {
 	// (§7.1). Consumers register below as they are built; the sweep itself is
 	// a job on the schedule, and what it does is decided by each leaf's
 	// NotAfter, not by the tick.
-	leafSweeper := mesh.NewLeafSweeper(meshCA)
+	leafSweeper := tlsca.NewLeafSweeper(meshCA)
 	defaultLogin := envOr("RASPUTIN_MESH_LOGIN_SERVER", "https://mesh.rasputin.local")
 	mw, err := wireMesh(meshStateDir, meshCA, defaultLogin)
 	if err != nil {
@@ -803,10 +804,10 @@ func main() {
 	// Mesh-CA leaf registers with the sweeper — the api's own HTTPS leaf and
 	// Headscale's below — and the leaf lifecycles that own a delivery contract of their own run as
 	// fan-outs from the same job, so there is one thing to look at when a
-	// certificate is about to lapse. See mesh/sweep.go.
-	runner.Register(mesh.LeafSweepWorkflow(mesh.LeafSweepDeps{
+	// certificate is about to lapse. See tlsca/sweep.go.
+	runner.Register(tlsca.LeafSweepWorkflow(tlsca.LeafSweepDeps{
 		Sweeper: leafSweeper,
-		FanOut: []mesh.LeafFanOut{{
+		FanOut: []tlsca.LeafFanOut{{
 			// The per-app leaves keep their prepare → ship → commit contract
 			// (the on-disk copy must not advance past what the node holds),
 			// so the sweep submits their sweep rather than re-minting them.
@@ -1304,7 +1305,7 @@ func main() {
 	// old per-app name is still honoured for an operator who set it.
 	leafSweepEvery := parseDurationOr(
 		envOr("RASPUTIN_LEAF_SWEEP_INTERVAL", os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL")),
-		mesh.DefaultLeafSweepInterval)
+		tlsca.DefaultLeafSweepInterval)
 	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafSweepEvery), []scheduler.Entry{
 		// storage.reconcile (#398): the claimed backup target's health, with
 		// a write probe. Fires only while a target is claimed (Due).
@@ -1624,7 +1625,7 @@ func main() {
 		// Served from memory through GetCertificate rather than from files at
 		// ListenAndServeTLS, so a LAN address change re-mints the leaf's IP SAN
 		// without a restart (#431).
-		leaf = &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
+		leaf = &apiLeaf{mint: func(lanIP net.IP) (tlsca.LeafPaths, error) {
 			return ensureAPILeaf(meshCA, dataDir, lanIP)
 		}}
 		// The api's own HTTPS leaf joins the sweep. Until now nothing renewed
@@ -1634,14 +1635,14 @@ func main() {
 		// fresh bytes into the in-memory certificate both TLS listeners read
 		// per handshake, so the HTTPS surface and the mTLS ingress pick it up
 		// together and neither needs a restart.
-		if err := leafSweeper.Register(mesh.LeafConsumer{
+		if err := leafSweeper.Register(tlsca.LeafConsumer{
 			Name: "api-https",
 			Dir:  filepath.Join(dataDir, "tls", "api"),
-			Spec: func() (mesh.LeafSpec, error) {
+			Spec: func() (tlsca.LeafSpec, error) {
 				hostname, _ := os.Hostname()
 				return apiLeafSpec(hostname, lanWatch.PrimaryIP()), nil
 			},
-			Reload: func(context.Context, mesh.LeafPaths) error {
+			Reload: func(context.Context, tlsca.LeafPaths) error {
 				return leaf.refresh(lanWatch.PrimaryIP())
 			},
 		}); err != nil {
@@ -1850,10 +1851,10 @@ func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
 // SAN-drift and <60d re-mint logic) the api's own HTTPS server leaf under
 // the Mesh CA. Lives at <dataDir>/tls/api/leaf.{pem,key}, parallel to the
 // Headscale leaf at <dataDir>/mesh/headscale/certs/.
-func ensureAPILeaf(meshCA *mesh.MeshCA, dataDir string, lanIP net.IP) (mesh.LeafPaths, error) {
+func ensureAPILeaf(meshCA *tlsca.MeshCA, dataDir string, lanIP net.IP) (tlsca.LeafPaths, error) {
 	hostname, _ := os.Hostname()
 	spec := apiLeafSpec(hostname, lanIP)
-	return mesh.MintLeafToDisk(meshCA, filepath.Join(dataDir, "tls", "api"), spec)
+	return tlsca.MintLeafToDisk(meshCA, filepath.Join(dataDir, "tls", "api"), spec)
 }
 
 // apiLeafSpec builds the SAN set for the api's HTTPS leaf:
@@ -1867,7 +1868,7 @@ func ensureAPILeaf(meshCA *mesh.MeshCA, dataDir string, lanIP net.IP) (mesh.Leaf
 //
 // MintLeafToDisk's SAN-drift check re-mints automatically when any of
 // these change (new hostname, node moved subnets).
-func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
+func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 	dns := []string{"rasputin.local", "localhost"}
 	seen := map[string]bool{"rasputin.local": true, "localhost": true}
 	add := func(name string) {
@@ -1886,7 +1887,7 @@ func apiLeafSpec(hostname string, lanIP net.IP) mesh.LeafSpec {
 	if lanIP != nil {
 		ips = append(ips, lanIP)
 	}
-	return mesh.LeafSpec{
+	return tlsca.LeafSpec{
 		CommonName:  "rasputin.local",
 		DNSNames:    dns,
 		IPAddresses: ips,
@@ -1969,7 +1970,7 @@ func reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, 
 		// still drives one app's leaf directly — but it no longer has a tick of
 		// its own, because two ticks renewing certificates is two places to
 		// look when one lapses.
-		{Kind: mesh.LeafSweepKind, Interval: leafSweepEvery, InitialDelay: 2 * time.Minute},
+		{Kind: tlsca.LeafSweepKind, Interval: leafSweepEvery, InitialDelay: 2 * time.Minute},
 	}
 }
 
@@ -2451,7 +2452,7 @@ type meshWiring struct {
 	bootstrap func(context.Context) (mesh.Client, error) // nil for eager (mock/external) modes
 }
 
-func wireMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (meshWiring, error) {
+func wireMesh(stateDir string, meshCA *tlsca.MeshCA, defaultLogin string) (meshWiring, error) {
 	backend := strings.ToLower(envOr("RASPUTIN_MESH_BACKEND", "auto"))
 	extURL := os.Getenv("RASPUTIN_HEADSCALE_URL")
 	extKey := os.Getenv("RASPUTIN_HEADSCALE_API_KEY")
@@ -2528,12 +2529,12 @@ func wireMockMesh(stateDir, defaultLogin string) (meshWiring, error) {
 // trust the system pool unless RASPUTIN_HEADSCALE_CA_FILE points at a PEM
 // bundle (e.g. their internal CA) — in which case nodes need that CA too, so
 // it is APPENDED to the Mesh CA in the bundle the enroll command ships
-// (mesh.NodeTrustBundle; geekdojo/geekdojo-brain#506). The Mesh CA goes to
+// (tlsca.NodeTrustBundle; geekdojo/geekdojo-brain#506). The Mesh CA goes to
 // every node whoever runs Headscale: it also signs the api's own HTTPS leaf
 // and the app leaves. The container lifecycle is theirs (noop supervisor)
 // unless they explicitly asked us to drive it. Eager: the client is
 // constructed up front (EnsureUser still runs in the background Start).
-func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, key string) (meshWiring, error) {
+func wireExternalMesh(stateDir string, meshCA *tlsca.MeshCA, defaultLogin, url, key string) (meshWiring, error) {
 	cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
 	var operatorCA []byte
 	if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
@@ -2545,7 +2546,7 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 		// and the CA the nodes are shipped are the same bytes, and a file
 		// that cannot be read fails the start rather than quietly shipping
 		// nodes a CA the api itself does not trust.
-		tlsCfg, cerr := mesh.CATLSConfig(pem, "RASPUTIN_HEADSCALE_CA_FILE="+caFile)
+		tlsCfg, cerr := tlsca.CATLSConfig(pem, "RASPUTIN_HEADSCALE_CA_FILE="+caFile)
 		if cerr != nil {
 			return meshWiring{}, cerr
 		}
@@ -2564,7 +2565,7 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 		}
 		sup = ds
 	}
-	caPEM := mesh.NodeTrustBundle(meshCA.CertPEM, operatorCA)
+	caPEM := tlsca.NodeTrustBundle(meshCA.CertPEM, operatorCA)
 	bundle := "mesh-ca"
 	if len(operatorCA) > 0 {
 		bundle = "mesh-ca+operator-ca"
@@ -2582,14 +2583,14 @@ func wireExternalMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin, url, k
 // mint this process's in-memory admin key, and point a real client at the local HTTPS
 // endpoint trusting the per-installation Mesh CA. Ships meshCA.CertPEM to
 // nodes so tailscaled trusts the same leaf. Nothing here blocks api boot.
-func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin string) (meshWiring, error) {
+func wireSelfHostedMesh(stateDir string, meshCA *tlsca.MeshCA, defaultLogin string) (meshWiring, error) {
 	sup, err := newDockerSupervisor(stateDir, meshCA)
 	if err != nil {
 		return meshWiring{}, err
 	}
 	// The same helper the external path uses; here the root that signs the
 	// Headscale leaf is this installation's Mesh CA (#506).
-	tlsCfg, err := mesh.CATLSConfig(meshCA.CertPEM, "the Mesh CA")
+	tlsCfg, err := tlsca.CATLSConfig(meshCA.CertPEM, "the Mesh CA")
 	if err != nil {
 		return meshWiring{}, err
 	}
@@ -2616,14 +2617,14 @@ func wireSelfHostedMesh(stateDir string, meshCA *mesh.MeshCA, defaultLogin strin
 		client:    mesh.NewNotReadyClient("headscale"),
 		sup:       sup,
 		login:     url,
-		caPEM:     mesh.NodeTrustBundle(meshCA.CertPEM),
+		caPEM:     tlsca.NodeTrustBundle(meshCA.CertPEM),
 		bootstrap: bootstrap,
 	}, nil
 }
 
 // newDockerSupervisor builds a DockerSupervisor from env overrides + the Mesh
 // CA (which switches it into HTTPS mode with a per-installation leaf).
-func newDockerSupervisor(stateDir string, meshCA *mesh.MeshCA) (*mesh.DockerSupervisor, error) {
+func newDockerSupervisor(stateDir string, meshCA *tlsca.MeshCA) (*mesh.DockerSupervisor, error) {
 	cfg := mesh.DockerSupervisorConfig{
 		StateDir:   filepath.Join(stateDir, "headscale"),
 		Image:      os.Getenv("RASPUTIN_HEADSCALE_IMAGE"),

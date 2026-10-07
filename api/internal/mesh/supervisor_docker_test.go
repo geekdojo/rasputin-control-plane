@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 // ============================================================================
@@ -557,7 +559,7 @@ func TestDockerSupervisor_Healthy_MissingContainer(t *testing.T) {
 // ============================================================================
 
 func TestDockerSupervisor_TLSMode_DefaultsServerURLToHTTPS(t *testing.T) {
-	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "x")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
@@ -574,7 +576,7 @@ func TestDockerSupervisor_TLSMode_DefaultsServerURLToHTTPS(t *testing.T) {
 }
 
 func TestDockerSupervisor_TLSMode_RenderedConfigPointsAtLeaf(t *testing.T) {
-	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "x")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
@@ -597,7 +599,7 @@ func TestDockerSupervisor_TLSMode_RenderedConfigPointsAtLeaf(t *testing.T) {
 }
 
 func TestDockerSupervisor_TLSMode_StartMintsLeafAndMountsIt(t *testing.T) {
-	ca, err := EnsureMeshCA(t.TempDir(), "x")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "x")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}

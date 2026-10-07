@@ -47,7 +47,7 @@ func (i *Issuer) PublicKey() string { return i.pubKey }
 func (i *Issuer) KeyPair() nkeys.KeyPair { return i.kp }
 
 // EnsureIssuer loads the account signing seed from dir/issuer.nk, generating
-// and persisting a fresh one (0600) on first run. Mirrors mesh.EnsureMeshCA.
+// and persisting a fresh one (0600) on first run. Mirrors tlsca.EnsureMeshCA.
 func EnsureIssuer(dir string) (*Issuer, error) {
 	if dir == "" {
 		return nil, errors.New("busauth: EnsureIssuer: dir required")

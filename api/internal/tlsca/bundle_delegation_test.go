@@ -1,4 +1,4 @@
-package mesh
+package tlsca
 
 import (
 	"testing"
@@ -6,7 +6,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// TC-590-03: mesh.CATLSConfig is proto.CATLSConfig — the api's Headscale
+// TC-590-03: tlsca.CATLSConfig is proto.CATLSConfig — the api's Headscale
 // clients and the agent's HTTPS clients build trust the same way. For every
 // input, the two return equal pools and identical error text.
 func TestCATLSConfig_DelegatesToProto(t *testing.T) {

@@ -33,6 +33,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
@@ -1887,7 +1888,7 @@ func TestHandleMeshIOSProfile_ServesAppleAspenConfig(t *testing.T) {
 	// TLS CA — NOT root-ca.pem; that's the bundle-signing root which is
 	// the wrong CA for the trust-Headscale use case).
 	certPEM := freshSelfSignedCertForAPI(t)
-	caPath := filepath.Join(f.srv.trustDir, mesh.MeshCAFileName)
+	caPath := filepath.Join(f.srv.trustDir, tlsca.MeshCAFileName)
 	if err := os.WriteFile(caPath, certPEM, 0o644); err != nil {
 		t.Fatalf("write mesh-ca.pem: %v", err)
 	}

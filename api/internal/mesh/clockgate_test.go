@@ -5,13 +5,16 @@ import (
 	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"os"
 )
 
 // gateCA returns a CA whose leaf mints go through a counting clock gate.
-func gateCA(t *testing.T, answer bool) (*MeshCA, *atomic.Int32) {
+func gateCA(t *testing.T, answer bool) (*tlsca.MeshCA, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
-	ca, err := EnsureMeshCA(t.TempDir(), "clockgate", WithLeafClockGate(func() bool {
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "clockgate", tlsca.WithLeafClockGate(func() bool {
 		calls.Add(1)
 		return answer
 	}))
@@ -25,22 +28,22 @@ func gateCA(t *testing.T, answer bool) (*MeshCA, *atomic.Int32) {
 // gated. This asserts that for each of them by name, because a new mint path
 // that bypassed the gate is exactly the sprawl this closes.
 func TestLeafMintsWaitForATrustworthyClock(t *testing.T) {
-	spec := LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}}
+	spec := tlsca.LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}}
 	mints := []struct {
 		name string
-		mint func(t *testing.T, ca *MeshCA)
+		mint func(t *testing.T, ca *tlsca.MeshCA)
 	}{
-		{"MintLeaf", func(t *testing.T, ca *MeshCA) {
-			if _, _, err := MintLeaf(ca, spec); err != nil {
+		{"MintLeaf", func(t *testing.T, ca *tlsca.MeshCA) {
+			if _, _, err := tlsca.MintLeaf(ca, spec); err != nil {
 				t.Fatalf("MintLeaf: %v", err)
 			}
 		}},
-		{"MintLeafToDisk", func(t *testing.T, ca *MeshCA) {
-			if _, err := MintLeafToDisk(ca, t.TempDir(), spec); err != nil {
+		{"MintLeafToDisk", func(t *testing.T, ca *tlsca.MeshCA) {
+			if _, err := tlsca.MintLeafToDisk(ca, t.TempDir(), spec); err != nil {
 				t.Fatalf("MintLeafToDisk: %v", err)
 			}
 		}},
-		{"PrepareAppLeaf", func(t *testing.T, ca *MeshCA) {
+		{"PrepareAppLeaf", func(t *testing.T, ca *tlsca.MeshCA) {
 			_, _, renewed, err := PrepareAppLeaf(ca, t.TempDir(), "c1", "jellyfin")
 			if err != nil {
 				t.Fatalf("PrepareAppLeaf: %v", err)
@@ -65,7 +68,7 @@ func TestLeafMintsWaitForATrustworthyClock(t *testing.T) {
 // reachable NTP still has to serve TLS, and the gate has already said so.
 func TestLeafMintProceedsWhenTheClockNeverSyncs(t *testing.T) {
 	ca, calls := gateCA(t, false)
-	certPEM, keyPEM, err := MintLeaf(ca, LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}})
+	certPEM, keyPEM, err := tlsca.MintLeaf(ca, tlsca.LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}})
 	if err != nil {
 		t.Fatalf("MintLeaf: %v", err)
 	}
@@ -82,20 +85,20 @@ func TestLeafMintProceedsWhenTheClockNeverSyncs(t *testing.T) {
 func TestUnchangedLeafDoesNotConsultTheClock(t *testing.T) {
 	ca, calls := gateCA(t, true)
 	dir := t.TempDir()
-	spec := LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}}
-	if _, err := MintLeafToDisk(ca, dir, spec); err != nil {
+	spec := tlsca.LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}}
+	if _, err := tlsca.MintLeafToDisk(ca, dir, spec); err != nil {
 		t.Fatalf("MintLeafToDisk: %v", err)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("first mint consulted the gate %d times, want 1", got)
 	}
-	if _, err := MintLeafToDisk(ca, dir, spec); err != nil {
+	if _, err := tlsca.MintLeafToDisk(ca, dir, spec); err != nil {
 		t.Fatalf("MintLeafToDisk (again): %v", err)
 	}
 	if got := calls.Load(); got != 1 {
 		t.Errorf("re-using the existing leaf consulted the gate; calls = %d, want still 1", got)
 	}
-	if !fileExists(filepath.Join(dir, "leaf.pem")) {
+	if _, err := os.Stat(filepath.Join(dir, "leaf.pem")); err != nil {
 		t.Fatal("leaf missing")
 	}
 }
@@ -103,11 +106,11 @@ func TestUnchangedLeafDoesNotConsultTheClock(t *testing.T) {
 // A CA built without the option mints exactly as before — every existing
 // caller, and every test, is unaffected.
 func TestNoGateMeansNoChange(t *testing.T) {
-	ca, err := EnsureMeshCA(t.TempDir(), "nogate")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "nogate")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
-	if _, _, err := MintLeaf(ca, LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}}); err != nil {
+	if _, _, err := tlsca.MintLeaf(ca, tlsca.LeafSpec{CommonName: "x.local", DNSNames: []string{"x.local"}}); err != nil {
 		t.Fatalf("MintLeaf: %v", err)
 	}
 }

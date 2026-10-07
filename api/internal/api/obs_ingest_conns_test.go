@@ -21,8 +21,8 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -84,18 +84,18 @@ func collectorKeysOf(t *testing.T, nodes ...string) map[string]inventory.KeyOwne
 // does it for its seeded nodes, collectorKeysOf for the fake registry.
 type ingressTLS struct {
 	srv     *httptest.Server
-	ca      *mesh.MeshCA
+	ca      *tlsca.MeshCA
 	roots   *x509.CertPool
 	clients map[string]tls.Certificate
 }
 
 func startIngress(t *testing.T, s *Server, gate IngestRegistry, nodes ...string) *ingressTLS {
 	t.Helper()
-	ca, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "test")
+	ca, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "test")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
-	serverCertPEM, serverKeyPEM, err := mesh.MintLeaf(ca, mesh.LeafSpec{CommonName: "api", IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}})
+	serverCertPEM, serverKeyPEM, err := tlsca.MintLeaf(ca, tlsca.LeafSpec{CommonName: "api", IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}})
 	if err != nil {
 		t.Fatalf("server leaf: %v", err)
 	}

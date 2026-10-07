@@ -22,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
@@ -243,13 +244,13 @@ func TestAPILeafSpec_HostnameIsRasputinLocal_NoDup(t *testing.T) {
 // assert the SANs survive onto the actual certificate.
 func TestEnsureAPILeaf_CertCarriesSANs(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(dir, "test")
+	ca, err := tlsca.EnsureMeshCA(dir, "test")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
 
 	spec := apiLeafSpec("nodex", net.ParseIP("10.0.0.5"))
-	certPEM, _, err := mesh.MintLeaf(ca, spec)
+	certPEM, _, err := tlsca.MintLeaf(ca, spec)
 	if err != nil {
 		t.Fatalf("MintLeaf: %v", err)
 	}
@@ -729,7 +730,7 @@ func TestWireBundleVerifier_MissingTrustRootIsNeverPermissive(t *testing.T) {
 // hardware: the OS image ships root-ca.pem, so this is the normal posture.
 func TestWireBundleVerifier_LoadsTheTrustRootWhenPresent(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(dir, "test") // any real CA PEM will do here
+	ca, err := tlsca.EnsureMeshCA(dir, "test") // any real CA PEM will do here
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
@@ -850,11 +851,11 @@ func TestEnsureSelfAgentToken(t *testing.T) {
 // trusted the operator's root and not the CA that signs its own controlplane's
 // HTTPS leaf and app leaves.
 func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
-	meshCA, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "wire-test")
+	meshCA, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "wire-test")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
-	operatorCA, err := mesh.EnsureMeshCA(filepath.Join(t.TempDir(), "operator"), "operator")
+	operatorCA, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "operator"), "operator")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA(operator): %v", err)
 	}
@@ -913,7 +914,7 @@ func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
 // client on the system pool.
 func TestWireSelfHostedMesh_UnusableMeshCAIsRefused(t *testing.T) {
 	t.Setenv("RASPUTIN_HEADSCALE_URL", "https://127.0.0.1:18080")
-	_, err := wireSelfHostedMesh(t.TempDir(), &mesh.MeshCA{CertPEM: []byte("not a certificate")}, "dev@example.com")
+	_, err := wireSelfHostedMesh(t.TempDir(), &tlsca.MeshCA{CertPEM: []byte("not a certificate")}, "dev@example.com")
 	if err == nil {
 		t.Fatal("a Mesh CA with no certificate in it was accepted")
 	}

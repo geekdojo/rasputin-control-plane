@@ -15,7 +15,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -435,12 +435,12 @@ func TestLeafSweeps_RotatedKeyReachesTheBusAndTheDiskOnly(t *testing.T) {
 		t.Run(tc.kind, func(t *testing.T) {
 			ctx := context.Background()
 			nc := startNATS(t)
-			ca, err := mesh.EnsureMeshCA(t.TempDir(), "home1")
+			ca, err := tlsca.EnsureMeshCA(t.TempDir(), "home1")
 			if err != nil {
 				t.Fatal(err)
 			}
 			leafRoot := t.TempDir()
-			keyPath := mesh.LeafPathsIn(filepath.Join(leafRoot, "a")).KeyPath
+			keyPath := tlsca.LeafPathsIn(filepath.Join(leafRoot, "a")).KeyPath
 
 			var onDiskAtAck atomic.Bool
 			got := make(chan proto.AppLeafCmd, 2)

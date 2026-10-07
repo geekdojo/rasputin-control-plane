@@ -16,7 +16,7 @@ import (
 // inline. Every other Mesh-CA mint (Headscale's leaf, a node's collector leaf,
 // an app's leaf) stamped time.Now() with nothing checked, so a controlplane
 // that came up before NTP could issue certificates anchored in a bogus window
-// and hand them to nodes. Passed to mesh.WithLeafClockGate, this gates all of
+// and hand them to nodes. Passed to tlsca.WithLeafClockGate, this gates all of
 // them.
 //
 // Shape:

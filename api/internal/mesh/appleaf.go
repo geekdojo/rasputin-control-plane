@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -73,9 +74,9 @@ func AppRouteHosts(clusterID, appName string, exposeLAN bool) (tailnet, lan stri
 // first renewal sweep after a deploy found an empty leaf directory and minted a
 // second leaf for an app that already had one (geekdojo/geekdojo-brain#603).
 // PrepareAppLeaf is now the only way in, and it is disk-backed by construction.
-func appLeafSpec(clusterID, appName string) LeafSpec {
+func appLeafSpec(clusterID, appName string) tlsca.LeafSpec {
 	names := AppLeafDNSNames(clusterID, appName)
-	return LeafSpec{
+	return tlsca.LeafSpec{
 		CommonName: names[0],
 		DNSNames:   names,
 		// The SAN set no longer moves with exposure, but ExactDNSNames stays
@@ -89,7 +90,7 @@ func appLeafSpec(clusterID, appName string) LeafSpec {
 	}
 }
 
-func appLeafPaths(dir string) LeafPaths { return LeafPathsIn(dir) }
+func appLeafPaths(dir string) tlsca.LeafPaths { return tlsca.LeafPathsIn(dir) }
 
 // PrepareAppLeaf is the ONE way an app's leaf comes into being (ADR-0004 §6).
 // It
@@ -118,13 +119,13 @@ func appLeafPaths(dir string) LeafPaths { return LeafPathsIn(dir) }
 // The private key comes back as a secret.Value the caller owns and destroys,
 // whether it was read from disk or minted (ADR-0009). A failure returns the
 // zero Value.
-func PrepareAppLeaf(ca *MeshCA, dir, clusterID, appName string) (certPEM []byte, key secret.Value, renewed bool, err error) {
+func PrepareAppLeaf(ca *tlsca.MeshCA, dir, clusterID, appName string) (certPEM []byte, key secret.Value, renewed bool, err error) {
 	if ca == nil {
 		return nil, secret.Value{}, false, errors.New("mesh: PrepareAppLeaf: nil CA")
 	}
 	spec := appLeafSpec(clusterID, appName)
 	paths := appLeafPaths(dir)
-	if loadLeafIfUsable(paths, ca, spec) != nil {
+	if tlsca.LoadLeafIfUsable(paths, ca, spec) != nil {
 		certPEM, err = os.ReadFile(paths.CertPath)
 		if err != nil {
 			return nil, secret.Value{}, false, fmt.Errorf("mesh: read app leaf cert: %w", err)
@@ -137,7 +138,7 @@ func PrepareAppLeaf(ca *MeshCA, dir, clusterID, appName string) (certPEM []byte,
 		clear(keyPEM)
 		return certPEM, key, false, nil
 	}
-	certPEM, key, err = MintLeaf(ca, spec)
+	certPEM, key, err = tlsca.MintLeaf(ca, spec)
 	if err != nil {
 		return nil, secret.Value{}, false, err
 	}
@@ -153,8 +154,5 @@ func CommitAppLeaf(dir string, certPEM []byte, key secret.Value) error {
 		return fmt.Errorf("mesh: app leaf dir: %w", err)
 	}
 	paths := appLeafPaths(dir)
-	if err := writeCert(paths.CertPath, certPEM); err != nil {
-		return err
-	}
-	return writeKey(paths.KeyPath, key)
+	return tlsca.WriteLeafFiles(paths, certPEM, key)
 }

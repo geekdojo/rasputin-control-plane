@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nameserver"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -97,7 +97,7 @@ func dnsForwardOnFirewallRegistration(submit func(reason string)) func(context.C
 // files by ListenAndServeTLS, it kept the address from api start until the next
 // restart; served through GetCertificate, it follows the address.
 type apiLeaf struct {
-	mint func(lanIP net.IP) (mesh.LeafPaths, error)
+	mint func(lanIP net.IP) (tlsca.LeafPaths, error)
 
 	mu     sync.Mutex
 	loaded bool

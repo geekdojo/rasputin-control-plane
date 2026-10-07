@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/nodekeytest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"log/slog"
@@ -29,17 +29,17 @@ import (
 // meshLeafOnDisk is an apiLeaf whose mint writes a FRESH leaf (new key, new
 // serial) under ca for the cluster "home1" on every call, so refresh swaps in
 // a genuinely re-minted certificate the way the leaf sweep's renewal does.
-func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
+func meshLeafOnDisk(t *testing.T, ca *tlsca.MeshCA) *apiLeaf {
 	t.Helper()
 	dir := t.TempDir()
 	var n atomic.Int32
-	return &apiLeaf{mint: func(lanIP net.IP) (mesh.LeafPaths, error) {
-		certPEM, keyPEM, err := mesh.MintLeaf(ca, apiLeafSpec("home1", lanIP))
+	return &apiLeaf{mint: func(lanIP net.IP) (tlsca.LeafPaths, error) {
+		certPEM, keyPEM, err := tlsca.MintLeaf(ca, apiLeafSpec("home1", lanIP))
 		if err != nil {
-			return mesh.LeafPaths{}, err
+			return tlsca.LeafPaths{}, err
 		}
 		i := n.Add(1)
-		p := mesh.LeafPaths{
+		p := tlsca.LeafPaths{
 			CertPath: filepath.Join(dir, fmt.Sprintf("leaf%d.pem", i)),
 			KeyPath:  filepath.Join(dir, fmt.Sprintf("leaf%d.key", i)),
 		}
@@ -50,9 +50,9 @@ func meshLeafOnDisk(t *testing.T, ca *mesh.MeshCA) *apiLeaf {
 	}}
 }
 
-func testMeshCA(t *testing.T) *mesh.MeshCA {
+func testMeshCA(t *testing.T) *tlsca.MeshCA {
 	t.Helper()
-	ca, err := mesh.EnsureMeshCA(t.TempDir(), "test")
+	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "test")
 	if err != nil {
 		t.Fatal(err)
 	}

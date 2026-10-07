@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 // The api's HTTPS leaf renews in place: refresh swaps in whatever is now on
@@ -17,7 +17,7 @@ import (
 // without it a renewed file would sit unserved until the api restarted.
 func TestAPILeaf_RefreshPicksUpARenewedLeaf(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := mesh.EnsureMeshCA(dir, "test")
+	ca, err := tlsca.EnsureMeshCA(dir, "test")
 	if err != nil {
 		t.Fatalf("EnsureMeshCA: %v", err)
 	}
@@ -25,12 +25,12 @@ func TestAPILeaf_RefreshPicksUpARenewedLeaf(t *testing.T) {
 	// file the sweep replaced" and "what it replaced it with".
 	hostname, _ := os.Hostname()
 	ip := net.ParseIP("192.168.1.2")
-	mintInto := func(lifetime time.Duration) mesh.LeafPaths {
+	mintInto := func(lifetime time.Duration) tlsca.LeafPaths {
 		t.Helper()
 		spec := apiLeafSpec(hostname, ip)
 		spec.Lifetime = lifetime
 		out := filepath.Join(dir, "tls", lifetime.String())
-		paths, err := mesh.MintLeafToDisk(ca, out, spec)
+		paths, err := tlsca.MintLeafToDisk(ca, out, spec)
 		if err != nil {
 			t.Fatalf("MintLeafToDisk: %v", err)
 		}
@@ -40,7 +40,7 @@ func TestAPILeaf_RefreshPicksUpARenewedLeaf(t *testing.T) {
 	after := mintInto(400 * 24 * time.Hour)
 
 	current := before
-	leaf := &apiLeaf{mint: func(net.IP) (mesh.LeafPaths, error) { return current, nil }}
+	leaf := &apiLeaf{mint: func(net.IP) (tlsca.LeafPaths, error) { return current, nil }}
 	if err := leaf.load(ip); err != nil {
 		t.Fatalf("load: %v", err)
 	}

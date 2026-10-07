@@ -18,6 +18,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -121,7 +122,7 @@ type DockerSupervisorConfig struct {
 	// via tls_cert_path / tls_key_path. ServerURL is also forced to
 	// https:// in that mode. Leave nil for HTTP-only (useful for tests
 	// and bring-up before the wizard's PKI step runs).
-	MeshCA *MeshCA
+	MeshCA *tlsca.MeshCA
 
 	// ExtraLeafDNSNames are appended to the leaf's SAN list — useful if
 	// the operator wants the cert to also validate for a custom hostname
@@ -786,8 +787,8 @@ const headscaleLeafName = HeadscaleLeafName
 // restarts — which is why this consumer has a reload hook, and why that hook
 // restarts. Sweep calls it only when a fresh leaf was actually minted, so the
 // restart follows real drift (near-expiry, a moved hostname) and never a tick.
-func (s *DockerSupervisor) LeafConsumer() LeafConsumer {
-	return LeafConsumer{
+func (s *DockerSupervisor) LeafConsumer() tlsca.LeafConsumer {
+	return tlsca.LeafConsumer{
 		Name:   headscaleLeafName,
 		Dir:    s.certsDir(),
 		Spec:   s.leafSpec,
@@ -800,7 +801,7 @@ func (s *DockerSupervisor) certsDir() string { return filepath.Join(s.cfg.StateD
 // reloadLeaf restarts the Headscale container so it picks up the leaf now on
 // disk. A container that is missing or stopped needs nothing: the next Start
 // creates or starts it, and Start reads the current leaf.
-func (s *DockerSupervisor) reloadLeaf(ctx context.Context, _ LeafPaths) error {
+func (s *DockerSupervisor) reloadLeaf(ctx context.Context, _ tlsca.LeafPaths) error {
 	state, err := s.inspect(ctx)
 	if err != nil {
 		return err
@@ -822,7 +823,7 @@ func (s *DockerSupervisor) ensureLeaf() error {
 	if err != nil {
 		return err
 	}
-	if _, err := MintLeafToDisk(s.cfg.MeshCA, s.certsDir(), spec); err != nil {
+	if _, err := tlsca.MintLeafToDisk(s.cfg.MeshCA, s.certsDir(), spec); err != nil {
 		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
 	}
 	return nil
@@ -835,8 +836,8 @@ func (s *DockerSupervisor) ensureLeaf() error {
 // Derived on every call rather than captured once, so the sweep re-checks the
 // names as well as the dates: a controlplane that changed hostname or moved
 // subnets gets a re-mint from the same check that catches near-expiry.
-func (s *DockerSupervisor) leafSpec() (LeafSpec, error) {
-	spec := LeafSpec{
+func (s *DockerSupervisor) leafSpec() (tlsca.LeafSpec, error) {
+	spec := tlsca.LeafSpec{
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		DNSNames:    []string{"localhost"},
 	}

@@ -1,4 +1,4 @@
-package mesh
+package tlsca
 
 import (
 	"context"
@@ -151,11 +151,11 @@ func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) L
 			continue
 		}
 		paths := LeafPathsIn(c.Dir)
-		// THE fact. loadLeafIfUsable returns nil when the leaf is missing,
+		// THE fact. LoadLeafIfUsable returns nil when the leaf is missing,
 		// unparseable, signed by another CA, minted for a different purpose,
 		// no longer covers the spec's names, or has less than renewWindow
 		// left. Anything else is a leaf that does not need touching.
-		if loadLeafIfUsable(paths, s.ca, spec) != nil {
+		if LoadLeafIfUsable(paths, s.ca, spec) != nil {
 			continue
 		}
 		if _, err := MintLeafToDisk(s.ca, c.Dir, spec); err != nil {
