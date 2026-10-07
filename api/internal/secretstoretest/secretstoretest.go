@@ -464,8 +464,10 @@ func (s *Store) teardown(ctx context.Context) error {
 	if err := os.RemoveAll(s.root); err != nil {
 		errs = append(errs, fmt.Errorf("secretstoretest: remove %s: %w", s.root, err))
 	}
-	if _, err := os.Stat(s.root); !errors.Is(err, fs.ErrNotExist) {
+	if _, err := os.Stat(s.root); err == nil {
 		errs = append(errs, fmt.Errorf("secretstoretest: teardown left %s behind", s.root))
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("secretstoretest: cannot show teardown removed %s: %w", s.root, err))
 	}
 	return errors.Join(errs...)
 }
@@ -497,6 +499,11 @@ func (l *lineLog) consume(r io.Reader) {
 			l.emit(strings.TrimRight(line, "\r\n"))
 		}
 		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				// The rest of this stream is lost: the DEBUG lines stop and
+				// the tail an exit error carries is cut short. Say so.
+				l.log.Warn("secret store output read failed", "source", "openbao", "stream", l.stream, "err", err)
+			}
 			return
 		}
 	}

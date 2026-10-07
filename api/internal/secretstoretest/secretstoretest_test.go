@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -393,17 +394,24 @@ esac
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	pid := make(chan int, 1)
+	type pidRead struct {
+		n   int
+		err error
+	}
+	pid := make(chan pidRead, 1)
 	go func() {
 		// Blocks until the fake has written its PID: the store is alive and
 		// not listening. Then waits for the harness to have recorded a
-		// refused health check. Only then is ctx cancelled.
+		// refused health check. Only then is ctx cancelled. A read or parse
+		// error goes back to the test goroutine, which reports it.
 		b, err := os.ReadFile(pidPipe)
-		n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
 		if err != nil {
-			n = -1
+			pid <- pidRead{-1, fmt.Errorf("read pid: %w", err)}
+		} else if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err != nil {
+			pid <- pidRead{-1, fmt.Errorf("pid %q: %w", b, err)}
+		} else {
+			pid <- pidRead{n, nil}
 		}
-		pid <- n
 		<-refused
 		cancel()
 	}()
@@ -415,7 +423,11 @@ esac
 		!strings.Contains(err.Error(), "connection refused") {
 		t.Errorf("err = %v, want it to name the ended ctx and the last health answer (connection refused)", err)
 	}
-	p := <-pid
+	r := <-pid
+	if r.err != nil {
+		t.Errorf("%v", r.err)
+	}
+	p := r.n
 	assertReaped(t, p)
 	assertEmpty(t, cfg.TempParent)
 
