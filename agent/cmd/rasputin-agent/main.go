@@ -72,7 +72,7 @@ func main() {
 	// into every component that logs through it (logkit, ARCH-COMMON's
 	// interim reference). Code this change did not touch still uses the
 	// standard log package.
-	logger := logkit.New(os.Stderr)
+	logger := logkit.New(os.Stderr, logkit.RedactSecrets())
 
 	nodeID := envOr("RASPUTIN_NODE_ID", "node-dev")
 	natsURL := envOr("RASPUTIN_NATS_URL", nats.DefaultURL)
