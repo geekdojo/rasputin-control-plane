@@ -247,6 +247,35 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 	}
 }
 
+// TC-741-24 (F-741-19): an agent version the api cannot parse is not called
+// too old (inventory.AgentPredates). Its bare kill is relayed as the agent's
+// own detail, with no "predates" or "update the node" reading. Before #741 an
+// unparseable version fell through to that reading.
+func TestEnrollWorkflow_UnparseableVersionBareKillIsRelayed(t *testing.T) {
+	f := newConvergeFixture(t)
+	if err := f.inv.Insert(f.ctx, &proto.Node{
+		ID: "node-1", Role: proto.RoleCompute, Hostname: "node-1", AgentVersion: "dev-build",
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("inv.Insert: %v", err)
+	}
+	f.admit("node-1")
+	const detail = "tailscale up: signal: killed (stderr=)"
+	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: detail})
+	_, err := dispatchAgainst(t, f, "node-1")
+	if err == nil {
+		t.Fatal("dispatch succeeded on a negative ack")
+	}
+	if err.Error() != "agent rejected enroll: "+detail {
+		t.Errorf("step error %q, want the agent's own detail relayed", err)
+	}
+	for _, not := range []string{"predates", "update the node"} {
+		if strings.Contains(err.Error(), not) {
+			t.Errorf("an unparseable version was read as too old: %q", err)
+		}
+	}
+}
+
 // An ordinary rejection is unchanged.
 func TestEnrollWorkflow_OrdinaryRejectionUnchanged(t *testing.T) {
 	f := newConvergeFixture(t)
