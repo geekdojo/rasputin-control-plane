@@ -2568,7 +2568,7 @@ func wireExternalMesh(stateDir string, cpCA *tlsca.CA, defaultLogin, url, key st
 	cfg := mesh.RealClientConfig{BaseURL: url, APIKey: key}
 	var operatorCA []byte
 	if caFile := os.Getenv("RASPUTIN_HEADSCALE_CA_FILE"); caFile != "" {
-		raw, err := os.ReadFile(caFile)
+		pem, err := os.ReadFile(caFile)
 		if err != nil {
 			return meshWiring{}, errors.New("read RASPUTIN_HEADSCALE_CA_FILE: " + err.Error())
 		}
@@ -2576,7 +2576,7 @@ func wireExternalMesh(stateDir string, cpCA *tlsca.CA, defaultLogin, url, key st
 		// shipped CERTIFICATE blocks only, and a key or a broken block fails
 		// the start, naming the file and the block (F-741-18). The error names
 		// the block's type and position, never its content.
-		certs, err := tlsca.CertificatesOnly(raw)
+		certs, err := tlsca.CertificatesOnly(pem)
 		if err != nil {
 			return meshWiring{}, fmt.Errorf("RASPUTIN_HEADSCALE_CA_FILE=%s: %w", caFile, err)
 		}
