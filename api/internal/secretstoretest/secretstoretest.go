@@ -11,7 +11,7 @@
 package secretstoretest
 
 import (
-	"bytes"
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -294,20 +294,34 @@ func clientTLS(caPEM []byte, leaf tlsca.LeafPaths) (*tls.Config, error) {
 	}, nil
 }
 
-// launch starts the store process. Its stdout and stderr go to the logger a
-// line at a time; the last stderr lines are kept for an early-exit error. One
-// goroutine owns cmd.Wait and closes s.exited when it returns.
+// launch starts the store process. Its stdout and stderr are read a line at
+// a time into the logger; the last stderr lines are kept for an early-exit
+// error. One goroutine owns cmd.Wait: it waits for both readers to reach EOF
+// (exec requires every read from the pipes to finish before Wait), then
+// reaps the process and closes s.exited.
 func (s *Store) launch(bin string, args ...string) error {
 	cmd := exec.Command(bin, args...)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("secretstoretest: stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("secretstoretest: stderr pipe: %w", err)
+	}
+	out := newLineLog(s.log, "stdout", 0)
 	s.stderr = newLineLog(s.log, "stderr", stderrTail)
-	cmd.Stdout = newLineLog(s.log, "stdout", 0)
-	cmd.Stderr = s.stderr
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("secretstoretest: start %s: %w", bin, err)
 	}
 	s.cmd = cmd
 	s.exited = make(chan struct{})
+	var readers sync.WaitGroup
+	readers.Add(2)
+	go func() { defer readers.Done(); out.consume(stdout) }()
+	go func() { defer readers.Done(); s.stderr.consume(stderr) }()
 	go func() {
+		readers.Wait()
 		s.waitErr = cmd.Wait()
 		close(s.exited)
 	}()
@@ -453,16 +467,16 @@ func (s *Store) teardown(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
-// lineLog is the io.Writer behind the store's stdout or stderr: each complete
-// line goes to the logger at DEBUG, and the last keep lines are kept for an
-// error. exec's copy goroutine writes; tail is read after the process exits.
+// lineLog reads the store's stdout or stderr: each line goes to the logger at
+// DEBUG, and the last keep lines are kept for an error. It is deliberately not
+// an io.Writer: one reader goroutine owns each stream, and tail is read after
+// the process exits.
 type lineLog struct {
 	log    *slog.Logger
 	stream string
 	keep   int
 
 	mu    sync.Mutex
-	part  []byte
 	lines []string
 }
 
@@ -470,42 +484,40 @@ func newLineLog(log *slog.Logger, stream string, keep int) *lineLog {
 	return &lineLog{log: log, stream: stream, keep: keep}
 }
 
-func (l *lineLog) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.part = append(l.part, p...)
+// consume reads r to EOF, a line at a time, however long a line is. A last
+// line with no newline is still a line.
+func (l *lineLog) consume(r io.Reader) {
+	br := bufio.NewReader(r)
 	for {
-		i := bytes.IndexByte(l.part, '\n')
-		if i < 0 {
-			return len(p), nil
+		line, err := br.ReadString('\n')
+		if line != "" {
+			l.emit(strings.TrimRight(line, "\r\n"))
 		}
-		l.emit(string(l.part[:i]))
-		l.part = l.part[i+1:]
+		if err != nil {
+			return
+		}
 	}
 }
 
 func (l *lineLog) emit(line string) {
-	line = strings.TrimRight(line, "\r")
 	l.log.Debug("secret store output", "source", "openbao", "stream", l.stream, "line", line)
 	if l.keep == 0 {
 		return
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	l.lines = append(l.lines, line)
 	if len(l.lines) > l.keep {
 		l.lines = l.lines[len(l.lines)-l.keep:]
 	}
 }
 
-// tail is the kept lines, plus any unterminated last line, joined with " | ".
+// tail is the kept lines joined with " | ".
 func (l *lineLog) tail() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	lines := append([]string(nil), l.lines...)
-	if len(l.part) > 0 {
-		lines = append(lines, string(l.part))
-	}
-	if len(lines) == 0 {
+	if len(l.lines) == 0 {
 		return "(none)"
 	}
-	return strings.Join(lines, " | ")
+	return strings.Join(l.lines, " | ")
 }

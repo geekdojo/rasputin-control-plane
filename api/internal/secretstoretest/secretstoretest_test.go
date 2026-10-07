@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -565,14 +564,14 @@ func TestClose_ReportsResidue(t *testing.T) {
 	assertReaped(t, pid)
 }
 
-// lineLog keeps only the last lines, and an unterminated one, for the
-// early-exit error.
+// lineLog keeps only the last lines, an unterminated last line included, for
+// the early-exit error.
 func TestLineLogTail(t *testing.T) {
-	l := newLineLog(slog.New(slog.DiscardHandler), "stderr", 2)
+	l := newLineLog(slog.New(slog.DiscardHandler), "stderr", 3)
 	if got := l.tail(); got != "(none)" {
 		t.Errorf("empty tail = %q", got)
 	}
-	_, _ = io.WriteString(l, "a\nb\r\nc\npartial")
+	l.consume(strings.NewReader("a\nb\r\nc\npartial"))
 	if got := l.tail(); got != "b | c | partial" {
 		t.Errorf("tail = %q, want %q", got, "b | c | partial")
 	}
