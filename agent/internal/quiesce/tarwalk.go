@@ -28,7 +28,7 @@ import (
 // `stop` the volume holds whatever the app left there. A compromised app
 // can plant a symlink in its own volume at any moment: replace a file the
 // walk has classified but not yet opened with a link to /etc/shadow, another
-// app's volume or the mesh CA key, or swap a directory for a link to /, or
+// app's volume or the controlplane CA key, or swap a directory for a link to /, or
 // plant one in the scratch directory the sqlite snapshot is written to,
 // which the container controls outright. A path-based os.Open follows every
 // one of those, and the host file lands in the archive under an innocent

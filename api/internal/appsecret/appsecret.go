@@ -25,7 +25,7 @@
 //     node. A stored secret makes every reschedule a data-movement problem with
 //     its own way to fail.
 //   - No new class of secret at rest. One seed file at 0600 in the existing
-//     trustDir beside the mesh CA's private key, on the dedicated
+//     trustDir beside the controlplane CA's private key, on the dedicated
 //     /var/lib/rasputin partition — so it survives A/B image switches and
 //     rollbacks by the same construction the mesh already relies on.
 //

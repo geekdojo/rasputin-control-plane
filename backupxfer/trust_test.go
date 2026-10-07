@@ -16,7 +16,7 @@ import (
 )
 
 // The transport verifies the api with exactly the TLS config the caller
-// hands it (geekdojo/geekdojo-brain#590) — on a node, the mesh CA bundle.
+// hands it (geekdojo/geekdojo-brain#590) — on a node, the controlplane CA bundle.
 // No config means no trust, never the system roots.
 
 const (

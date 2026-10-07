@@ -2,16 +2,9 @@ package api
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1670,28 +1663,29 @@ func TestHandleListMeshDevices_Empty(t *testing.T) {
 	}
 }
 
-// Each Rasputin device carries how the CA its agent reports trusting compares
-// with the api's: a node still holding the CA an identity restore replaced
-// reads "stale" (the next reconcile re-delivers), one that has not said
-// reads "unreported", and user devices carry nothing.
+// fixedFingerprint is a trustFingerprinter that reports one value.
+type fixedFingerprint string
+
+func (f fixedFingerprint) Fingerprint() string { return string(f) }
+
+// TC-741-23: each Rasputin device carries how the bundle its agent reports
+// trusting compares with the api's, computed against the node trust service's
+// Fingerprint(): a node still holding the CA an identity restore replaced
+// reads "stale", one whose tailscaled has not reloaded reads "stale" with
+// fingerprint "reload-pending", one that has not said reads "unreported",
+// and user devices carry nothing. The trust field's JSON is today's shape,
+// byte for byte.
 func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	ca := []byte("-----BEGIN CERTIFICATE-----\nORIGINAL\n-----END CERTIFICATE-----\n")
-	meshSvc := mesh.NewService(mesh.Config{MeshCAPEM: ca}, f.mesh.Store(), f.meshFake, mesh.NewNoopSupervisor())
-	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
-		f.fw, f.fwSvc, f.appsStore,
-		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
-		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
-	if err != nil {
-		t.Fatalf("NewServer: %v", err)
-	}
+	f.srv.SetNodeTrust(fixedFingerprint(proto.TrustFingerprint(ca)))
 	now := time.Now().UTC()
 	ctx := context.Background()
 	for id, meta := range map[string]map[string]any{
-		"stale-1":   {proto.MetadataMeshCAFingerprint: "not-the-one"},
-		"current-1": {proto.MetadataMeshCAFingerprint: proto.MeshCAFingerprint(ca)},
+		"stale-1":   {proto.MetadataTrustFingerprint: "not-the-one"},
+		"pending-1": {proto.MetadataTrustFingerprint: proto.TrustFingerprintReloadPending},
+		"current-1": {proto.MetadataTrustFingerprint: proto.TrustFingerprint(ca)},
 		"silent-1":  nil,
 	} {
 		if err := f.inv.Insert(ctx, &proto.Node{ID: id, Role: proto.RoleCompute, Hostname: id, Metadata: meta, FirstSeen: now, LastSeen: now}); err != nil {
@@ -1708,35 +1702,32 @@ func TestHandleListMeshDevices_CarriesTrust(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/mesh/devices", nil)
 	req.AddCookie(c)
 	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
+	f.srv.Handler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body.String())
 	}
 	var out []struct {
-		HSID  string `json:"hsId"`
-		Trust *struct {
-			State       string `json:"state"`
-			Fingerprint string `json:"fingerprint"`
-		} `json:"trust"`
+		HSID  string          `json:"hsId"`
+		Trust json.RawMessage `json:"trust"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	got := map[string]string{}
 	for _, d := range out {
-		if d.Trust == nil {
-			got[d.HSID] = "(none)"
-			continue
-		}
-		got[d.HSID] = d.Trust.State
-		if strings.Contains(d.Trust.Fingerprint, "CERTIFICATE") {
-			t.Errorf("%s: trust carries PEM material", d.HSID)
-		}
+		got[d.HSID] = string(d.Trust)
 	}
-	want := map[string]string{"hs-stale-1": "stale", "hs-current-1": "current", "hs-silent-1": "unreported", "hs-laptop": "(none)"}
-	for id, state := range want {
-		if got[id] != state {
-			t.Errorf("%s: trust = %q, want %q (all: %v)", id, got[id], state, got)
+	current := proto.TrustFingerprint(ca)
+	want := map[string]string{
+		"hs-stale-1":   `{"nodeId":"stale-1","state":"stale","fingerprint":"not-the-one"}`,
+		"hs-pending-1": `{"nodeId":"pending-1","state":"stale","fingerprint":"reload-pending"}`,
+		"hs-current-1": `{"nodeId":"current-1","state":"current","fingerprint":"` + current + `"}`,
+		"hs-silent-1":  `{"nodeId":"silent-1","state":"unreported"}`,
+		"hs-laptop":    ``,
+	}
+	for id, w := range want {
+		if got[id] != w {
+			t.Errorf("%s: trust = %s, want %s", id, got[id], w)
 		}
 	}
 }
@@ -1887,8 +1878,8 @@ func TestHandleMeshIOSProfile_ServesAppleAspenConfig(t *testing.T) {
 	// Drop a fresh self-signed cert at <trustDir>/mesh-ca.pem (the Mesh
 	// TLS CA — NOT root-ca.pem; that's the bundle-signing root which is
 	// the wrong CA for the trust-Headscale use case).
-	certPEM := freshSelfSignedCertForAPI(t)
-	caPath := filepath.Join(f.srv.trustDir, tlsca.MeshCAFileName)
+	certPEM := freshSelfSignedCertPEM(t, "Rasputin API Test CA")
+	caPath := filepath.Join(f.srv.trustDir, tlsca.ControlplaneCertFile)
 	if err := os.WriteFile(caPath, certPEM, 0o644); err != nil {
 		t.Fatalf("write mesh-ca.pem: %v", err)
 	}
@@ -1905,30 +1896,6 @@ func TestHandleMeshIOSProfile_ServesAppleAspenConfig(t *testing.T) {
 	if !strings.Contains(w.Body.String(), "com.apple.security.root") {
 		t.Errorf("body missing root payload type:\n%s", w.Body.String())
 	}
-}
-
-// freshSelfSignedCertForAPI mirrors the mesh-package test helper but
-// duplicated here to avoid an internal export just for the test.
-func freshSelfSignedCertForAPI(t *testing.T) []byte {
-	t.Helper()
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("ecdsa: %v", err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber:          big.NewInt(1),
-		Subject:               pkix.Name{CommonName: "Rasputin API Test CA"},
-		NotBefore:             time.Now().Add(-time.Hour).UTC(),
-		NotAfter:              time.Now().Add(24 * time.Hour).UTC(),
-		IsCA:                  true,
-		BasicConstraintsValid: true,
-		KeyUsage:              x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		t.Fatalf("create cert: %v", err)
-	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
 // Verify the handler removes the node from Headscale before dropping the

@@ -17,9 +17,9 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 )
 
-// The bundle download trusts exactly the node's mesh CA bundle
+// The bundle download trusts exactly the node's controlplane CA bundle
 // (geekdojo/geekdojo-brain#590). The api serves /api/bundles/{sha} over its
-// Mesh-CA HTTPS leaf; a system root can never legitimately verify it, so the
+// controlplane-CA HTTPS leaf; a system root can never legitimately verify it, so the
 // client carries none, and a node with no usable bundle refuses before it
 // asks for anything.
 
@@ -111,7 +111,7 @@ func TestRAUCBackend_Download_TrustFailureRefusesBeforeAnyRequest(t *testing.T) 
 	ca := tlstest.NewCA(t, "mesh")
 	body := []byte("pretend-raucb-bytes")
 	url, hits := countingServer(t, ca, body)
-	errTrust := errors.New("mesh CA bundle /x/tailscaled-ca.pem: no such file")
+	errTrust := errors.New("controlplane CA bundle /x/tailscaled-ca.pem: no such file")
 
 	b, err := newRAUCBackend(t.TempDir(), "/bin/true", func() (*tls.Config, error) { return nil, errTrust })
 	if err != nil {

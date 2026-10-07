@@ -1077,7 +1077,7 @@ func runSeal(cfg RunConfig) jobs.DoFn {
 			return nil, serr
 		}
 		// The plaintext tar is deleted the instant it has been sealed. It is a
-		// clear copy of the mesh CA's private key and the whole database; the
+		// clear copy of the controlplane CA's private key and the whole database; the
 		// window in which it exists on disk is the one thing this step can
 		// shorten, and this is where it shortens it.
 		_ = os.Remove(src)

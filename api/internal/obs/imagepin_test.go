@@ -233,7 +233,7 @@ func TestBuildCollectorCompose_RefusesAnUnpinnedImage(t *testing.T) {
 		NodeID:          "node-1",
 		IngressBaseURL:  "https://rasputin.local",
 		ServerName:      "rasputin.local",
-		MeshCAPEM:       "x",
+		CAPEM:           "x",
 		NodeKeyCertPath: "/k.crt",
 		NodeKeyPath:     "/k.key",
 		AlloyImage:      "grafana/alloy:v1.4.2",

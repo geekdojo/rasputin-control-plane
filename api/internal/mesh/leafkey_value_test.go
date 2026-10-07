@@ -59,12 +59,12 @@ func TestAppLeaf_KeyIsAValueFromMintToDisk(t *testing.T) {
 
 // TC-825-09: the failure rows. A nil CA is an error with the zero Value from
 // MintLeaf and PrepareAppLeaf, and writing a leaf key under a path that is a file is
-// an error. An unreadable key FILE is not an error: loadLeafIfUsable treats it as
+// an error. An unreadable key FILE is not an error: LeafUsable treats it as
 // no usable leaf, so PrepareAppLeaf mints a fresh one (renewed) instead of
 // returning bytes it could not read.
 func TestAppLeaf_FailuresReturnAZeroValue(t *testing.T) {
-	if _, key, err := tlsca.MintLeaf(nil, tlsca.LeafSpec{CommonName: "x", DNSNames: []string{"x"}}); err == nil || key.Len() != 0 {
-		t.Errorf("tlsca.MintLeaf(nil CA): err=%v key bytes=%d, want an error and the zero Value", err, key.Len())
+	if _, key, err := (*tlsca.CA)(nil).MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "x", DNSNames: []string{"x"}}); err == nil || key.Len() != 0 {
+		t.Errorf("MintLeaf on a nil CA: err=%v key bytes=%d, want an error and the zero Value", err, key.Len())
 	}
 	if _, key, _, err := PrepareAppLeaf(nil, t.TempDir(), "home1", "app"); err == nil || key.Len() != 0 {
 		t.Errorf("PrepareAppLeaf(nil CA): err=%v key bytes=%d, want an error and the zero Value", err, key.Len())

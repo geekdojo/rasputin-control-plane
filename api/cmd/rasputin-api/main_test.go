@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
@@ -244,13 +245,13 @@ func TestAPILeafSpec_HostnameIsRasputinLocal_NoDup(t *testing.T) {
 // assert the SANs survive onto the actual certificate.
 func TestEnsureAPILeaf_CertCarriesSANs(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := tlsca.EnsureMeshCA(dir, "test")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), dir, "test", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 
 	spec := apiLeafSpec("nodex", net.ParseIP("10.0.0.5"))
-	certPEM, _, err := tlsca.MintLeaf(ca, spec)
+	certPEM, _, err := ca.MintLeaf(spec)
 	if err != nil {
 		t.Fatalf("MintLeaf: %v", err)
 	}
@@ -730,9 +731,9 @@ func TestWireBundleVerifier_MissingTrustRootIsNeverPermissive(t *testing.T) {
 // hardware: the OS image ships root-ca.pem, so this is the normal posture.
 func TestWireBundleVerifier_LoadsTheTrustRootWhenPresent(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := tlsca.EnsureMeshCA(dir, "test") // any real CA PEM will do here
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), dir, "test", tlscatest.Deps()) // any real CA PEM will do here
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.Cert.Raw})
 	if err := os.WriteFile(filepath.Join(dir, "root-ca.pem"), pemBytes, 0o600); err != nil {
@@ -845,34 +846,34 @@ func TestEnsureSelfAgentToken(t *testing.T) {
 	}
 }
 
-// A node always gets its own cluster's Mesh CA, whoever runs Headscale
+// A node always gets its own cluster's controlplane CA, whoever runs Headscale
 // (geekdojo/geekdojo-brain#506). The operator's CA is APPENDED when they name
-// one; before this it replaced the Mesh CA, so a node on an external Headscale
+// one; before this it replaced the controlplane CA, so a node on an external Headscale
 // trusted the operator's root and not the CA that signs its own controlplane's
 // HTTPS leaf and app leaves.
 func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
-	meshCA, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "trust"), "wire-test")
+	meshCA, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(t.TempDir(), "trust"), "wire-test", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
-	operatorCA, err := tlsca.EnsureMeshCA(filepath.Join(t.TempDir(), "operator"), "operator")
+	operatorCA, err := tlsca.Ensure(tlsca.ControlplaneConfig(), filepath.Join(t.TempDir(), "operator"), "operator", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA(operator): %v", err)
+		t.Fatalf("tlsca.Ensure(operator): %v", err)
 	}
 	t.Setenv("RASPUTIN_HEADSCALE_SUPERVISOR", "noop")
 
-	t.Run("no CA file: the Mesh CA alone, unchanged", func(t *testing.T) {
+	t.Run("no CA file: the controlplane CA alone, unchanged", func(t *testing.T) {
 		t.Setenv("RASPUTIN_HEADSCALE_CA_FILE", "")
 		mw, err := wireExternalMesh(t.TempDir(), meshCA, "dev@example.com", "https://hs.example", "hskey-test")
 		if err != nil {
 			t.Fatalf("wireExternalMesh: %v", err)
 		}
-		if !bytes.Equal(mw.caPEM, meshCA.CertPEM) {
-			t.Errorf("node bundle = %q, want the Mesh CA PEM byte for byte", mw.caPEM)
+		if got := nodeTrustBundle(meshCA, mw); !bytes.Equal(got, meshCA.CertPEM) {
+			t.Errorf("node bundle = %q, want the controlplane CA PEM byte for byte", got)
 		}
 	})
 
-	t.Run("CA file: the operator's CA appended to the Mesh CA", func(t *testing.T) {
+	t.Run("CA file: the operator's CA appended to the controlplane CA", func(t *testing.T) {
 		caFile := filepath.Join(t.TempDir(), "operator-ca.pem")
 		if err := os.WriteFile(caFile, operatorCA.CertPEM, 0o644); err != nil {
 			t.Fatalf("write CA file: %v", err)
@@ -882,10 +883,11 @@ func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
 		if err != nil {
 			t.Fatalf("wireExternalMesh: %v", err)
 		}
-		if !bytes.Contains(mw.caPEM, bytes.TrimSpace(meshCA.CertPEM)) {
-			t.Error("the node bundle dropped the Mesh CA when the operator named their own")
+		bundle := nodeTrustBundle(meshCA, mw)
+		if !bytes.Contains(bundle, bytes.TrimSpace(meshCA.CertPEM)) {
+			t.Error("the node bundle dropped the controlplane CA when the operator named their own")
 		}
-		if !bytes.Contains(mw.caPEM, bytes.TrimSpace(operatorCA.CertPEM)) {
+		if !bytes.Contains(bundle, bytes.TrimSpace(operatorCA.CertPEM)) {
 			t.Error("the node bundle does not carry the operator's CA")
 		}
 	})
@@ -909,17 +911,17 @@ func TestWireExternalMesh_ShipsTheMeshCAPlusTheOperatorCA(t *testing.T) {
 	})
 }
 
-// The self-hosted path goes through the same helper, so a Mesh CA that holds
+// The self-hosted path goes through the same helper, so a controlplane CA that holds
 // no certificate stops the api there too, instead of leaving the Headscale
 // client on the system pool.
 func TestWireSelfHostedMesh_UnusableMeshCAIsRefused(t *testing.T) {
 	t.Setenv("RASPUTIN_HEADSCALE_URL", "https://127.0.0.1:18080")
-	_, err := wireSelfHostedMesh(t.TempDir(), &tlsca.MeshCA{CertPEM: []byte("not a certificate")}, "dev@example.com")
+	_, err := wireSelfHostedMesh(t.TempDir(), &tlsca.CA{CertPEM: []byte("not a certificate")}, "dev@example.com")
 	if err == nil {
-		t.Fatal("a Mesh CA with no certificate in it was accepted")
+		t.Fatal("a controlplane CA with no certificate in it was accepted")
 	}
-	if !strings.Contains(err.Error(), "Mesh CA") {
-		t.Errorf("error %q does not name the Mesh CA as the input to fix", err)
+	if !strings.Contains(err.Error(), "controlplane CA") {
+		t.Errorf("error %q does not name the controlplane CA as the input to fix", err)
 	}
 }
 

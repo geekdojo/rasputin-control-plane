@@ -253,7 +253,7 @@ func (r AppVolumeReport) Complete() bool {
 // It is about the BUILD, not about one run, which is why it says nothing about
 // counts. The per-run facts are AppVolumeReport.Summary and Volumes.
 const appVolumeFanOutReason = "This generation covers EVERY NODE (scope `" + proto.BackupScopeFull + "`). " +
-	"It contains the control-plane identity set — the database, the mesh CA, the bus key and Headscale state — sealed by the controlplane, " +
+	"It contains the control-plane identity set — the database, the controlplane CA, the bus key and Headscale state — sealed by the controlplane, " +
 	"plus every volume classed `critical` or `state` belonging to every installed app, each sealed on the node that hosts it and " +
 	"landed as its own member under volumes/. " +
 	"`bulk` volumes are a different lane (design/storage.md §4.7: streamed direct, never staged, not sealed) and that lane is not built; " +
@@ -410,12 +410,12 @@ func trustFiles(src IdentitySources) []trustFile {
 			trustFile{
 				abs:  filepath.Join(src.TrustDir, "mesh-ca.key"),
 				arc:  "trust/mesh-ca.key",
-				note: "the per-installation mesh CA's PRIVATE key — without it every operator device's installed trust is orphaned after a restore",
+				note: "the per-installation controlplane CA's PRIVATE key — without it every operator device's installed trust is orphaned after a restore",
 			},
 			trustFile{
 				abs:  filepath.Join(src.TrustDir, "mesh-ca.pem"),
 				arc:  "trust/mesh-ca.pem",
-				note: "the per-installation mesh CA certificate",
+				note: "the per-installation controlplane CA certificate",
 			},
 			trustFile{
 				abs:  filepath.Join(src.TrustDir, appsecret.SeedFileName),

@@ -16,20 +16,16 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
 
-func sweepTestCA(t *testing.T) *MeshCA {
+func sweepTestCA(t *testing.T) *CA {
 	t.Helper()
-	ca, err := EnsureMeshCA(t.TempDir(), "sweep")
-	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
-	}
-	return ca
+	return newCAForTest(t)
 }
 
 // mintWithLifetime puts a leaf on disk whose NotAfter is `lifetime` away, so a
 // test can put a leaf inside or outside the renew window deliberately.
-func mintWithLifetime(t *testing.T, ca *MeshCA, dir, cn string, lifetime time.Duration) {
+func mintWithLifetime(t *testing.T, ca *CA, dir, cn string, lifetime time.Duration) {
 	t.Helper()
-	if _, err := MintLeafToDisk(ca, dir, LeafSpec{CommonName: cn, DNSNames: []string{cn}, Lifetime: lifetime}); err != nil {
+	if _, err := ca.MintLeafToDisk(dir, LeafSpec{Usage: UsageServer, CommonName: cn, DNSNames: []string{cn}, Lifetime: lifetime}); err != nil {
 		t.Fatalf("MintLeafToDisk: %v", err)
 	}
 }
@@ -75,7 +71,7 @@ func TestLeafSweep_RenewsOnTheFactAndReloadsOnlyThen(t *testing.T) {
 		if err := s.Register(LeafConsumer{
 			Name: c.name, Dir: c.dir,
 			Spec: func() (LeafSpec, error) {
-				return LeafSpec{CommonName: c.cn, DNSNames: []string{c.cn}}, nil
+				return LeafSpec{Usage: UsageServer, CommonName: c.cn, DNSNames: []string{c.cn}}, nil
 			},
 			Reload: func(context.Context, LeafPaths) error {
 				reloaded = append(reloaded, c.name)
@@ -131,7 +127,7 @@ func TestLeafSweep_RenewsOnSpecDrift(t *testing.T) {
 	if err := s.Register(LeafConsumer{
 		Name: "api", Dir: dir,
 		Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: name, DNSNames: []string{name}}, nil
+			return LeafSpec{Usage: UsageServer, CommonName: name, DNSNames: []string{name}}, nil
 		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -164,19 +160,19 @@ func TestLeafSweep_OneFailureDoesNotStopTheRest(t *testing.T) {
 	}
 	mustRegister(LeafConsumer{
 		Name: "a-spec-error", Dir: t.TempDir(),
-		Spec: func() (LeafSpec, error) { return LeafSpec{}, errors.New("boom") },
+		Spec: func() (LeafSpec, error) { return LeafSpec{Usage: UsageServer}, errors.New("boom") },
 	})
 	mustRegister(LeafConsumer{
 		Name: "b-reload-error", Dir: reloadFails,
 		Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: "reload.local", DNSNames: []string{"reload.local"}}, nil
+			return LeafSpec{Usage: UsageServer, CommonName: "reload.local", DNSNames: []string{"reload.local"}}, nil
 		},
 		Reload: func(context.Context, LeafPaths) error { return errors.New("restart failed") },
 	})
 	mustRegister(LeafConsumer{
 		Name: "c-good", Dir: good,
 		Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: "good.local", DNSNames: []string{"good.local"}}, nil
+			return LeafSpec{Usage: UsageServer, CommonName: "good.local", DNSNames: []string{"good.local"}}, nil
 		},
 	})
 
@@ -199,7 +195,7 @@ func TestLeafSweep_OneFailureDoesNotStopTheRest(t *testing.T) {
 
 func TestLeafSweep_RegisterRejectsDuplicatesAndIncompleteConsumers(t *testing.T) {
 	s := NewLeafSweeper(sweepTestCA(t))
-	ok := LeafConsumer{Name: "api", Dir: t.TempDir(), Spec: func() (LeafSpec, error) { return LeafSpec{}, nil }}
+	ok := LeafConsumer{Name: "api", Dir: t.TempDir(), Spec: func() (LeafSpec, error) { return LeafSpec{Usage: UsageServer}, nil }}
 	if err := s.Register(ok); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -207,8 +203,8 @@ func TestLeafSweep_RegisterRejectsDuplicatesAndIncompleteConsumers(t *testing.T)
 		t.Error("a duplicate name must be refused — two registrations of one leaf is the sprawl this replaces")
 	}
 	for _, bad := range []LeafConsumer{
-		{Dir: "d", Spec: func() (LeafSpec, error) { return LeafSpec{}, nil }},
-		{Name: "n", Spec: func() (LeafSpec, error) { return LeafSpec{}, nil }},
+		{Dir: "d", Spec: func() (LeafSpec, error) { return LeafSpec{Usage: UsageServer}, nil }},
+		{Name: "n", Spec: func() (LeafSpec, error) { return LeafSpec{Usage: UsageServer}, nil }},
 		{Name: "n", Dir: "d"},
 	} {
 		if err := s.Register(bad); err == nil {
@@ -223,7 +219,7 @@ func TestLeafSweep_NoCAIsANoOp(t *testing.T) {
 	s := NewLeafSweeper(nil)
 	if err := s.Register(LeafConsumer{
 		Name: "api", Dir: t.TempDir(),
-		Spec: func() (LeafSpec, error) { return LeafSpec{}, errors.New("must not be called") },
+		Spec: func() (LeafSpec, error) { return LeafSpec{Usage: UsageServer}, errors.New("must not be called") },
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -249,7 +245,7 @@ func TestLeafSweepWorkflow(t *testing.T) {
 	if err := s.Register(LeafConsumer{
 		Name: "api-https", Dir: dir,
 		Spec: func() (LeafSpec, error) {
-			return LeafSpec{CommonName: "api.local", DNSNames: []string{"api.local"}}, nil
+			return LeafSpec{Usage: UsageServer, CommonName: "api.local", DNSNames: []string{"api.local"}}, nil
 		},
 	}); err != nil {
 		t.Fatalf("Register: %v", err)
@@ -311,7 +307,9 @@ func TestLeafSweep_KeyMaterialNeverReachesTheLedger(t *testing.T) {
 	} {
 		if err := s.Register(LeafConsumer{
 			Name: c.name, Dir: c.dir,
-			Spec:   func() (LeafSpec, error) { return LeafSpec{CommonName: c.cn, DNSNames: []string{c.cn}}, nil },
+			Spec: func() (LeafSpec, error) {
+				return LeafSpec{Usage: UsageServer, CommonName: c.cn, DNSNames: []string{c.cn}}, nil
+			},
 			Reload: c.reload,
 		}); err != nil {
 			t.Fatalf("Register: %v", err)

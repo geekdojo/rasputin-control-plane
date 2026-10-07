@@ -143,7 +143,7 @@ func TestEnrollCommand_CarriesTheKey(t *testing.T) {
 		t.Fatalf("decode: %v", err)
 	}
 	if cmd.AuthKey != "tskey-auth-example" || cmd.LoginServer != "https://hs.example" || cmd.Hostname != "n1" ||
-		!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || !cmd.AcceptDNS || !cmd.AcceptRoutes || string(cmd.MeshCAPEM) != "CA" {
+		!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || !cmd.AcceptDNS || !cmd.AcceptRoutes || string(cmd.LegacyTrustBundlePEM) != "CA" {
 		t.Errorf("enroll command = %+v", cmd)
 	}
 }
@@ -162,7 +162,7 @@ func TestLeafSweep_KeysGoThroughWriteKey(t *testing.T) {
 	for _, c := range []struct{ name, dir string }{{"a-due", dueA}, {"b-key-blocked", keyBlocked}, {"c-due", dueB}} {
 		cn := c.name + ".local"
 		if err := s.Register(tlsca.LeafConsumer{Name: c.name, Dir: c.dir, Spec: func() (tlsca.LeafSpec, error) {
-			return tlsca.LeafSpec{CommonName: cn, DNSNames: []string{cn}}, nil
+			return tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: cn, DNSNames: []string{cn}}, nil
 		}}); err != nil {
 			t.Fatalf("Register: %v", err)
 		}
@@ -189,7 +189,7 @@ func TestLeafSweep_KeysGoThroughWriteKey(t *testing.T) {
 		}
 	}
 	if !slices.ContainsFunc(logs, func(m string) bool {
-		return strings.Contains(m, "b-key-blocked: mint: mesh:")
+		return strings.Contains(m, "b-key-blocked: mint: tlsca:")
 	}) {
 		t.Errorf("the writeKey failure is not logged with its wrapped error: %v", logs)
 	}

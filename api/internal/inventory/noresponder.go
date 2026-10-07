@@ -127,7 +127,7 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 	if n.MinVersion != "" && n.AgentVersion != "" {
 		// An unparseable version is left Unexplained: the api cannot say the
 		// agent is too old when it cannot read what the agent said.
-		if c, err := releases.Compare(releases.SchemeCalVer, n.AgentVersion, n.MinVersion); err == nil && c < 0 {
+		if AgentPredates(n.AgentVersion, n.MinVersion) {
 			n.Kind = SilenceOldAgent
 		}
 	}
@@ -135,8 +135,8 @@ func ExplainNoResponder(node *proto.Node, subject string) NoResponder {
 }
 
 // SetNow wires the clock the readings from this store render elapsed times
-// against — the off-bus sentence's "(seen 20s ago)". Nil (what production
-// leaves it) is time.Now. Set before the reader runs, as SetMeshLookup is;
+// against — the off-bus sentence's "(seen 20s ago)" — and that Presence derives
+// status at. Nil (what production leaves it) is time.Now. Set before the reader runs, as SetMeshLookup is;
 // it exists so a caller in another package — the storage fan-out's tests
 // hold the store and nothing else — can pin that string.
 func (s *Store) SetNow(fn func() time.Time) { s.now = fn }
@@ -226,4 +226,19 @@ func humanAgo(d time.Duration) string {
 // vtag renders a bare CalVer the way the release is named.
 func vtag(v string) string {
 	return "v" + strings.TrimPrefix(v, "v")
+}
+
+// AgentPredates reports whether agentVersion is older than floor, both bare
+// or v-prefixed CalVer. An empty or unparseable version is NOT called too
+// old, and neither is any version against an empty floor: the api does not
+// accuse an agent on the strength of a string it could not read. The one
+// comparison every "is this agent too old for X" reading shares.
+func AgentPredates(agentVersion, floor string) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(agentVersion), "v")
+	f := strings.TrimPrefix(strings.TrimSpace(floor), "v")
+	if v == "" || f == "" {
+		return false
+	}
+	c, err := releases.Compare(releases.SchemeCalVer, v, f)
+	return err == nil && c < 0
 }

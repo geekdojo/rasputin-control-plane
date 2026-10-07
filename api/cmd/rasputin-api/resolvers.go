@@ -19,7 +19,7 @@ import (
 // resolver, stays in main.go beside the derivation it documents.
 
 // trustDirFromEnv resolves RASPUTIN_TRUST_DIR, the directory holding the
-// bundle-signing root and the mesh CA. A blank value gives <dataDir>/trust and
+// bundle-signing root and the controlplane CA. A blank value gives <dataDir>/trust and
 // padding is trimmed, so the result is never empty.
 func trustDirFromEnv(dataDir string) string {
 	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_TRUST_DIR")), filepath.Join(dataDir, "trust"))

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -16,19 +16,24 @@ import (
 // already be running (systemd on Linux, the .app on macOS, the Tailscale
 // service on Windows).
 type RealBackend struct {
-	binary   string
-	caBundle string    // where the Mesh CA is installed for tailscaled to trust
-	run      cmdRunner // restart hook; injectable for tests
+	binary string
+	trust  TrustInstaller // the node's trust bundle, for a legacy enroll's bundle
+	run    cmdRunner      // restart hook; injectable for tests
+	log    *slog.Logger
 }
 
-// NewRealBackend resolves the tailscale binary path. Returns an error if
-// not found.
-func NewRealBackend() (*RealBackend, error) {
+// NewRealBackend resolves the tailscale binary path, installing a legacy
+// enroll's bundle through trust. Returns an error if the binary is not found,
+// or trust or log is nil.
+func NewRealBackend(trust TrustInstaller, log *slog.Logger) (*RealBackend, error) {
+	if trust == nil || log == nil {
+		return nil, errors.New("tailscale: NewRealBackend needs a TrustInstaller and a logger")
+	}
 	bin, err := exec.LookPath("tailscale")
 	if err != nil {
 		return nil, fmt.Errorf("tailscale binary not on PATH: %w", err)
 	}
-	return &RealBackend{binary: bin, caBundle: caBundlePath(), run: execRun}, nil
+	return &RealBackend{binary: bin, trust: trust, run: execRun, log: log}, nil
 }
 
 // execRun is the default cmdRunner — runs a binary and returns combined output.
@@ -38,34 +43,41 @@ func execRun(ctx context.Context, name string, args ...string) ([]byte, error) {
 
 func (b *RealBackend) Name() string { return "tailscale" }
 
-// TrustFingerprint is the fingerprint of the bundle at b.caBundle — the one
+// TrustFingerprint is the fingerprint of the node's trust bundle — the one
 // SSL_CERT_FILE points tailscaled at and the agent's own HTTPS clients read.
-func (b *RealBackend) TrustFingerprint() string { return InstalledCAFingerprint(b.caBundle) }
+func (b *RealBackend) TrustFingerprint() string { return b.trust.Fingerprint() }
+
+// ReloadTrust restarts tailscaled so it re-reads the trust bundle (Go caches
+// its cert pool at process start), then waits for its socket so a following
+// `tailscale up` does not race the restart.
+func (b *RealBackend) ReloadTrust(ctx context.Context) error {
+	if err := restartTailscaled(ctx, b.run); err != nil {
+		return fmt.Errorf("tailscale: %w", err)
+	}
+	b.waitForDaemon(ctx)
+	return nil
+}
 
 func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error) {
 	if in.LoginServer == "" || in.AuthKey == "" {
 		return Status{}, errors.New("tailscale: login server and auth key are required")
 	}
 	started := time.Now()
-	// Trust the self-hosted Headscale's HTTPS leaf before tailscaled dials it.
-	// The Mesh CA isn't in any public store, so without this `tailscale up`
-	// fails the TLS handshake. Only restart tailscaled when the CA actually
-	// changed (first enroll); subsequent enrolls + post-reboot starts already
-	// have it on the persistent bundle.
-	if len(in.MeshCAPEM) > 0 {
-		// ONE trust mechanism on both images: the bundle at b.caBundle, which
-		// the tailscaled service is pointed at with SSL_CERT_FILE (a systemd
-		// drop-in on rasputin-os, files/etc/init.d/rasputin-tailscale on the
-		// OpenWrt firewall). The agent no longer also appends the CA to the
-		// box's global trust bundle — see the note in trust.go
-		// (geekdojo/geekdojo-brain#542). tailscaled caches the cert pool at
-		// process start, so restart it when the bundle actually changed.
-		changedFile, err := installMeshCA(in.MeshCAPEM, b.caBundle)
+	// An api that predates trust.install carries the bundle here, and only
+	// here: trust it before tailscaled dials the self-hosted Headscale's
+	// HTTPS leaf. Only restart tailscaled when the bundle actually changed;
+	// later enrolls and post-reboot starts already have it on the persistent
+	// file. ONE trust mechanism on both images: the bundle file, which the
+	// tailscaled service is pointed at with SSL_CERT_FILE (a systemd drop-in
+	// on rasputin-os, files/etc/init.d/rasputin-tailscale on the OpenWrt
+	// firewall) — see restart.go (geekdojo/geekdojo-brain#542).
+	if len(in.LegacyTrustBundlePEM) > 0 {
+		changedFile, err := b.trust.Install(in.LegacyTrustBundlePEM)
 		if err != nil {
-			return Status{}, fmt.Errorf("tailscale: install mesh CA: %w", err)
+			return Status{}, fmt.Errorf("tailscale: install trust bundle: %w", err)
 		}
 		if changedFile {
-			log.Printf("rasputin-agent: mesh CA installed at %s; restarting tailscaled", b.caBundle)
+			b.log.InfoContext(ctx, "rasputin-agent: trust bundle installed from mesh.enroll; restarting tailscaled")
 			if err := restartTailscaled(ctx, b.run); err != nil {
 				if ctx.Err() != nil {
 					return Status{}, fmt.Errorf("tailscale: restarting tailscaled had not finished when the enroll deadline expired, %s after the enroll began: %w",
@@ -132,7 +144,7 @@ const upWaitDelay = 2 * time.Second
 // enrollKilledByDeadline is the error for a `tailscale up` that the enroll
 // deadline killed while it was still waiting on the login. It carries what
 // an operator needs without the agent log: how long the CLI ran, the
-// deadline that ended it, how much of that deadline the mesh CA install and
+// deadline that ended it, how much of that deadline the trust bundle install and
 // tailscaled restart had already used, which Headscale it was waiting on,
 // and what tailscaled reports now — on a fresh, short context, since the
 // one that fired can run nothing.
@@ -144,7 +156,7 @@ func (b *RealBackend) enrollKilledByDeadline(ctx context.Context, loginServer st
 	}
 	prep := ""
 	if spent := upStarted.Sub(started); spent >= time.Second {
-		prep = fmt.Sprintf(" (%s of it had gone to installing the mesh CA and restarting tailscaled)", tidyDuration(spent))
+		prep = fmt.Sprintf(" (%s of it had gone to installing the trust bundle and restarting tailscaled)", tidyDuration(spent))
 	}
 	probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()

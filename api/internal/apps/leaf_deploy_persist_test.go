@@ -10,6 +10,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -22,7 +23,7 @@ import (
 // replacement when it finds none. So the first sweep after any deploy found an
 // empty directory for an app that was already serving a perfectly good
 // certificate, minted a second one and re-shipped it. Every deployed app on the
-// cluster was re-leafed exactly once, for nothing: needless Mesh CA issuance,
+// cluster was re-leafed exactly once, for nothing: needless controlplane CA issuance,
 // a needless push to the node, and a spurious apps.leaf_rotate in the ledger.
 //
 // It went unnoticed because nothing asserted it. sweep_test.go:341 covers the
@@ -39,9 +40,9 @@ func TestProvisionAppLeaf_DeployPersistsSoTheSweepDoesNotReMint(t *testing.T) {
 	_, inv := seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
 
 	caDir := t.TempDir()
-	ca, err := tlsca.EnsureMeshCA(caDir, "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), caDir, "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	leafRoot := t.TempDir()
 	rotate := realRotator(t, ca, leafRoot, "home1")
@@ -96,9 +97,9 @@ func TestProvisionAppLeaf_RejectedLeafIsNotPersisted(t *testing.T) {
 	nc := startNATS(t)
 	seedAppWithPort(t, "n", "a", "jellyfin", 8096, true)
 
-	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "home1")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "home1", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("mesh CA: %v", err)
+		t.Fatalf("controlplane CA: %v", err)
 	}
 	leafRoot := t.TempDir()
 	rotate := realRotator(t, ca, leafRoot, "home1")

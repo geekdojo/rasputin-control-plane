@@ -16,7 +16,7 @@ import (
 
 // SeedFileName is the app-secret seed, in trustDir — /var/lib/rasputin/trust on
 // an appliance, beside mesh-ca.key. ADR-0006 Decision 11a puts it there on
-// purpose: that partition is the one the mesh CA already depends on surviving
+// purpose: that partition is the one the controlplane CA already depends on surviving
 // an A/B image switch and a rollback, so the seed inherits a property that has
 // been exercised rather than one that has been assumed.
 const SeedFileName = "app-secret.seed"
@@ -56,7 +56,7 @@ func EnsureSeed(dir string) (*Seed, error) {
 	if dir == "" {
 		return nil, errors.New("appsecret: EnsureSeed: dir required")
 	}
-	// The trust dir holds the mesh CA's private key and now this: owner-only,
+	// The trust dir holds the controlplane CA's private key and now this: owner-only,
 	// existing installs included.
 	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("appsecret: %w", err)

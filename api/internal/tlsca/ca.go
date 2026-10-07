@@ -3,14 +3,17 @@ package tlsca
 import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"math/big"
-	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -19,52 +22,76 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
-// Mesh TLS PKI ("TLS-A" per design/control-plane/certificates.md).
-//
-// Two-CA model: a per-installation Mesh TLS CA lives on the controlplane
-// and signs TLS leaves for any HTTPS service the controlplane runs —
-// Headscale today, future Headplane / observability / api-HTTPS later.
-// Operator devices install the CA once (via the .mobileconfig endpoint
-// for iOS, curl-to-keystore for laptops) and from that moment on every
-// controlplane HTTPS service is "real TLS" to that device.
-//
-// Deliberately separated from the bundle-signing CA: the bundle root
-// belongs to Rasputin-Inc and never needs to leave Geekdojo's offline
-// custody. Mixing it with a TLS CA would either leak the cross-fleet
-// intermediate onto every customer's box, or make operators trust
-// Rasputin-Inc keys to verify their own Rasputin — both wrong.
-
+// The file names each instance keeps in the trust dir. The controlplane CA's
+// names are compatibility names (see the package comment): they predate this
+// package and are never migrated.
 const (
-	// MeshCAFileName is the public cert delivered via .mobileconfig and
-	// served to operator devices for trust-root install.
-	MeshCAFileName = "mesh-ca.pem"
-	// MeshCAKeyFileName is the matching private key. 0600 perms; never
-	// leaves the controlplane.
-	MeshCAKeyFileName = "mesh-ca.key"
+	// ControlplaneCertFile is the controlplane CA's public cert, served to
+	// operator devices and shipped to every node.
+	ControlplaneCertFile = "mesh-ca.pem"
+	// ControlplaneKeyFile is its private key. 0600; never leaves the
+	// controlplane.
+	ControlplaneKeyFile = "mesh-ca.key"
+	// StoreCertFile is the store CA's public cert. It never enters a node,
+	// browser or collector trust bundle.
+	StoreCertFile = "store-ca.pem"
+	// StoreKeyFile is the store CA's private key. 0600.
+	StoreKeyFile = "store-ca.key"
 
-	// meshCALifetime is intentionally long — the operator installs the
-	// CA on their phone exactly once and shouldn't have to re-trust for
+	// controlplaneCALifetime is intentionally long: the operator installs the
+	// CA on their devices exactly once and should not have to re-trust it for
 	// the lifetime of their hardware.
-	meshCALifetime = 10 * 365 * 24 * time.Hour
-	// defaultLeafLifetime — short enough that compromise has a bounded
-	// blast radius; long enough that auto-rotation doesn't generate
-	// noise. Per certificates.md §4.
-	defaultLeafLifetime = 365 * 24 * time.Hour
-	// renewWindow — when a leaf has less than this much life left at
-	// startup, MintLeaf re-mints it instead of returning the existing one.
-	renewWindow = 60 * 24 * time.Hour
+	controlplaneCALifetime = 10 * 365 * 24 * time.Hour
+	// storeCALifetime matches it. The store CA's only verifier is the
+	// secret store's listener, which re-reads the CA file it is configured
+	// with; there is no device to re-trust, and no fact to rotate on yet.
+	storeCALifetime = 10 * 365 * 24 * time.Hour
 )
 
-// MeshCA is a loaded TLS CA — public cert + private key + PEM-encoded
-// public cert (cached so callers can serve it directly without re-encoding).
-type MeshCA struct {
-	Cert    *x509.Certificate
-	Key     *ecdsa.PrivateKey
-	CertPEM []byte
+// Config is one CA instance. Every instance goes through the same code; the
+// differences between them are exactly these fields.
+type Config struct {
+	// Name identifies the instance in logs and errors ("controlplane",
+	// "store").
+	Name string
+	// CertFile and KeyFile are the file names inside the trust dir.
+	CertFile, KeyFile string
+	// SubjectFormat is the CA certificate's CommonName, with one %s for the
+	// install name.
+	SubjectFormat string
+	// Lifetime is the CA certificate's validity.
+	Lifetime time.Duration
+	// Usages are the leaf kinds this CA issues. MintLeaf refuses any other.
+	Usages []Usage
+}
 
-	// leafClock, when set, is consulted before a leaf's validity window is
-	// stamped. See ClockGate.
-	leafClock ClockGate
+// ControlplaneConfig is the CA that signs every HTTPS leaf the controlplane
+// serves (the api, Headscale, the per-app leaves). Its subject is unchanged
+// from the release that created it, so installed devices keep the name they
+// show.
+func ControlplaneConfig() Config {
+	return Config{
+		Name:          "controlplane",
+		CertFile:      ControlplaneCertFile,
+		KeyFile:       ControlplaneKeyFile,
+		SubjectFormat: "Rasputin Mesh CA (%s)",
+		Lifetime:      controlplaneCALifetime,
+		Usages:        []Usage{UsageServer},
+	}
+}
+
+// StoreConfig is the CA the secret store's listener trusts, alone. It issues
+// client leaves (the api's login to the store) and server leaves (the
+// listener's own).
+func StoreConfig() Config {
+	return Config{
+		Name:          "store",
+		CertFile:      StoreCertFile,
+		KeyFile:       StoreKeyFile,
+		SubjectFormat: "Rasputin Store CA (%s)",
+		Lifetime:      storeCALifetime,
+		Usages:        []Usage{UsageClient, UsageServer},
+	}
 }
 
 // ClockGate answers whether the wall clock can be trusted to stamp a
@@ -79,154 +106,202 @@ type MeshCA struct {
 // The gate is a fact check, not a timer: it asks whether the clock has
 // synchronized, and the bound on its wait only decides how long a mint is
 // willing to be delayed before proceeding anyway, loudly.
+//
+// Scope, deliberately: it gates LEAF mints. Creating the CA itself is not
+// gated, because Ensure runs synchronously in the api's startup and the api
+// unit is Type=notify with systemd's default start timeout — a wait there
+// could delay or lose the :80 bootstrap surface on a first boot with no
+// reachable NTP.
 type ClockGate func() bool
 
-// CAOption configures EnsureMeshCA.
-type CAOption func(*MeshCA)
-
-// WithLeafClockGate makes every leaf minted under this CA wait for a
-// trustworthy clock first (MintLeaf, and so MintLeafToDisk and
-// PrepareAppLeaf with it).
-//
-// Scope, deliberately: this gates LEAF mints. Creating the CA itself is NOT
-// gated, because EnsureMeshCA runs synchronously in the api's startup and the
-// api unit is Type=notify with systemd's default 90s start timeout — a wait
-// there could delay or lose the :80 bootstrap surface on a first boot with no
-// reachable NTP. Closing that half means making the CA itself lazily created,
-// which is a change to what a first boot does and is not made here.
-func WithLeafClockGate(gate ClockGate) CAOption {
-	return func(ca *MeshCA) { ca.leafClock = gate }
+// Deps are a CA's collaborators, passed in by the composition root.
+type Deps struct {
+	// Now is the clock that dates the CA and every leaf, and that the
+	// near-expiry check reads. Required.
+	Now func() time.Time
+	// Rand feeds certificate serials, signatures and key generation.
+	// Required; production passes crypto/rand.Reader.
+	Rand io.Reader
+	// LeafClock, when set, is consulted before a leaf's validity window is
+	// stamped. Optional.
+	LeafClock ClockGate
+	// Log receives the load and create records. Required.
+	Log *slog.Logger
 }
 
-// EnsureMeshCA loads the Mesh TLS CA from trustDir, generating a fresh
-// per-installation CA if none exists. The CA's Subject embeds installName
-// so an operator browsing their device's trust store can tell which
-// Rasputin issued it.
+// CA is a loaded TLS CA: its certificate, the PEM it was read from (so
+// callers can serve it without re-encoding), and its private key, which
+// nothing outside this package reads.
+type CA struct {
+	Cert    *x509.Certificate
+	CertPEM []byte
+
+	key  *ecdsa.PrivateKey
+	cfg  Config
+	deps Deps
+}
+
+// Name is the instance's Config.Name.
+func (ca *CA) Name() string { return ca.cfg.Name }
+
+// Ensure loads the cfg instance from dir, creating it when neither of its
+// files exists. The CA's subject embeds installName so a person reading a
+// device's trust store can tell which Rasputin issued it.
 //
-// Idempotent: subsequent calls return the same CA. Re-generation only
-// happens when neither file exists — a partial state (cert without key
-// or vice versa) is treated as corrupted and returns an error rather
-// than silently regenerating (per certificates.md C-3, leaning toward
-// fail-loudly).
+// A partial state (a cert without its key, or the reverse) is refused, never
+// re-issued: a fresh CA would silently invalidate everything that trusts the
+// old one (certificates.md C-3). No failure writes a file.
 //
-// Permissions: cert is 0644 (it's public), key is 0600.
-func EnsureMeshCA(trustDir, installName string, opts ...CAOption) (*MeshCA, error) {
-	ca, err := ensureMeshCA(trustDir, installName)
-	if err != nil {
+// Permissions: the dir is 0700, the cert 0644 (it is public), the key 0600.
+func Ensure(cfg Config, dir, installName string, d Deps) (*CA, error) {
+	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	for _, opt := range opts {
-		opt(ca)
+	if err := d.validate(cfg.Name); err != nil {
+		return nil, err
 	}
-	return ca, nil
-}
-
-func ensureMeshCA(trustDir, installName string) (*MeshCA, error) {
-	if trustDir == "" {
-		return nil, errors.New("mesh: EnsureMeshCA: trustDir required")
+	if dir == "" {
+		return nil, fmt.Errorf("tlsca %s: trust dir required", cfg.Name)
 	}
 	if installName == "" {
 		installName = "rasputin"
 	}
-	// The trust dir holds the Mesh CA key: owner-only, existing installs
-	// included.
-	if err := atrest.EnsureSecretDir(trustDir); err != nil {
-		return nil, fmt.Errorf("mesh: trust dir: %w", err)
+	// The trust dir holds CA keys: owner-only, existing installs included.
+	if err := atrest.EnsureSecretDir(dir); err != nil {
+		return nil, fmt.Errorf("tlsca %s: trust dir: %w", cfg.Name, err)
 	}
-	certPath := filepath.Join(trustDir, MeshCAFileName)
-	keyPath := filepath.Join(trustDir, MeshCAKeyFileName)
-
+	certPath := filepath.Join(dir, cfg.CertFile)
+	keyPath := filepath.Join(dir, cfg.KeyFile)
 	certExists := fileExists(certPath)
 	keyExists := fileExists(keyPath)
 	if certExists != keyExists {
-		// Per C-3: corrupted half-state. Refuse to silently re-issue
-		// because that would invalidate every operator device's trust
-		// without their knowledge.
-		return nil, fmt.Errorf("mesh: partial CA state at %s — found %s=%v key=%v; aborting to avoid silent re-trust",
-			trustDir, MeshCAFileName, certExists, keyExists)
+		return nil, fmt.Errorf("tlsca %s: partial CA state in %s — found %s=%v %s=%v; refusing to re-issue a CA everything already trusts",
+			cfg.Name, dir, cfg.CertFile, certExists, cfg.KeyFile, keyExists)
 	}
+	var (
+		ca  *CA
+		err error
+		msg = "tls ca loaded"
+	)
 	if certExists {
-		return loadMeshCA(certPath, keyPath)
+		ca, err = load(cfg, certPath, keyPath)
+	} else {
+		ca, err = create(cfg, d, certPath, keyPath, installName)
+		msg = "tls ca created"
 	}
-	return createMeshCA(certPath, keyPath, installName)
-}
-
-func createMeshCA(certPath, keyPath, installName string) (*MeshCA, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("mesh: generate CA key: %w", err)
-	}
-	serial, err := randomSerial()
 	if err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC()
+	ca.deps = d
+	sum := sha256.Sum256(ca.Cert.Raw)
+	d.Log.Info(msg, "ca", cfg.Name, "subject", ca.Cert.Subject.CommonName,
+		"not_after", ca.Cert.NotAfter.UTC().Format(time.RFC3339), "sha256", hex.EncodeToString(sum[:]))
+	return ca, nil
+}
+
+func (c Config) validate() error {
+	if c.Name == "" || c.CertFile == "" || c.KeyFile == "" || c.SubjectFormat == "" || c.Lifetime <= 0 || len(c.Usages) == 0 {
+		return fmt.Errorf("tlsca %q: incomplete config", c.Name)
+	}
+	for _, u := range c.Usages {
+		if _, ok := u.extKeyUsage(); !ok {
+			return fmt.Errorf("tlsca %s: config names unknown usage %d", c.Name, u)
+		}
+	}
+	return nil
+}
+
+func (d Deps) validate(name string) error {
+	if d.Now == nil || d.Rand == nil || d.Log == nil {
+		return fmt.Errorf("tlsca %s: Deps needs Now, Rand and Log", name)
+	}
+	return nil
+}
+
+func create(cfg Config, d Deps, certPath, keyPath, installName string) (*CA, error) {
+	// Since Go 1.26 GenerateKey ignores its reader and always draws from the
+	// system's secure source (go doc crypto/ecdsa.GenerateKey); Rand is passed
+	// anyway so every randomness consumer here takes the injected one.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), d.Rand)
+	if err != nil {
+		return nil, fmt.Errorf("tlsca %s: generate CA key: %w", cfg.Name, err)
+	}
+	serial, err := randomSerial(d.Rand)
+	if err != nil {
+		return nil, fmt.Errorf("tlsca %s: %w", cfg.Name, err)
+	}
+	now := d.Now().UTC()
 	tmpl := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
-			CommonName:   fmt.Sprintf("Rasputin Mesh CA (%s)", installName),
+			CommonName:   fmt.Sprintf(cfg.SubjectFormat, installName),
 			Organization: []string{"Rasputin"},
 		},
 		NotBefore:             now.Add(-time.Hour), // skew tolerance
-		NotAfter:              now.Add(meshCALifetime),
+		NotAfter:              now.Add(cfg.Lifetime),
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	der, err := x509.CreateCertificate(d.Rand, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: self-sign CA: %w", err)
+		return nil, fmt.Errorf("tlsca %s: self-sign CA: %w", cfg.Name, err)
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	if err := writeCert(certPath, certPEM); err != nil {
-		return nil, err
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return nil, fmt.Errorf("tlsca %s: round-trip parse CA: %w", cfg.Name, err)
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: marshal CA key: %w", err)
+		return nil, fmt.Errorf("tlsca %s: marshal CA key: %w", cfg.Name, err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	caKey := secret.New(keyPEM)
 	clear(keyPEM)
 	clear(keyDER)
-	err = writeKey(keyPath, caKey)
-	caKey.Destroy()
-	if err != nil {
-		return nil, err
+	defer caKey.Destroy()
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	// Key first, then cert, and the key is taken back if the cert cannot be
+	// written: a failure leaves neither file, so the next start does not
+	// read a half state it must refuse.
+	if err := writeKey(keyPath, caKey); err != nil {
+		return nil, fmt.Errorf("tlsca %s: %w", cfg.Name, err)
 	}
-	cert, err := x509.ParseCertificate(der)
-	if err != nil {
-		return nil, fmt.Errorf("mesh: round-trip parse CA: %w", err)
+	if err := writeCert(certPath, certPEM); err != nil {
+		_ = os.Remove(keyPath)
+		return nil, fmt.Errorf("tlsca %s: %w", cfg.Name, err)
 	}
-	return &MeshCA{Cert: cert, Key: key, CertPEM: certPEM}, nil
+	return &CA{Cert: cert, CertPEM: certPEM, key: key, cfg: cfg}, nil
 }
 
-func loadMeshCA(certPath, keyPath string) (*MeshCA, error) {
+func load(cfg Config, certPath, keyPath string) (*CA, error) {
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: read mesh-ca.pem: %w", err)
+		return nil, fmt.Errorf("tlsca %s: read %s: %w", cfg.Name, cfg.CertFile, err)
 	}
 	block, _ := pem.Decode(certPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("mesh: %s is not a PEM-encoded CERTIFICATE", certPath)
+		return nil, fmt.Errorf("tlsca %s: %s is not a PEM-encoded CERTIFICATE", cfg.Name, cfg.CertFile)
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: parse mesh-ca.pem: %w", err)
+		return nil, fmt.Errorf("tlsca %s: parse %s: %w", cfg.Name, cfg.CertFile, err)
 	}
 	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: read mesh-ca.key: %w", err)
+		return nil, fmt.Errorf("tlsca %s: read %s: %w", cfg.Name, cfg.KeyFile, err)
 	}
 	keyBlock, _ := pem.Decode(keyPEM)
+	clear(keyPEM)
 	if keyBlock == nil {
-		return nil, fmt.Errorf("mesh: %s is not PEM-encoded", keyPath)
+		return nil, fmt.Errorf("tlsca %s: %s is not PEM-encoded", cfg.Name, cfg.KeyFile)
 	}
 	key, err := parseECKey(keyBlock)
+	clear(keyBlock.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: parse mesh-ca.key: %w", err)
+		return nil, fmt.Errorf("tlsca %s: parse %s: %w", cfg.Name, cfg.KeyFile, err)
 	}
-	return &MeshCA{Cert: cert, Key: key, CertPEM: certPEM}, nil
+	return &CA{Cert: cert, CertPEM: certPEM, key: key, cfg: cfg}, nil
 }
 
 func parseECKey(block *pem.Block) (*ecdsa.PrivateKey, error) {
@@ -250,228 +325,6 @@ func parseECKey(block *pem.Block) (*ecdsa.PrivateKey, error) {
 	}
 }
 
-// LeafSpec describes a TLS server-auth leaf to mint under the Mesh CA.
-type LeafSpec struct {
-	// CommonName goes on the cert's Subject. Mostly cosmetic for modern
-	// clients — SANs are what get validated — but useful in operator
-	// debugging output.
-	CommonName string
-	// DNSNames is the set of hostnames the leaf should validate for.
-	// Empty when the operator only reaches the service by IP.
-	DNSNames []string
-	// IPAddresses is the set of IPs the leaf should validate for.
-	// Should include 127.0.0.1 (for same-host health checks) plus
-	// every LAN IP the operator might use to reach the service.
-	IPAddresses []net.IP
-	// Lifetime — defaults to 365d if zero. The auto-rotation path only
-	// kicks in when an existing leaf has less than `renewWindow` left.
-	Lifetime time.Duration
-	// ExactDNSNames requires the on-disk leaf's SAN set to EQUAL DNSNames
-	// rather than merely contain it, so a name being REMOVED forces a
-	// re-mint the same way adding one does.
-	//
-	// Off by default because the tolerant check below is right for a leaf
-	// whose names only ever grow. Turn it on wherever a name can be
-	// WITHDRAWN and the leaf must not outlive it — a rename, or a change of
-	// cluster id. App leaves set it for exactly that reason (see
-	// appLeafSpec); note they no longer withdraw a name on an exposure
-	// change, because exposure is enforced by the route, not the SAN set.
-	ExactDNSNames bool
-}
-
-// leafEKU is the single ExtKeyUsage every leaf carries: a server leaf. The
-// controlplane mints no client leaf; a node authenticates by its own key.
-// One constant, so MintLeaf (which stamps it) and LoadLeafIfUsable (which
-// must re-mint on a mismatch) can never disagree.
-const leafEKU = x509.ExtKeyUsageServerAuth
-
-// LeafPaths is a small bundle of where a leaf's PEM files live on disk.
-// Returned from MintLeafToDisk so callers (the supervisor) can mount
-// them into containers without re-deriving paths.
-type LeafPaths struct {
-	CertPath string
-	KeyPath  string
-}
-
-// MintLeafToDisk is the operational entry point used by the supervisor.
-// It checks whether a usable leaf already exists at the given paths and
-// either returns it untouched or mints a fresh one.
-//
-// "Usable" means: parseable, signed by ca.Cert, has all the SAN entries
-// in spec, and expires more than renewWindow from now. Any mismatch
-// triggers a fresh mint — SAN drift (controlplane moved subnets, new
-// hostname) silently replaces the leaf so the operator never sees a
-// "wrong cert for this address" error.
-func MintLeafToDisk(ca *MeshCA, outDir string, spec LeafSpec) (LeafPaths, error) {
-	if ca == nil {
-		return LeafPaths{}, errors.New("mesh: MintLeafToDisk: nil CA")
-	}
-	// The leaf dir holds the leaf's private key: owner-only, existing
-	// installs included.
-	if err := atrest.EnsureSecretDir(outDir); err != nil {
-		return LeafPaths{}, fmt.Errorf("mesh: leaf dir: %w", err)
-	}
-	paths := LeafPathsIn(outDir)
-	if existing := LoadLeafIfUsable(paths, ca, spec); existing != nil {
-		return paths, nil
-	}
-	certPEM, key, err := MintLeaf(ca, spec)
-	if err != nil {
-		return LeafPaths{}, err
-	}
-	defer key.Destroy()
-	if err := writeCert(paths.CertPath, certPEM); err != nil {
-		return LeafPaths{}, err
-	}
-	if err := writeKey(paths.KeyPath, key); err != nil {
-		return LeafPaths{}, err
-	}
-	return paths, nil
-}
-
-// MintLeaf creates a fresh leaf cert + key under ca: the certificate as PEM
-// bytes, and the private key's PEM as a secret.Value the caller owns and
-// destroys (ADR-0009). Pure function: no disk I/O. Use MintLeafToDisk for the
-// idempotent-with-on-disk-state path. A failure returns the zero Value.
-func MintLeaf(ca *MeshCA, spec LeafSpec) (certPEM []byte, key secret.Value, err error) {
-	if ca == nil {
-		return nil, secret.Value{}, errors.New("mesh: MintLeaf: nil CA")
-	}
-	if spec.CommonName == "" {
-		return nil, secret.Value{}, errors.New("mesh: MintLeaf: CommonName required")
-	}
-	if len(spec.DNSNames) == 0 && len(spec.IPAddresses) == 0 {
-		return nil, secret.Value{}, errors.New("mesh: MintLeaf: at least one DNS or IP SAN required")
-	}
-	lifetime := spec.Lifetime
-	if lifetime <= 0 {
-		lifetime = defaultLeafLifetime
-	}
-	// Don't date a certificate against a clock nobody has checked. The gate
-	// blocks until the clock is trustworthy, within its own budget; when that
-	// budget runs out it says so and the mint proceeds, because a node with no
-	// reachable NTP still has to serve TLS. The gate owns the warning — this
-	// path mints once per leaf per renewal, and a line per mint would either
-	// be silence or a flood depending on the fleet.
-	if ca.leafClock != nil {
-		ca.leafClock()
-	}
-	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("mesh: generate leaf key: %w", err)
-	}
-	serial, err := randomSerial()
-	if err != nil {
-		return nil, secret.Value{}, err
-	}
-	now := time.Now().UTC()
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName:   spec.CommonName,
-			Organization: []string{"Rasputin"},
-		},
-		NotBefore:   now.Add(-time.Hour),
-		NotAfter:    now.Add(lifetime),
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{leafEKU},
-		DNSNames:    append([]string(nil), spec.DNSNames...),
-		IPAddresses: append([]net.IP(nil), spec.IPAddresses...),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.Cert, &leafKey.PublicKey, ca.Key)
-	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("mesh: sign leaf: %w", err)
-	}
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyDER, err := x509.MarshalECPrivateKey(leafKey)
-	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("mesh: marshal leaf key: %w", err)
-	}
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	key = secret.New(keyPEM)
-	clear(keyPEM)
-	clear(keyDER)
-	return certPEM, key, nil
-}
-
-// LoadLeafIfUsable returns a non-nil cert when the on-disk leaf matches
-// the spec well enough to skip re-issuing. Returns nil on any of:
-// missing files, parse error, wrong issuer, missing SAN, near-expiry,
-// or unreadable key. Caller treats nil as "mint a fresh one."
-func LoadLeafIfUsable(paths LeafPaths, ca *MeshCA, spec LeafSpec) *x509.Certificate {
-	certPEM, err := os.ReadFile(paths.CertPath)
-	if err != nil {
-		return nil
-	}
-	if _, err := os.ReadFile(paths.KeyPath); err != nil {
-		return nil
-	}
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return nil
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return nil
-	}
-	// Issuer match — protects against trying to use an old leaf after
-	// the CA itself was regenerated.
-	if err := cert.CheckSignatureFrom(ca.Cert); err != nil {
-		return nil
-	}
-	// Near-expiry → re-mint.
-	if time.Until(cert.NotAfter) < renewWindow {
-		return nil
-	}
-	// EKU drift — a leaf on disk that is not a server leaf (a client leaf
-	// an earlier release minted) is not reused for one.
-	hasEKU := false
-	for _, eku := range cert.ExtKeyUsage {
-		if eku == leafEKU {
-			hasEKU = true
-			break
-		}
-	}
-	if !hasEKU {
-		return nil
-	}
-	// SAN drift — every requested name/IP must be present on the leaf,
-	// otherwise mint a fresh one with the updated set. By default we DON'T
-	// require exact equality (older SAN entries are fine to keep) since the
-	// operator may add a new hostname mid-lifetime.
-	//
-	// That tolerance is one-directional, and a spec that WITHDRAWS a name
-	// must say so with ExactDNSNames. Found on #197 by the automated review:
-	// revoking an app's LAN exposure shrinks the wanted set to a subset of
-	// what the leaf already carries, so the leaf read as still-usable,
-	// nothing was re-minted, nothing was shipped, and the node kept both a
-	// valid .lan certificate and its Caddy LAN route until the leaf's own
-	// renew window — 365d lifetime minus 60d window, so roughly ten months
-	// after the operator was told the app had left the LAN.
-	have := make(map[string]bool, len(cert.DNSNames))
-	for _, n := range cert.DNSNames {
-		have[n] = true
-	}
-	for _, want := range spec.DNSNames {
-		if !have[want] {
-			return nil
-		}
-	}
-	if spec.ExactDNSNames && len(cert.DNSNames) != len(spec.DNSNames) {
-		return nil
-	}
-	haveIP := make(map[string]bool, len(cert.IPAddresses))
-	for _, ip := range cert.IPAddresses {
-		haveIP[ip.String()] = true
-	}
-	for _, want := range spec.IPAddresses {
-		if !haveIP[want.String()] {
-			return nil
-		}
-	}
-	return cert
-}
-
 // ----- file helpers -------------------------------------------------------
 
 func fileExists(p string) bool {
@@ -481,12 +334,11 @@ func fileExists(p string) bool {
 
 // writeCert and writeKey persist a certificate and its private key through
 // the at-rest helper: atomic (a crashed write never leaves a partial cert or
-// key that EnsureMeshCA would later mis-interpret), with the mode set
-// explicitly. A certificate is public by construction and is 0644; a private
-// key is 0600.
+// key that Ensure would later mis-interpret), with the mode set explicitly. A
+// certificate is public by construction and is 0644; a private key is 0600.
 func writeCert(path string, certPEM []byte) error {
 	if err := atrest.WritePublicFile(path, certPEM); err != nil {
-		return fmt.Errorf("mesh: %w", err)
+		return fmt.Errorf("tlsca: %w", err)
 	}
 	return nil
 }
@@ -495,7 +347,7 @@ func writeCert(path string, certPEM []byte) error {
 // the owner-only file they are read back from. The caller owns key.
 func writeKey(path string, key secret.Value) error {
 	if err := atrest.WriteSecretFile(path, key.Reveal()); err != nil {
-		return fmt.Errorf("mesh: %w", err)
+		return fmt.Errorf("tlsca: %w", err)
 	}
 	return nil
 }
@@ -510,14 +362,14 @@ func WriteLeafFiles(paths LeafPaths, certPEM []byte, key secret.Value) error {
 	return writeKey(paths.KeyPath, key)
 }
 
-// randomSerial generates a 128-bit positive integer for cert serials.
+// randomSerial generates a 128-bit positive integer for cert serials from r.
 // 128 bits is RFC 5280's recommendation; small enough for ASN.1 INTEGER
 // encoding, large enough to be effectively unique without coordination.
-func randomSerial() (*big.Int, error) {
+func randomSerial(r io.Reader) (*big.Int, error) {
 	limit := new(big.Int).Lsh(big.NewInt(1), 128)
-	n, err := rand.Int(rand.Reader, limit)
+	n, err := cryptorand.Int(r, limit)
 	if err != nil {
-		return nil, fmt.Errorf("mesh: random serial: %w", err)
+		return nil, fmt.Errorf("random serial: %w", err)
 	}
 	return n, nil
 }

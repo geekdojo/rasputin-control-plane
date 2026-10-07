@@ -14,8 +14,8 @@ import (
 // The agent generates two keys, once, and keeps them in its state directory:
 // one it uses itself and one it hands to the per-node observability collector.
 // Neither key ever leaves the node. What the node reports — here, in
-// registration metadata, exactly as it reports the mesh CA fingerprint
-// (MetadataMeshCAFingerprint) — is the SHA-256 of each key's DER
+// registration metadata, exactly as it reports the controlplane CA fingerprint
+// (MetadataTrustFingerprint) — is the SHA-256 of each key's DER
 // SubjectPublicKeyInfo. That is the same value, in the same encoding, as a bus
 // pin (BusPinForPublicKey), because it answers the same question: which key is
 // this, ignoring whatever certificate happens to be wrapped around it.

@@ -60,7 +60,7 @@ import (
 //     users, credentials and bus tokens match the pre-wipe database ROW FOR
 //     ROW; a pre-wipe bus token still VALIDATES against the restored store
 //     (a node's existing join token authenticates with no re-registration);
-//     the mesh CA and Headscale state are byte-identical; the backup target
+//     the controlplane CA and Headscale state are byte-identical; the backup target
 //     row came back with the identity, so the disk is still this cluster's
 //     target; and the private key appears in no log line, no ledger row and
 //     no report.
@@ -462,7 +462,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 		t.Fatal("the token validated for a node it is not bound to")
 	}
 	_ = restoredBus.Close()
-	// 4. The mesh CA and Headscale state are byte-identical to what was
+	// 4. The controlplane CA and Headscale state are byte-identical to what was
 	//    captured; the fresh CA went aside.
 	for _, f := range []string{"mesh-ca.key", "mesh-ca.pem"} {
 		want, _ := os.ReadFile(filepath.Join(h.trustDir, f))

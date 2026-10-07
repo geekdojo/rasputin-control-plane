@@ -7,9 +7,9 @@ import (
 )
 
 // TrustSource returns the TLS client config the bundle download trusts: the
-// node's mesh CA bundle and nothing else (geekdojo/geekdojo-brain#590). The
+// node's controlplane CA bundle and nothing else (geekdojo/geekdojo-brain#590). The
 // download URL is always the api's /api/bundles/{sha} at <cluster>.local, a
-// leaf the Mesh CA signs, so no system root belongs in it. The composition
+// leaf the controlplane CA signs, so no system root belongs in it. The composition
 // root passes tailscale.MeshTrust.ClientTLSConfig, which re-reads the bundle
 // on every call.
 type TrustSource func() (*tls.Config, error)

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
 // The api's HTTPS leaf renews in place: refresh swaps in whatever is now on
@@ -17,9 +18,9 @@ import (
 // without it a renewed file would sit unserved until the api restarted.
 func TestAPILeaf_RefreshPicksUpARenewedLeaf(t *testing.T) {
 	dir := t.TempDir()
-	ca, err := tlsca.EnsureMeshCA(dir, "test")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), dir, "test", tlscatest.Deps())
 	if err != nil {
-		t.Fatalf("EnsureMeshCA: %v", err)
+		t.Fatalf("tlsca.Ensure: %v", err)
 	}
 	// Two leaves for the same address, distinguishable by NotAfter — "the
 	// file the sweep replaced" and "what it replaced it with".
@@ -30,7 +31,7 @@ func TestAPILeaf_RefreshPicksUpARenewedLeaf(t *testing.T) {
 		spec := apiLeafSpec(hostname, ip)
 		spec.Lifetime = lifetime
 		out := filepath.Join(dir, "tls", lifetime.String())
-		paths, err := tlsca.MintLeafToDisk(ca, out, spec)
+		paths, err := ca.MintLeafToDisk(out, spec)
 		if err != nil {
 			t.Fatalf("MintLeafToDisk: %v", err)
 		}

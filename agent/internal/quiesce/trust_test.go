@@ -14,7 +14,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 )
 
-// The transfer and restore clients verify the api with the node's mesh CA
+// The transfer and restore clients verify the api with the node's controlplane CA
 // bundle and nothing else (geekdojo/geekdojo-brain#590). These drive the
 // Stager's own transport and fetcher — no transportFor or fetcherFor
 // override — so what is under test is the production client.
@@ -23,7 +23,7 @@ const trustBundlePath = "/var/lib/rasputin/mesh/tailscaled-ca.pem"
 
 // failingTrust stands in for MeshTrust on a node whose bundle is missing.
 func failingTrust() (*tls.Config, error) {
-	return nil, fmt.Errorf("mesh CA bundle %s: no such file or directory: this node trusts no mesh CA", trustBundlePath)
+	return nil, fmt.Errorf("controlplane CA bundle %s: no such file or directory: this node trusts no controlplane CA", trustBundlePath)
 }
 
 func tlsXferRig(t *testing.T, ca *tlstest.CA) *xferRig {

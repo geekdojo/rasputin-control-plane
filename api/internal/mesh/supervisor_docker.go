@@ -122,7 +122,7 @@ type DockerSupervisorConfig struct {
 	// via tls_cert_path / tls_key_path. ServerURL is also forced to
 	// https:// in that mode. Leave nil for HTTP-only (useful for tests
 	// and bring-up before the wizard's PKI step runs).
-	MeshCA *tlsca.MeshCA
+	MeshCA *tlsca.CA
 
 	// ExtraLeafDNSNames are appended to the leaf's SAN list — useful if
 	// the operator wants the cert to also validate for a custom hostname
@@ -823,7 +823,7 @@ func (s *DockerSupervisor) ensureLeaf() error {
 	if err != nil {
 		return err
 	}
-	if _, err := tlsca.MintLeafToDisk(s.cfg.MeshCA, s.certsDir(), spec); err != nil {
+	if _, err := s.cfg.MeshCA.MintLeafToDisk(s.certsDir(), spec); err != nil {
 		return fmt.Errorf("mesh supervisor: mint leaf: %w", err)
 	}
 	return nil
@@ -838,6 +838,7 @@ func (s *DockerSupervisor) ensureLeaf() error {
 // subnets gets a re-mint from the same check that catches near-expiry.
 func (s *DockerSupervisor) leafSpec() (tlsca.LeafSpec, error) {
 	spec := tlsca.LeafSpec{
+		Usage:       tlsca.UsageServer,
 		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		DNSNames:    []string{"localhost"},
 	}

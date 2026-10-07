@@ -574,7 +574,12 @@ func (s *Service) emit(n *proto.Node, change proto.InventoryChangeType) {
 // which is DeriveStatus (presence.go). Gating on "== StatusOnline" against
 // either function means the same thing.
 func ComputeStatus(lastSeen time.Time) proto.NodeStatus {
-	gap := time.Since(lastSeen)
+	return computeStatusAt(time.Now(), lastSeen)
+}
+
+// computeStatusAt is ComputeStatus read at now rather than the wall clock.
+func computeStatusAt(now, lastSeen time.Time) proto.NodeStatus {
+	gap := now.Sub(lastSeen)
 	switch {
 	case gap < staleAfter:
 		return proto.StatusOnline

@@ -162,8 +162,8 @@ func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error)
 var errHTTPSOff = errors.New("rasputin-api: node listener: no Mesh leaf to serve because HTTPS is off; set RASPUTIN_HTTPS_ADDR")
 
 // nodeListenerCert is the node listener's certificate selection: the api's
-// Mesh-CA-signed server leaf, for every SNI. A collector verifies it by chain
-// to the Mesh CA under the cluster name, the same way every other Rasputin
+// controlplane-CA-signed server leaf, for every SNI. A collector verifies it by chain
+// to the controlplane CA under the cluster name, the same way every other Rasputin
 // HTTPS client verifies the api, and nothing pins its bytes, so a renewed or
 // re-minted leaf is served with no change on any node
 // (geekdojo/geekdojo-brain#672).

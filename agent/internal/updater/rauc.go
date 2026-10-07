@@ -39,7 +39,7 @@ type RAUCBackend struct {
 	// rebooter is the agent's one reboot function. Wired from main.go via
 	// SetRebooter; nil means this backend refuses to reboot.
 	rebooter Rebooter
-	// trust is the bundle download's only trust root: the node's mesh CA
+	// trust is the bundle download's only trust root: the node's controlplane CA
 	// bundle, which signs the api's HTTPS leaf that serves /api/bundles/{sha}.
 	// Called once per Download. Required by the constructor.
 	trust TrustSource
@@ -90,7 +90,7 @@ func newRAUCBackend(stateDir, binary string, trust TrustSource) (*RAUCBackend, e
 func (r *RAUCBackend) SetRebooter(rb Rebooter) { r.rebooter = rb }
 
 // httpClient returns the client used to pull a bundle. It trusts exactly
-// the mesh CA bundle trust returns; a trust failure (no bundle, an unusable
+// the controlplane CA bundle trust returns; a trust failure (no bundle, an unusable
 // one) is returned, never degraded to the system roots.
 func (r *RAUCBackend) httpClient() (*http.Client, error) {
 	return trustedClient(r.trust)
@@ -362,7 +362,7 @@ func (r *RAUCBackend) Download(ctx context.Context, bundleID, url, _, expectedSH
 		return "", "", fmt.Errorf("rauc download: %w", err)
 	}
 	// Trust is resolved before anything is pruned or requested: a node that
-	// trusts no mesh CA refuses here, with the bundle path in the error.
+	// trusts no controlplane CA refuses here, with the bundle path in the error.
 	client, err := r.httpClient()
 	if err != nil {
 		return "", "", fmt.Errorf("rauc download: %w", err)

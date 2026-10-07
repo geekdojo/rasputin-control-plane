@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,7 +21,9 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/configfault"
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/proto/tlstest"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -696,15 +699,15 @@ func TestUCILANAddr_PassesADeadline(t *testing.T) {
 	}
 }
 
-// The registration carries the fingerprint of the mesh CA this node trusts,
+// The registration carries the fingerprint of the controlplane CA this node trusts,
 // under the key the api's converge_trust reads — and never the PEM. This is
 // the one fact that lets the api re-deliver a CA it changed under an enrolled
 // node (e3bench 2026-09-04).
-func TestPublishRegistered_CarriesMeshCAFingerprint(t *testing.T) {
+func TestPublishRegistered_CarriesTrustFingerprint(t *testing.T) {
 	nc := testBus(t)
 	ev := registeredEvt(t, nc, "cp-test", nil)
-	if got := ev.Metadata[proto.MetadataMeshCAFingerprint]; got != "fp-test" {
-		t.Errorf("metadata %s = %v, want the backend's fingerprint", proto.MetadataMeshCAFingerprint, got)
+	if got := ev.Metadata[proto.MetadataTrustFingerprint]; got != "fp-test" {
+		t.Errorf("metadata %s = %v, want the backend's fingerprint", proto.MetadataTrustFingerprint, got)
 	}
 	for k, v := range ev.Metadata {
 		if s, ok := v.(string); ok && strings.Contains(s, "BEGIN CERTIFICATE") {
@@ -824,5 +827,83 @@ func TestProcessLoggerRedactsSecrets(t *testing.T) {
 	}
 	if calls == 0 {
 		t.Fatal("main.go has no logkit.New( call; the process logger must be built there with logkit.RedactSecrets() (#733)")
+	}
+}
+
+// pendingReloader is a tailscaled whose reload fails until told otherwise.
+type pendingReloader struct{ fail bool }
+
+func (r *pendingReloader) ReloadTrust(context.Context) error {
+	if r.fail {
+		return errors.New("reload refused")
+	}
+	return nil
+}
+
+// TC-741-21: the registration's trust fingerprint is what the trust handler
+// reports, not the tailscale backend. With no tailscale backend and a bundle
+// installed it is the bundle's fingerprint, not "none"; while a reload is
+// pending it is "reload-pending"; once the reload lands it is the bundle's
+// again. main wires TrustFingerprint to the handler's ReportedFingerprint
+// exactly so.
+func TestPublishRegistered_TrustFollowsTheTrustStore(t *testing.T) {
+	nc := testBus(t)
+	ca := tlstest.NewCA(t, "cp").PEM
+	cmd, err := json.Marshal(proto.TrustInstallCmd{BundlePEM: ca})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	publish := func(h *nodetrust.Handler) any {
+		return registeredEvtFacts(t, nc, "n1", nil, nil, registrationFacts{TrustFingerprint: h.ReportedFingerprint}).Metadata[proto.MetadataTrustFingerprint]
+	}
+
+	t.Run("no tailscale backend", func(t *testing.T) {
+		store := nodetrust.NewStore(filepath.Join(t.TempDir(), "ca.pem"))
+		h, err := nodetrust.NewHandler(store, nil, func() {}, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := publish(h); got != proto.TrustFingerprintNone {
+			t.Errorf("before install: %v", got)
+		}
+		if ack := h.Handle(context.Background(), "n1", cmd); !ack.OK {
+			t.Fatalf("install: %+v", ack)
+		}
+		if got := publish(h); got != proto.TrustFingerprint(ca) {
+			t.Errorf("after install: %v, want the bundle's fingerprint", got)
+		}
+	})
+	t.Run("reload pending, then cleared", func(t *testing.T) {
+		store := nodetrust.NewStore(filepath.Join(t.TempDir(), "ca.pem"))
+		r := &pendingReloader{fail: true}
+		h, err := nodetrust.NewHandler(store, []nodetrust.Reloader{r}, func() {}, logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Handle(context.Background(), "n1", cmd)
+		if got := publish(h); got != proto.TrustFingerprintReloadPending {
+			t.Errorf("pending: %v", got)
+		}
+		r.fail = false
+		h.Handle(context.Background(), "n1", cmd)
+		if got := publish(h); got != proto.TrustFingerprint(ca) {
+			t.Errorf("cleared: %v, want the bundle's fingerprint", got)
+		}
+	})
+}
+
+// F-741-14: the mock tailscale backend keeps its bundle in the agent's own
+// state dir, as it always has, so a dev agent run as an ordinary user can
+// install one; every other backend uses the per-image path.
+func TestTrustBundlePath(t *testing.T) {
+	t.Setenv("RASPUTIN_MESH_CA_BUNDLE", "")
+	if got, want := trustBundlePath("mock", "/state"), filepath.Join("/state", "tailscale", "tailscaled-ca.pem"); got != want {
+		t.Errorf("mock: %q, want %q", got, want)
+	}
+	for _, b := range []string{"tailscale", backendUnavailable, ""} {
+		if got := trustBundlePath(b, "/state"); got != nodetrust.BundlePath() {
+			t.Errorf("%q: %q, want %q", b, got, nodetrust.BundlePath())
+		}
 	}
 }

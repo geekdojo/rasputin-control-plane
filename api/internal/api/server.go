@@ -61,9 +61,12 @@ type Server struct {
 	bundleDir     string
 	trustDir      string
 	mesh          *mesh.Service
-	bmc           *bmc.Service
-	bmcSessions   *bmc.SessionManager
-	setup         *setup.Service
+	// nodeTrust is the api's node trust bundle, for the devices view's
+	// trust reading (SetNodeTrust); nil reads every node as current.
+	nodeTrust   trustFingerprinter
+	bmc         *bmc.Service
+	bmcSessions *bmc.SessionManager
+	setup       *setup.Service
 	// console is the console root password store (#587). nil keeps its
 	// routes at 503.
 	console *console.Store
@@ -95,7 +98,7 @@ type Server struct {
 	hostLANInfo func() (ip string, mac string)
 	// rotateAppLeaf re-mints an app's TLS leaf when its SANs drift, so a LAN
 	// exposure change (#197) takes effect immediately instead of waiting for
-	// the rotation sweep. nil when there is no Mesh CA (dev, or a cluster that
+	// the rotation sweep. nil when there is no controlplane CA (dev, or a cluster that
 	// never enrolled) — the exposure flip still persists and still changes DNS;
 	// only the proxy half waits.
 	rotateAppLeaf apps.LeafRotator
@@ -304,7 +307,7 @@ func (s *Server) routes() *routeMux {
 	// runs before any passkey exists and needs to read step state to know
 	// which form to show first. The response carries no secrets.
 	mux.HandleFunc("GET /api/setup/state", s.handleSetupState)
-	// CA-download endpoints are intentionally unauthenticated: the Mesh CA
+	// CA-download endpoints are intentionally unauthenticated: the controlplane CA
 	// public cert is not a secret, and first-run has no users yet — the
 	// operator must be able to install the CA before the first passkey
 	// ceremony can happen over HTTPS. See the handlers' comments.

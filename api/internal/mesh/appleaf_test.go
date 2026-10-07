@@ -67,14 +67,14 @@ func TestPrepareAppLeaf_SANsAreExposureIndependent(t *testing.T) {
 	if cert.Subject.CommonName != wantSANs[0] {
 		t.Errorf("CommonName = %q, want %q", cert.Subject.CommonName, wantSANs[0])
 	}
-	// It's a server-auth leaf, and it chains to the Mesh CA.
+	// It's a server-auth leaf, and it chains to the controlplane CA.
 	if !slices.Contains(cert.ExtKeyUsage, x509.ExtKeyUsageServerAuth) {
 		t.Errorf("leaf missing serverAuth EKU: %v", cert.ExtKeyUsage)
 	}
 	roots := x509.NewCertPool()
 	roots.AddCert(ca.Cert)
 	if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
-		t.Errorf("leaf does not verify against the Mesh CA: %v", err)
+		t.Errorf("leaf does not verify against the controlplane CA: %v", err)
 	}
 }
 

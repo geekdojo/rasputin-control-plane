@@ -25,7 +25,7 @@ import (
 //
 // Everything under <dir> is owner-only (0700 directories, 0600 files, through
 // agent/internal/atrest). A compose file is not public text: the api renders
-// the observability collector's compose with that node's mesh-CA leaf KEY
+// the observability collector's compose with that node's controlplane-CA leaf KEY
 // inline (api/internal/obs), and an owner's custom compose or a catalog tile's
 // environment can carry credentials of its own. Only the docker CLI this
 // backend runs — as the agent's own uid — ever reads these files; the

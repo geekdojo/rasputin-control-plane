@@ -16,7 +16,7 @@
 //
 // The threat these defend against is the same on every path: a symlink
 // planted where a name was expected, so that a path-based open lands on
-// /etc/shadow, another app's volume, or the mesh CA key under an innocent
+// /etc/shadow, another app's volume, or the controlplane CA key under an innocent
 // name. A symlink anywhere in a path is ELOOP here, not a redirect, and a
 // name that is not the kind of thing the caller expected (a file where a
 // directory should be, or the reverse) is refused after the fstat.

@@ -251,9 +251,9 @@ func TestEnrollWorkflow_NewAgentNamedKillIsRelayed(t *testing.T) {
 func TestEnrollWorkflow_OrdinaryRejectionUnchanged(t *testing.T) {
 	f := newConvergeFixture(t)
 	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC())
-	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale: install mesh CA: read-only file system"})
+	fakeAgent(t, f.nc, "node-1", proto.MeshEnrollAck{OK: false, Backend: "tailscale", Detail: "tailscale: install controlplane CA: read-only file system"})
 	_, err := dispatchAgainst(t, f, "node-1")
-	if err == nil || err.Error() != "agent rejected enroll: tailscale: install mesh CA: read-only file system" {
+	if err == nil || err.Error() != "agent rejected enroll: tailscale: install controlplane CA: read-only file system" {
 		t.Errorf("ordinary rejection changed: %v", err)
 	}
 }

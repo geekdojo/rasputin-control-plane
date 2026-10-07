@@ -52,7 +52,7 @@ const (
 	// card, with the app STOPPED for part of it), backup's transfer (45m —
 	// sealing and uploading one staged volume) and backup's volume restore
 	// (45m — downloading, unpacking and swapping one volume, #291 phase 2)
-	// and mesh enroll (2m — mesh CA install, tailscaled restart and a first
+	// and mesh enroll (2m — controlplane CA install, tailscaled restart and a first
 	// `tailscale up` login against a Headscale that may still be coming up,
 	// geekdojo-brain#402) are the others. EVERY
 	// agent-side budget belongs in this max(): one left out is a handler that

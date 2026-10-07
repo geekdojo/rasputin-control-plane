@@ -39,7 +39,7 @@ type Stager struct {
 	afterFile        func(rel string) error
 	logf             func(format string, args ...any)
 	// trust is what the transfer's and the restore's HTTP clients verify
-	// the api with: the node's mesh CA bundle and nothing else. Called once
+	// the api with: the node's controlplane CA bundle and nothing else. Called once
 	// per transfer and per restore fetch. transportFor is a test's
 	// replacement for the transport itself.
 	trust TrustSource
@@ -62,7 +62,7 @@ type Stager struct {
 // TrustSource returns the TLS client config the transfer and restore
 // clients verify the api with (geekdojo/geekdojo-brain#590). The composition
 // root passes tailscale.MeshTrust.ClientTLSConfig, which re-reads the node's
-// mesh CA bundle on every call.
+// controlplane CA bundle on every call.
 type TrustSource func() (*tls.Config, error)
 
 // errNoTrustSource is a Stager built without a trust source. Every transfer
@@ -79,7 +79,7 @@ var errNoNodeKey = errors.New("quiesce: no node key wired")
 
 // New builds a Stager over the runtime. stagingRoot is the agent's one
 // staging root (storage.StagingRoot), markerDir is MarkerDir(stateDir), trust
-// is the node's mesh CA trust, and clientCert is the node's agent key as a
+// is the node's controlplane CA trust, and clientCert is the node's agent key as a
 // TLS client certificate (nodekeys.Keys.ClientCertificate), presented on every
 // transfer and restore fetch.
 func New(rt Runtime, stagingRoot, markerDir string, trust TrustSource, clientCert *tls.Certificate) *Stager {

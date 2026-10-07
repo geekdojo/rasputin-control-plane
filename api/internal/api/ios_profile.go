@@ -27,11 +27,11 @@ import (
 // instead of stacking duplicates.
 func BuildIOSMobileConfig(rootPEM []byte, displayName, organization string) ([]byte, error) {
 	if len(rootPEM) == 0 {
-		return nil, errors.New("mesh: BuildIOSMobileConfig: empty cert PEM")
+		return nil, errors.New("api: BuildIOSMobileConfig: empty cert PEM")
 	}
 	block, _ := pem.Decode(rootPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, errors.New("mesh: BuildIOSMobileConfig: input is not a PEM-encoded CERTIFICATE")
+		return nil, errors.New("api: BuildIOSMobileConfig: input is not a PEM-encoded CERTIFICATE")
 	}
 	if displayName == "" {
 		displayName = "Rasputin Internal Trust Root"

@@ -50,7 +50,7 @@ type SubnetRouteSpec struct {
 }
 
 // MeshEnrollWork is the agent's budget for one mesh.enroll, from the cmd
-// arriving to the ack going back: installing the mesh CA, restarting
+// arriving to the ack going back: installing the controlplane CA, restarting
 // tailscaled and waiting for its socket, and `tailscale up` — which blocks
 // until tailscaled has logged in to Headscale, however long that takes.
 //
@@ -88,14 +88,13 @@ type MeshEnrollCmd struct {
 	AdvertiseRoutes []string `json:"advertiseRoutes,omitempty"`
 	AcceptDNS       bool     `json:"acceptDns"`
 	AcceptRoutes    bool     `json:"acceptRoutes"`
-	// MeshCAPEM is the per-installation Mesh CA root (PEM). When the
-	// controlplane self-hosts Headscale over HTTPS, the leaf is signed by
-	// this CA — which no public trust store knows about — so the node must
-	// trust it before `tailscale up`, or tailscaled's TLS dial to Headscale
-	// fails. The agent installs it into tailscaled's trust bundle. Empty
-	// when Headscale is plain HTTP (dev) or externally managed with a
-	// publicly trusted cert.
-	MeshCAPEM []byte `json:"meshCaPem,omitempty"`
+	// LegacyTrustBundlePEM is the node trust bundle (the controlplane CA,
+	// plus the operator's CA when Headscale is theirs), carried ONLY to an
+	// agent that predates trust.install (TrustInstallVerb), which takes its
+	// trust from here and nowhere else. A current agent receives the bundle
+	// on trust.install before mesh.enroll and gets none here. The json tag is
+	// a compatibility name: older agents read it.
+	LegacyTrustBundlePEM []byte `json:"meshCaPem,omitempty"`
 }
 
 // MeshEnrollAck reports the post-enrollment tailscale state.
@@ -107,9 +106,9 @@ type MeshEnrollAck struct {
 	Routes    []string `json:"routes,omitempty"`
 	Backend   string   `json:"backend"` // "tailscale" or "mock"
 	Detail    string   `json:"detail,omitempty"`
-	// TrustFingerprint is the MeshCAFingerprint of the CA bundle the node
+	// TrustFingerprint is the TrustFingerprint of the trust bundle the node
 	// holds AFTER this enroll — what it will report under
-	// MetadataMeshCAFingerprint from now on. Lets the saga log that the
+	// MetadataTrustFingerprint from now on. Lets the saga log that the
 	// delivery landed as the CA the api meant to deliver. Empty from a
 	// pre-fingerprint agent.
 	TrustFingerprint string `json:"trustFingerprint,omitempty"`

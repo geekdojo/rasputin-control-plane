@@ -18,7 +18,7 @@ import (
 type MockBackend struct {
 	mu        sync.Mutex
 	statePath string
-	caBundle  string // where the mock installs a delivered Mesh CA, so it reports trust like the real backend
+	trust     TrustInstaller // the node's trust bundle, for a legacy enroll's bundle
 	state     mockTSState
 }
 
@@ -30,13 +30,18 @@ type mockTSState struct {
 	EnrolledAt time.Time `json:"enrolledAt"`
 }
 
-func NewMockBackend(stateDir string) (*MockBackend, error) {
+// NewMockBackend file-backs the mock in stateDir, installing a legacy
+// enroll's bundle through trust.
+func NewMockBackend(stateDir string, trust TrustInstaller) (*MockBackend, error) {
+	if trust == nil {
+		return nil, errors.New("tailscale mock: a TrustInstaller is required")
+	}
 	if err := atrest.EnsureSecretDir(stateDir); err != nil {
 		return nil, fmt.Errorf("tailscale mock: mkdir %s: %w", stateDir, err)
 	}
 	b := &MockBackend{
 		statePath: filepath.Join(stateDir, "tailscale.json"),
-		caBundle:  filepath.Join(stateDir, "tailscaled-ca.pem"),
+		trust:     trust,
 	}
 	// An existing install's file was written 0644 by an older agent and is
 	// not rewritten until something changes it. Tighten it at start.
@@ -51,10 +56,11 @@ func NewMockBackend(stateDir string) (*MockBackend, error) {
 
 func (b *MockBackend) Name() string { return "mock" }
 
-// TrustFingerprint reports the CA the mock last installed (or "none"), so a
-// mock-backed node converges under the api's trust reconcile exactly as a
-// real one does instead of reading as stale forever.
-func (b *MockBackend) TrustFingerprint() string { return InstalledCAFingerprint(b.caBundle) }
+// TrustFingerprint is the fingerprint of the node's trust bundle.
+func (b *MockBackend) TrustFingerprint() string { return b.trust.Fingerprint() }
+
+// ReloadTrust is a no-op: there is no tailscaled to reload.
+func (b *MockBackend) ReloadTrust(context.Context) error { return nil }
 
 func (b *MockBackend) load() error {
 	buf, err := os.ReadFile(b.statePath)
@@ -81,11 +87,12 @@ func (b *MockBackend) Enroll(_ context.Context, in EnrollInput) (Status, error) 
 	if in.AuthKey == "" {
 		return Status{}, errors.New("tailscale mock: empty auth key")
 	}
-	// Keep the delivered CA the way the real backend does (minus the
-	// tailscaled restart, there being no tailscaled), so what the mock
-	// reports it trusts is what it was last handed.
-	if _, err := installMeshCA(in.MeshCAPEM, b.caBundle); err != nil {
-		return Status{}, fmt.Errorf("tailscale mock: install mesh CA: %w", err)
+	// Keep a legacy enroll's bundle the way the real backend does (minus
+	// the tailscaled restart, there being no tailscaled).
+	if len(in.LegacyTrustBundlePEM) > 0 {
+		if _, err := b.trust.Install(in.LegacyTrustBundlePEM); err != nil {
+			return Status{}, fmt.Errorf("tailscale mock: install trust bundle: %w", err)
+		}
 	}
 	b.state = mockTSState{
 		Enrolled:   true,

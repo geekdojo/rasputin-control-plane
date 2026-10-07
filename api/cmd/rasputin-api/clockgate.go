@@ -13,10 +13,10 @@ import (
 // validity window with the current time?".
 //
 // Before this there was one caller — the HTTPS leaf's mint — and it waited
-// inline. Every other Mesh-CA mint (Headscale's leaf, a node's collector leaf,
+// inline. Every other controlplane-CA mint (Headscale's leaf, a node's collector leaf,
 // an app's leaf) stamped time.Now() with nothing checked, so a controlplane
 // that came up before NTP could issue certificates anchored in a bogus window
-// and hand them to nodes. Passed to tlsca.WithLeafClockGate, this gates all of
+// and hand them to nodes. Passed to the CAs as tlsca.Deps.LeafClock, this gates all of
 // them.
 //
 // Shape:
@@ -61,7 +61,7 @@ func (c *trustedClock) ok() bool {
 			return
 		}
 		log.Printf("rasputin-api: WARNING — system clock not NTP-synchronized after %s; "+
-			"certificates minted under the Mesh CA from here on are dated against the current "+
+			"certificates minted under the controlplane CA from here on are dated against the current "+
 			"clock. If the UI, a node's collector or the mesh reports an expired or not-yet-valid "+
 			"certificate, fix time sync (NTP) and restart rasputin-api.", c.timeout)
 	})

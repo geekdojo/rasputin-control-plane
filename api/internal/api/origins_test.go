@@ -206,7 +206,7 @@ func TestWebSocketUpgradeOriginPolicy(t *testing.T) {
 }
 
 // The /trust page reads /api/setup/state over plain HTTP on a device that
-// does not trust the Mesh CA yet, so the bootstrap listener serves it rather
+// does not trust the controlplane CA yet, so the bootstrap listener serves it rather
 // than redirecting it to https://. Only GET: anything else still redirects.
 func TestBootstrapServesSetupState(t *testing.T) {
 	f := newAPIFixture(t)

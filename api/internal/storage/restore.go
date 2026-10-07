@@ -313,15 +313,15 @@ type RestoreReport struct {
 	TrustRedelivery *TrustRedeliveryRecord `json:"trustRedelivery,omitempty"`
 }
 
-// TrustRedeliveryRecord is the mesh-CA re-delivery an identity restore
+// TrustRedeliveryRecord is the controlplane-CA re-delivery an identity restore
 // kicked (mesh converge_trust), as the report records it. An identity
-// restore swaps the mesh CA under every node enrolled since the box was
+// restore swaps the controlplane CA under every node enrolled since the box was
 // re-flashed; each of those keeps trusting the interim CA, and every
 // node→api TLS client on it fails, until the restored CA is delivered again
 // (e3bench 2026-09-04). Fingerprints only, never PEMs.
 type TrustRedeliveryRecord struct {
 	CheckedAt time.Time `json:"checkedAt"`
-	// CAFingerprint is the restored mesh CA the nodes were compared against.
+	// CAFingerprint is the restored controlplane CA the nodes were compared against.
 	CAFingerprint string `json:"caFingerprint,omitempty"`
 	// Redelivered is every enrolled node the kick re-delivered the CA to.
 	Redelivered []string `json:"redelivered"`
@@ -344,7 +344,7 @@ type TrustRedeliveryRecord struct {
 
 // restoreWarning is the report's standing caveat.
 const restoreWarning = "This restore put back the control-plane IDENTITY SET only — the database (users and passkeys, node bus tokens, app declarations, mesh intents), " +
-	"the mesh CA, the bus key and Headscale state. Every operator device, user and node re-authenticates with no ceremony. " +
+	"the controlplane CA, the bus key and Headscale state. Every operator device, user and node re-authenticates with no ceremony. " +
 	"APP DATA WAS NOT RESTORED: every app volume the generation holds is listed by name under appVolumesPresent and is still on the backup disk, sealed. " +
 	"Restoring app volumes to the nodes that host them is a later phase. Do not read this record as a full restore of the cluster."
 
@@ -355,9 +355,9 @@ func identityRestorePath(p string) (note string, ok bool) {
 	case p == "rasputin.db":
 		return "the control-plane database — users and passkey credentials, the bus-token store, app declarations, mesh intents, the job ledger", true
 	case p == "trust/mesh-ca.key":
-		return "the per-installation mesh CA private key — every operator device's installed trust", true
+		return "the per-installation controlplane CA private key — every operator device's installed trust", true
 	case p == "trust/mesh-ca.pem":
-		return "the per-installation mesh CA certificate", true
+		return "the per-installation controlplane CA certificate", true
 	case p == busKeyArchivePath:
 		return busKeyNote, true
 	case p == busCertArchivePath:

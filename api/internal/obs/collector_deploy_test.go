@@ -95,7 +95,7 @@ func TestCollectorDeploy_KeyedNodeTrustsTheMeshChain(t *testing.T) {
 	}
 	nc, agent := startCollectorAgent(t, "c02")
 	d := CollectorDeployDeps{
-		Inv: inv, MeshCAPEM: testMeshCA,
+		Inv: inv, CAPEM: testMeshCA,
 		IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 	}
 	r := runCollectorDeploy(t, d, nc, "c02")
@@ -110,7 +110,7 @@ func TestCollectorDeploy_KeyedNodeTrustsTheMeshChain(t *testing.T) {
 	if !strings.Contains(alloy, `server_name = "home1.local"`) || !strings.Contains(alloy, collectorTrustLine) {
 		t.Errorf("keyed compose lacks the Mesh trust line or server name:\n%s", alloy)
 	}
-	short := proto.ShortFingerprint(proto.MeshCAFingerprint([]byte(testMeshCA)))
+	short := proto.ShortFingerprint(proto.TrustFingerprint([]byte(testMeshCA)))
 	found := false
 	for _, l := range r.logs {
 		if strings.Contains(l, "trust=mesh-ca "+short) {
@@ -134,7 +134,7 @@ func TestCollectorDeploy_RefusesANodeWithNoCollectorKey(t *testing.T) {
 	}
 	nc, agent := startCollectorAgent(t, "c03")
 	d := CollectorDeployDeps{
-		Inv: inv, MeshCAPEM: testMeshCA,
+		Inv: inv, CAPEM: testMeshCA,
 		IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 	}
 	r := runCollectorDeploy(t, d, nc, "c03")
@@ -161,8 +161,8 @@ func TestCollectorDeploy_RefusesANodeWithNoCollectorKey(t *testing.T) {
 	}
 }
 
-// TC-672-10: with no Mesh CA configured, a keyed node's deploy fails with an
-// error that wraps "MeshCAPEM required" and names the node, and no RPC is
+// TC-672-10: with no controlplane CA configured, a keyed node's deploy fails with an
+// error that wraps "CAPEM required" and names the node, and no RPC is
 // sent.
 func TestCollectorDeploy_RefusesWithNoMeshCA(t *testing.T) {
 	inv := admittedStore(t, "k1")
@@ -178,11 +178,11 @@ func TestCollectorDeploy_RefusesWithNoMeshCA(t *testing.T) {
 				IngressBaseURL: "https://home1.local:8443", ServerName: "home1.local",
 			}
 			r := runCollectorDeploy(t, d, nc, node)
-			if r.err == nil || !strings.Contains(r.err.Error(), "MeshCAPEM required") || !strings.Contains(r.err.Error(), node) {
-				t.Errorf("deploy with no Mesh CA = %v, want an error naming %s and MeshCAPEM required", r.err, node)
+			if r.err == nil || !strings.Contains(r.err.Error(), "CAPEM required") || !strings.Contains(r.err.Error(), node) {
+				t.Errorf("deploy with no controlplane CA = %v, want an error naming %s and CAPEM required", r.err, node)
 			}
 			if n := len(agent.sent()); n != 0 {
-				t.Errorf("%d deploy RPC(s) sent with no Mesh CA", n)
+				t.Errorf("%d deploy RPC(s) sent with no controlplane CA", n)
 			}
 		})
 	}

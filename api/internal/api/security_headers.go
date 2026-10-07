@@ -52,7 +52,7 @@ const (
 // narrower exception overrides them (sameOriginFraming does).
 //
 // Strict-Transport-Security is deliberately never sent, on any listener. Each
-// installation has its own Mesh CA, first trusted from the plain-HTTP /trust
+// installation has its own controlplane CA, first trusted from the plain-HTTP /trust
 // page, and a controlplane re-flashed without restoring its identity mints a
 // new one. A browser holding HSTS for the cluster's name would refuse to let
 // the operator click through the new certificate and would upgrade the /trust

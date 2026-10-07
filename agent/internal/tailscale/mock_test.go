@@ -10,7 +10,7 @@ import (
 
 func newTSMock(t *testing.T) *MockBackend {
 	t.Helper()
-	mb, err := NewMockBackend(t.TempDir())
+	mb, err := NewMockBackend(t.TempDir(), testTrust(t))
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestMockBackend_LeaveClearsState(t *testing.T) {
 
 func TestMockBackend_StatePersistsAcrossReopen(t *testing.T) {
 	dir := t.TempDir()
-	mb, err := NewMockBackend(dir)
+	mb, err := NewMockBackend(dir, testTrust(t))
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestMockBackend_StatePersistsAcrossReopen(t *testing.T) {
 	}
 
 	// Reopen — state file should drive a Status call.
-	mb2, err := NewMockBackend(dir)
+	mb2, err := NewMockBackend(dir, testTrust(t))
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestNewMockBackend_RejectsBadStateDir(t *testing.T) {
 	if err := os.WriteFile(clash, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed clashing file: %v", err)
 	}
-	if _, err := NewMockBackend(clash); err == nil {
+	if _, err := NewMockBackend(clash, testTrust(t)); err == nil {
 		t.Errorf("expected error when state dir is a file")
 	}
 }
@@ -147,7 +147,7 @@ func TestNewMockBackend_CorruptStateFileErrs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "tailscale.json"), []byte("garbage"), 0o600); err != nil {
 		t.Fatalf("seed bad state: %v", err)
 	}
-	if _, err := NewMockBackend(dir); err == nil {
+	if _, err := NewMockBackend(dir, testTrust(t)); err == nil {
 		t.Errorf("expected error on corrupt state")
 	}
 }
@@ -156,7 +156,7 @@ func TestNewMockBackend_CorruptStateFileErrs(t *testing.T) {
 // It either returns an error (no tailscale on PATH) or a backend whose Name
 // is "tailscale". We accept both — this is the contract.
 func TestNewRealBackend_NameOrLookupErr(t *testing.T) {
-	b, err := NewRealBackend()
+	b, err := NewRealBackend(testTrust(t), discardLog())
 	if err != nil {
 		// No tailscale on PATH — expected on CI / dev boxes without it.
 		return

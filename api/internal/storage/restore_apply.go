@@ -21,7 +21,7 @@ import (
 //
 // # Why a restart, and why this runs before any store opens
 //
-// PrepareRestore ran inside an api that had rasputin.db open, a mesh CA
+// PrepareRestore ran inside an api that had rasputin.db open, a controlplane CA
 // loaded, an HTTPS leaf minted under that CA and a Headscale supervisor
 // pointed at a state directory. Not one of those can be swapped under a
 // running process: replacing a SQLite file beneath an open connection is
@@ -29,7 +29,7 @@ import (
 // the fresh CA. So the api that prepared the restore does not apply it. It
 // exits, the unit restarts it, and the NEW process applies the pending restore
 // as its first act — before the bus, before the first OpenStore, before
-// EnsureMeshCA — and then boots exactly as it would on any other start, onto
+// tlsca.Ensure — and then boots exactly as it would on any other start, onto
 // the restored files.
 //
 // This is the self-update reconciler's shape (updater.ResumeSelfUpdates): work
@@ -40,7 +40,7 @@ import (
 //
 // # What the next start then does for free
 //
-// EnsureMeshCA loads the restored CA (it only generates when neither file
+// tlsca.Ensure loads the restored CA (it only generates when neither file
 // exists). MintLeafToDisk re-mints the api's HTTPS leaf because the existing
 // leaf no longer verifies against the CA (CheckSignatureFrom) — so the
 // operator's device, which trusted the ORIGINAL CA before the re-flash,
@@ -163,7 +163,7 @@ func identityApplyRules() []applyRule {
 // AppliedAt set, and true, when a restore was applied; nil and false when
 // there was nothing to do.
 //
-// MUST be called before any store opens the database, before the mesh CA is
+// MUST be called before any store opens the database, before the controlplane CA is
 // loaded and before the Headscale supervisor starts. An error is fatal to the
 // start: a partition with a pending restore that could not be applied should
 // not come up as a fresh cluster and silently offer first-run setup over the
@@ -238,7 +238,7 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 		}
 	}
 	targets = append(targets, trees...)
-	// The mesh CA is a pair; EnsureMeshCA refuses a half. Restore both or
+	// The controlplane CA is a pair; tlsca.Ensure refuses a half. Restore both or
 	// neither.
 	hasKey, hasPem := false, false
 	for _, t := range targets {
@@ -246,7 +246,7 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 		hasPem = hasPem || t.staged == "trust/mesh-ca.pem"
 	}
 	if hasKey != hasPem {
-		return nil, false, fmt.Errorf("%w: the restore holds one half of the mesh CA and not the other", ErrRestoreApplyFailed)
+		return nil, false, fmt.Errorf("%w: the restore holds one half of the controlplane CA and not the other", ErrRestoreApplyFailed)
 	}
 
 	// Created only once every entry has a rule and the CA pair is whole, so a

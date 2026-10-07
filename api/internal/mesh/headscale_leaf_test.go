@@ -6,11 +6,11 @@ import (
 	"encoding/pem"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
 // The Headscale supervisor is a consumer of the controlplane CA: these are its
@@ -106,9 +106,9 @@ func TestHeadscaleLeafConsumer_SpecMatchesWhatStartMints(t *testing.T) {
 	}
 }
 
-func newCAForTest(t *testing.T) *tlsca.MeshCA {
+func newCAForTest(t *testing.T) *tlsca.CA {
 	t.Helper()
-	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "test-install")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "test-install", tlscatest.Deps())
 	if err != nil {
 		t.Fatalf("newCAForTest: %v", err)
 	}
@@ -126,28 +126,4 @@ func mustParseCert(t *testing.T, pemBytes []byte) *x509.Certificate {
 		t.Fatalf("parse cert: %v", err)
 	}
 	return cert
-}
-
-func mustParseCertFile(t *testing.T, path string) *x509.Certificate {
-	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	return mustParseCert(t, b)
-}
-
-func mustHavePerm(t *testing.T, path string, want os.FileMode) {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		return // file mode bits don't map cleanly
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatalf("stat %s: %v", path, err)
-	}
-	got := info.Mode().Perm()
-	if got != want {
-		t.Errorf("%s perm: got %#o, want %#o", path, got, want)
-	}
 }

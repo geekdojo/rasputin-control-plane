@@ -16,25 +16,22 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// One caTLSConfig for both Headscale backends, and one node trust bundle
+// One proto.CATLSConfig for both Headscale backends, and one node trust bundle
 // (geekdojo/geekdojo-brain#506).
 
-// newCA mints a throwaway CA, standing in for this installation's Mesh CA or
+// newCA mints a throwaway CA, standing in for this installation's controlplane CA or
 // for the operator's own root.
-func newCA(t *testing.T, name string) *MeshCA {
+func newCA(t *testing.T, name string) *CA {
 	t.Helper()
-	ca, err := EnsureMeshCA(filepath.Join(t.TempDir(), name), name)
-	if err != nil {
-		t.Fatalf("EnsureMeshCA(%s): %v", name, err)
-	}
-	return ca
+	return mustEnsure(t, ControlplaneConfig(), filepath.Join(t.TempDir(), name), testDeps())
 }
 
 // tlsServerSignedBy starts an HTTPS server whose leaf ca signed, the shape
 // either Headscale presents.
-func tlsServerSignedBy(t *testing.T, ca *MeshCA, name string) *httptest.Server {
+func tlsServerSignedBy(t *testing.T, ca *CA, name string) *httptest.Server {
 	t.Helper()
-	certPEM, keyPEM, err := MintLeaf(ca, LeafSpec{
+	certPEM, keyPEM, err := ca.MintLeaf(LeafSpec{
+		Usage:       UsageServer,
 		CommonName:  name,
 		DNSNames:    []string{name, "localhost"},
 		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
@@ -77,23 +74,23 @@ func TestCATLSConfig_TrustsExactlyThePEMItIsGiven(t *testing.T) {
 	selfHosted := tlsServerSignedBy(t, meshCA, "headscale-self")
 	external := tlsServerSignedBy(t, operatorCA, "headscale-external")
 
-	meshCfg, err := CATLSConfig(meshCA.CertPEM, "the Mesh CA")
+	meshCfg, err := proto.CATLSConfig(meshCA.CertPEM, "the controlplane CA")
 	if err != nil {
-		t.Fatalf("CATLSConfig(mesh): %v", err)
+		t.Fatalf("proto.CATLSConfig(mesh): %v", err)
 	}
-	opCfg, err := CATLSConfig(operatorCA.CertPEM, "RASPUTIN_HEADSCALE_CA_FILE=/x")
+	opCfg, err := proto.CATLSConfig(operatorCA.CertPEM, "RASPUTIN_HEADSCALE_CA_FILE=/x")
 	if err != nil {
-		t.Fatalf("CATLSConfig(operator): %v", err)
+		t.Fatalf("proto.CATLSConfig(operator): %v", err)
 	}
 
 	if err := get(t, selfHosted.URL, meshCfg); err != nil {
-		t.Errorf("the Mesh CA config did not trust the self-hosted leaf: %v", err)
+		t.Errorf("the controlplane CA config did not trust the self-hosted leaf: %v", err)
 	}
 	if err := get(t, external.URL, opCfg); err != nil {
 		t.Errorf("the operator CA config did not trust the external leaf: %v", err)
 	}
 	if err := get(t, external.URL, meshCfg); err == nil {
-		t.Error("the Mesh CA config trusted a leaf it did not sign")
+		t.Error("the controlplane CA config trusted a leaf it did not sign")
 	}
 	if err := get(t, selfHosted.URL, opCfg); err == nil {
 		t.Error("the operator CA config trusted a leaf it did not sign")
@@ -113,7 +110,7 @@ func TestCATLSConfig_RefusesUnusablePEM(t *testing.T) {
 		{"pem-ish but undecodable", "-----BEGIN CERTIFICATE-----\nnope\n-----END CERTIFICATE-----\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := CATLSConfig([]byte(tc.pem), "RASPUTIN_HEADSCALE_CA_FILE=/x")
+			cfg, err := proto.CATLSConfig([]byte(tc.pem), "RASPUTIN_HEADSCALE_CA_FILE=/x")
 			if err == nil {
 				t.Fatalf("CATLSConfig accepted %q and returned %+v", tc.name, cfg)
 			}
@@ -124,60 +121,60 @@ func TestCATLSConfig_RefusesUnusablePEM(t *testing.T) {
 	}
 }
 
-// The node bundle: the Mesh CA always, the operator's appended, no duplicates.
-func TestNodeTrustBundle_Contents(t *testing.T) {
+// The node bundle: the controlplane CA always, the operator's appended, no duplicates.
+func TestBundle_Contents(t *testing.T) {
 	meshCA := newCA(t, "mesh")
 	operatorCA := newCA(t, "operator")
 
-	only := NodeTrustBundle(meshCA.CertPEM)
+	only := Bundle(meshCA.CertPEM)
 	if !bytes.Contains(only, bytes.TrimSpace(meshCA.CertPEM)) {
-		t.Fatal("the self-hosted bundle does not carry the Mesh CA")
+		t.Fatal("the self-hosted bundle does not carry the controlplane CA")
 	}
 	if got := countCerts(t, only); got != 1 {
 		t.Fatalf("the self-hosted bundle holds %d certificates, want 1", got)
 	}
 
-	both := NodeTrustBundle(meshCA.CertPEM, operatorCA.CertPEM)
+	both := Bundle(meshCA.CertPEM, operatorCA.CertPEM)
 	if got := countCerts(t, both); got != 2 {
 		t.Fatalf("the external bundle holds %d certificates, want 2", got)
 	}
 	if !bytes.Contains(both, bytes.TrimSpace(meshCA.CertPEM)) {
-		t.Error("the external bundle dropped the Mesh CA — a node must always get its own cluster's CA")
+		t.Error("the external bundle dropped the controlplane CA — a node must always get its own cluster's CA")
 	}
 	if !bytes.Contains(both, bytes.TrimSpace(operatorCA.CertPEM)) {
 		t.Error("the external bundle dropped the operator's CA")
 	}
 	if i, j := bytes.Index(both, bytes.TrimSpace(meshCA.CertPEM)), bytes.Index(both, bytes.TrimSpace(operatorCA.CertPEM)); i > j {
-		t.Error("the operator's CA is not appended after the Mesh CA")
+		t.Error("the operator's CA is not appended after the controlplane CA")
 	}
 
 	// Idempotent inputs: the same CA twice (an operator who points
-	// RASPUTIN_HEADSCALE_CA_FILE at the Mesh CA) is one certificate.
-	if got := countCerts(t, NodeTrustBundle(meshCA.CertPEM, meshCA.CertPEM)); got != 1 {
+	// RASPUTIN_HEADSCALE_CA_FILE at the controlplane CA) is one certificate.
+	if got := countCerts(t, Bundle(meshCA.CertPEM, meshCA.CertPEM)); got != 1 {
 		t.Errorf("a duplicated CA produced %d certificates, want 1", got)
 	}
-	if b := NodeTrustBundle(nil, []byte("  \n")); b != nil {
-		t.Errorf("NodeTrustBundle with nothing to ship = %q, want nil", b)
+	if b := Bundle(nil, []byte("  \n")); b != nil {
+		t.Errorf("Bundle with nothing to ship = %q, want nil", b)
 	}
 	// The bundle is what converge_trust compares, so it must be stable: the
 	// same inputs produce the same fingerprint.
-	if a, b := proto.MeshCAFingerprint(both), proto.MeshCAFingerprint(NodeTrustBundle(meshCA.CertPEM, operatorCA.CertPEM)); a != b {
+	if a, b := proto.TrustFingerprint(both), proto.TrustFingerprint(Bundle(meshCA.CertPEM, operatorCA.CertPEM)); a != b {
 		t.Errorf("the bundle's fingerprint is not stable: %s vs %s", a, b)
 	}
-	if proto.MeshCAFingerprint(both) == proto.MeshCAFingerprint(only) {
+	if proto.TrustFingerprint(both) == proto.TrustFingerprint(only) {
 		t.Error("appending the operator's CA left the fingerprint unchanged; converge_trust would never re-deliver it")
 	}
 }
 
-// A self-hosted cluster must see no change at all: the bundle for the Mesh CA
-// alone is the Mesh CA's own PEM, byte for byte, so its fingerprint is the one
+// A self-hosted cluster must see no change at all: the bundle for the controlplane CA
+// alone is the controlplane CA's own PEM, byte for byte, so its fingerprint is the one
 // every enrolled node already reports and converge_trust re-delivers nothing.
-func TestNodeTrustBundle_SelfHostedBundleIsUnchangedBytes(t *testing.T) {
+func TestBundle_SelfHostedBundleIsUnchangedBytes(t *testing.T) {
 	meshCA := newCA(t, "mesh")
-	if got := NodeTrustBundle(meshCA.CertPEM); !bytes.Equal(got, meshCA.CertPEM) {
-		t.Fatalf("the self-hosted bundle is not the Mesh CA PEM byte for byte:\n got %q\nwant %q", got, meshCA.CertPEM)
+	if got := Bundle(meshCA.CertPEM); !bytes.Equal(got, meshCA.CertPEM) {
+		t.Fatalf("the self-hosted bundle is not the controlplane CA PEM byte for byte:\n got %q\nwant %q", got, meshCA.CertPEM)
 	}
-	if proto.MeshCAFingerprint(NodeTrustBundle(meshCA.CertPEM)) != proto.MeshCAFingerprint(meshCA.CertPEM) {
+	if proto.TrustFingerprint(Bundle(meshCA.CertPEM)) != proto.TrustFingerprint(meshCA.CertPEM) {
 		t.Error("the self-hosted bundle's fingerprint moved; every node would be re-enrolled for nothing")
 	}
 }
@@ -185,14 +182,14 @@ func TestNodeTrustBundle_SelfHostedBundleIsUnchangedBytes(t *testing.T) {
 // Functional: a node that holds the bundle — read the way tailscaled reads
 // SSL_CERT_FILE, as a pool of PEM blocks — trusts BOTH the Headscale the
 // operator runs and its own cluster's services.
-func TestNodeTrustBundle_TrustsBothServersFromOneFile(t *testing.T) {
+func TestBundle_TrustsBothServersFromOneFile(t *testing.T) {
 	meshCA := newCA(t, "mesh")
 	operatorCA := newCA(t, "operator")
 	clusterService := tlsServerSignedBy(t, meshCA, "api-https") // the node's own api / app leaves
 	headscale := tlsServerSignedBy(t, operatorCA, "headscale-external")
 
 	bundlePath := filepath.Join(t.TempDir(), "mesh-ca.pem")
-	if err := os.WriteFile(bundlePath, NodeTrustBundle(meshCA.CertPEM, operatorCA.CertPEM), 0o644); err != nil {
+	if err := os.WriteFile(bundlePath, Bundle(meshCA.CertPEM, operatorCA.CertPEM), 0o644); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
 	onDisk, err := os.ReadFile(bundlePath)
@@ -233,4 +230,39 @@ func countCerts(t *testing.T, bundle []byte) int {
 		n++
 	}
 	return n
+}
+
+// TC-741-11 (bundle half): the bundle and its fingerprint are byte-identical
+// to what the release before tlsca produced. The fixtures in testdata were
+// written by mesh.NodeTrustBundle and proto.TrustFingerprint at
+// origin/main b2522ff, from two fixed CA certificates, so an upgrade changes
+// no node's reported fingerprint and trust.converge re-sends nothing.
+func TestBundle_GoldenAgainstThePreTLSCARelease(t *testing.T) {
+	read := func(name string) []byte {
+		b, err := os.ReadFile(filepath.Join("testdata", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	cp, op := read("controlplane-ca.pem"), read("operator-ca.pem")
+	fps := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(read("fingerprints.txt"))), "\n") {
+		k, v, _ := strings.Cut(line, " ")
+		fps[k] = v
+	}
+	for _, tc := range []struct {
+		name, golden, fpKey string
+		got                 []byte
+	}{
+		{"controlplane only", "bundle-controlplane.pem", "controlplane", Bundle(cp)},
+		{"controlplane and operator", "bundle-controlplane-operator.pem", "controlplane+operator", Bundle(cp, op)},
+	} {
+		if want := read(tc.golden); !bytes.Equal(tc.got, want) {
+			t.Errorf("%s: bundle bytes differ from the golden", tc.name)
+		}
+		if got := proto.TrustFingerprint(tc.got); got != fps[tc.fpKey] {
+			t.Errorf("%s: fingerprint %s, want %s", tc.name, got, fps[tc.fpKey])
+		}
+	}
 }

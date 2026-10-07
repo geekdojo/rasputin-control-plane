@@ -19,7 +19,7 @@ import (
 // the fleet out with no channel left to deliver new trust; certificate
 // validity would make bus membership depend on node clocks, and a Pi boots
 // before NTP with no battery-backed clock; and matched sets are generated
-// offline, before any mesh CA exists. So the check looks at the key and
+// offline, before any controlplane CA exists. So the check looks at the key and
 // ignores the certificate around it: no chain, no hostname, no dates.
 //
 // The encoding is HPKP's pin-sha256 (RFC 7469 §2.4): standard base64 of the

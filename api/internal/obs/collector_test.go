@@ -17,7 +17,7 @@ func validCollectorSpec() CollectorSpec {
 		NodeID:          "c02",
 		IngressBaseURL:  "https://rasputin.local:8443",
 		ServerName:      "rasputin.local",
-		MeshCAPEM:       testMeshCA,
+		CAPEM:           testMeshCA,
 		NodeKeyCertPath: "/var/lib/rasputin/keys/collector.crt",
 		NodeKeyPath:     "/var/lib/rasputin/keys/collector.key",
 	}
@@ -145,7 +145,7 @@ func TestBuildCollectorCompose_Validation(t *testing.T) {
 		{"missing ServerName", func(s *CollectorSpec) { s.ServerName = "" }},
 		{"missing NodeKeyCertPath", func(s *CollectorSpec) { s.NodeKeyCertPath = "" }},
 		{"missing NodeKeyPath", func(s *CollectorSpec) { s.NodeKeyPath = "" }},
-		{"missing MeshCAPEM", func(s *CollectorSpec) { s.MeshCAPEM = "" }},
+		{"missing CAPEM", func(s *CollectorSpec) { s.CAPEM = "" }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

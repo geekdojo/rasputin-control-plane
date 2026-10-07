@@ -88,7 +88,7 @@ func TestOpenWrtDownload_SigAndArtifactThroughOneTrustedClient(t *testing.T) {
 
 	t.Run("(c) trust error: refused before any request", func(t *testing.T) {
 		bundleURL, sigURL, hits := tlsArtifactServer(t, serverCA, body, sig)
-		errTrust := errors.New("mesh CA bundle /etc/rasputin/mesh/tailscaled-ca.pem: no such file")
+		errTrust := errors.New("controlplane CA bundle /etc/rasputin/mesh/tailscaled-ca.pem: no such file")
 		stateDir := t.TempDir()
 		b, err := NewOpenWrtABBackend(stateDir, func() (*tls.Config, error) { return nil, errTrust })
 		if err != nil {

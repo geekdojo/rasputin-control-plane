@@ -15,7 +15,7 @@
 // Rasputin is up is unreachable by name for the rest of its uptime. And the
 // operator gets no signal at any point — the failure surfaces downstream as an
 // unrelated TLS/CA error ("certificate signed by unknown authority", because
-// both clusters' Mesh CAs share a CN), which is what made this cost a day to
+// both clusters' controlplane CAs share a CN), which is what made this cost a day to
 // diagnose during the Turing Pi bring-up.
 //
 // nameguard probes the wire on an interval and classifies what answers:

@@ -64,7 +64,7 @@ func AppRouteHosts(clusterID, appName string, exposeLAN bool) (tailnet, lan stri
 	return tailnet, lan
 }
 
-// appLeafSpec is the per-app leaf of ADR-0004 §6 — a Mesh-CA server leaf valid
+// appLeafSpec is the per-app leaf of ADR-0004 §6 — a controlplane-CA server leaf valid
 // for BOTH of the app's FQDNs regardless of exposure, which the node-local
 // Caddy terminates TLS with. 127.0.0.1 is included so a same-host health probe
 // can hit the proxy over loopback.
@@ -77,6 +77,7 @@ func AppRouteHosts(clusterID, appName string, exposeLAN bool) (tailnet, lan stri
 func appLeafSpec(clusterID, appName string) tlsca.LeafSpec {
 	names := AppLeafDNSNames(clusterID, appName)
 	return tlsca.LeafSpec{
+		Usage:      tlsca.UsageServer,
 		CommonName: names[0],
 		DNSNames:   names,
 		// The SAN set no longer moves with exposure, but ExactDNSNames stays
@@ -119,13 +120,13 @@ func appLeafPaths(dir string) tlsca.LeafPaths { return tlsca.LeafPathsIn(dir) }
 // The private key comes back as a secret.Value the caller owns and destroys,
 // whether it was read from disk or minted (ADR-0009). A failure returns the
 // zero Value.
-func PrepareAppLeaf(ca *tlsca.MeshCA, dir, clusterID, appName string) (certPEM []byte, key secret.Value, renewed bool, err error) {
+func PrepareAppLeaf(ca *tlsca.CA, dir, clusterID, appName string) (certPEM []byte, key secret.Value, renewed bool, err error) {
 	if ca == nil {
 		return nil, secret.Value{}, false, errors.New("mesh: PrepareAppLeaf: nil CA")
 	}
 	spec := appLeafSpec(clusterID, appName)
 	paths := appLeafPaths(dir)
-	if tlsca.LoadLeafIfUsable(paths, ca, spec) != nil {
+	if ca.LeafUsable(paths, spec) {
 		certPEM, err = os.ReadFile(paths.CertPath)
 		if err != nil {
 			return nil, secret.Value{}, false, fmt.Errorf("mesh: read app leaf cert: %w", err)
@@ -138,7 +139,7 @@ func PrepareAppLeaf(ca *tlsca.MeshCA, dir, clusterID, appName string) (certPEM [
 		clear(keyPEM)
 		return certPEM, key, false, nil
 	}
-	certPEM, key, err = tlsca.MintLeaf(ca, spec)
+	certPEM, key, err = ca.MintLeaf(spec)
 	if err != nil {
 		return nil, secret.Value{}, false, err
 	}

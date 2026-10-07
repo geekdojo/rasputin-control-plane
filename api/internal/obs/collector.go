@@ -24,7 +24,7 @@ import (
 // key directory. The control plane mints no collector certificate.
 //
 // The collector trusts the api the standard way every Rasputin HTTPS client
-// does: by chain to the Mesh CA, under the cluster name, with no
+// does: by chain to the controlplane CA, under the cluster name, with no
 // certificate pinned (geekdojo/geekdojo-brain#672). The CA's public bytes ride
 // inline as the `mesh_ca` config and Alloy reads them with ca_file
 // (collectorTrustLine). A renewed api leaf therefore needs no redeploy.
@@ -54,7 +54,7 @@ const (
 )
 
 // collectorTrustLine is how every collector trusts the api: by chain to the
-// Mesh CA, read from the inline mesh_ca config. Never a pinned certificate,
+// controlplane CA, read from the inline mesh_ca config. Never a pinned certificate,
 // never the system roots. It is a standalone declaration on one line because
 // the auth register's C17 row anchors to it: changing what a collector trusts
 // changes this line, and the register gate then fails until the row is
@@ -70,7 +70,7 @@ func collectorTLSConfig(certPath, keyPath, serverName string) string {
 		certPath, keyPath, collectorTrustLine, serverName)
 }
 
-// CollectorSpec is the input to BuildCollectorCompose. The Mesh CA PEM is
+// CollectorSpec is the input to BuildCollectorCompose. The controlplane CA PEM is
 // supplied by the caller (the deploy step) — the obs package stays decoupled
 // from mesh.
 type CollectorSpec struct {
@@ -90,9 +90,9 @@ type CollectorSpec struct {
 	IngressBaseURL string
 	ServerName     string
 
-	// MeshCAPEM is the CA the collector verifies the api's server leaf
+	// CAPEM is the CA the collector verifies the api's server leaf
 	// against, by chain. Required: there is no fallback to the system roots.
-	MeshCAPEM string
+	CAPEM string
 
 	// NodeKeyCertPath / NodeKeyPath are the node's own collector certificate
 	// and key, as absolute paths ON THE NODE (proto.NodeCertPath /
@@ -183,7 +183,7 @@ loki.source.docker "containers" {
 `))
 
 // collectorComposeTmpl renders the collector's compose file. The Alloy config
-// and the Mesh CA ride as inline `configs` content (Compose >= v2.23.1). The
+// and the controlplane CA ride as inline `configs` content (Compose >= v2.23.1). The
 // client material is not in the file at all: it is bind-mounted read-only from the node's own key
 // directory, so the collector's private key stays a 0600 file on the node
 // instead of sitting inside a compose file the agent writes.
@@ -242,7 +242,7 @@ configs:
 {{ indent 6 .AlloyConfig }}
   mesh_ca:
     content: |
-{{ indent 6 .MeshCAPEM }}
+{{ indent 6 .CAPEM }}
 `))
 
 // indentBlock prefixes every non-empty line of s with n spaces. Blank lines are
@@ -263,7 +263,7 @@ func indentBlock(n int, s string) string {
 }
 
 // BuildCollectorCompose renders the self-contained compose YAML for a per-node
-// collector: the Alloy River config and the Mesh CA it trusts the api by,
+// collector: the Alloy River config and the controlplane CA it trusts the api by,
 // plus a read-only bind of the node's own key and certificate. Returns an
 // error if the spec is missing anything the deployment can't work without.
 func BuildCollectorCompose(spec CollectorSpec) (string, error) {
@@ -274,11 +274,11 @@ func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 		return "", fmt.Errorf("obs collector: IngressBaseURL required")
 	case strings.TrimSpace(spec.ServerName) == "":
 		return "", fmt.Errorf("obs collector: ServerName required")
-	case strings.TrimSpace(spec.MeshCAPEM) == "":
+	case strings.TrimSpace(spec.CAPEM) == "":
 		// Fail closed rather than render a collector with no trust anchor:
 		// Alloy would fall back to the system roots, which trust nothing the
 		// control plane presents.
-		return "", fmt.Errorf("obs collector: MeshCAPEM required")
+		return "", fmt.Errorf("obs collector: CAPEM required")
 	case strings.TrimSpace(spec.NodeKeyCertPath) == "" || strings.TrimSpace(spec.NodeKeyPath) == "":
 		// The collector's only client credential is the node's own key; with
 		// no path to it there is nothing to present, and no other shape.
@@ -316,7 +316,7 @@ func BuildCollectorCompose(spec CollectorSpec) (string, error) {
 	if err := collectorComposeTmpl.Execute(&composeBuf, map[string]any{
 		"AlloyImage":      image,
 		"AlloyConfig":     alloyBuf.String(),
-		"MeshCAPEM":       strings.TrimRight(spec.MeshCAPEM, "\n"),
+		"CAPEM":           strings.TrimRight(spec.CAPEM, "\n"),
 		"NodeKeyCertPath": spec.NodeKeyCertPath,
 		"NodeKeyPath":     spec.NodeKeyPath,
 		"ClientCertPath":  certPath,

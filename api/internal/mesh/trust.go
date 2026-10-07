@@ -1,6 +1,7 @@
 package mesh
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -9,137 +10,47 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/nodetrust"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
-// Trust convergence: the CA a node holds must be the CA the api holds.
+// Trust delivery, from the mesh's side.
 //
-// The mesh CA reaches a node exactly once, inside mesh.enroll, and until this
-// step nothing compared what a node kept with what the api now has. An
-// identity restore (#291 phase 1) is the case that made the gap visible on
-// e3bench, 2026-09-04: a wiped controlplane minted a fresh CA at 04:18, auto-
-// enrolled compute1 with it at 04:20, and at 04:47 the restore put the
-// ORIGINAL CA back. The api's HTTPS leaf was re-minted under the original;
-// compute1 still trusted the fresh one; every node→api TLS client on it
-// (backup transfer, bundle download, restore egress) failed with
-// "certificate signed by unknown authority", and no product path existed to
-// fix it — converge_enrollment enrolls only nodes with no device row, and the
-// UI offers nothing for an enrolled node.
+// The node trust bundle reaches a node on its own verb, trust.install, through
+// nodetrust (api/internal/nodetrust), and the mesh only consumes it: enroll
+// delivers trust before it mints a key, because tailscaled must trust
+// Headscale's leaf before `tailscale up` can dial it.
 //
-// Derived from data, not from the restore event: every agent reports the
-// fingerprint of the bundle it holds on every registration (proto
-// MetadataMeshCAFingerprint), this step compares each enrolled node's report
-// with the api's own on every mesh.reconcile tick, and any node that differs
-// gets mesh.enroll_node again. The agent side already handles a re-delivery
-// correctly — installMeshCA is a no-op when the bundle is unchanged and
-// restarts tailscaled when it changed — and re-registering an already-
-// registered node with a fresh pre-auth key updates the node Headscale has
-// rather than creating another (headscale 0.28 HandleNodeFromPreAuthKey:
-// same machine key + same user → NodeKey/Hostinfo/AuthKey refreshed in place,
-// IPs kept). A node whose agent has not reported a fingerprint is left alone:
-// the api does not guess what a node trusts.
+// Two bridges remain for agents that predate trust.install, and only for
+// them. mesh.enroll carries the bundle (proto.MeshEnrollCmd
+// .LegacyTrustBundlePEM), and converge_trust below re-delivers it to an
+// enrolled old agent by re-running mesh.enroll_node — the path every node used
+// before (e3bench 2026-09-04: a restore swapped the CA under compute1, and this
+// re-delivery is what converged it). The agent side handles a re-delivery
+// correctly: an unchanged bundle is a no-op, a changed one restarts tailscaled,
+// and re-registering with a fresh pre-auth key updates the node Headscale has
+// rather than creating another (headscale 0.28 HandleNodeFromPreAuthKey).
 
-// NodeTrustState is how a node's reported mesh-CA fingerprint compares with
-// the api's current mesh CA.
-type NodeTrustState string
-
-const (
-	// TrustCurrent: the node reports the fingerprint of the api's mesh CA.
-	TrustCurrent NodeTrustState = "current"
-	// TrustStale: the node reports a different fingerprint (or "none"); the
-	// reconcile re-delivers the CA.
-	TrustStale NodeTrustState = "stale"
-	// TrustUnreported: the node's agent has reported no fingerprint. Older
-	// agent, or not registered since the field shipped. Left alone.
-	TrustUnreported NodeTrustState = "unreported"
-)
-
-// NodeTrust is one node's trust reading.
-type NodeTrust struct {
-	NodeID string         `json:"nodeId"`
-	State  NodeTrustState `json:"state"`
-	// Fingerprint is what the node reported (proto.MeshCAFingerprint of its
-	// bundle, or "none"); "" when unreported. A fingerprint, never a PEM.
-	Fingerprint string `json:"fingerprint,omitempty"`
-	// AgentPredatesField says the node's reported agent version is older
-	// than the release that reports the fingerprint (proto
-	// MetadataMinAgentVersion), so "unreported" means "cannot", not "did
-	// not". Only meaningful when State is TrustUnreported.
-	AgentPredatesField bool `json:"agentPredatesField,omitempty"`
+// TrustDeliverer installs the node trust bundle on one node (nodetrust
+// .Service.Deliver). nodetrust.ErrAgentPredatesVerb means the node's agent
+// is too old for the verb and must be given the bundle in mesh.enroll.
+type TrustDeliverer interface {
+	Deliver(ctx context.Context, req nodetrust.Requester, nodeID string) (proto.TrustInstallAck, error)
 }
 
-// ReportedCAFingerprint is the fingerprint n's agent reported under
-// proto.MetadataMeshCAFingerprint, or "" when it reported none.
-func ReportedCAFingerprint(n *proto.Node) string {
-	if n == nil || n.Metadata == nil {
+// TrustFingerprinter is the api's bundle fingerprint (nodetrust
+// .Service.Fingerprint).
+type TrustFingerprinter interface {
+	Fingerprint() string
+}
+
+// trustFingerprint is the api's bundle fingerprint, or "" when this mesh was
+// built without trust.
+func (s *Service) trustFingerprint() string {
+	if s.cfg.TrustFingerprint == nil {
 		return ""
 	}
-	fp, _ := n.Metadata[proto.MetadataMeshCAFingerprint].(string)
-	return strings.TrimSpace(fp)
-}
-
-// NodeTrustFor reads n against want, the api's current mesh-CA fingerprint.
-// An empty want (no mesh CA configured: mock mesh, plain-HTTP dev, external
-// Headscale with a public cert) has nothing to compare against and reads
-// every node as current — there is no CA to deliver.
-func NodeTrustFor(want string, n *proto.Node) NodeTrust {
-	t := NodeTrust{NodeID: n.ID, Fingerprint: ReportedCAFingerprint(n)}
-	switch {
-	case want == "":
-		t.State = TrustCurrent
-	case t.Fingerprint == "":
-		t.State = TrustUnreported
-		t.AgentPredatesField = agentPredatesField(n.AgentVersion, proto.MetadataMeshCAFingerprint)
-	case t.Fingerprint == want:
-		t.State = TrustCurrent
-	default:
-		t.State = TrustStale
-	}
-	return t
-}
-
-// agentPredatesField reports whether agentVersion is older than the first
-// release that reports key. Unknown floor or unparseable version → false:
-// the api cannot call an agent too old when it cannot read what it said.
-func agentPredatesField(agentVersion, key string) bool {
-	floor, ok := proto.MetadataMinAgentVersion(key)
-	if !ok {
-		return false
-	}
-	v := strings.TrimPrefix(strings.TrimSpace(agentVersion), "v")
-	if v == "" {
-		return false
-	}
-	c, err := releases.Compare(releases.SchemeCalVer, v, floor)
-	return err == nil && c < 0
-}
-
-// MeshCAFingerprint is proto.MeshCAFingerprint of the CA the api ships in
-// mesh.enroll (Config.MeshCAPEM), or "" when it ships none.
-func (s *Service) MeshCAFingerprint() string { return s.caFingerprint }
-
-// TrustConvergeResult is the converge_trust step's result, and what the
-// restore report records of the reconcile it kicked (RestoreReport
-// TrustRedelivery).
-type TrustConvergeResult struct {
-	// CAFingerprint is the api's current mesh CA. "" when none is configured,
-	// in which case nothing below is populated.
-	CAFingerprint string `json:"caFingerprint,omitempty"`
-	// Redelivered is every enrolled node this pass submitted mesh.enroll_node
-	// for because its reported fingerprint differed.
-	Redelivered []string `json:"redelivered"`
-	// Stale is every enrolled node whose fingerprint differs — Redelivered
-	// plus those a guard (offline, in-flight, backoff, recent delivery) held
-	// back this pass.
-	Stale []string `json:"stale"`
-	// Current is every enrolled node reporting the api's fingerprint.
-	Current []string `json:"current"`
-	// Unreported is every enrolled node whose agent has reported no
-	// fingerprint. Left alone; named so the gap is visible.
-	Unreported []string `json:"unreported"`
-	// Skipped counts stale nodes held back, by reason.
-	Skipped map[string]int `json:"skipped,omitempty"`
+	return s.cfg.TrustFingerprint.Fingerprint()
 }
 
 // trustRedeliverCooldown is how long converge_trust waits after a SUCCEEDED
@@ -220,15 +131,19 @@ func (g *enrollGuards) deliveredRecently(nodeID string) bool {
 	return time.Since(at) < trustRedeliverCooldown
 }
 
-// reconcileConvergeTrust re-delivers the mesh CA to every enrolled node whose
-// reported fingerprint differs from the api's. See the package note above.
+// reconcileConvergeTrust re-delivers the trust bundle, by mesh.enroll_node, to
+// every enrolled node whose agent predates trust.install and whose reported
+// fingerprint differs from the api's. A node whose agent answers
+// trust.install is trust.converge's and is not looked at here. See the note
+// above.
 //
 // A node qualifies when it:
 //
+//   - runs an agent below the trust.install floor (proto.VerbMinAgentVersion),
 //   - has a rasputin device row in mesh_devices (fetch_observed just synced
 //     that table from Headscale) — it is enrolled; the unenrolled are
 //     converge_enrollment's,
-//   - has reported a fingerprint (proto MetadataMeshCAFingerprint) that is
+//   - has reported a fingerprint (proto MetadataTrustFingerprint) that is
 //     not the api's — "none" counts: a node that trusts nothing is stale,
 //   - is online (an enroll RPC to an offline agent burns the dispatch
 //     timeout; it converges when it comes back — its fingerprint is in
@@ -243,17 +158,14 @@ func (g *enrollGuards) deliveredRecently(nodeID string) bool {
 // enrollDispatch handles it).
 func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Store, runner *jobs.Runner) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
-		res := TrustConvergeResult{
-			CAFingerprint: svc.MeshCAFingerprint(),
-			Redelivered:   []string{}, Stale: []string{}, Current: []string{}, Unreported: []string{},
-			Skipped: map[string]int{},
-		}
+		res := nodetrust.NewConvergeResult(svc.trustFingerprint())
 		if res.CAFingerprint == "" {
-			sc.Log("info", "trust: no mesh CA is shipped to nodes in this configuration — nothing to converge")
+			sc.Log("info", "trust: no trust bundle is delivered in this configuration — nothing to converge")
 			return json.Marshal(res)
 		}
+		floor, _ := proto.VerbMinAgentVersion(proto.TrustInstallVerb)
 		// This list is a DATA read, not a membership decision: what the pass
-		// needs from each node is the mesh CA fingerprint its agent reported,
+		// needs from each node is the trust fingerprint its agent reported,
 		// which lives in the node row's metadata and not in the node registry
 		// (geekdojo-brain#585). The membership decision it makes — is this
 		// node enrolled? — comes from the mesh device table below.
@@ -279,15 +191,15 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 
 		var predates []string
 		for _, n := range nodes {
-			if !enrolled[n.ID] {
+			if !enrolled[n.ID] || !inventory.AgentPredates(n.AgentVersion, floor) {
 				continue
 			}
-			t := NodeTrustFor(res.CAFingerprint, n)
+			t := nodetrust.StateFor(res.CAFingerprint, n)
 			switch t.State {
-			case TrustCurrent:
+			case nodetrust.TrustCurrent:
 				res.Current = append(res.Current, n.ID)
 				continue
-			case TrustUnreported:
+			case nodetrust.TrustUnreported:
 				res.Unreported = append(res.Unreported, n.ID)
 				if t.AgentPredatesField {
 					predates = append(predates, n.ID)
@@ -326,7 +238,7 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 				res.Skipped["submit_error"]++
 				continue
 			}
-			sc.Log("info", fmt.Sprintf("trust: %s trusts %s, api holds %s — re-delivering the mesh CA",
+			sc.Log("info", fmt.Sprintf("trust: %s trusts %s, api holds %s — re-delivering the trust bundle",
 				n.ID, proto.ShortFingerprint(t.Fingerprint), proto.ShortFingerprint(res.CAFingerprint)))
 			res.Redelivered = append(res.Redelivered, n.ID)
 		}
@@ -337,18 +249,18 @@ func reconcileConvergeTrust(svc *Service, inv *inventory.Store, jstore *jobs.Sto
 
 		switch {
 		case len(res.Redelivered) > 0:
-			sc.Log("info", fmt.Sprintf("trust: re-delivering the mesh CA (%s) to %d node(s): %s",
+			sc.Log("info", fmt.Sprintf("trust: re-delivering the trust bundle (%s) to %d legacy-agent node(s): %s",
 				proto.ShortFingerprint(res.CAFingerprint), len(res.Redelivered), strings.Join(res.Redelivered, ", ")))
 		case len(res.Stale) > 0:
 			sc.Log("info", fmt.Sprintf("trust: %d stale node(s) not re-delivered this pass (skipped: %v)", len(res.Stale), res.Skipped))
 		default:
-			sc.Log("info", fmt.Sprintf("trust: %d enrolled node(s) hold the current mesh CA", len(res.Current)))
+			sc.Log("info", fmt.Sprintf("trust: %d enrolled legacy-agent node(s) hold the current trust bundle", len(res.Current)))
 		}
 		if len(res.Unreported) > 0 {
 			msg := fmt.Sprintf("trust: %d enrolled node(s) have not reported what they trust and are left alone: %s",
 				len(res.Unreported), strings.Join(res.Unreported, ", "))
 			if len(predates) > 0 {
-				if floor, ok := proto.MetadataMinAgentVersion(proto.MetadataMeshCAFingerprint); ok {
+				if floor, ok := proto.MetadataMinAgentVersion(proto.MetadataTrustFingerprint); ok {
 					msg += fmt.Sprintf(" (agent predates %s on %s — update the node to have it report)", floor, strings.Join(predates, ", "))
 				}
 			}

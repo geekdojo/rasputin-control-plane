@@ -16,6 +16,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -124,17 +125,23 @@ func rows() []row {
 			want: []want{{"bus/" + busauth.TombstoneFileName, secretMode}},
 		},
 		{
-			name:     "mesh CA",
+			// TC-741-26: both CAs through the one tlsca path, as main's ensureCAs runs
+			// them, beside each other in trust/.
+			name:     "controlplane CA and store CA",
 			seedDirs: []string{"trust"},
 			write: func(t *testing.T, d string) {
-				if _, err := tlsca.EnsureMeshCA(filepath.Join(d, "trust"), "test"); err != nil {
-					t.Fatal(err)
+				for _, cfg := range []tlsca.Config{tlsca.ControlplaneConfig(), tlsca.StoreConfig()} {
+					if _, err := tlsca.Ensure(cfg, filepath.Join(d, "trust"), "test", tlscatest.Deps()); err != nil {
+						t.Fatal(err)
+					}
 				}
 			},
 			want: []want{
 				{"trust", dirMode},
-				{"trust/" + tlsca.MeshCAKeyFileName, secretMode},
-				{"trust/" + tlsca.MeshCAFileName, publicMode}, // a certificate: public by construction
+				{"trust/" + tlsca.ControlplaneKeyFile, secretMode},
+				{"trust/" + tlsca.ControlplaneCertFile, publicMode}, // a certificate: public by construction
+				{"trust/" + tlsca.StoreKeyFile, secretMode},
+				{"trust/" + tlsca.StoreCertFile, publicMode},
 			},
 		},
 		{
@@ -143,7 +150,7 @@ func rows() []row {
 			write: func(t *testing.T, d string) {
 				ca := meshCA(t)
 				for _, sub := range []string{"tls/api", "tls/collectors/n1"} {
-					if _, err := tlsca.MintLeafToDisk(ca, filepath.Join(d, sub), tlsca.LeafSpec{CommonName: "x", DNSNames: []string{"x"}}); err != nil {
+					if _, err := ca.MintLeafToDisk(filepath.Join(d, sub), tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "x", DNSNames: []string{"x"}}); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -160,7 +167,7 @@ func rows() []row {
 			name:     "app leaf",
 			seedDirs: []string{"tls", "tls/apps", "tls/apps/web"},
 			write: func(t *testing.T, d string) {
-				cert, key, err := tlsca.MintLeaf(meshCA(t), tlsca.LeafSpec{CommonName: "web", DNSNames: []string{"web"}})
+				cert, key, err := meshCA(t).MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageServer, CommonName: "web", DNSNames: []string{"web"}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -291,9 +298,9 @@ func openBusStore(t *testing.T, dataDir string) *busauth.Store {
 	return st
 }
 
-func meshCA(t *testing.T) *tlsca.MeshCA {
+func meshCA(t *testing.T) *tlsca.CA {
 	t.Helper()
-	ca, err := tlsca.EnsureMeshCA(t.TempDir(), "test")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig(), t.TempDir(), "test", tlscatest.Deps())
 	if err != nil {
 		t.Fatal(err)
 	}

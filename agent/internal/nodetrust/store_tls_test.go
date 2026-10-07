@@ -1,4 +1,4 @@
-package tailscale
+package nodetrust
 
 import (
 	"crypto/tls"
@@ -17,7 +17,7 @@ func okHandler() http.Handler {
 
 func writeBundle(t *testing.T, path string, pem []byte) {
 	t.Helper()
-	// Atomic, the way installMeshCA replaces it.
+	// Atomic, the way Store.Install replaces it.
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, pem, 0o644); err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func writeBundle(t *testing.T, path string, pem []byte) {
 // that is not a usable CA is refused — a nil config, never one that falls
 // back to the system roots — and the error names the path. The absent
 // bundle's error also says what it means and what installs it.
-func TestMeshTrust_ClientTLSConfig_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+func TestStore_ClientTLSConfig_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	dir := t.TempDir()
 	file := func(name string, content []byte) string {
 		p := filepath.Join(dir, name)
@@ -57,7 +57,7 @@ func TestMeshTrust_ClientTLSConfig_FailsClosedOnEveryShapeOfInput(t *testing.T) 
 		{"a path that is a directory", subdir, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := NewMeshTrust(tc.path).ClientTLSConfig()
+			cfg, err := NewStore(tc.path).ClientTLSConfig()
 			if cfg != nil {
 				t.Errorf("config = %+v, want nil", cfg)
 			}
@@ -68,7 +68,7 @@ func TestMeshTrust_ClientTLSConfig_FailsClosedOnEveryShapeOfInput(t *testing.T) 
 				t.Errorf("err = %q, want it to name %s", err, tc.path)
 			}
 			if tc.actionable {
-				for _, want := range []string{"this node trusts no mesh CA", "mesh.enroll"} {
+				for _, want := range []string{"this node trusts no controlplane CA", "trust.install"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Errorf("err = %q, want it to say %q", err, want)
 					}
@@ -80,8 +80,8 @@ func TestMeshTrust_ClientTLSConfig_FailsClosedOnEveryShapeOfInput(t *testing.T) 
 
 // TC-590-05: the config trusts the bundle and only the bundle. A server under
 // the bundle's CA handshakes; one under an unrelated CA is refused. A bundle
-// that holds two CAs (the Mesh CA and the operator's) trusts both.
-func TestMeshTrust_TrustsTheBundleAndOnlyTheBundle(t *testing.T) {
+// that holds two CAs (the controlplane CA and the operator's) trusts both.
+func TestStore_TrustsTheBundleAndOnlyTheBundle(t *testing.T) {
 	a := tlstest.NewCA(t, "mesh-A")
 	b := tlstest.NewCA(t, "unrelated-B")
 	c := tlstest.NewCA(t, "operator-C")
@@ -91,7 +91,7 @@ func TestMeshTrust_TrustsTheBundleAndOnlyTheBundle(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "tailscaled-ca.pem")
 	writeBundle(t, path, a.PEM)
-	cfg, err := NewMeshTrust(path).ClientTLSConfig()
+	cfg, err := NewStore(path).ClientTLSConfig()
 	if err != nil {
 		t.Fatalf("ClientTLSConfig: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestMeshTrust_TrustsTheBundleAndOnlyTheBundle(t *testing.T) {
 	}
 
 	writeBundle(t, path, append(append(append([]byte{}, a.PEM...), '\n'), c.PEM...))
-	cfg, err = NewMeshTrust(path).ClientTLSConfig()
+	cfg, err = NewStore(path).ClientTLSConfig()
 	if err != nil {
 		t.Fatalf("ClientTLSConfig on a two-CA bundle: %v", err)
 	}
@@ -125,13 +125,13 @@ func TestMeshTrust_TrustsTheBundleAndOnlyTheBundle(t *testing.T) {
 
 // TC-590-06: the bundle is read on every call, so a re-delivered CA is
 // trusted by the next request and a removed bundle is refused by it.
-func TestMeshTrust_ReReadsTheBundleOnEveryCall(t *testing.T) {
+func TestStore_ReReadsTheBundleOnEveryCall(t *testing.T) {
 	a := tlstest.NewCA(t, "first")
 	b := tlstest.NewCA(t, "second")
 	srvA := a.NewServer(t, okHandler())
 	srvB := b.NewServer(t, okHandler())
 	path := filepath.Join(t.TempDir(), "tailscaled-ca.pem")
-	trust := NewMeshTrust(path)
+	trust := NewStore(path)
 
 	writeBundle(t, path, a.PEM)
 	cfg, err := trust.ClientTLSConfig()
@@ -158,7 +158,7 @@ func TestMeshTrust_ReReadsTheBundleOnEveryCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err = trust.ClientTLSConfig()
-	if cfg != nil || err == nil || !strings.Contains(err.Error(), "this node trusts no mesh CA") {
+	if cfg != nil || err == nil || !strings.Contains(err.Error(), "this node trusts no controlplane CA") {
 		t.Errorf("third call after removal: cfg=%v err=%v, want the absent-bundle refusal", cfg, err)
 	}
 }

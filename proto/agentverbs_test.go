@@ -40,7 +40,7 @@ func TestVerbMinAgentVersionsAreBareCalVer(t *testing.T) {
 // CalVer strings.
 func TestMetadataMinAgentVersionLookup(t *testing.T) {
 	calver := regexp.MustCompile(`^\d{4}\.\d{1,2}\.\d+(?:-dev\.\d+)?$`)
-	for _, key := range []string{MetadataMeshCAFingerprint, MetadataNodeKeys} {
+	for _, key := range []string{MetadataTrustFingerprint, MetadataNodeKeys} {
 		v, ok := MetadataMinAgentVersion(key)
 		if !ok {
 			t.Errorf("%s has no minimum agent version recorded", key)

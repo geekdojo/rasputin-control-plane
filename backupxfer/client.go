@@ -59,7 +59,7 @@ var ErrUnsupportedDestination = errors.New("backupxfer: no transport for that de
 // HTTPOptions configures the HTTP transport.
 type HTTPOptions struct {
 	// TLSConfig is the TLS client config the transport verifies the api
-	// with: on a node, exactly the mesh CA bundle that signs the api's HTTPS
+	// with: on a node, exactly the controlplane CA bundle that signs the api's HTTPS
 	// leaf (geekdojo/geekdojo-brain#590), built by the caller so this package
 	// does no I/O. It is cloned, never mutated. Nil trusts NO certificate —
 	// an empty pool, not the system roots — so every HTTPS server is refused;

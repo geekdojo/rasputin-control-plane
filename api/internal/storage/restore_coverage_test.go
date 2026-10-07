@@ -476,7 +476,7 @@ func TestApplyPendingRestorePlacesTheBusCertInTheConfiguredBusDir(t *testing.T) 
 	}
 }
 
-// TC-694-16: the mesh-CA pair-check refusal leaves no residue either — the
+// TC-694-16: the controlplane-CA pair-check refusal leaves no residue either — the
 // replaced directory is created only after the check passes (F-694-09).
 func TestApplyPendingRestoreHalfACARefusalLeavesNoResidue(t *testing.T) {
 	dataDir := t.TempDir()
@@ -489,8 +489,8 @@ func TestApplyPendingRestoreHalfACARefusalLeavesNoResidue(t *testing.T) {
 	stagePending(t, dataDir, staged, []string{"rasputin.db", "trust/mesh-ca.key"})
 
 	report, applied, err := ApplyPendingRestore(RestoreLayout{DataDir: dataDir})
-	if !errors.Is(err, ErrRestoreApplyFailed) || !strings.Contains(err.Error(), "one half of the mesh CA") {
-		t.Fatalf("err = %v, want ErrRestoreApplyFailed saying the restore holds one half of the mesh CA", err)
+	if !errors.Is(err, ErrRestoreApplyFailed) || !strings.Contains(err.Error(), "one half of the controlplane CA") {
+		t.Fatalf("err = %v, want ErrRestoreApplyFailed saying the restore holds one half of the controlplane CA", err)
 	}
 	if applied || report != nil {
 		t.Errorf("applied = %v, report = %+v; want false, nil", applied, report)
