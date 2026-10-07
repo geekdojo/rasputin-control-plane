@@ -197,7 +197,14 @@ func TestMintLeafToDisk_ReMintsOnEKUDriftAndNearExpiry(t *testing.T) {
 		if !bytes.Equal(first, fileBytes(t, paths.CertPath)) {
 			t.Fatal("a leaf outside the renew window was rewritten")
 		}
-		now = now.Add(2 * 24 * time.Hour) // 59 days left: inside it
+		now = now.Add(24 * time.Hour) // exactly 60 days left: the window's edge, still reused
+		if _, err := ca.MintLeafToDisk(dir, spec); err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(first, fileBytes(t, paths.CertPath)) {
+			t.Fatal("a leaf exactly at the renew window's edge was rewritten")
+		}
+		now = now.Add(24 * time.Hour) // 59 days left: inside it
 		if _, err := ca.MintLeafToDisk(dir, spec); err != nil {
 			t.Fatal(err)
 		}

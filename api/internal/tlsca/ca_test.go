@@ -221,6 +221,15 @@ func TestEnsure_RefusesIncompleteConfigAndDeps(t *testing.T) {
 	if _, err := Ensure(cfg, t.TempDir(), "x", testDeps()); err == nil {
 		t.Error("a config with no usages was accepted")
 	}
+	// A zero lifetime is refused as a negative one is (F-741-23: the
+	// boundary of Lifetime <= 0).
+	for _, life := range []time.Duration{0, -time.Hour} {
+		cfg = ControlplaneConfig()
+		cfg.Lifetime = life
+		if _, err := Ensure(cfg, t.TempDir(), "x", testDeps()); err == nil || !strings.Contains(err.Error(), "incomplete config") {
+			t.Errorf("lifetime %v: err %v, want an incomplete-config refusal", life, err)
+		}
+	}
 	cfg = ControlplaneConfig()
 	cfg.Usages = []Usage{Usage(42)}
 	if _, err := Ensure(cfg, t.TempDir(), "x", testDeps()); err == nil {
