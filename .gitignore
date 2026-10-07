@@ -52,6 +52,10 @@ ui/.test-out/
 # (api/internal/api/testdata/fwmanifest/gen-fixtures.sh) mints keys in a temp dir
 # and deletes them.
 !api/internal/api/testdata/fwmanifest/*.pem
+# The tlsca bundle golden (geekdojo/geekdojo-brain#741): two fixed public CA
+# certificates and the bundles the release before tlsca built from them. No
+# key half exists anywhere in that directory.
+!api/internal/tlsca/testdata/*.pem
 *.key
 *.srl
 *.csr
