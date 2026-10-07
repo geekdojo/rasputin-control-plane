@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -584,6 +586,50 @@ func TestClose_ReportsResidue(t *testing.T) {
 	assertReaped(t, pid)
 }
 
+// F-753-19: when Close cannot stat the root, it cannot show the root is gone,
+// so it says so with the stat error, after reaping the process. A parent at
+// mode 0o000 makes the stat fail with EACCES.
+func TestClose_CannotShowRootRemoved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Fatal("this case needs a non-root user: root ignores directory modes, so the stat cannot be made to fail")
+	}
+	s, pid, root := launched(t, slog.New(slog.DiscardHandler), "", "exec tail -f /dev/null\n")
+	parent := filepath.Dir(root)
+	if err := os.Chmod(parent, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(parent, 0o700); err != nil {
+			t.Errorf("unlock %s for cleanup: %v", parent, err)
+		}
+	})
+
+	err := s.Close(context.Background())
+	if err == nil {
+		t.Fatal("Close = nil with the root's parent unreadable")
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("err = %v, want it to wrap fs.ErrPermission", err)
+	}
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		t.Fatalf("err is not an errors.Join: %#v", err)
+	}
+	var statErr error
+	for _, e := range joined.Unwrap() {
+		if strings.Contains(e.Error(), "cannot show teardown removed "+root) {
+			statErr = e
+		}
+	}
+	if statErr == nil {
+		t.Fatalf("err = %v, want one naming %q", err, "cannot show teardown removed "+root)
+	}
+	if !errors.Is(statErr, fs.ErrPermission) {
+		t.Errorf("stat error = %v, want it to wrap fs.ErrPermission", statErr)
+	}
+	assertReaped(t, pid)
+}
+
 // lineLog keeps only the last lines, an unterminated last line included, for
 // the early-exit error.
 func TestLineLogTail(t *testing.T) {
@@ -594,6 +640,37 @@ func TestLineLogTail(t *testing.T) {
 	l.consume(strings.NewReader("a\nb\r\nc\npartial"))
 	if got := l.tail(); got != "b | c | partial" {
 		t.Errorf("tail = %q, want %q", got, "b | c | partial")
+	}
+}
+
+// F-753-19: a read that fails with anything but EOF cuts the stream short, so
+// consume logs one WARN naming the stream and the error. EOF logs no WARN.
+func TestLineLogConsume_ReadError(t *testing.T) {
+	errX := errors.New("read broke")
+	log, rec := logkittest.New()
+	l := newLineLog(log, "stderr", 3)
+	l.consume(io.MultiReader(strings.NewReader("a\n"), iotest.ErrReader(errX)))
+
+	warns := rec.AtLevel(slog.LevelWarn)
+	if len(warns) != 1 {
+		t.Fatalf("%d WARN records, want 1:\n%s", len(warns), rec.Text())
+	}
+	if warns[0].Message != "secret store output read failed" {
+		t.Errorf("WARN message = %q", warns[0].Message)
+	}
+	for key, want := range map[string]string{"source": "openbao", "stream": "stderr", "err": errX.Error()} {
+		if got, ok := logkittest.Attr(warns[0], key); !ok || got != want {
+			t.Errorf("WARN %s = %q (present %t), want %q", key, got, ok, want)
+		}
+	}
+	if got := l.tail(); got != "a" {
+		t.Errorf("tail = %q, want the line read before the error", got)
+	}
+
+	eofLog, eofRec := logkittest.New()
+	newLineLog(eofLog, "stdout", 0).consume(strings.NewReader("a\nb"))
+	if w := eofRec.AtLevel(slog.LevelWarn); len(w) != 0 {
+		t.Errorf("EOF input logged %d WARN record(s), want 0:\n%s", len(w), eofRec.Text())
 	}
 }
 
