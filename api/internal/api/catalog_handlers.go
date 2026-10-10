@@ -136,7 +136,7 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "target node not registered")
 		return
 	}
-	if node.Role != proto.RoleCompute {
+	if !proto.AcceptsApps(node.Role) {
 		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
 		return
 	}

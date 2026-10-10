@@ -10,9 +10,9 @@ import (
 )
 
 // RegisterHandlers subscribes the agent to per-app leaf delivery for nodeID.
-// Register only on app-hosting roles (compute / controlplane), alongside the
-// docker handlers. Returns the subscription so the caller can unsubscribe at
-// shutdown.
+// Register only on roles that accept apps (proto.AcceptsApps, compute);
+// StartNodeProxy does this. Returns the subscription so the caller can
+// unsubscribe at shutdown.
 func RegisterHandlers(nc *nats.Conn, nodeID string, store *LeafStore, reconcile func() error) (*nats.Subscription, error) {
 	subj := proto.AppLeafSubject(nodeID)
 	sub, err := nc.Subscribe(subj, func(m *nats.Msg) { handleLeaf(store, reconcile, m) })

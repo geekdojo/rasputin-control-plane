@@ -820,7 +820,7 @@ func loadAppByID(sc *jobs.StepCtx, store *Store, inv *inventory.Store, appID str
 	if node == nil {
 		return nil, fmt.Errorf("target node %q not registered", app.TargetNode)
 	}
-	if node.Role != proto.RoleCompute {
+	if !proto.AcceptsApps(node.Role) {
 		return nil, fmt.Errorf("target node %q has role %q; apps run on compute nodes only",
 			app.TargetNode, node.Role)
 	}

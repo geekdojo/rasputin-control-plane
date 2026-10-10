@@ -533,27 +533,21 @@ func main() {
 			})
 		}
 
-		// Node-local reverse proxy (ADR-0004 §1/§6/§9): the agent runs the stock
-		// caddy binary, receives per-app TLS leaves + route metadata, and pushes
-		// the Caddy config (Host-routes to loopback, TLS from the leaves) via the
-		// admin API — on a root-only unix socket, never TCP (geekdojo-brain#450;
-		// see proxy.DefaultAdminSocket). Listen addresses: the node's LAN IP
-		// (host) and tailnet IP (tailscale). Best-effort — a proxy failure never
+		// Node-local reverse proxy (ADR-0004 §1/§6/§9): it runs where apps are
+		// accepted, which is compute (proto.AcceptsApps). On a controlplane
+		// rasputin-api owns :443, and StartNodeProxy starts nothing there, so
+		// the api has no competitor for the port in either start order
+		// (geekdojo/geekdojo-brain#831). Best-effort: a proxy failure never
 		// blocks the agent.
-		leafStore := proxy.NewLeafStore(filepath.Join(stateDir, "proxy"))
-		reconciler := proxy.NewReconciler(leafStore, proxy.DefaultAdminSocket,
-			func() string { return nodeTailnetIP() },
-			host.PrimaryLANIP)
-		if caddyBin := caddyBinary(); caddyBin != "" {
-			go reconciler.RunCaddy(ctx, caddyBin)
-		} else {
-			log.Printf("rasputin-agent: caddy binary not found on PATH — node-local proxy disabled (leaves still delivered)")
-		}
-		subscribe(func(c *nats.Conn) error {
-			if _, err := proxy.RegisterHandlers(c, nodeID, leafStore, reconciler.Reconcile); err != nil {
-				return fmt.Errorf("register proxy handlers: %w", err)
-			}
-			return nil
+		proxy.StartNodeProxy(ctx, role, proxy.NodeProxyConfig{
+			NodeID:      nodeID,
+			StateDir:    stateDir,
+			AdminSocket: proxy.DefaultAdminSocket,
+			CaddyBin:    caddyBinary(),
+			TailnetIP:   nodeTailnetIP,
+			LANIP:       host.PrimaryLANIP,
+			Subscribe:   subscribe,
+			Logger:      logger,
 		})
 	}
 
