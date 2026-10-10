@@ -42,6 +42,21 @@ func ValidRole(r NodeRole) bool {
 	return false
 }
 
+// AcceptsApps reports whether user apps are placed on, and proxied from, a node
+// of role r. It is the one statement of that rule: the api's placement checks
+// and the agent's node-local app proxy gate both call it, so the two cannot
+// drift apart. Only compute accepts apps.
+//
+// A controlplane is excluded because rasputin-api owns wildcard :443 there; a
+// node-local Caddy on the same node would race it for the port at every boot
+// (geekdojo/geekdojo-brain#831). Admitting a controlplane later — the one-node
+// cluster the api's placement code anticipates — flips the api's placement
+// checks and the agent's proxy gate together, so the port has to be shared
+// first.
+func AcceptsApps(r NodeRole) bool {
+	return r == RoleCompute
+}
+
 // MaxClusterNodes is the deliberate cluster-size cap, controlplane included
 // (product decision 2026-07-12). The UI's hex grid is designed around it —
 // ui/components/NodeGrid.tsx MAX_NODES must stay in sync. The api enforces it

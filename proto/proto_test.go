@@ -192,6 +192,28 @@ func TestValidRole(t *testing.T) {
 	}
 }
 
+// TC-831-01: AcceptsApps is the one app-host predicate, and it admits compute
+// only — a controlplane is refused because rasputin-api owns :443 there.
+func TestAcceptsApps(t *testing.T) {
+	for _, tc := range []struct {
+		role NodeRole
+		want bool
+	}{
+		{RoleCompute, true},
+		{RoleControlPlane, false},
+		{RoleFirewall, false},
+		{RoleStorage, false},
+		{"", false},
+		{"bogus", false},
+	} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			if got := AcceptsApps(tc.role); got != tc.want {
+				t.Errorf("AcceptsApps(%q) = %v, want %v", tc.role, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestValidBMCPowerVerb(t *testing.T) {
 	for _, v := range AllBMCPowerVerbs {
 		if !ValidBMCPowerVerb(v) {
