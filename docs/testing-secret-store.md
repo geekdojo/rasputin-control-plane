@@ -27,14 +27,16 @@ functional tests share under their own variables.
 
 ## What it proves
 
-On the CI runner (linux/amd64), against OpenBao v2.7.0 as pinned in
+On the CI runner (linux/amd64), against OpenBao v2.7.1 as pinned in
 `api/internal/secretstoretest/pin.go`:
 
 - The store starts with S8's transport: one TCP listener on 127.0.0.1, TLS, a required and
   verified client certificate trusted only from the store CA, and the unauthenticated rekey and
-  generate-root endpoints disabled. Two runtime checks show the config took effect: a client
-  with no certificate fails at the TLS handshake, and a token-less
-  `GET /v1/sys/generate-root/attempt` answers 405.
+  generate-root endpoints disabled. Four runtime checks show the config took effect: a client
+  with no certificate fails at the TLS handshake; a client whose leaf comes from a second,
+  foreign store CA fails at the TLS handshake (T20); a token-less
+  `GET /v1/sys/generate-root/attempt` answers 405; and a token-less `PUT /v1/sys/rekey/init`
+  answers 405 (T21).
 - It runs with S6's PebbleDB with clustering disabled, a static test seal, temporary storage,
   and self-init (`-config main.hcl -config init.json`), which leaves no root token.
 - The store CA, the server leaf (serverAuth only, IP SAN 127.0.0.1) and the client leaf
@@ -59,8 +61,8 @@ Around it:
 - **mlock.** OpenBao v2 removed mlock ([GH-363](https://github.com/openbao/openbao/pull/363),
   noted in the v2.7.0 changelog), so nothing here exercises it, and the config carries no
   `disable_mlock` key.
-- **The rest of the listener matrix.** A foreign-CA client, a wrong-EKU leaf and
-  `sys/rekey/init` are not run here. They rest on #679's evidence (rows T20 and T21).
+- **The rest of the listener matrix.** A wrong-EKU leaf is not run here. It rests on #679's
+  evidence (row T20).
 - **Production use of the store.** It does not cover the api's production client
   ([geekdojo-brain#758](https://github.com/geekdojo/geekdojo-brain/issues/758)), a role pinned to
   the api's identity, a least-privilege production policy, restore
@@ -84,13 +86,15 @@ Around it:
 
 ## The pin, and bumping it
 
-`pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.0`) and `OpenBaoLinuxAMD64SHA256`, the
-sha256 of `openbao_2.7.0_linux_amd64.tar.gz`.
+`pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
+sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
 
 - **Provenance.** The hash is copied only from an upstream `checksums.txt` whose signature has
   been verified with both GPG and cosign, as geekdojo-brain#678's `verify-signatures.sh` does.
-  For v2.7.0 that record is geekdojo-brain
-  `projects/rasputin/research/openbao-evidence/678/raw/signature-verification.txt`. A hash taken
+  For v2.7.1 that record is geekdojo-brain
+  `projects/rasputin/research/openbao-evidence/798/raw/signature-verification-v2.7.1.txt`, the
+  #678 script run with `V=2.7.1`
+  ([geekdojo-brain#798](https://github.com/geekdojo/geekdojo-brain/issues/798)). A hash taken
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
@@ -112,9 +116,9 @@ install it with the script CI uses; it refuses any other platform:
 ./scripts/install-openbao.sh "$HOME/.cache/openbao"
 ```
 
-It prints the download URL, `openbao_2.7.0_linux_amd64.tar.gz: OK` from `sha256sum -c`, and
-`OpenBao v2.7.0 (...)`. On another platform, fetch that release's binary for your platform
-yourself; the harness refuses any binary whose `bao version` is not exactly `OpenBao v2.7.0`.
+It prints the download URL, `openbao_2.7.1_linux_amd64.tar.gz: OK` from `sha256sum -c`, and
+`OpenBao v2.7.1 (...)`. On another platform, fetch that release's binary for your platform
+yourself; the harness refuses any binary whose `bao version` is not exactly `OpenBao v2.7.1`.
 
 **Positive: binary present, switch set.** This is what CI runs.
 

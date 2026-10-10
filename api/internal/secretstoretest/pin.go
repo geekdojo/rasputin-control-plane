@@ -16,10 +16,11 @@ package secretstoretest
 //   - It is copied ONLY from an upstream checksums.txt whose signature has
 //     been verified with both GPG (the OpenBao release key) and cosign (the
 //     release workflow's identity), as geekdojo-brain#678's
-//     verify-signatures.sh does. For v2.7.0 that is
-//     projects/rasputin/research/openbao-evidence/678/raw/signature-verification.txt,
-//     which records checksums.txt sha256=654f25b6…d501 passing both and this
-//     tarball's line matching it.
+//     verify-signatures.sh does. For v2.7.1 that is
+//     projects/rasputin/research/openbao-evidence/798/raw/signature-verification-v2.7.1.txt
+//     (the #678 script run with V=2.7.1, geekdojo-brain#798), which records
+//     checksums.txt sha256=95ad62d5…b750 passing both and this tarball's
+//     line matching it.
 //   - A hash copied from an unverified checksums.txt proves only that the
 //     bytes match what the download host served. gatereg fires when the TAG
 //     changes, not when this hash does, so nothing but this rule stops a
@@ -29,6 +30,6 @@ package secretstoretest
 //     OPENBAO_VERSION pin is kept in step by hand until geekdojo-brain#769
 //     automates it (docs/testing-secret-store.md).
 const (
-	OpenBaoRelease          = "openbao/openbao:v2.7.0"
-	OpenBaoLinuxAMD64SHA256 = "c3ab5de9e778223445487ccbfb16c291bf491642b688f3a3df5aeba23d9b3667"
+	OpenBaoRelease          = "openbao/openbao:v2.7.1"
+	OpenBaoLinuxAMD64SHA256 = "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"
 )
