@@ -54,7 +54,7 @@ func ValidRole(r NodeRole) bool {
 // checks and the agent's proxy gate together, so the port has to be shared
 // first.
 func AcceptsApps(r NodeRole) bool {
-	return r == RoleCompute
+	return r == RoleCompute || r == RoleControlPlane
 }
 
 // MaxClusterNodes is the deliberate cluster-size cap, controlplane included
