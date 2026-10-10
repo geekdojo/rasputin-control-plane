@@ -44,11 +44,31 @@ func NewLeafStore(dir string) *LeafStore { return &LeafStore{dir: dir} }
 
 func (s *LeafStore) appDir(appID string) string { return filepath.Join(s.dir, "certs", appID) }
 
+// The files LeafStore writes in each app's directory. leafFiles lists them so
+// TightenExisting touches exactly these names and nothing else.
+const (
+	certFile = "leaf.pem"
+	keyFile  = "leaf.key"
+	metaFile = "meta.json"
+)
+
+var leafFiles = []string{certFile, keyFile, metaFile}
+
 // CertPath / KeyPath are where appID's leaf lives — the paths the Caddy config
 // will reference.
-func (s *LeafStore) CertPath(appID string) string { return filepath.Join(s.appDir(appID), "leaf.pem") }
-func (s *LeafStore) KeyPath(appID string) string  { return filepath.Join(s.appDir(appID), "leaf.key") }
-func (s *LeafStore) metaPath(appID string) string { return filepath.Join(s.appDir(appID), "meta.json") }
+func (s *LeafStore) CertPath(appID string) string { return filepath.Join(s.appDir(appID), certFile) }
+func (s *LeafStore) KeyPath(appID string) string  { return filepath.Join(s.appDir(appID), keyFile) }
+func (s *LeafStore) metaPath(appID string) string { return filepath.Join(s.appDir(appID), metaFile) }
+
+// TightenExisting brings the leaves an older agent left behind to the at-rest
+// rule: each app directory under certs/ 0700, and its leaf.pem, leaf.key and
+// meta.json 0600. Contents are not read or rewritten, other files are left
+// alone, and symlinks are not followed. A store with no certs/ yet returns
+// nil. It is best effort per app (atrest.TightenSubdirs) and does not log; the
+// caller logs the joined error.
+func (s *LeafStore) TightenExisting() error {
+	return atrest.TightenSubdirs(filepath.Join(s.dir, "certs"), leafFiles)
+}
 
 // Write stores appID's leaf and route metadata, each written atomically (temp
 // + rename). Caddy reads the pair on config (re)load, not via a filewatcher,
@@ -57,10 +77,11 @@ func (s *LeafStore) metaPath(appID string) string { return filepath.Join(s.appDi
 // config that differs is loaded — which is why Routes carries each
 // certificate's digest into the config (geekdojo-brain#611).
 //
-// The app's directory is 0700 and the key and route metadata in it are 0600;
-// the certificate is 0644, set explicitly, because a certificate is public by
-// construction. Caddy runs as this process's own uid (see RunCaddy and
-// PrepareAdminDir), so nothing here needs to be readable by another user.
+// Every file in the app's directory is owner-only: the directory is 0700 and
+// the certificate, key and route metadata are each 0600. Caddy runs as this
+// process's own uid (see RunCaddy and PrepareAdminDir), so nothing here needs
+// to be readable by another user, and the 0700 directory already meant a
+// wider mode on the certificate granted access to nobody.
 func (s *LeafStore) Write(appID string, certPEM, keyPEM []byte, meta RouteMeta) error {
 	if appID == "" {
 		return fmt.Errorf("proxy: leaf write: empty appID")
@@ -74,7 +95,7 @@ func (s *LeafStore) Write(appID string, certPEM, keyPEM []byte, meta RouteMeta) 
 	if err := atrest.EnsureSecretDir(s.appDir(appID)); err != nil {
 		return fmt.Errorf("proxy: leaf dir: %w", err)
 	}
-	if err := atrest.WritePublicFile(s.CertPath(appID), certPEM); err != nil {
+	if err := atrest.WriteSecretFile(s.CertPath(appID), certPEM); err != nil {
 		return fmt.Errorf("proxy: write %s: %w", s.CertPath(appID), err)
 	}
 	if err := atrest.WriteSecretFile(s.KeyPath(appID), keyPEM); err != nil {

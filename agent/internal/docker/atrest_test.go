@@ -3,9 +3,12 @@
 package docker
 
 import (
+	"bytes"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -117,7 +120,11 @@ func TestTightenAppState_ExistingInstall(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	TightenAppState(root)
+	// TC-832-08: only this call line changed when TightenAppState began
+	// returning its error instead of logging; every assertion below is as it was.
+	if err := TightenAppState(root); err != nil {
+		t.Fatal(err)
+	}
 
 	if got := perm(t, appDir); got != 0o700 {
 		t.Errorf("app dir: mode %#o, want 0700", got)
@@ -134,6 +141,31 @@ func TestTightenAppState_ExistingInstall(t *testing.T) {
 		if got := perm(t, p); got != 0o755 && got != 0o644 {
 			t.Errorf("%s: mode %#o — the tile's own content was chmodded", p, got)
 		}
+	}
+}
+
+// TC-832-09: TightenAppState reports a failure to its caller, which logs it,
+// and writes nothing to the process-global logger itself (LOG-STRUCT).
+func TestTightenAppState_ReturnsFailureWithoutLogging(t *testing.T) {
+	var buf bytes.Buffer
+	prev := log.Writer()
+	log.SetOutput(&buf)
+	defer log.SetOutput(prev)
+
+	dir := filepath.Join(t.TempDir(), "apps")
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := TightenAppState(dir)
+	if err == nil {
+		t.Fatal("TightenAppState over a regular file returned nil")
+	}
+	if !strings.Contains(err.Error(), dir) {
+		t.Errorf("error %q does not name %s", err, dir)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("TightenAppState wrote to the global log: %q", buf.String())
 	}
 }
 

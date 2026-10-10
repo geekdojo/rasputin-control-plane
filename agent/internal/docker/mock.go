@@ -24,12 +24,13 @@ type MockBackend struct {
 
 // NewMockBackend roots the mock at dir. The at-rest rules are the real
 // backend's (0700 directories, 0600 files): the mock writes the same compose
-// the real one would, and a dev box running it is a node like any other.
+// the real one would, and a dev box running it is a node like any other. Like
+// NewComposeBackend it does not tighten an older install; the composition
+// root runs TightenAppState for both backends.
 func NewMockBackend(dir string) (*MockBackend, error) {
 	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("docker-mock: mkdir: %w", err)
 	}
-	TightenAppState(dir)
 	return &MockBackend{dir: dir}, nil
 }
 
@@ -50,8 +51,9 @@ func (m *MockBackend) appDir(appID string) string {
 	return filepath.Join(m.dir, appID)
 }
 
-// mockStateFileName is the mock backend's per-app state file. Named so
-// TightenAppState, which serves both backends, can reach it.
+// mockStateFileName is the mock backend's per-app state file. Named so it can
+// sit in agentWrittenFiles, the list TightenAppState tightens for both
+// backends at agent start.
 const mockStateFileName = "state.json"
 
 func (m *MockBackend) statePath(appID string) string {

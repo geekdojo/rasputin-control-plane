@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -224,4 +225,103 @@ func TestTightenIfExists_RefusesASymlink(t *testing.T) {
 	if got := perm(t, victim); got != 0o644 {
 		t.Errorf("symlink target's mode changed to %#o", got)
 	}
+}
+
+// TC-832-06: TightenSubdirs over a missing, malformed or partly foreign root.
+func TestTightenSubdirs(t *testing.T) {
+	names := []string{"a.yml", "b.json"}
+
+	t.Run("TC-832-06a missing root returns nil and creates nothing", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "absent")
+		if err := TightenSubdirs(root, names); err != nil {
+			t.Errorf("missing root: %v", err)
+		}
+		if _, err := os.Lstat(root); !os.IsNotExist(err) {
+			t.Errorf("root was created (Lstat: %v)", err)
+		}
+	})
+
+	t.Run("TC-832-06b root that is a regular file is an error naming it", func(t *testing.T) {
+		root := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(root, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := TightenSubdirs(root, names)
+		if err == nil {
+			t.Fatal("regular-file root returned nil")
+		}
+		if !strings.Contains(err.Error(), root) {
+			t.Errorf("error %q does not name %s", err, root)
+		}
+	})
+
+	t.Run("TC-832-06c plain file directly in root is left alone", func(t *testing.T) {
+		withUmask(t, 0, func() {
+			root := t.TempDir()
+			stray := filepath.Join(root, "a.yml")
+			if err := os.WriteFile(stray, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := TightenSubdirs(root, names); err != nil {
+				t.Fatal(err)
+			}
+			if got := perm(t, stray); got != 0o644 {
+				t.Errorf("stray file mode %#o, want 0644", got)
+			}
+		})
+	})
+
+	t.Run("TC-832-06d subdirectory with none of the named files: only the dir is tightened", func(t *testing.T) {
+		withUmask(t, 0, func() {
+			root := t.TempDir()
+			sub := filepath.Join(root, "app1")
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			other := filepath.Join(sub, "other")
+			if err := os.WriteFile(other, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := TightenSubdirs(root, names); err != nil {
+				t.Fatal(err)
+			}
+			if got := perm(t, sub); got != 0o700 {
+				t.Errorf("subdir mode %#o, want 0700", got)
+			}
+			if got := perm(t, other); got != 0o644 {
+				t.Errorf("unnamed file mode %#o, want 0644", got)
+			}
+			for _, n := range names {
+				if _, err := os.Lstat(filepath.Join(sub, n)); !os.IsNotExist(err) {
+					t.Errorf("%s was created (Lstat: %v)", n, err)
+				}
+			}
+		})
+	})
+
+	t.Run("TC-832-06e symlinked entry is not followed", func(t *testing.T) {
+		withUmask(t, 0, func() {
+			outside := filepath.Join(t.TempDir(), "outside")
+			if err := os.Mkdir(outside, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(outside, "a.yml")
+			if err := os.WriteFile(target, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			if err := os.Symlink(outside, filepath.Join(root, "app1")); err != nil {
+				t.Fatal(err)
+			}
+			if err := TightenSubdirs(root, names); err != nil {
+				t.Fatal(err)
+			}
+			if got := perm(t, outside); got != 0o755 {
+				t.Errorf("symlink target dir mode %#o, want 0755", got)
+			}
+			if got := perm(t, target); got != 0o644 {
+				t.Errorf("file behind the symlink mode %#o, want 0644", got)
+			}
+		})
+	})
 }
