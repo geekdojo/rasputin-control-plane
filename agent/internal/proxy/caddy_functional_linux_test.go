@@ -492,17 +492,6 @@ func freeLoopbackAddr(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-func waitFor(t *testing.T, within time.Duration, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(within)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("never happened within %s: %s", within, what)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
 func mustChmod(t *testing.T, path string, mode os.FileMode) {
 	t.Helper()
 	if err := os.Chmod(path, mode); err != nil {

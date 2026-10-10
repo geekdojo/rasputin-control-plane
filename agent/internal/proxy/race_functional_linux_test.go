@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/host"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -92,7 +93,7 @@ type raceHarness struct {
 	lanIP    string
 	dir      string
 	role     proto.NodeRole
-	logs     *captureHandler
+	logs     *logkittest.Recorder
 	subs     *subscribeRecorder
 }
 
@@ -101,7 +102,8 @@ type raceHarness struct {
 // is gone, so the next subtest starts with :443 free.
 func (h *raceHarness) startProxy() (*Reconciler, string) {
 	t := h.t
-	h.logs, h.subs = &captureHandler{}, &subscribeRecorder{}
+	logger, logs := logkittest.New()
+	h.logs, h.subs = logs, &subscribeRecorder{}
 	sock := filepath.Join(h.dir, "caddy", "admin.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
@@ -118,7 +120,7 @@ func (h *raceHarness) startProxy() (*Reconciler, string) {
 		TailnetIP:   func() string { return "" },
 		LANIP:       host.PrimaryLANIP,
 		Subscribe:   h.subs.subscribe,
-		Logger:      slog.New(h.logs),
+		Logger:      logger,
 	})
 	return r, sock
 }
@@ -216,16 +218,14 @@ func (h *raceHarness) assertProxyNotStarted(r *Reconciler) {
 	if n := len(h.subs.registered()); n != 0 {
 		t.Errorf("Subscribe called %d times on %s, want 0", n, h.role)
 	}
-	recs := h.logs.withMessage(notStartedMsg)
+	recs := h.logs.Matching(slog.LevelInfo, notStartedMsg)
 	if len(recs) != 1 {
-		t.Errorf("got %d %q records, want 1", len(recs), notStartedMsg)
-	} else if role, _ := attr(recs[0], "role"); role != string(h.role) {
+		t.Errorf("got %d INFO %q records, want 1:\n%s", len(recs), notStartedMsg, h.logs.Text())
+	} else if role, _ := logkittest.Attr(recs[0], "role"); role != string(h.role) {
 		t.Errorf("%q record role = %q, want %q", notStartedMsg, role, h.role)
 	}
-	for _, rec := range h.logs.all() {
-		if strings.Contains(rec.Message, "address already in use") {
-			t.Errorf("logged %q", rec.Message)
-		}
+	if text := h.logs.Text(); strings.Contains(text, "address already in use") {
+		t.Errorf("logged address already in use:\n%s", text)
 	}
 }
 

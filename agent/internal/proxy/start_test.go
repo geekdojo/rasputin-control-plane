@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -22,65 +23,6 @@ import (
 // stubWithin bounds every wait on the stub caddy below. Each wait is on a
 // checkable fact (a file appearing, a process being gone), never a sleep.
 const stubWithin = 10 * time.Second
-
-// captureHandler is a slog.Handler that keeps every record it is given.
-type captureHandler struct {
-	mu      sync.Mutex
-	records []slog.Record
-}
-
-func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
-func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.records = append(h.records, r.Clone())
-	return nil
-}
-func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
-
-func (h *captureHandler) all() []slog.Record {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return append([]slog.Record(nil), h.records...)
-}
-
-// withMessage returns the captured records whose message contains substr.
-func (h *captureHandler) withMessage(substr string) []slog.Record {
-	var out []slog.Record
-	for _, r := range h.all() {
-		if strings.Contains(r.Message, substr) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// atLevel returns the captured records at level.
-func (h *captureHandler) atLevel(level slog.Level) []slog.Record {
-	var out []slog.Record
-	for _, r := range h.all() {
-		if r.Level == level {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// attr returns the string value of record r's attribute key, and whether it is
-// present.
-func attr(r slog.Record, key string) (string, bool) {
-	var val string
-	var found bool
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			val, found = a.Value.String(), true
-			return false
-		}
-		return true
-	})
-	return val, found
-}
 
 // subscribeRecorder stands in for the agent's subscribe hook: it counts the
 // calls and keeps each registration so a test can run it against a bus.
@@ -119,7 +61,7 @@ func stubCaddy(t *testing.T, dir string) (bin, marker string) {
 
 // startTestConfig is a NodeProxyConfig whose state and admin socket live under
 // dir, a directory this test's uid owns (PrepareAdminDir accepts it).
-func startTestConfig(dir, caddyBin string, logs *captureHandler, subs *subscribeRecorder) NodeProxyConfig {
+func startTestConfig(dir, caddyBin string, logger *slog.Logger, subs *subscribeRecorder) NodeProxyConfig {
 	return NodeProxyConfig{
 		NodeID:      "node-831",
 		StateDir:    filepath.Join(dir, "state"),
@@ -128,42 +70,34 @@ func startTestConfig(dir, caddyBin string, logs *captureHandler, subs *subscribe
 		TailnetIP:   func() string { return "" },
 		LANIP:       func() string { return "127.0.0.1" },
 		Subscribe:   subs.subscribe,
-		Logger:      slog.New(logs),
+		Logger:      logger,
 	}
 }
 
 // waitStubPID waits for the stub's marker file and returns the pid it holds.
 func waitStubPID(t *testing.T, marker string) int {
 	t.Helper()
-	deadline := time.Now().Add(stubWithin)
-	for {
-		if b, err := os.ReadFile(marker); err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-			if err != nil {
-				t.Fatalf("stub caddy marker %s holds %q, not a pid", marker, b)
-			}
-			return pid
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("never happened within %s: the stub caddy writing its start marker %s", stubWithin, marker)
-		}
-		time.Sleep(20 * time.Millisecond)
+	waitFor(t, stubWithin, "the stub caddy writing its start marker "+marker, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	})
+	b, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
 	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Fatalf("stub caddy marker %s holds %q, not a pid", marker, b)
+	}
+	return pid
 }
 
 // waitProcessGone waits until pid no longer exists (reaped by RunCaddy).
 func waitProcessGone(t *testing.T, pid int) {
 	t.Helper()
-	deadline := time.Now().Add(stubWithin)
-	for {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("never happened within %s: stub caddy pid %d exiting after its context was cancelled", stubWithin, pid)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	waitFor(t, stubWithin, "stub caddy pid "+strconv.Itoa(pid)+" exiting after its context was cancelled", func() bool {
+		return errors.Is(syscall.Kill(pid, 0), syscall.ESRCH)
+	})
 }
 
 // TC-831-02: on a controlplane StartNodeProxy starts no Caddy, registers no
@@ -171,11 +105,12 @@ func waitProcessGone(t *testing.T, pid int) {
 func TestStartNodeProxy_ControlplaneStartsNothing(t *testing.T) {
 	dir := t.TempDir()
 	bin, marker := stubCaddy(t, dir)
-	logs, subs := &captureHandler{}, &subscribeRecorder{}
+	logger, logs := logkittest.New()
+	subs := &subscribeRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := StartNodeProxy(ctx, proto.RoleControlPlane, startTestConfig(dir, bin, logs, subs))
+	r := StartNodeProxy(ctx, proto.RoleControlPlane, startTestConfig(dir, bin, logger, subs))
 
 	if r != nil {
 		t.Errorf("StartNodeProxy on a controlplane returned a reconciler, want nil")
@@ -190,7 +125,7 @@ func TestStartNodeProxy_ControlplaneStartsNothing(t *testing.T) {
 		t.Errorf("caddy admin dir was created on a controlplane (err %v), want nothing prepared", err)
 	}
 
-	recs := logs.all()
+	recs := logs.Records()
 	if len(recs) != 1 {
 		t.Fatalf("got %d log records, want exactly 1: %v", len(recs), recs)
 	}
@@ -198,10 +133,10 @@ func TestStartNodeProxy_ControlplaneStartsNothing(t *testing.T) {
 	if rec.Level != slog.LevelInfo || !strings.Contains(rec.Message, notStartedMsg) {
 		t.Errorf("record = %s %q, want INFO %q", rec.Level, rec.Message, notStartedMsg)
 	}
-	if role, ok := attr(rec, "role"); !ok || role != string(proto.RoleControlPlane) {
+	if role, ok := logkittest.Attr(rec, "role"); !ok || role != string(proto.RoleControlPlane) {
 		t.Errorf("record role = %q (present %v), want %q", role, ok, proto.RoleControlPlane)
 	}
-	if reason, ok := attr(rec, "reason"); !ok || reason == "" {
+	if reason, ok := logkittest.Attr(rec, "reason"); !ok || reason == "" {
 		t.Errorf("record reason = %q (present %v), want a non-empty reason", reason, ok)
 	}
 }
@@ -211,11 +146,12 @@ func TestStartNodeProxy_ControlplaneStartsNothing(t *testing.T) {
 func TestStartNodeProxy_ComputeStartsCaddy(t *testing.T) {
 	dir := t.TempDir()
 	bin, marker := stubCaddy(t, dir)
-	logs, subs := &captureHandler{}, &subscribeRecorder{}
+	logger, logs := logkittest.New()
+	subs := &subscribeRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	r := StartNodeProxy(ctx, proto.RoleCompute, startTestConfig(dir, bin, logs, subs))
+	r := StartNodeProxy(ctx, proto.RoleCompute, startTestConfig(dir, bin, logger, subs))
 
 	if r == nil {
 		t.Fatal("StartNodeProxy on compute returned nil, want a reconciler")
@@ -225,10 +161,10 @@ func TestStartNodeProxy_ComputeStartsCaddy(t *testing.T) {
 	}
 	pid := waitStubPID(t, marker)
 
-	if recs := logs.withMessage(notStartedMsg); len(recs) != 0 {
-		t.Errorf("compute logged %d %q records, want none", len(recs), notStartedMsg)
+	if text := logs.Text(); strings.Contains(text, notStartedMsg) {
+		t.Errorf("compute logged %q, want no such record:\n%s", notStartedMsg, text)
 	}
-	if recs := logs.atLevel(slog.LevelWarn); len(recs) != 0 {
+	if recs := logs.AtLevel(slog.LevelWarn); len(recs) != 0 {
 		t.Errorf("compute with a caddy binary logged %d WARN records, want none: %v", len(recs), recs)
 	}
 
@@ -241,10 +177,11 @@ func TestStartNodeProxy_ComputeStartsCaddy(t *testing.T) {
 // logs one WARN carrying node_id.
 func TestStartNodeProxy_ComputeWithoutCaddy(t *testing.T) {
 	dir := t.TempDir()
-	logs, subs := &captureHandler{}, &subscribeRecorder{}
+	logger, logs := logkittest.New()
+	subs := &subscribeRecorder{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	cfg := startTestConfig(dir, "", logs, subs)
+	cfg := startTestConfig(dir, "", logger, subs)
 
 	r := StartNodeProxy(ctx, proto.RoleCompute, cfg)
 
@@ -261,14 +198,14 @@ func TestStartNodeProxy_ComputeWithoutCaddy(t *testing.T) {
 		t.Errorf("caddy admin dir exists (err %v), want no caddy supervisor started", err)
 	}
 
-	warns := logs.atLevel(slog.LevelWarn)
+	warns := logs.AtLevel(slog.LevelWarn)
 	if len(warns) != 1 {
 		t.Fatalf("got %d WARN records, want exactly 1: %v", len(warns), warns)
 	}
 	if !strings.Contains(warns[0].Message, "node-local proxy disabled") {
 		t.Errorf("WARN message = %q, want it to say the node-local proxy is disabled", warns[0].Message)
 	}
-	if id, ok := attr(warns[0], "node_id"); !ok || id != cfg.NodeID {
+	if id, ok := logkittest.Attr(warns[0], "node_id"); !ok || id != cfg.NodeID {
 		t.Errorf("WARN node_id = %q (present %v), want %q", id, ok, cfg.NodeID)
 	}
 
@@ -286,5 +223,37 @@ func TestStartNodeProxy_ComputeWithoutCaddy(t *testing.T) {
 	store := NewLeafStore(filepath.Join(cfg.StateDir, "proxy"))
 	if b, err := os.ReadFile(store.CertPath("app-1")); err != nil || string(b) != "CERT" {
 		t.Errorf("delivered leaf at %s = %q (err %v), want CERT", store.CertPath("app-1"), b, err)
+	}
+}
+
+// F-831-08: when the bus connection refuses the app.leaf subscription, the
+// registration StartNodeProxy hands to Subscribe returns the failure wrapped
+// with what it was doing, so the agent's subscribe hook can report it.
+func TestStartNodeProxy_RegistrationErrorIsWrapped(t *testing.T) {
+	dir := t.TempDir()
+	logger, _ := logkittest.New()
+	subs := &subscribeRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if r := StartNodeProxy(ctx, proto.RoleCompute, startTestConfig(dir, "", logger, subs)); r == nil {
+		t.Fatal("StartNodeProxy on compute returned nil, want a reconciler")
+	}
+	fns := subs.registered()
+	if len(fns) != 1 {
+		t.Fatalf("Subscribe called %d times, want 1", len(fns))
+	}
+
+	nc := startNATS(t)
+	nc.Close()
+	err := fns[0](nc)
+	if err == nil {
+		t.Fatal("registration on a closed connection succeeded, want an error")
+	}
+	if !strings.HasPrefix(err.Error(), "register proxy handlers: ") {
+		t.Errorf("registration error = %q, want it prefixed %q", err, "register proxy handlers: ")
+	}
+	if !errors.Is(err, nats.ErrConnectionClosed) {
+		t.Errorf("registration error = %v, want it to wrap nats.ErrConnectionClosed", err)
 	}
 }
