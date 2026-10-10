@@ -101,7 +101,7 @@ func New(cfg Config) (*Harness, error) {
 }
 
 // pinnedVersion is the release tag OpenBaoRelease pins: the text after its
-// last ':' (v2.7.0), which is how gatereg reads the same const.
+// last ':' (v2.7.1), which is how gatereg reads the same const.
 func pinnedVersion() string {
 	return OpenBaoRelease[strings.LastIndex(OpenBaoRelease, ":")+1:]
 }
@@ -232,7 +232,7 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 
 // checkVersion runs `bao version` and refuses any binary but the pinned
 // release, so the store under test is the one the const names. It returns
-// the pinned tag (v2.7.0).
+// the pinned tag (v2.7.1).
 func (h *Harness) checkVersion(ctx context.Context) (string, error) {
 	out, err := exec.CommandContext(ctx, h.cfg.BinaryPath, "version").Output()
 	if err != nil {

@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
@@ -38,11 +40,13 @@ const (
 
 // TestSecretStore_SmokeWriteReadKV runs the real pinned store through the
 // harness: S8's transport, PebbleDB, a static test seal, temporary storage
-// and self-init. It proves the listener's config took effect (no client
-// certificate is refused at the handshake; the unauthenticated generate-root
-// endpoint is disabled), logs in with a store-CA client leaf through cert
-// auth, writes and reads one KV v2 value, and proves teardown left nothing.
-// TC-753-12 and TC-753-13.
+// and self-init. It proves the listener's config took effect with four
+// runtime checks: a client with no certificate and a client whose leaf comes
+// from a foreign CA are both refused at the handshake (T20), and the
+// unauthenticated generate-root and rekey/init endpoints both answer 405
+// (T21). It then logs in with a store-CA client leaf through cert auth, writes
+// and reads one KV v2 value, and proves teardown left nothing. TC-753-12,
+// TC-753-13, TC-798-23 and TC-798-24.
 func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	bin := os.Getenv(binEnv)
 	if bin == "" {
@@ -95,8 +99,8 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	if got, _ := logkittest.Attr(started[0], "pid"); got != strconv.Itoa(pid) {
 		t.Errorf("started pid = %q, want %d", got, pid)
 	}
-	if got, _ := logkittest.Attr(started[0], "version"); got != "v2.7.0" {
-		t.Errorf("started version = %q, want v2.7.0", got)
+	if got, _ := logkittest.Attr(started[0], "version"); got != "v2.7.1" {
+		t.Errorf("started version = %q, want v2.7.1", got)
 	}
 	if got, _ := logkittest.Attr(started[0], "dir"); got != root {
 		t.Errorf("started dir = %q, want %q", got, root)
@@ -142,12 +146,45 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 		t.Errorf("a client with no certificate failed with %v, want a TLS error", err)
 	}
 
+	// TC-798-23 (T20): a client leaf from a second, foreign store CA, with the
+	// same usage and CommonName as the real one, fails at the TLS layer, with
+	// no HTTP status. Only the issuing CA differs.
+	foreign, err := tlsca.Ensure(tlsca.StoreConfig(), t.TempDir(), "foreign", tlscatest.Deps())
+	if err != nil {
+		t.Fatalf("foreign store CA: %v", err)
+	}
+	foreignLeaf, err := foreign.MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: ClientRole})
+	if err != nil {
+		t.Fatalf("foreign client leaf: %v", err)
+	}
+	foreignCert, err := tls.LoadX509KeyPair(foreignLeaf.CertPath, foreignLeaf.KeyPath)
+	if err != nil {
+		t.Fatalf("load the foreign client leaf: %v", err)
+	}
+	foreignTLS := s.ClientTLS()
+	foreignTLS.Certificates = []tls.Certificate{foreignCert}
+	fc := &http.Client{Transport: &http.Transport{TLSClientConfig: foreignTLS}}
+	resp, err = fc.Get(s.URL() + "/v1/sys/health")
+	if err == nil {
+		if err := resp.Body.Close(); err != nil {
+			t.Errorf("close the response body: %v", err)
+		}
+		t.Errorf("a client with a foreign-CA leaf got HTTP %d, want a TLS failure", resp.StatusCode)
+	} else if !strings.Contains(err.Error(), "tls: ") {
+		t.Errorf("a client with a foreign-CA leaf failed with %v, want a TLS error", err)
+	}
+	fc.CloseIdleConnections()
+
 	c := &http.Client{Transport: &http.Transport{TLSClientConfig: s.ClientTLS()}}
 	defer c.CloseIdleConnections()
 
 	// TC-753-13 (b): the unauthenticated generate-root endpoint is disabled.
 	if code, _ := call(t, c, http.MethodGet, s.URL()+"/v1/sys/generate-root/attempt", "", nil); code != http.StatusMethodNotAllowed {
 		t.Errorf("token-less generate-root/attempt = %d, want 405", code)
+	}
+	// TC-798-24 (T21): so is the unauthenticated rekey endpoint.
+	if code, _ := call(t, c, http.MethodPut, s.URL()+"/v1/sys/rekey/init", "", nil); code != http.StatusMethodNotAllowed {
+		t.Errorf("token-less PUT sys/rekey/init = %d, want 405", code)
 	}
 
 	// TC-753-12: cert login.

@@ -53,8 +53,8 @@ if [ "$os" != "Linux" ] || [ "$arch" != "x86_64" ]; then
 fi
 
 owner_repo="${release%:*}"   # openbao/openbao
-tag="${release##*:}"         # v2.7.0
-version="${tag#v}"           # 2.7.0
+tag="${release##*:}"         # v2.7.1
+version="${tag#v}"           # 2.7.1
 tarball="openbao_${version}_linux_amd64.tar.gz"
 url="https://github.com/${owner_repo}/releases/download/${tag}/${tarball}"
 
