@@ -448,6 +448,15 @@ func main() {
 	// mock. Force via RASPUTIN_DOCKER_BACKEND=mock|docker.
 	if role == proto.RoleCompute || role == proto.RoleControlPlane {
 		appsDir := filepath.Join(stateDir, "apps")
+		// Best effort, logged and not returned: an older agent's 0755/0644 app
+		// state is brought to 0700/0600 here, and every write path re-tightens
+		// its own app's directory and files anyway (compose.go and mock.go run
+		// EnsureSecretDir before each WriteSecretFile), so a failure leaves at
+		// worst one stale mode until that app is next written, never a broken
+		// app subsystem.
+		if err := docker.TightenAppState(appsDir); err != nil {
+			logger.Warn("rasputin-agent: docker: could not tighten existing app state", "dir", appsDir, "err", err.Error())
+		}
 		backendChoice := dockerBackendFromEnv(autodetectDockerBackend)
 
 		var dockerBackend docker.Backend

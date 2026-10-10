@@ -25,7 +25,8 @@
 // what the agent uses — the api's CreateSecretFile and EnsureSecretFile have
 // no agent-side caller (the agent creates no database and no never-replaced
 // key) — and adds EnsurePublicDir, which the agent needs for the two
-// directories whose contents other daemons read.
+// directories whose contents other daemons read, and TightenSubdirs, which
+// brings a per-app tree an older agent left behind to the rule at start.
 package atrest
 
 import (
@@ -95,6 +96,46 @@ func TightenIfExists(path string) error {
 		return nil
 	}
 	return err
+}
+
+// TightenSubdirs brings each directory directly under root to 0700 and each
+// of the named files in it to 0600, as an older agent may have left them at
+// 0755 and 0644. Contents are not read or rewritten, and nothing else is
+// touched: a plain file in root, an unnamed file in a subdirectory, and
+// anything deeper keep their modes.
+//
+// A missing root returns nil: there is nothing to tighten. An entry that is a
+// symlink is not a directory to DirEntry.IsDir, so it is never followed, and a
+// named file that is a symlink is refused by TightenIfExists.
+//
+// It is best effort per entry. A directory or file that cannot be tightened is
+// recorded and the rest are still done; the result joins every failure, each
+// naming its path and action. The caller decides how to report it.
+func TightenSubdirs(root string, files []string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("atrest: list %s to tighten: %w", root, err)
+	}
+	var errs []error
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if err := EnsureSecretDir(dir); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, name := range files {
+			if err := TightenIfExists(filepath.Join(dir, name)); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // ensureDirMode chmods dir to mode when its permission bits differ. A

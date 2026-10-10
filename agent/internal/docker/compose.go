@@ -43,15 +43,13 @@ type ComposeBackend struct {
 // NewComposeBackend constructs the real backend. dir is the per-agent state
 // root; the docker CLI is assumed to be on PATH (the caller LookPaths first,
 // and DISABLES the subsystem if it isn't there — it does not fall back to the
-// mock; see agent/internal/configfault).
+// mock; see agent/internal/configfault). It does not tighten the app state an
+// older agent left in dir: the composition root runs TightenAppState at every
+// start, whichever backend it picks.
 func NewComposeBackend(dir string) (*ComposeBackend, error) {
 	if err := atrest.EnsureSecretDir(dir); err != nil {
 		return nil, fmt.Errorf("docker-compose: mkdir: %w", err)
 	}
-	// An install made by an older agent has its app directories at 0755 and
-	// its compose files at 0644, and nothing rewrites them until the app is
-	// deployed again. Bring them to the rule here, at every start.
-	TightenAppState(dir)
 	if _, err := exec.LookPath("docker"); err != nil {
 		return nil, fmt.Errorf("docker-compose: docker CLI not found: %w", err)
 	}
@@ -59,41 +57,18 @@ func NewComposeBackend(dir string) (*ComposeBackend, error) {
 }
 
 // TightenAppState brings the app state an older agent left in dir to the
-// at-rest rule: every app directory 0700, every file in one 0600. Contents are
-// not read or rewritten.
+// at-rest rule: every app directory 0700, and in each the files this agent
+// writes (agentWrittenFiles) 0600. Contents are not read or rewritten, and a
+// tile's own files in an app directory are left alone: a compose file's
+// relative paths resolve against that directory, so a bind mount may be rooted
+// there, and its content belongs to a container that may run as another uid.
 //
-// It is best effort by design, and per app. A directory that cannot be
-// tightened is logged and skipped rather than failing the constructor,
-// because the alternative is worse: refusing to construct the backend
-// disables the node's whole app subsystem (agent/internal/configfault), so one
-// unreadable leftover directory would stop every app on the node from being
-// deployed, stopped or reported. The next Deploy tightens that app's own
-// directory anyway, and the state root above it is already 0700 by then.
-func TightenAppState(dir string) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		log.Printf("rasputin-agent: docker: cannot list %s to tighten app state: %v", dir, err)
-		return
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		appDir := filepath.Join(dir, e.Name())
-		if err := atrest.EnsureSecretDir(appDir); err != nil {
-			log.Printf("rasputin-agent: docker: %v", err)
-			continue
-		}
-		// Only the files the agent itself writes. A compose file's relative
-		// paths resolve against this directory, so a tile may have a bind
-		// mount rooted here; that content belongs to the container, which may
-		// run as a uid that is not ours, and chmodding it would break the app.
-		for _, name := range agentWrittenFiles {
-			if err := atrest.TightenIfExists(filepath.Join(appDir, name)); err != nil {
-				log.Printf("rasputin-agent: docker: %v", err)
-			}
-		}
-	}
+// It is best effort and per app (atrest.TightenSubdirs): one directory that
+// cannot be tightened does not stop the rest, and the joined error names each
+// failure. It does not log; the caller logs the result. A missing dir returns
+// nil.
+func TightenAppState(dir string) error {
+	return atrest.TightenSubdirs(dir, agentWrittenFiles)
 }
 
 func (c *ComposeBackend) Name() string { return "docker" }

@@ -121,7 +121,7 @@ func rows() []row {
 			want: []want{
 				{"proxy/certs/app1", dirMode},
 				{"proxy/certs/app1/leaf.key", secretMode},
-				{"proxy/certs/app1/leaf.pem", publicMode}, // a certificate: public by construction
+				{"proxy/certs/app1/leaf.pem", secretMode}, // TC-832-07
 				{"proxy/certs/app1/meta.json", secretMode},
 			},
 		},
