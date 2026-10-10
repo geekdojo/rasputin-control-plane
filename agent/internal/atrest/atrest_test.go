@@ -3,6 +3,7 @@
 package atrest
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -323,5 +324,125 @@ func TestTightenSubdirs(t *testing.T) {
 				t.Errorf("file behind the symlink mode %#o, want 0644", got)
 			}
 		})
+	})
+
+	t.Run("TC-832-06f named file in a subdirectory is tightened, contents unchanged", func(t *testing.T) {
+		withUmask(t, 0, func() {
+			root := t.TempDir()
+			sub := filepath.Join(root, "app1")
+			if err := os.Mkdir(sub, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			named := filepath.Join(sub, "a.yml")
+			want := []byte("services: {}\n")
+			if err := os.WriteFile(named, want, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := TightenSubdirs(root, names); err != nil {
+				t.Fatal(err)
+			}
+			if got := perm(t, sub); got != 0o700 {
+				t.Errorf("subdir mode %#o, want 0700", got)
+			}
+			if got := perm(t, named); got != 0o600 {
+				t.Errorf("named file mode %#o, want 0600", got)
+			}
+			got, err := os.ReadFile(named)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != string(want) {
+				t.Errorf("named file contents %q, want %q", got, want)
+			}
+		})
+	})
+
+	t.Run("TC-832-06g named file that is a symlink is an error; later subdirectories are still done", func(t *testing.T) {
+		withUmask(t, 0, func() {
+			outside := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(outside, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			// ReadDir returns entries sorted by name, so app1 (the refused
+			// symlink) is visited before app2.
+			sub1 := filepath.Join(root, "app1")
+			sub2 := filepath.Join(root, "app2")
+			for _, d := range []string{sub1, sub2} {
+				if err := os.Mkdir(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := filepath.Join(sub1, "a.yml")
+			if err := os.Symlink(outside, link); err != nil {
+				t.Fatal(err)
+			}
+			named := filepath.Join(sub2, "b.json")
+			if err := os.WriteFile(named, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			err := TightenSubdirs(root, names)
+			if err == nil {
+				t.Fatal("symlinked named file returned nil")
+			}
+			if !strings.Contains(err.Error(), link) {
+				t.Errorf("error %q does not name %s", err, link)
+			}
+			if got := perm(t, outside); got != 0o644 {
+				t.Errorf("symlink target mode %#o, want 0644", got)
+			}
+			if got := perm(t, named); got != 0o600 {
+				t.Errorf("second subdir's named file mode %#o, want 0600", got)
+			}
+			if got := perm(t, sub2); got != 0o700 {
+				t.Errorf("second subdir mode %#o, want 0700", got)
+			}
+		})
+	})
+
+	t.Run("TC-832-06h subdirectory that cannot be tightened is an error naming it", func(t *testing.T) {
+		// A subdirectory whose absolute path is longer than the platform's
+		// PATH_MAX: os.ReadDir on root lists it, but every path-based call on
+		// it (stat, mkdir, chmod) fails with ENAMETOOLONG, so EnsureSecretDir
+		// fails for root and non-root alike. The tree is built one 200-byte
+		// component at a time through os.Root (openat), which has no total
+		// length limit, until the next level's absolute path is too long.
+		comp := strings.Repeat("d", 200)
+		root := t.TempDir()
+		var sub string
+		for i := 0; ; i++ {
+			if i == 64 {
+				t.Fatalf("no ENAMETOOLONG after %d levels of %d bytes", i, len(comp))
+			}
+			r, err := os.OpenRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = r.Mkdir(comp, 0o755)
+			_ = r.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			next := filepath.Join(root, comp)
+			_, err = os.Lstat(next)
+			if errors.Is(err, syscall.ENAMETOOLONG) {
+				sub = next
+				break
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			root = next
+		}
+		err := TightenSubdirs(root, names)
+		if err == nil {
+			t.Fatal("untightenable subdirectory returned nil")
+		}
+		if !strings.Contains(err.Error(), sub) {
+			t.Errorf("error does not name the subdirectory %s", sub)
+		}
+		if !errors.Is(err, syscall.ENAMETOOLONG) {
+			t.Errorf("error %v is not ENAMETOOLONG", err)
+		}
 	})
 }
