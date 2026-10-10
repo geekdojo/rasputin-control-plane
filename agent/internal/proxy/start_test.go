@@ -257,3 +257,108 @@ func TestStartNodeProxy_RegistrationErrorIsWrapped(t *testing.T) {
 		t.Errorf("registration error = %v, want it to wrap nats.ErrConnectionClosed", err)
 	}
 }
+
+const tightenWarnMsg = "could not tighten existing app leaves"
+
+// TC-832-13 (leaf half of the start wiring, unit level): on compute,
+// StartNodeProxy brings an older agent's 0755/0644 leaf under
+// <StateDir>/proxy/certs to 0700/0600 as soon as it builds the store, with no
+// Caddy involved and no tighten WARN, and leaves the contents alone.
+func TestStartNodeProxy_ComputeTightensExistingLeaves(t *testing.T) {
+	dir := t.TempDir()
+	logger, logs := logkittest.New()
+	subs := &subscribeRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := startTestConfig(dir, "", logger, subs)
+	s := NewLeafStore(filepath.Join(cfg.StateDir, "proxy"))
+	seedOldLeaf(t, s, "a1", map[string][]byte{certFile: []byte("OLD CERT")})
+
+	if r := StartNodeProxy(ctx, proto.RoleCompute, cfg); r == nil {
+		t.Fatal("StartNodeProxy on compute returned nil, want a reconciler")
+	}
+
+	if got := leafPerm(t, s.CertPath("a1")); got != 0o600 {
+		t.Errorf("leaf.pem: mode %#o, want 0600", got)
+	}
+	if got := leafPerm(t, s.appDir("a1")); got != 0o700 {
+		t.Errorf("a1 dir: mode %#o, want 0700", got)
+	}
+	if got := readFile(t, s.CertPath("a1")); got != "OLD CERT" {
+		t.Errorf("leaf.pem = %q, want OLD CERT (tightened, not rewritten)", got)
+	}
+	if text := logs.Text(); strings.Contains(text, tightenWarnMsg) {
+		t.Errorf("a clean tighten logged %q:\n%s", tightenWarnMsg, text)
+	}
+}
+
+// TC-832-13 (leaf half, unit level): on a controlplane, which accepts no apps,
+// StartNodeProxy touches no leaf, so an old 0644 leaf.pem and its 0755 dir
+// keep their modes.
+func TestStartNodeProxy_ControlplaneLeavesLeavesAlone(t *testing.T) {
+	dir := t.TempDir()
+	logger, _ := logkittest.New()
+	subs := &subscribeRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := startTestConfig(dir, "", logger, subs)
+	s := NewLeafStore(filepath.Join(cfg.StateDir, "proxy"))
+	seedOldLeaf(t, s, "a1", map[string][]byte{certFile: []byte("OLD CERT")})
+
+	if r := StartNodeProxy(ctx, proto.RoleControlPlane, cfg); r != nil {
+		t.Fatal("StartNodeProxy on a controlplane returned a reconciler, want nil")
+	}
+
+	if got := leafPerm(t, s.CertPath("a1")); got != 0o644 {
+		t.Errorf("leaf.pem: mode %#o, want 0644 (untouched on a controlplane)", got)
+	}
+	if got := leafPerm(t, s.appDir("a1")); got != 0o755 {
+		t.Errorf("a1 dir: mode %#o, want 0755 (untouched on a controlplane)", got)
+	}
+}
+
+// TC-832-13 (leaf half, unit level): a tighten that fails is logged once at
+// WARN with the certs dir and the error, and does not stop the proxy: the
+// reconciler is still returned and the app.leaf subscription still made.
+func TestStartNodeProxy_TightenFailureWarnsAndContinues(t *testing.T) {
+	zeroUmask(t)
+	dir := t.TempDir()
+	logger, logs := logkittest.New()
+	subs := &subscribeRecorder{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := startTestConfig(dir, "", logger, subs)
+	s := NewLeafStore(filepath.Join(cfg.StateDir, "proxy"))
+	seedOldLeaf(t, s, "a1", map[string][]byte{keyFile: []byte("KEY")})
+	link := s.CertPath("a1")
+	if err := os.Symlink(filepath.Join(t.TempDir(), "elsewhere.pem"), link); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := StartNodeProxy(ctx, proto.RoleCompute, cfg); r == nil {
+		t.Fatal("StartNodeProxy on compute returned nil after a failed tighten, want a reconciler")
+	}
+	if n := len(subs.registered()); n != 1 {
+		t.Errorf("Subscribe called %d times after a failed tighten, want 1", n)
+	}
+
+	var warns []slog.Record
+	for _, rec := range logs.AtLevel(slog.LevelWarn) {
+		if strings.Contains(rec.Message, tightenWarnMsg) {
+			warns = append(warns, rec)
+		}
+	}
+	if len(warns) != 1 {
+		t.Fatalf("got %d tighten WARN records, want exactly 1:\n%s", len(warns), logs.Text())
+	}
+	wantDir := filepath.Join(cfg.StateDir, "proxy", "certs")
+	if got, ok := logkittest.Attr(warns[0], "dir"); !ok || got != wantDir {
+		t.Errorf("WARN dir = %q (present %v), want %q", got, ok, wantDir)
+	}
+	if got, ok := logkittest.Attr(warns[0], "err"); !ok || !strings.Contains(got, link) {
+		t.Errorf("WARN err = %q (present %v), want it to name %s", got, ok, link)
+	}
+	if got := leafPerm(t, s.KeyPath("a1")); got != 0o600 {
+		t.Errorf("leaf.key: mode %#o, want 0600 (best effort past the bad entry)", got)
+	}
+}

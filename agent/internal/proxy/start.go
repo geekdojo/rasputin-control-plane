@@ -56,7 +56,17 @@ func StartNodeProxy(ctx context.Context, role proto.NodeRole, cfg NodeProxyConfi
 		return nil
 	}
 
-	store := NewLeafStore(filepath.Join(cfg.StateDir, "proxy"))
+	proxyDir := filepath.Join(cfg.StateDir, "proxy")
+	store := NewLeafStore(proxyDir)
+	// Before Caddy reads a leaf or a delivery rewrites one, leaves an older
+	// agent wrote 0755/0644 are brought to 0700/0600 (geekdojo/geekdojo-brain#832).
+	// Best effort, logged and not returned: LeafStore.Write re-writes every
+	// file 0600 on the next delivery, and a proxy failure never blocks the
+	// agent.
+	if err := store.TightenExisting(); err != nil {
+		cfg.Logger.Warn("rasputin-agent: proxy: could not tighten existing app leaves",
+			"dir", filepath.Join(proxyDir, "certs"), "err", err.Error())
+	}
 	r := NewReconciler(store, cfg.AdminSocket, cfg.TailnetIP, cfg.LANIP)
 	if cfg.CaddyBin != "" {
 		go r.RunCaddy(ctx, cfg.CaddyBin)

@@ -548,15 +548,6 @@ func main() {
 		// the api has no competitor for the port in either start order
 		// (geekdojo/geekdojo-brain#831). Best-effort: a proxy failure never
 		// blocks the agent.
-		if proto.AcceptsApps(role) {
-			leafStore := proxy.NewLeafStore(filepath.Join(stateDir, "proxy"))
-			// Best effort, logged and not returned: leaves written 0644 by an older
-			// agent are brought to 0600 here; LeafStore.Write re-writes every file
-			// 0600 on the next delivery, and a proxy failure never blocks the agent.
-			if err := leafStore.TightenExisting(); err != nil {
-				logger.Warn("rasputin-agent: proxy: could not tighten existing app leaves", "dir", filepath.Join(stateDir, "proxy", "certs"), "err", err.Error())
-			}
-		}
 		proxy.StartNodeProxy(ctx, role, proxy.NodeProxyConfig{
 			NodeID:      nodeID,
 			StateDir:    stateDir,
