@@ -74,6 +74,9 @@ func TestParseAddr(t *testing.T) {
 	for _, ok := range []struct{ in, host, port string }{
 		{"https://127.0.0.1:8200", "127.0.0.1", "8200"},
 		{"https://127.0.0.1:18200", "127.0.0.1", "18200"},
+		// The port range's two ends; 0 and 65536 are refused below.
+		{"https://127.0.0.1:1", "127.0.0.1", "1"},
+		{"https://127.0.0.1:65535", "127.0.0.1", "65535"},
 	} {
 		u, err := secretstore.ParseAddr(ok.in)
 		if err != nil {
@@ -210,10 +213,19 @@ func TestNewKVPath(t *testing.T) {
 	if err != nil || p.Mount() != "kv" || p.Path() != "apps/web_1.db-pass" || p.String() != "kv/apps/web_1.db-pass" {
 		t.Fatalf("valid pair = %v, %v", p, err)
 	}
+	// Each end of each allowed character range is accepted.
+	for _, r := range []string{"a", "z", "A", "Z", "0", "9", "-", "_", "x.y"} {
+		if _, err := secretstore.NewKVPath(r, r); err != nil {
+			t.Errorf("NewKVPath(%q, %q) = %v, want accepted", r, r, err)
+		}
+	}
 	for _, bad := range [][2]string{
 		{"", "a"}, {"kv", ""}, {"kv", "/a"}, {"kv", "a/"}, {"/kv", "a"}, {"kv/", "a"}, {"kv", "a//b"},
 		{"kv", "."}, {"kv", ".."}, {"kv", "a/../b"}, {"..", "a"}, {"kv", "a b"}, {"kv", "a%2fb"},
 		{"kv", "a?b"}, {"kv", "a#b"}, {"kv", "café"}, {"k v", "a"},
+		// The neighbours of each allowed range's ends ('/' below '0' is the
+		// separator, refused above as an empty segment).
+		{"kv", "`"}, {"kv", "{"}, {"kv", "@"}, {"kv", "["}, {"kv", ":"}, {"`", "a"}, {"{", "a"},
 	} {
 		if _, err := secretstore.NewKVPath(bad[0], bad[1]); err == nil {
 			t.Errorf("NewKVPath(%q, %q) accepted", bad[0], bad[1])

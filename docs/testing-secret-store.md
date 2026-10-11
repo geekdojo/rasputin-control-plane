@@ -135,7 +135,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T31 at it before editing their `version` column.
+  release, and re-verifies T20 to T37 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -209,7 +209,7 @@ The cases for geekdojo-brain#753, and where each is checked:
 | TC-753-12 | The smoke case: real store, cert login, KV write and read, asserted teardown | `TestSecretStore_SmokeWriteReadKV`, in the `backend` job |
 | TC-753-13 | No client certificate fails at the handshake; token-less generate-root answers 405 | `TestSecretStore_SmokeWriteReadKV` |
 | TC-753-14 | In CI, removing the install step fails the `backend` job | A recorded run on the PR |
-| TC-753-15 | Changing the const without re-verifying T20 to T27 fails gatereg | `go test ./api/internal/gatereg` with the tag edited |
+| TC-753-15 | Changing the const without re-verifying T20 to T37 fails gatereg | `go test ./api/internal/gatereg` with the tag edited |
 | TC-753-16 | The capability rows resolve and timer-audit row K22 matches | `go test ./api/internal/gatereg` |
 | TC-753-17 | The install follows the const, and a stale hash fails | The CI install step's log, and a local run with the hash edited |
 | TC-753-18 | The install fails before any download when a const cannot be read | A local run with the const renamed |

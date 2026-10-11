@@ -3,6 +3,8 @@ package secretstore_test
 import (
 	"context"
 	"errors"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -53,8 +55,10 @@ func contractTable(t *testing.T, s kvStore, token secret.Value, p, missing secre
 	if err != nil {
 		t.Fatalf("versions: %v", err)
 	}
-	if md.CurrentVersion != 2 || len(md.Versions) != 2 {
-		t.Errorf("metadata current_version %d with %d versions, want 2 and 2", md.CurrentVersion, len(md.Versions))
+	if _, ok1 := md.Versions[1]; !ok1 || md.CurrentVersion != 2 || len(md.Versions) != 2 {
+		t.Errorf("metadata current_version %d with versions %v, want 2 with versions 1 and 2", md.CurrentVersion, slices.Sorted(maps.Keys(md.Versions)))
+	} else if _, ok2 := md.Versions[2]; !ok2 {
+		t.Errorf("metadata versions %v, want versions 1 and 2", slices.Sorted(maps.Keys(md.Versions)))
 	}
 	for n, vm := range md.Versions {
 		if !wantTime.IsZero() && !vm.CreatedTime.Equal(wantTime) {

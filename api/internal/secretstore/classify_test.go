@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,15 +395,16 @@ func TestBadResponses(t *testing.T) {
 func TestWrite(t *testing.T) {
 	const token = "write-token-sentinel"
 	type seen struct {
-		url, header string
-		body        []byte
+		url, header, contentType string
+		contentLength            int64
+		body                     []byte
 	}
 	var mu sync.Mutex
 	var got []seen
 	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		mu.Lock()
-		got = append(got, seen{r.URL.String(), r.Header.Get("X-Vault-Token"), b})
+		got = append(got, seen{r.URL.String(), r.Header.Get("X-Vault-Token"), r.Header.Get("Content-Type"), r.ContentLength, b})
 		mu.Unlock()
 		var req struct {
 			Options struct {
@@ -438,6 +441,10 @@ func TestWrite(t *testing.T) {
 		if req.Data["k"] != "v\"\\\n" {
 			t.Errorf("body %d data.k = %q, want the value round-tripped", i, req.Data["k"])
 		}
+		// The body is sent whole, with its length and type, not chunked.
+		if s.contentType != "application/json" || s.contentLength != int64(len(s.body)) {
+			t.Errorf("request %d Content-Type %q Content-Length %d, want application/json and %d", i, s.contentType, s.contentLength, len(s.body))
+		}
 		if s.header != token {
 			t.Errorf("request %d X-Vault-Token = %q, want the token", i, s.header)
 		}
@@ -452,6 +459,9 @@ func TestWrite(t *testing.T) {
 		"invalid UTF-8": secret.New([]byte{0xff, 0xfe}),
 		"RFC 3339":      tok("2026-10-11T09:00:00Z"),
 		"RFC 3339 nano": tok("2026-10-11T09:00:00.123456789+02:00"),
+		// The year's first digit at each end of '0'-'9'.
+		"RFC 3339, year 0999": tok("0999-01-01T00:00:00Z"),
+		"RFC 3339, year 9999": tok("9999-12-31T23:59:59Z"),
 	} {
 		_, err := f.client.Write(t.Context(), tok(token), p, map[string]secret.Value{"k": v}, 0)
 		if !errors.Is(err, secretstore.ErrInvalidValue) {
@@ -477,5 +487,130 @@ func TestWrite(t *testing.T) {
 	// A time-like value that is not RFC 3339 is an ordinary value.
 	if _, err := f.client.Write(t.Context(), tok(token), p, map[string]secret.Value{"k": tok("2026-10-11 09:00:00")}, 5); err != nil {
 		t.Errorf("non-RFC-3339 date: %v", err)
+	}
+}
+
+// TC-758-05, TC-758-11: Read asks for the version it was given, and only
+// then, and refuses an answer for another version; Versions returns the
+// metadata the store sent.
+func TestReadAndVersions_Success(t *testing.T) {
+	var mu sync.Mutex
+	var queries []string
+	answerVersion := 0 // 0: the version asked for, or 3 for the latest
+	f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		queries = append(queries, r.URL.RawQuery)
+		v := answerVersion
+		mu.Unlock()
+		if strings.HasPrefix(r.URL.Path, "/v1/kv/metadata/") {
+			writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{
+				"created_time": "2026-10-11T09:00:00Z", "updated_time": "2026-10-11T11:00:00Z",
+				"current_version": 3, "oldest_version": 1,
+				"versions": map[string]any{
+					"1": map[string]any{"created_time": "2026-10-11T09:00:00Z", "deletion_time": "", "destroyed": false},
+					"2": map[string]any{"created_time": "2026-10-11T10:00:00Z", "deletion_time": "2026-10-11T10:30:00Z", "destroyed": false},
+					"3": map[string]any{"created_time": "2026-10-11T11:00:00Z", "deletion_time": "", "destroyed": true},
+				},
+			}})
+			return
+		}
+		if v == 0 {
+			v = 3
+			if q := r.URL.Query().Get("version"); q != "" {
+				v, _ = strconv.Atoi(q)
+			}
+		}
+		writeJSON(w, http.StatusOK, kvBody(v, map[string]any{"k": "v" + strconv.Itoa(v)}))
+	})
+	p := kvPath(t, "kv", "a")
+	for _, tc := range []struct {
+		version, want int
+		query         string
+	}{{0, 3, ""}, {1, 1, "version=1"}, {2, 2, "version=2"}} {
+		mu.Lock()
+		queries = nil
+		mu.Unlock()
+		kv, err := f.client.Read(t.Context(), tok("t"), p, tc.version)
+		if err != nil || kv.Version != tc.want || string(kv.Data["k"].Reveal()) != "v"+strconv.Itoa(tc.want) {
+			t.Errorf("Read version %d = version %d, %v; want version %d", tc.version, kv.Version, err, tc.want)
+		}
+		mu.Lock()
+		if len(queries) != 1 || queries[0] != tc.query {
+			t.Errorf("Read version %d sent queries %q, want [%q]", tc.version, queries, tc.query)
+		}
+		mu.Unlock()
+	}
+
+	mu.Lock()
+	answerVersion = 3
+	mu.Unlock()
+	_, err := f.client.Read(t.Context(), tok("t"), p, 2)
+	assertKind(t, err, secretstore.ErrProtocol)
+
+	md, err := f.client.Versions(t.Context(), tok("t"), p)
+	if err != nil {
+		t.Fatalf("Versions: %v", err)
+	}
+	at := func(h, m int) time.Time { return time.Date(2026, 10, 11, h, m, 0, 0, time.UTC) }
+	want := secretstore.Metadata{
+		CurrentVersion: 3, OldestVersion: 1, CreatedTime: at(9, 0), UpdatedTime: at(11, 0),
+		Versions: map[int]secretstore.VersionMetadata{
+			1: {CreatedTime: at(9, 0)},
+			2: {CreatedTime: at(10, 0), DeletionTime: at(10, 30)},
+			3: {CreatedTime: at(11, 0), Destroyed: true},
+		},
+	}
+	if !reflect.DeepEqual(md, want) {
+		t.Errorf("Versions = %+v, want %+v", md, want)
+	}
+}
+
+// TC-758-08: the 1 MiB body limit is exact: a body of exactly 1 MiB is read
+// and decoded, and one byte more is ErrProtocol for its size.
+func TestBodyLimit_Exact(t *testing.T) {
+	const limit = 1 << 20
+	const head, tail = `{"data":{"data":{"k":"`, `"},"metadata":{"created_time":"2026-10-11T09:00:00Z","deletion_time":"","destroyed":false,"version":1}}}`
+	body := func(size int) string { return head + strings.Repeat("x", size-len(head)-len(tail)) + tail }
+	p := kvPath(t, "kv", "a")
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{limit, true}, {limit + 1, false}} {
+		f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, body(tc.size))
+		})
+		kv, err := f.client.Read(t.Context(), tok("t"), p, 0)
+		if tc.ok {
+			if err != nil || kv.Data["k"].Len() != tc.size-len(head)-len(tail) {
+				t.Errorf("a %d-byte body: Read = %d value bytes, %v; want it read whole", tc.size, kv.Data["k"].Len(), err)
+			}
+			continue
+		}
+		assertKind(t, err, secretstore.ErrProtocol)
+		if !strings.Contains(err.Error(), "over 1 MiB") {
+			t.Errorf("a %d-byte body: err = %v, want it refused for its size", tc.size, err)
+		}
+	}
+}
+
+// TC-758-05, TC-758-13: Error() renders the op, the mount and path only when
+// there is one, the status only when one was received, the kind and the
+// cause, and nothing else.
+func TestError_Text(t *testing.T) {
+	for _, tc := range []struct {
+		e    secretstore.Error
+		want string
+	}{
+		{secretstore.Error{Op: "health", Status: 503, Kind: secretstore.ErrSealed}, "secretstore: health: status 503: sealed"},
+		{secretstore.Error{Op: "health", Kind: secretstore.ErrUnreachable, Err: errors.New("refused")}, "secretstore: health: unreachable: refused"},
+		{secretstore.Error{Op: "read", Mount: "kv", Path: "a/b", Status: 404, Kind: secretstore.ErrNotFound}, "secretstore: read kv/a/b: status 404: not found"},
+		{secretstore.Error{Op: "read", Mount: "kv", Kind: secretstore.ErrInvalidValue}, "secretstore: read kv/: invalid value"},
+		{secretstore.Error{Op: "read", Path: "a", Kind: secretstore.ErrInvalidValue}, "secretstore: read /a: invalid value"},
+		{secretstore.Error{Op: "write", Mount: "kv", Path: "a", StoreMessages: []string{"store text"}}, "secretstore: write kv/a: unknown"},
+	} {
+		if got := tc.e.Error(); got != tc.want {
+			t.Errorf("Error() = %q, want %q", got, tc.want)
+		}
 	}
 }

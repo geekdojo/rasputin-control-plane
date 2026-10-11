@@ -1,13 +1,18 @@
 package secretstore_test
 
 import (
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -26,41 +31,164 @@ const (
 // Error().
 func TestRedaction(t *testing.T) {
 	errs := map[string]any{"errors": []string{storeMarker + " check-and-set parameter did not match the current version"}}
-	answers := map[string]kvAnswer{
-		"200 value":  {status: 200, body: kvBody(1, map[string]any{"k": sentinelValue})},
-		"403":        {status: 403, body: map[string]any{"errors": []string{storeMarker + " permission denied"}}},
-		"404":        {status: 404, body: map[string]any{"errors": []string{storeMarker}}},
-		"400 cas":    {status: 400, body: errs},
-		"400 other":  {status: 400, body: map[string]any{"errors": []string{storeMarker + " bad"}}},
-		"500":        {status: 500, body: map[string]any{"errors": []string{storeMarker + " internal"}}},
-		"503 sealed": {status: 503, body: map[string]any{"errors": []string{storeMarker + " sealed"}}, health: healthAnswer(503, true, true)},
-		"bad value":  {status: 200, body: kvBody(1, map[string]any{"k": 7, "v": sentinelValue})},
+	// kv answers a KV GET with a, and a write with a's status.
+	kv := func(a kvAnswer) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				writeJSON(w, a.status, map[string]any{"errors": []string{storeMarker}, "data": map[string]any{"version": 1}})
+				return
+			}
+			scripted(t, a)(w, r)
+		}
 	}
-	for name, a := range answers {
+	// raw answers every request with body as it stands.
+	raw := func(status int, body string) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, body)
+		}
+	}
+	gone := func(field string, v any) map[string]any {
+		b := kvBody(2, map[string]any{"k": sentinelValue})
+		b["data"].(map[string]any)["metadata"].(map[string]any)[field] = v
+		return b
+	}
+	target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	t.Cleanup(target.Close)
+	redirect := func(status int) http.HandlerFunc {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Location", target.URL+"/steal")
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, sentinelValue)
+		}
+	}
+	answers := map[string]http.HandlerFunc{
+		"200 value":      kv(kvAnswer{status: 200, body: kvBody(1, map[string]any{"k": sentinelValue})}),
+		"403":            kv(kvAnswer{status: 403, body: map[string]any{"errors": []string{storeMarker + " permission denied"}}}),
+		"404":            kv(kvAnswer{status: 404, body: map[string]any{"errors": []string{storeMarker}}}),
+		"400 cas":        kv(kvAnswer{status: 400, body: errs}),
+		"400 other":      kv(kvAnswer{status: 400, body: map[string]any{"errors": []string{storeMarker + " bad"}}}),
+		"500":            kv(kvAnswer{status: 500, body: map[string]any{"errors": []string{storeMarker + " internal"}}}),
+		"503 sealed":     kv(kvAnswer{status: 503, body: map[string]any{"errors": []string{storeMarker + " sealed"}}, health: healthAnswer(503, true, true)}),
+		"bad value":      kv(kvAnswer{status: 200, body: kvBody(1, map[string]any{"k": 7, "v": sentinelValue})}),
+		"deleted":        kv(kvAnswer{status: 200, body: gone("deletion_time", "2026-10-11T10:00:00Z")}),
+		"destroyed":      kv(kvAnswer{status: 200, body: gone("destroyed", true)}),
+		"malformed JSON": raw(200, `{"data":{"data":{"k":"`+sentinelValue),
+		"over 1 MiB":     raw(200, `{"data":{"data":{"k":"`+sentinelValue+strings.Repeat("x", 1<<20)+`"}}}`),
+		"302":            redirect(http.StatusFound),
+		"307":            redirect(http.StatusTemporaryRedirect),
+	}
+	for name, h := range answers {
 		t.Run(name, func(t *testing.T) {
-			f := newFixture(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPost {
-					writeJSON(w, a.status, map[string]any{"errors": []string{storeMarker}, "data": map[string]any{"version": 1}})
-					return
-				}
-				scripted(t, a)(w, r)
-			})
-			p := kvPath(t, "kv", "redact")
-			var outs []any
-			var gotErrs []error
-			kv, err := f.client.Read(t.Context(), tok(sentinelToken), p, 0)
-			outs = append(outs, kv)
-			gotErrs = append(gotErrs, err)
-			_, err = f.client.Write(t.Context(), tok(sentinelToken), p, map[string]secret.Value{"k": tok(sentinelValue)}, 0)
-			gotErrs = append(gotErrs, err)
-			_, err = f.client.Write(t.Context(), tok(sentinelToken), p, map[string]secret.Value{"k": tok(sentinelValue + "\xff")}, 0)
-			gotErrs = append(gotErrs, err)
-			md, err := f.client.Versions(t.Context(), tok(sentinelToken), p)
-			outs = append(outs, md)
-			gotErrs = append(gotErrs, err)
+			f := newFixture(t, h)
+			outs, gotErrs := callEveryKVMethod(t, f.client)
 			assertRedacted(t, f.rec, outs, gotErrs)
 		})
 	}
+}
+
+// callEveryKVMethod makes each KV call with the sentinel token, and writes
+// the sentinel value, and returns what came back.
+func callEveryKVMethod(t *testing.T, c *secretstore.Client) (outs []any, errs []error) {
+	t.Helper()
+	p := kvPath(t, "kv", "redact")
+	kv, err := c.Read(t.Context(), tok(sentinelToken), p, 0)
+	outs = append(outs, kv)
+	errs = append(errs, err)
+	_, err = c.Write(t.Context(), tok(sentinelToken), p, map[string]secret.Value{"k": tok(sentinelValue)}, 0)
+	errs = append(errs, err)
+	_, err = c.Write(t.Context(), tok(sentinelToken), p, map[string]secret.Value{"k": tok(sentinelValue + "\xff")}, 0)
+	errs = append(errs, err)
+	md, err := c.Versions(t.Context(), tok(sentinelToken), p)
+	outs = append(outs, md)
+	errs = append(errs, err)
+	return outs, errs
+}
+
+// TC-758-13 over TC-758-06 and TC-758-07: the Health outcomes, with the
+// sentinel in the body, and the transport failures, with the sentinel token
+// and value in the call.
+func TestRedaction_HealthAndTransport(t *testing.T) {
+	for _, status := range []int{200, 501, 503, 429, 472, 473} {
+		for _, sealed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("health %d sealed=%t", status, sealed), func(t *testing.T) {
+				f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+					writeJSON(w, status, map[string]any{"initialized": status != 501, "sealed": sealed,
+						"version": "2.7.1", "errors": []string{storeMarker}, "cluster_name": sentinelValue})
+				})
+				h, err := f.client.Health(t.Context())
+				assertRedacted(t, f.rec, []any{h}, []error{err})
+			})
+		}
+	}
+	t.Run("health malformed JSON", func(t *testing.T) {
+		f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"initialized":true,"x":"`+sentinelValue)
+		})
+		h, err := f.client.Health(t.Context())
+		assertRedacted(t, f.rec, []any{h}, []error{err})
+	})
+
+	// stall reads the request whole, so the server notices the client hang
+	// up, and then answers nothing.
+	stall := func(r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		<-r.Context().Done()
+	}
+	t.Run("call bound runs out", func(t *testing.T) {
+		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) { stall(r) })
+		lg, rec := logkittest.New()
+		u, _ := secretstore.ParseAddr(f.srv.URL)
+		c, err := secretstore.New(secretstore.Config{Addr: u, TLS: mustTLS(t, f.ca.CertPEM, f.leaf), CallTimeout: 100 * time.Millisecond, Logger: lg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(c.CloseIdleConnections)
+		outs, errs := callEveryKVMethod(t, c)
+		assertRedacted(t, rec, outs, errs)
+	})
+	t.Run("caller cancels", func(t *testing.T) {
+		arrived := make(chan struct{}, 1)
+		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) {
+			arrived <- struct{}{}
+			stall(r)
+		})
+		p := kvPath(t, "kv", "redact")
+		var outs []any
+		var errs []error
+		for _, call := range []func(ctx context.Context) (any, error){
+			func(ctx context.Context) (any, error) { return f.client.Read(ctx, tok(sentinelToken), p, 0) },
+			func(ctx context.Context) (any, error) {
+				return f.client.Write(ctx, tok(sentinelToken), p, map[string]secret.Value{"k": tok(sentinelValue)}, 0)
+			},
+			func(ctx context.Context) (any, error) { return f.client.Versions(ctx, tok(sentinelToken), p) },
+		} {
+			ctx, cancel := context.WithCancel(t.Context())
+			go func() {
+				select {
+				case <-arrived:
+					cancel()
+				case <-ctx.Done():
+				}
+			}()
+			out, err := call(ctx)
+			cancel()
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want context.Canceled", err)
+			}
+			outs, errs = append(outs, out), append(errs, err)
+		}
+		assertRedacted(t, f.rec, outs, errs)
+	})
+	t.Run("client certificate refused", func(t *testing.T) {
+		ca, foreign := storeCA(t), storeCA(t)
+		srv := startTLSServer(t, serverCert(t, ca), ca, tls.VersionTLS13, tls.VersionTLS13, okHandler())
+		lg, rec := logkittest.New()
+		c := newClient(t, srv.URL, mustTLS(t, ca.CertPEM, clientLeaf(t, foreign)), lg)
+		outs, errs := callEveryKVMethod(t, c)
+		assertRedacted(t, rec, outs, errs)
+	})
 }
 
 // assertRedacted scans everything a caller or an operator could see for the
