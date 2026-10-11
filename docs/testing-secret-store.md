@@ -51,7 +51,7 @@ Around it:
 
 - `scripts/install-openbao.sh` reads the release and the sha256 out of `pin.go`, so CI
   downloads exactly what the const names, and a stale hash fails the install.
-- Rows T20 to T27 of `.github/third-party-capabilities.tsv` point at the const, so changing the
+- Rows T20 to T37 of `.github/third-party-capabilities.tsv` point at the const, so changing the
   tag fails `go test ./api/internal/gatereg` until each row is re-verified at the new release.
 
 ## What it does not prove
@@ -63,11 +63,12 @@ Around it:
   `disable_mlock` key.
 - **The rest of the listener matrix.** A wrong-EKU leaf is not run here. It rests on #679's
   evidence (row T20).
-- **Production use of the store.** It does not cover the api's production client
-  ([geekdojo-brain#758](https://github.com/geekdojo/geekdojo-brain/issues/758)), a role pinned to
-  the api's identity, a least-privilege production policy, restore
+- **Production use of the store.** It does not cover the api's login
+  ([geekdojo-brain#759](https://github.com/geekdojo/geekdojo-brain/issues/759)), a role pinned to
+  the api's identity, a least-privilege production policy
+  ([geekdojo-brain#804](https://github.com/geekdojo/geekdojo-brain/issues/804)), restore
   ([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)), or an audit
-  device.
+  device. The api's store client has its own test, below.
 - **A clean stop when `go test` times out.** Start waits for the store's health for as long as
   its ctx allows. The test passes `t.Context()`, so a store that never becomes healthy and never
   exits (a wrong seal key, for one) is bounded only by `go test -timeout`. That timeout panics
@@ -84,6 +85,42 @@ Around it:
   `-config` path names (`.../secretstore-<random>/`), which sits under the test's temporary
   directory.
 
+## The store client's functional test
+
+`TestClient_AgainstTheRealStore`, in `api/internal/secretstore/functional_test.go`, runs the
+api's store client (`secretstore.Client`) against the same harness and binary, under the same
+switch, in the same CI step. Its unit tests run the client against an `httptest` TLS 1.3 server
+that requires a client certificate; this test shows the real store answers the way those fakes
+do ([geekdojo-brain#758](https://github.com/geekdojo/geekdojo-brain/issues/758)). One store
+serves every step, in this order, because sealing and stopping it cannot be undone:
+
+- **Contract (T28 to T30).** The same table the unit tests run against `secretstore.Mock`:
+  check-and-set 0 creates and then refuses, a stale check-and-set is `ErrCASMismatch`, a read of
+  the latest and of version 1, the version metadata, and `ErrNotFound` for a path never written.
+  A token the store does not know is `ErrDenied`.
+- **Refused client certificate.** A client presenting no certificate, and one presenting a leaf
+  from a foreign store CA with the same CommonName, both get `ErrDenied`, not `ErrUnreachable`,
+  from `Health` and from `Read`.
+- **Sealed (T31).** `RestartSealed` restarts the store with a fresh, wrong seal key and returns
+  once `sys/health` answers 503 with `initialized=true sealed=true`. `Health` and `Read` then
+  both give `ErrSealed`.
+- **Stopped.** After `Close`, every method gives `ErrUnreachable`.
+- **Redaction.** No sentinel value, sentinel token or the real token appears in any log record,
+  error rendering, `StoreMessages` or `LogAttrs()` from the steps above.
+
+It does not prove an uninitialised store (row T32 stays `unverified`; the client's 501 handling
+is unit-tested only), login, the policy, or what systemd does with the store's unit.
+
+Run it the same way as the smoke test, with `-run TestClient_ ./api/internal/secretstore`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestClient_ ./api/internal/secretstore
+```
+
+Expect `--- PASS: TestClient_AgainstTheRealStore` with one `PASS` line per step, and exit
+status 0. With the binary absent and the switch set it fails, naming the variable, exactly as
+the smoke test does.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -98,7 +135,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T27 at it before editing their `version` column.
+  release, and re-verifies T20 to T31 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -182,3 +219,15 @@ The cases for geekdojo-brain#753, and where each is checked:
 | TC-753-22 | Coverage of the harness is at least 70%, under `-race` | The `backend` job's `api.coverage.out` |
 | TC-753-23 | The PR answers SC-CP line by line | Review |
 | TC-753-24 | Every gosec finding in the harness has a reviewed row | `scripts/sast-register.sh --gate` in the `sast` workflow |
+
+The cases for geekdojo-brain#758 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-758-26 | The harness: `RestartSealed` ends on the sealed answer or names the last one; `Token`; the smoke test rebuilt for a per-handshake leaf | `TestRestartSealed_CtxEndsBeforeSealed`, `TestCheckHealth`, `TestSecretStore_SmokeWriteReadKV`, `TestClient_AgainstTheRealStore` |
+| TC-758-27 | The contract table against the real store (T28 to T30) | `TestClient_AgainstTheRealStore` |
+| TC-758-28 | Sealed (T31) | `TestClient_AgainstTheRealStore` |
+| TC-758-29 | Stopped | `TestClient_AgainstTheRealStore` |
+| TC-758-30 | No client certificate, and a foreign-CA leaf, are `ErrDenied` | `TestClient_AgainstTheRealStore` |
+| TC-758-31 | Redaction against the real store | `TestClient_AgainstTheRealStore` |
+| TC-758-32 | Binary absent with the switch set fails | The `env -u` command above, with `-run TestClient_ ./api/internal/secretstore` |

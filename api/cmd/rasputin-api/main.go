@@ -36,6 +36,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/ids"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
@@ -475,12 +476,25 @@ func main() {
 	// of them can be anchored in a bogus pre-NTP window and read as expired
 	// once the clock corrects. It waits at most once; see trustedClock.
 	clockGate := newTrustedClock(ctx, clockGateTimeout)
-	// Both CAs, through one code path (tlsca). The store CA has no consumer in
-	// this release — the secret store's listener and its leaves arrive with
-	// it — so only its creation happens here; see ensureCAs for why a store
-	// CA that will not load is not fatal.
-	cpCA, _ := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
+	// Both CAs, through one code path (tlsca). The store CA signs the secret
+	// store's server leaf and the api's client leaf at the store, wired just
+	// below; see ensureCAs for why a store CA that will not load is not fatal.
+	cpCA, storeCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
 		tlsca.Deps{Now: time.Now, Rand: cryptorand.Reader, LeafClock: clockGate.ok, Log: logger})
+	// The secret store (geekdojo/geekdojo-brain#758). RASPUTIN_SECRETSTORE_BACKEND
+	// selects it; a refused setting turns it off with a configfault and the api
+	// starts anyway. Wiring reads no leaf: on first boot neither exists until
+	// the startup sweep mints them, in its own goroutine, behind the same clock
+	// gate, and independent of RASPUTIN_HTTPS_ADDR. Nothing consumes the store
+	// yet; login (#759) and the business rules (#761) do.
+	storeW, err := wireSecretStore(ctx, logger, secretStoreBackendFromEnv(), secretStoreAddrFromEnv(),
+		storeCA, dataDir, execrun.CombinedOutput)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store", "err", err.Error())
+		os.Exit(1)
+	}
+	startStoreSweep(ctx, storeW.sweeper, logger)
+	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
 	// One renewal driver for every controlplane-CA leaf this controlplane holds
 	// (§7.1). Consumers register below as they are built; the sweep itself is
 	// a job on the schedule, and what it does is decided by each leaf's
@@ -821,7 +835,10 @@ func main() {
 	// fan-outs from the same job, so there is one thing to look at when a
 	// certificate is about to lapse. See tlsca/sweep.go.
 	runner.Register(tlsca.LeafSweepWorkflow(tlsca.LeafSweepDeps{
-		Sweeper: leafSweeper,
+		// The store CA's leaves have a sweeper of their own (a sweeper is
+		// bound to one CA); it is nil, and skipped, unless the store is
+		// openbao.
+		Sweepers: []*tlsca.LeafSweeper{leafSweeper, storeW.sweeper},
 		FanOut: []tlsca.LeafFanOut{{
 			// The per-app leaves keep their prepare → ship → commit contract
 			// (the on-disk copy must not advance past what the node holds),
@@ -1730,8 +1747,8 @@ func main() {
 	// Every controlplane-CA leaf this configuration holds is now either registered with
 	// the one renewal driver or it is not, and there is no third state — so say
 	// which, here, while the answer is still cheap. See requiredLeafConsumers.
-	if err := verifyLeafConsumers(leafSweeper.RegisteredNames(),
-		requiredLeafConsumers(httpsAddr != "", selfHostedMesh)); err != nil {
+	if err := verifyLeafConsumers(append(leafSweeper.RegisteredNames(), storeW.registeredNames()...),
+		requiredLeafConsumers(httpsAddr != "", selfHostedMesh, storeW.mode == storeModeOpenBao)); err != nil {
 		log.Fatalf("rasputin-api: %v", err)
 	}
 
@@ -1927,7 +1944,7 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 // only re-check what those already cover (#431). firewall.reconcile keeps its
 // own entry and cadence; it compares observed state and never rewrites the
 // forward.
-// requiredLeafConsumers names the controlplane-CA leaves this configuration holds and
+// requiredLeafConsumers names the CA leaves this configuration holds and
 // is therefore obliged to renew. ONE place that says it, because the Register
 // calls themselves are scattered through main() next to whatever dependency
 // each one needs, and a reader there cannot tell whether the set is complete.
@@ -1939,13 +1956,19 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 //   - headscale exists only for the self-hosted Docker backend. The mock has no
 //     container, and an external Headscale brings its own certificate — neither
 //     is ours to renew.
-func requiredLeafConsumers(httpsEnabled, selfHostedMesh bool) []string {
+//   - the two store-CA leaves exist only when RASPUTIN_SECRETSTORE_BACKEND is
+//     openbao. They are registered with the store CA's own sweeper, so the
+//     caller checks the union of both sweepers' names.
+func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []string {
 	var want []string
 	if httpsEnabled {
 		want = append(want, "api-https")
 	}
 	if selfHostedMesh {
 		want = append(want, mesh.HeadscaleLeafName)
+	}
+	if storeSelected {
+		want = append(want, storeServerLeafName, storeClientLeafName)
 	}
 	return want
 }

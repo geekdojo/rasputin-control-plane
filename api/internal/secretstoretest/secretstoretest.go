@@ -12,9 +12,9 @@ package secretstoretest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -33,7 +33,9 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 const (
@@ -45,8 +47,9 @@ const (
 	ClientRole = "harness-client"
 
 	// healthRecheckInterval is how often waitHealthy re-asks the store's
-	// sys/health. It decides nothing: readiness is the store's own answer
-	// (200, initialized, unsealed), a store that exits fails at once, and the
+	// sys/health. It decides nothing: the wait ends on the store's own answer
+	// (200 initialized and unsealed after Start; 503 initialized and sealed
+	// after RestartSealed), a store that exits fails at once, and the
 	// wait as a whole is bounded only by the caller's ctx. The interval only
 	// sets how soon after the fact becomes true the harness notices it; a
 	// PebbleDB store is healthy on its first answer (geekdojo-brain#679 Q4).
@@ -108,10 +111,14 @@ func pinnedVersion() string {
 
 // Store is one running secret store.
 type Store struct {
-	log       *slog.Logger
-	root      string
-	url       string
-	clientTLS *tls.Config
+	h          *Harness
+	log        *slog.Logger
+	root       string
+	url        string
+	clientTLS  *tls.Config
+	clientLeaf tlsca.LeafPaths
+	sealKey    string   // the seal key's path
+	args       []string // the store's command line after the binary
 
 	cmd     *exec.Cmd
 	stderr  *lineLog
@@ -125,10 +132,78 @@ type Store struct {
 // URL is the store's API address, https://127.0.0.1:<port>.
 func (s *Store) URL() string { return s.url }
 
-// ClientTLS is a TLS config that trusts only the store CA and presents the
-// store-CA client leaf (CN ClientRole, EKU clientAuth). Each call returns a
-// fresh copy.
+// ClientTLS is the production client's TLS config (secretstore.NewTLSConfig):
+// it trusts only the store CA, speaks TLS 1.3, and presents the store-CA
+// client leaf (CN ClientRole, EKU clientAuth), read from disk at each
+// handshake. Each call returns a fresh copy.
 func (s *Store) ClientTLS() *tls.Config { return s.clientTLS.Clone() }
+
+// ClientLeaf is where the client leaf ClientTLS presents lives on disk.
+func (s *Store) ClientLeaf() tlsca.LeafPaths { return s.clientLeaf }
+
+// Token logs in through cert auth with the client leaf and returns the token.
+// It is test support: production login is geekdojo/geekdojo-brain#759's.
+func (s *Store) Token(ctx context.Context) (secret.Value, error) {
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: s.ClientTLS()}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/auth/cert/login",
+		bytes.NewReader([]byte(`{"name":"`+ClientRole+`"}`)))
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	defer clear(body)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+	}
+	var login struct {
+		Auth struct {
+			ClientToken string `json:"client_token"`
+		} `json:"auth"`
+	}
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &login) != nil || login.Auth.ClientToken == "" {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login answered %d with no token", resp.StatusCode)
+	}
+	return secret.New([]byte(login.Auth.ClientToken)), nil
+}
+
+// RestartSealed stops the store, overwrites its seal key with fresh random
+// bytes, and starts it again on the same data, so it comes up initialised and
+// unable to unseal. It returns once sys/health answers 503 with
+// initialized=true and sealed=true, which is the fact a sealed store reports;
+// if ctx ends first, the error names the last health answer.
+func (s *Store) RestartSealed(ctx context.Context) error {
+	select {
+	case <-s.exited:
+		return errors.New("secretstoretest: RestartSealed: the store is not running")
+	default:
+	}
+	pid := s.cmd.Process.Pid
+	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err)
+	}
+	select {
+	case <-s.exited:
+	case <-ctx.Done():
+		return fmt.Errorf("secretstoretest: pid %d did not stop for RestartSealed: %w", pid, ctx.Err())
+	}
+	if err := s.h.writeSealKey(s.sealKey); err != nil {
+		return err
+	}
+	if err := s.launch(s.h.cfg.BinaryPath, s.args...); err != nil {
+		return err
+	}
+	if err := s.h.waitHealthy(ctx, s, sealedAndInitialised); err != nil {
+		return err
+	}
+	s.log.Info("secret store restarted sealed", "pid", s.cmd.Process.Pid, "dir", s.root)
+	return nil
+}
 
 // Start brings up a store and returns once it answers healthy. On any failure
 // it tears down whatever it made, so nothing is left behind, and returns the
@@ -145,7 +220,7 @@ func (h *Harness) Start(ctx context.Context) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secretstoretest: temp root: %w", err)
 	}
-	s := &Store{log: h.cfg.Logger, root: root}
+	s := &Store{h: h, log: h.cfg.Logger, root: root}
 	if err := h.start(ctx, s, version); err != nil {
 		// Teardown waits for the store to honour SIGTERM. The caller's ctx may
 		// be the very thing that ended (a cancelled or expired wait), and a
@@ -181,8 +256,9 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 	if err != nil {
 		return fmt.Errorf("secretstoretest: client leaf: %w", err)
 	}
-	if s.clientTLS, err = clientTLS(ca.CertPEM, client); err != nil {
-		return err
+	s.clientLeaf = client
+	if s.clientTLS, err = secretstore.NewTLSConfig(ca.CertPEM, client.CertPath, client.KeyPath); err != nil {
+		return fmt.Errorf("secretstoretest: client TLS: %w", err)
 	}
 
 	paths := serverPaths{
@@ -192,6 +268,7 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 		SealKey:    filepath.Join(s.root, "seal-key"),
 		Storage:    filepath.Join(s.root, "data"),
 	}
+	s.sealKey = paths.SealKey
 	if err := h.writeSealKey(paths.SealKey); err != nil {
 		return err
 	}
@@ -219,10 +296,11 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 		return fmt.Errorf("secretstoretest: init config: %w", err)
 	}
 
-	if err := s.launch(h.cfg.BinaryPath, "server", "-config", mainPath, "-config", initPath); err != nil {
+	s.args = []string{"server", "-config", mainPath, "-config", initPath}
+	if err := s.launch(h.cfg.BinaryPath, s.args...); err != nil {
 		return err
 	}
-	if err := h.waitHealthy(ctx, s); err != nil {
+	if err := h.waitHealthy(ctx, s, healthyAndUnsealed); err != nil {
 		return err
 	}
 	s.log.Info("secret store started", "addr", strings.TrimPrefix(s.url, "https://"),
@@ -278,22 +356,6 @@ func freePort() (int, error) {
 	return port, nil
 }
 
-func clientTLS(caPEM []byte, leaf tlsca.LeafPaths) (*tls.Config, error) {
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPEM) {
-		return nil, errors.New("secretstoretest: store CA PEM holds no certificate")
-	}
-	cert, err := tls.LoadX509KeyPair(leaf.CertPath, leaf.KeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("secretstoretest: client leaf: %w", err)
-	}
-	return &tls.Config{
-		RootCAs:      pool,
-		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
-	}, nil
-}
-
 // launch starts the store process. Its stdout and stderr are read a line at
 // a time into the logger; the last stderr lines are kept for an early-exit
 // error. One goroutine owns cmd.Wait: it waits for both readers to reach EOF
@@ -315,7 +377,8 @@ func (s *Store) launch(bin string, args ...string) error {
 		return fmt.Errorf("secretstoretest: start %s: %w", bin, err)
 	}
 	s.cmd = cmd
-	s.exited = make(chan struct{})
+	exited := make(chan struct{})
+	s.exited = exited
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() { defer readers.Done(); out.consume(stdout) }()
@@ -323,7 +386,7 @@ func (s *Store) launch(bin string, args ...string) error {
 	go func() {
 		readers.Wait()
 		s.waitErr = cmd.Wait()
-		close(s.exited)
+		close(exited)
 	}()
 	return nil
 }
@@ -334,15 +397,29 @@ type health struct {
 	Sealed      bool `json:"sealed"`
 }
 
-// waitHealthy returns once the store answers sys/health with 200,
-// initialized and unsealed. READY=1 is no use here: the store sends it before
-// unseal (geekdojo-brain#679 Q4). It fails at once if the store exits, and
-// otherwise waits as long as ctx allows.
+// healthWant is the sys/health answer a wait ends on.
+type healthWant func(code int, hb health) bool
+
+// healthyAndUnsealed is a started store: 200, initialized and unsealed.
+func healthyAndUnsealed(code int, hb health) bool {
+	return code == http.StatusOK && hb.Initialized && !hb.Sealed
+}
+
+// sealedAndInitialised is a store restarted with the wrong seal key: 503,
+// initialized and sealed.
+func sealedAndInitialised(code int, hb health) bool {
+	return code == http.StatusServiceUnavailable && hb.Initialized && hb.Sealed
+}
+
+// waitHealthy returns once the store's sys/health answer satisfies want.
+// READY=1 is no use here: the store sends it before unseal
+// (geekdojo-brain#679 Q4). It fails at once if the store exits, and otherwise
+// waits as long as ctx allows.
 //
 // No request carries a timeout of its own: each runs under a ctx that ends
 // when the caller's ctx does or when the store exits, which are the two facts
 // that can make an answer never come.
-func (h *Harness) waitHealthy(ctx context.Context, s *Store) error {
+func (h *Harness) waitHealthy(ctx context.Context, s *Store, want healthWant) error {
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
@@ -359,7 +436,7 @@ func (h *Harness) waitHealthy(ctx context.Context, s *Store) error {
 	ticker := time.NewTicker(healthRecheckInterval)
 	defer ticker.Stop()
 	for {
-		ok, status, err := s.checkHealth(reqCtx, client)
+		ok, status, err := s.checkHealth(reqCtx, client, want)
 		if ok {
 			return nil
 		}
@@ -391,7 +468,7 @@ func (h *Harness) waitHealthy(ctx context.Context, s *Store) error {
 	}
 }
 
-func (s *Store) checkHealth(ctx context.Context, client *http.Client) (ok bool, status string, err error) {
+func (s *Store) checkHealth(ctx context.Context, client *http.Client, want healthWant) (ok bool, status string, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url+"/v1/sys/health", nil)
 	if err != nil {
 		return false, "", err
@@ -409,10 +486,11 @@ func (s *Store) checkHealth(ctx context.Context, client *http.Client) (ok bool, 
 		return false, fmt.Sprintf("%d, unreadable body: %v", resp.StatusCode, err), nil
 	}
 	status = fmt.Sprintf("%d initialized=%t sealed=%t", resp.StatusCode, hb.Initialized, hb.Sealed)
-	return resp.StatusCode == http.StatusOK && hb.Initialized && !hb.Sealed, status, nil
+	return want(resp.StatusCode, hb), status, nil
 }
 
-// exitError is the error for a store that exited before it was healthy. It
+// exitError is the error for a store that exited before it gave the awaited
+// health answer. It
 // carries the store's last stderr lines, where the cause is.
 func (s *Store) exitError() error {
 	return fmt.Errorf("secretstoretest: store exited before it was healthy: %v; last stderr: %s",

@@ -3,6 +3,7 @@ package secretstoretest
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -674,23 +675,30 @@ func TestLineLogConsume_ReadError(t *testing.T) {
 	}
 }
 
-// checkHealth calls the store healthy only on 200 with initialized=true and
-// sealed=false. A sealed or uninitialized store, any other status, or an
-// unreadable body is not healthy, and the status names what was seen.
+// checkHealth applies the awaited answer. healthyAndUnsealed (Start) holds
+// only on 200 with initialized=true and sealed=false; sealedAndInitialised
+// (RestartSealed, TC-758-26) only on 503 with initialized=true and
+// sealed=true. Anything else, an unreadable body included, does not end the
+// wait, and the status names what was seen.
 func TestCheckHealth(t *testing.T) {
 	cases := []struct {
 		name   string
+		want   healthWant
 		code   int
 		body   string
 		ok     bool
 		status string
 	}{
-		{"healthy", 200, `{"initialized":true,"sealed":false}`, true, "200 initialized=true sealed=false"},
-		{"sealed", 200, `{"initialized":true,"sealed":true}`, false, "200 initialized=true sealed=true"},
-		{"uninitialized", 200, `{"initialized":false,"sealed":false}`, false, "200 initialized=false sealed=false"},
-		{"sealed 503", 503, `{"initialized":true,"sealed":true}`, false, "503 initialized=true sealed=true"},
-		{"standby 429", 429, `{"initialized":true,"sealed":false}`, false, "429 initialized=true sealed=false"},
-		{"unreadable", 200, `not json`, false, "200, unreadable body"},
+		{"healthy", healthyAndUnsealed, 200, `{"initialized":true,"sealed":false}`, true, "200 initialized=true sealed=false"},
+		{"sealed", healthyAndUnsealed, 200, `{"initialized":true,"sealed":true}`, false, "200 initialized=true sealed=true"},
+		{"uninitialized", healthyAndUnsealed, 200, `{"initialized":false,"sealed":false}`, false, "200 initialized=false sealed=false"},
+		{"sealed 503", healthyAndUnsealed, 503, `{"initialized":true,"sealed":true}`, false, "503 initialized=true sealed=true"},
+		{"standby 429", healthyAndUnsealed, 429, `{"initialized":true,"sealed":false}`, false, "429 initialized=true sealed=false"},
+		{"unreadable", healthyAndUnsealed, 200, `not json`, false, "200, unreadable body"},
+		{"awaiting sealed: sealed 503", sealedAndInitialised, 503, `{"initialized":true,"sealed":true}`, true, "503 initialized=true sealed=true"},
+		{"awaiting sealed: healthy 200", sealedAndInitialised, 200, `{"initialized":true,"sealed":false}`, false, "200 initialized=true sealed=false"},
+		{"awaiting sealed: uninitialized 501", sealedAndInitialised, 501, `{"initialized":false,"sealed":true}`, false, "501 initialized=false sealed=true"},
+		{"awaiting sealed: 503 saying unsealed", sealedAndInitialised, 503, `{"initialized":true,"sealed":false}`, false, "503 initialized=true sealed=false"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -706,7 +714,7 @@ func TestCheckHealth(t *testing.T) {
 			}))
 			defer srv.Close()
 			s := &Store{url: srv.URL}
-			ok, status, err := s.checkHealth(t.Context(), srv.Client())
+			ok, status, err := s.checkHealth(t.Context(), srv.Client(), tc.want)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -714,5 +722,65 @@ func TestCheckHealth(t *testing.T) {
 				t.Errorf("checkHealth = %t, %q; want %t, %q", ok, status, tc.ok, tc.status)
 			}
 		})
+	}
+}
+
+// TC-758-26: RestartSealed stops the store, writes a fresh seal key and
+// relaunches it, then waits for the sealed answer; a ctx that ends first
+// returns an error naming the last health answer. The fake never listens, so
+// the last answer is a refused connection.
+func TestRestartSealed_CtxEndsBeforeSealed(t *testing.T) {
+	refused := make(chan struct{})
+	log, rec := logkittest.New()
+	cfg := validConfig(t)
+	cfg.Logger = slog.New(&signalOn{inner: log.Handler(), msg: "secret store not healthy yet",
+		attr: "connection refused", ch: refused})
+	cfg.BinaryPath = writeFake(t, "exec tail -f /dev/null\n")
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := freePort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{h: h, log: cfg.Logger, root: root, url: "https://127.0.0.1:" + strconv.Itoa(port),
+		clientTLS: &tls.Config{MinVersion: tls.VersionTLS13}, sealKey: filepath.Join(root, "seal-key"),
+		args: []string{"server"}}
+	if err := s.launch(cfg.BinaryPath, s.args...); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(context.Background()); err != nil {
+			t.Errorf("cleanup Close: %v", err)
+		}
+	})
+	firstExited := s.exited
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { <-refused; cancel() }()
+	err = s.RestartSealed(ctx)
+	if err == nil || !strings.Contains(err.Error(), "when ctx ended") || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("RestartSealed = %v, want the ended ctx and the last health answer (connection refused)", err)
+	}
+	select {
+	case <-firstExited:
+	default:
+		t.Error("the first store process was not stopped")
+	}
+	if s.exited == firstExited {
+		t.Error("RestartSealed did not relaunch the store")
+	}
+	info, err := os.Stat(s.sealKey)
+	if err != nil || info.Size() != sealKeyBytes || info.Mode().Perm() != 0o600 {
+		t.Errorf("seal key = %v, %v; want %d bytes at 0600", info, err, sealKeyBytes)
+	}
+	if got := rec.Matching(slog.LevelInfo, "restarted sealed"); len(got) != 0 {
+		t.Errorf("%d 'restarted sealed' records for a restart that never sealed", len(got))
 	}
 }

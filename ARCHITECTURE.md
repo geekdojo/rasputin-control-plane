@@ -247,6 +247,9 @@ and kept in `trust/`. The **controlplane CA** signs every HTTPS leaf the
 controlplane serves (the api, Headscale, the app leaves); operator devices
 install it once, and every node is given it. The **store CA** is trusted by the
 secret store's listener alone and enters no node, browser or collector trust.
+It signs the store's server leaf and the api's client leaf at the store, which
+the api's store client (`api/internal/secretstore`, selected by
+`RASPUTIN_SECRETSTORE_BACKEND`) presents over TLS 1.3 to a loopback address.
 Every leaf carries exactly one explicit EKU. A node's trust bundle (the
 controlplane CA, plus the certificates parsed from the operator's CA file on an
 external Headscale) reaches it on

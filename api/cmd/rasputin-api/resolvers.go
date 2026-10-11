@@ -53,3 +53,24 @@ func rpOriginsFromEnv() []string {
 		func(h string) string { return "https://" + h },
 		"http://localhost:3000,http://localhost:8080"))
 }
+
+// secretStoreBackendFromEnv resolves RASPUTIN_SECRETSTORE_BACKEND, the secret
+// store selector, verbatim: no trim and no case-fold, as the agent's selectors
+// do, so " openbao" or "OpenBao" reach wireSecretStore as the wrong values
+// they are and turn the store off with a configfault rather than being
+// guessed at. Absent and empty both give "", which is "not configured"
+// (geekdojo/geekdojo-brain#758).
+func secretStoreBackendFromEnv() string {
+	return os.Getenv("RASPUTIN_SECRETSTORE_BACKEND")
+}
+
+// defaultSecretStoreAddr is where #756 binds the store's one listener.
+const defaultSecretStoreAddr = "https://127.0.0.1:8200"
+
+// secretStoreAddrFromEnv resolves RASPUTIN_SECRETSTORE_ADDR, the store's
+// address. A blank value gives the default and padding is trimmed; whether
+// the result is acceptable (https, loopback, explicit port) is decided by
+// secretstore.ParseAddr in wireSecretStore.
+func secretStoreAddrFromEnv() string {
+	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_SECRETSTORE_ADDR")), defaultSecretStoreAddr)
+}
