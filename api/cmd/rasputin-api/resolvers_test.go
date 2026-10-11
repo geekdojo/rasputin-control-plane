@@ -195,3 +195,59 @@ func TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		}
 	})
 }
+
+// TC-758-15: fail-closed table test for secretStoreBackendFromEnv
+// (security-resolvers R40). Absent and empty are "not configured"; every
+// other value comes back verbatim, so wireSecretStore sees a padded or
+// wrongly cased selector as the wrong value it is.
+func TestSecretStoreBackendFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		absent bool
+		value  string
+		want   string
+	}{
+		{"absent", true, "", ""},
+		{"empty", false, "", ""},
+		{"blank", false, " ", " "},
+		{"padded", false, " openbao", " openbao"},
+		{"case", false, "OpenBao", "OpenBao"},
+		{"padded mock", false, "mock ", "mock "},
+		{"unknown", false, "vault", "vault"},
+		{"openbao", false, "openbao", "openbao"},
+		{"mock", false, "mock", "mock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setOrUnset(t, "RASPUTIN_SECRETSTORE_BACKEND", tc.absent, tc.value)
+			if got := secretStoreBackendFromEnv(); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TC-758-16: fail-closed table test for secretStoreAddrFromEnv
+// (security-resolvers R41). Blank shapes give the default; a padded value is
+// trimmed.
+func TestSecretStoreAddrFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	const env = "RASPUTIN_SECRETSTORE_ADDR"
+	for _, b := range blankShapes {
+		t.Run(b.name, func(t *testing.T) {
+			setOrUnset(t, env, b.absent, b.value)
+			if got := secretStoreAddrFromEnv(); got != "https://127.0.0.1:8200" {
+				t.Errorf("got %q, want the default", got)
+			}
+		})
+	}
+	for _, tc := range []struct{ name, value string }{
+		{"padded", "  https://127.0.0.1:8300  "},
+		{"set", "https://127.0.0.1:8300"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(env, tc.value)
+			if got := secretStoreAddrFromEnv(); got != "https://127.0.0.1:8300" {
+				t.Errorf("got %q, want https://127.0.0.1:8300", got)
+			}
+		})
+	}
+}

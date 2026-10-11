@@ -40,7 +40,7 @@ func TestRequiredLeafConsumers_FollowsTheConfiguration(t *testing.T) {
 		{"neither", false, false, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := requiredLeafConsumers(tc.httpsEnabled, tc.selfHostedMesh)
+			got := requiredLeafConsumers(tc.httpsEnabled, tc.selfHostedMesh, false)
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 				t.Errorf("requiredLeafConsumers(%v, %v) = %v, want %v",
 					tc.httpsEnabled, tc.selfHostedMesh, got, tc.want)
@@ -50,7 +50,7 @@ func TestRequiredLeafConsumers_FollowsTheConfiguration(t *testing.T) {
 }
 
 func TestVerifyLeafConsumers_RefusesALeafNothingWillRenew(t *testing.T) {
-	required := requiredLeafConsumers(true, true)
+	required := requiredLeafConsumers(true, true, false)
 
 	if err := verifyLeafConsumers([]string{"api-https", mesh.HeadscaleLeafName}, required); err != nil {
 		t.Fatalf("a fully wired appliance must start: %v", err)
@@ -112,7 +112,7 @@ func TestLeafSweeperRegisteredNames_ReportsWhatWasRegistered(t *testing.T) {
 	}
 
 	// And the wiring check is satisfied by exactly this.
-	if err := verifyLeafConsumers(s.RegisteredNames(), requiredLeafConsumers(true, true)); err != nil {
+	if err := verifyLeafConsumers(s.RegisteredNames(), requiredLeafConsumers(true, true, false)); err != nil {
 		t.Errorf("a sweeper holding both required leaves must verify: %v", err)
 	}
 }

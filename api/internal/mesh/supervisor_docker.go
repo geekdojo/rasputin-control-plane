@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
@@ -104,7 +104,7 @@ type DockerSupervisorConfig struct {
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
 
-	// Runner overrides the command runner. Defaults to exec.CommandContext.
+	// Runner overrides the command runner. Defaults to execrun.CombinedOutput.
 	Runner CmdRunner
 
 	// HealthTimeout caps how long Start waits for the listen port to
@@ -201,7 +201,7 @@ func NewDockerSupervisor(cfg DockerSupervisorConfig) (*DockerSupervisor, error) 
 	}
 	runner := cfg.Runner
 	if runner == nil {
-		runner = execRunner
+		runner = execrun.CombinedOutput
 	}
 	return &DockerSupervisor{
 		cfg:    cfg,
@@ -258,17 +258,6 @@ func portOf(listenAddr string) string {
 		return "18080"
 	}
 	return port
-}
-
-// execRunner is the default CmdRunner — runs the binary and returns its
-// combined output. Errors include the captured output so logs surface why
-// docker rejected an invocation.
-func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("%s %s: %w (output: %s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return out, nil
 }
 
 // ----- Lifecycle ----------------------------------------------------------

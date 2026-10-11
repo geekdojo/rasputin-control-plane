@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 )
 
 // Supervisor owns the observability sidecar stack's lifecycle on the
@@ -306,7 +306,7 @@ type DockerComposeSupervisorConfig struct {
 	// CLI lives somewhere unexpected. Defaults to "docker".
 	DockerBin string
 
-	// Runner overrides the command runner. Defaults to exec.CommandContext.
+	// Runner overrides the command runner. Defaults to execrun.CombinedOutput.
 	Runner CmdRunner
 
 	// HTTPClient is used to probe VM's /health endpoint. Tests inject a
@@ -587,7 +587,7 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	}
 	runner := cfg.Runner
 	if runner == nil {
-		runner = execRunner
+		runner = execrun.CombinedOutput
 	}
 	client := cfg.HTTPClient
 	if client == nil {
@@ -622,17 +622,6 @@ func newUnixTransport(sockPath string) http.RoundTripper {
 		IdleConnTimeout:       90 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
-}
-
-// execRunner is the default CmdRunner — runs the binary and returns its
-// combined output. Errors include the captured output so logs surface why
-// docker rejected an invocation.
-func execRunner(ctx context.Context, name string, args ...string) ([]byte, error) {
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("%s %s: %w (output: %s)", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
-	}
-	return out, nil
 }
 
 // ----- Lifecycle ----------------------------------------------------------

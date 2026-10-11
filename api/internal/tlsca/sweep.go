@@ -127,6 +127,16 @@ type LeafSweepReport struct {
 	Failed   []string `json:"failed,omitempty"`
 }
 
+// merge is r with o's counts added and o's names appended, so one job report
+// covers every sweeper it ran.
+func (r LeafSweepReport) merge(o LeafSweepReport) LeafSweepReport {
+	r.Checked += o.Checked
+	r.Renewed = append(r.Renewed, o.Renewed...)
+	r.Reloaded = append(r.Reloaded, o.Reloaded...)
+	r.Failed = append(r.Failed, o.Failed...)
+	return r
+}
+
 // Sweep re-checks every registered leaf and renews the ones whose fact has
 // changed. It never fails as a whole: one consumer's error is recorded against
 // that consumer and the rest are still swept, because a sweep that stops at
@@ -200,8 +210,14 @@ func LeafPathsIn(dir string) LeafPaths {
 
 // LeafSweepDeps is what the workflow needs.
 type LeafSweepDeps struct {
-	// Sweeper renews the leaves the controlplane holds directly.
-	Sweeper *LeafSweeper
+	// Sweepers renew the leaves the controlplane holds directly, one sweeper
+	// per CA: a sweeper is bound to the CA that signs its leaves, so the
+	// controlplane CA's leaves and the store CA's leaves have one each
+	// (geekdojo/geekdojo-brain#758). They run in turn, under this one job and
+	// its one schedule entry, and their reports are merged. A nil entry is
+	// skipped, so a sweeper that a configuration does not build (the store's,
+	// when no store is selected) needs no special case at the call site.
+	Sweepers []*LeafSweeper
 	// FanOut are the leaf lifecycles that own a delivery contract of their
 	// own — the per-app leaves, which must be accepted by a node before the
 	// on-disk copy advances past what that node holds. They keep that
@@ -231,8 +247,11 @@ func LeafSweepWorkflow(deps LeafSweepDeps) jobs.Workflow {
 func leafSweepStep(deps LeafSweepDeps) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		report := LeafSweepReport{}
-		if deps.Sweeper != nil {
-			report = deps.Sweeper.Sweep(sc.Ctx, sc.Log)
+		for _, sw := range deps.Sweepers {
+			if sw == nil {
+				continue
+			}
+			report = report.merge(sw.Sweep(sc.Ctx, sc.Log))
 		}
 		for _, f := range deps.FanOut {
 			if f.Run == nil {

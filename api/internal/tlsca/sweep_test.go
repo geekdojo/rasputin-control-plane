@@ -252,7 +252,7 @@ func TestLeafSweepWorkflow(t *testing.T) {
 	}
 	var ran, failedRan int
 	wf := LeafSweepWorkflow(LeafSweepDeps{
-		Sweeper: s,
+		Sweepers: []*LeafSweeper{s},
 		FanOut: []LeafFanOut{
 			{Name: "apps.leaf_rotate", Run: func(*jobs.StepCtx) error { ran++; return nil }},
 			{Name: "broken", Run: func(*jobs.StepCtx) error { failedRan++; return errors.New("submit failed") }},
@@ -322,7 +322,7 @@ func TestLeafSweep_KeyMaterialNeverReachesTheLedger(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	runner := jobs.NewRunner(store, nil)
-	runner.Register(LeafSweepWorkflow(LeafSweepDeps{Sweeper: s}))
+	runner.Register(LeafSweepWorkflow(LeafSweepDeps{Sweepers: []*LeafSweeper{s}}))
 	job, err := runner.Submit(ctx, LeafSweepKind, nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
@@ -353,5 +353,44 @@ func TestLeafSweep_KeyMaterialNeverReachesTheLedger(t *testing.T) {
 	// The reload failure is in the step result: the job really did something.
 	if !strings.Contains(string(stepJSON), "headscale") {
 		t.Fatalf("the sweep's step result does not mention the consumer it failed to reload")
+	}
+}
+
+// TC-758-22: the workflow runs one sweeper per CA under the one job and merges
+// their reports; a nil sweeper is skipped.
+func TestLeafSweepWorkflow_MergesSweepers(t *testing.T) {
+	cp, store := newCAForTest(t), newStoreCAForTest(t)
+	cpSweeper, storeSweeper := NewLeafSweeper(cp), NewLeafSweeper(store)
+	if err := cpSweeper.Register(LeafConsumer{
+		Name: "api-https", Dir: t.TempDir(),
+		Spec: func() (LeafSpec, error) {
+			return LeafSpec{Usage: UsageServer, CommonName: "api.local", DNSNames: []string{"api.local"}}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := storeSweeper.Register(LeafConsumer{
+		Name: "store-broken", Dir: t.TempDir(),
+		Spec: func() (LeafSpec, error) { return LeafSpec{}, errors.New("no spec") },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wf := LeafSweepWorkflow(LeafSweepDeps{Sweepers: []*LeafSweeper{cpSweeper, nil, storeSweeper}})
+	raw, err := wf.Steps[0].Do(&jobs.StepCtx{Ctx: context.Background(), Log: func(string, string) {}})
+	if err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	var rep LeafSweepReport
+	if err := json.Unmarshal(raw, &rep); err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	if rep.Checked != 2 {
+		t.Errorf("checked = %d, want 2 (one consumer per sweeper)", rep.Checked)
+	}
+	if !slices.Equal(rep.Renewed, []string{"api-https"}) {
+		t.Errorf("renewed = %v, want [api-https]", rep.Renewed)
+	}
+	if !slices.Equal(rep.Failed, []string{"store-broken"}) {
+		t.Errorf("failed = %v, want [store-broken]", rep.Failed)
 	}
 }

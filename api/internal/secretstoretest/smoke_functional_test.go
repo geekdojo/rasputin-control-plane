@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -126,15 +127,29 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	if len(cs.VerifiedChains) == 0 {
 		t.Error("served leaf did not verify against the store CA")
 	}
-	cli := s.ClientTLS().Certificates[0].Leaf
-	if cli == nil || !slices.Equal(cli.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) ||
+	// ClientTLS reads the leaf from disk at each handshake, so the leaf
+	// checked is the one on disk (geekdojo-brain#758, F-758-03).
+	cliPEM, err := os.ReadFile(s.ClientLeaf().CertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cliBlock, _ := pem.Decode(cliPEM)
+	if cliBlock == nil {
+		t.Fatal("the client leaf on disk is not PEM")
+	}
+	cli, err := x509.ParseCertificate(cliBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(cli.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) ||
 		cli.Subject.CommonName != ClientRole {
 		t.Errorf("client leaf = %v, want EKU clientAuth only and CN %s", cli, ClientRole)
 	}
 
 	// TC-753-13 (a): no client certificate fails at the TLS layer, with no
-	// HTTP status.
+	// HTTP status. Both ways a config can present a leaf are cleared.
 	noCert := s.ClientTLS()
+	noCert.GetClientCertificate = nil
 	noCert.Certificates = nil
 	resp, err := (&http.Client{Transport: &http.Transport{TLSClientConfig: noCert}}).Get(s.URL() + "/v1/sys/health")
 	if err == nil {
@@ -161,7 +176,10 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load the foreign client leaf: %v", err)
 	}
+	// The per-handshake leaf is cleared, so the foreign leaf is the one
+	// presented.
 	foreignTLS := s.ClientTLS()
+	foreignTLS.GetClientCertificate = nil
 	foreignTLS.Certificates = []tls.Certificate{foreignCert}
 	fc := &http.Client{Transport: &http.Transport{TLSClientConfig: foreignTLS}}
 	resp, err = fc.Get(s.URL() + "/v1/sys/health")

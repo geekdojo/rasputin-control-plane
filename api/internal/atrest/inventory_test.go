@@ -5,6 +5,7 @@ package atrest_test
 import (
 	"context"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -161,6 +162,35 @@ func rows() []row {
 				{"tls/api/leaf.pem", publicMode},
 				{"tls/collectors/n1", dirMode},
 				{"tls/collectors/n1/leaf.key", secretMode},
+			},
+		},
+		{
+			// TC-758-25: the secret store's two leaves, minted under the store
+			// CA with the specs rasputin-api's wireSecretStore registers
+			// (geekdojo/geekdojo-brain#758).
+			name:     "secret store leaves",
+			seedDirs: []string{"tls", "tls/openbao-server", "tls/openbao-client"},
+			write: func(t *testing.T, d string) {
+				ca, err := tlsca.Ensure(tlsca.StoreConfig(), t.TempDir(), "test", tlscatest.Deps())
+				if err != nil {
+					t.Fatal(err)
+				}
+				for sub, spec := range map[string]tlsca.LeafSpec{
+					"tls/openbao-server": {Usage: tlsca.UsageServer, CommonName: "rasputin secret store", IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)}},
+					"tls/openbao-client": {Usage: tlsca.UsageClient, CommonName: "rasputin-api"},
+				} {
+					if _, err := ca.MintLeafToDisk(filepath.Join(d, sub), spec); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			want: []want{
+				{"tls/openbao-server", dirMode},
+				{"tls/openbao-server/leaf.key", secretMode},
+				{"tls/openbao-server/leaf.pem", publicMode},
+				{"tls/openbao-client", dirMode},
+				{"tls/openbao-client/leaf.key", secretMode},
+				{"tls/openbao-client/leaf.pem", publicMode},
 			},
 		},
 		{
