@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -229,6 +230,102 @@ func TestRenderServerHCL(t *testing.T) {
 		if strings.Contains(hcl, banned) {
 			t.Errorf("config contains %q:\n%s", banned, hcl)
 		}
+	}
+}
+
+// TC-799-27: the audit stanza is opt-in. With AuditLog set the render holds a
+// declarative file audit device writing there; without it, none (TC-753-02
+// above asserts that, unchanged).
+func TestRenderServerHCL_AuditOptIn(t *testing.T) {
+	p := serverPaths{StoreCA: "/t/ca.pem", ServerCert: "/t/c.pem", ServerKey: "/t/k.pem", SealKey: "/t/seal", Storage: "/t/data"}
+	if hcl := renderServerHCL(p, 18299); strings.Contains(hcl, "audit") {
+		t.Errorf("the default render holds an audit stanza:\n%s", hcl)
+	}
+	p.AuditLog = "/t/audit/audit.log"
+	hcl := renderServerHCL(p, 18299)
+	if !strings.Contains(hcl, `audit "file" "file" {`) || !hasSetting(hcl, "file_path", `"/t/audit/audit.log"`) {
+		t.Errorf("the audited render lacks the file device at /t/audit/audit.log:\n%s", hcl)
+	}
+}
+
+// TC-799-27: with Config.Audit set, Start renders the stanza with a file_path
+// under the harness root, in a directory the store can enter.
+func TestStart_AuditPathUnderRoot(t *testing.T) {
+	copied := filepath.Join(t.TempDir(), "main.hcl")
+	dirMode := filepath.Join(t.TempDir(), "dirmode")
+	cfg := validConfig(t)
+	cfg.Audit = true
+	cfg.BinaryPath = writeFake(t, `case "$1" in
+version) echo "OpenBao v2.7.1 (fake)" ;;
+server) cp "$3" "`+copied+`"; stat -c %a "$(dirname "$3")/audit" > "`+dirMode+`" 2>/dev/null || stat -f %Lp "$(dirname "$3")/audit" > "`+dirMode+`"; exit 3 ;;
+esac
+`)
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := h.Start(t.Context()); s != nil || err == nil {
+		t.Fatalf("Start = %v, %v; want the fake's exit", s, err)
+	}
+	b, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`file_path\s*=\s*"([^"]+)"`).FindStringSubmatch(string(b))
+	if m == nil {
+		t.Fatalf("no audit file_path in the rendered config:\n%s", b)
+	}
+	if !strings.HasPrefix(m[1], cfg.TempParent+string(filepath.Separator)) || !strings.HasSuffix(m[1], "/audit/audit.log") {
+		t.Errorf("file_path = %q, want <root>/audit/audit.log under %s", m[1], cfg.TempParent)
+	}
+	if mode, err := os.ReadFile(dirMode); err != nil || strings.TrimSpace(string(mode)) != "700" {
+		t.Errorf("audit dir mode = %q, %v; want 700", mode, err)
+	}
+	assertEmpty(t, cfg.TempParent)
+}
+
+// Reload sends SIGHUP to the store process, and refuses once it has exited.
+// The fake writes its PID to a pipe only after its trap is set, so the test
+// signals on that fact.
+func TestReload_SendsSIGHUP(t *testing.T) {
+	got := filepath.Join(t.TempDir(), "hup")
+	ready := fifo(t)
+	cfg := validConfig(t)
+	cfg.BinaryPath = writeFake(t, `tail -f /dev/null >/dev/null 2>&1 &
+trap 'echo hup > "`+got+`"; kill $!; exit 0' HUP
+echo $$ > "`+ready+`"
+wait
+`)
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s := &Store{h: h, log: cfg.Logger, root: root, auditPath: filepath.Join(root, "audit", "audit.log")}
+	if err := s.launch(cfg.BinaryPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := s.Close(context.Background()); err != nil {
+			t.Errorf("cleanup Close: %v", err)
+		}
+	})
+	if s.AuditPath() != filepath.Join(root, "audit", "audit.log") {
+		t.Errorf("AuditPath = %q", s.AuditPath())
+	}
+	readPID(t, ready)
+	if err := s.Reload(t.Context()); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	<-s.exited
+	if b, err := os.ReadFile(got); err != nil || strings.TrimSpace(string(b)) != "hup" {
+		t.Errorf("the store did not see SIGHUP: %q, %v", b, err)
+	}
+	if err := s.Reload(t.Context()); err == nil {
+		t.Error("Reload on an exited store = nil, want an error")
 	}
 }
 

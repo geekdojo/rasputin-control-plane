@@ -495,6 +495,13 @@ func main() {
 	}
 	startStoreSweep(ctx, storeW.sweeper, logger)
 	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
+	// The store's audit file rotation and the data partition's free-space alert
+	// (ADR-0010 S11, geekdojo/geekdojo-brain#799).
+	storeAud, err := storeAuditWiring(storeW.mode, dataDir, storeW.store, execrun.CombinedOutput, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store audit", "err", err.Error())
+		os.Exit(1)
+	}
 	// One renewal driver for every controlplane-CA leaf this controlplane holds
 	// (§7.1). Consumers register below as they are built; the sweep itself is
 	// a job on the schedule, and what it does is decided by each leaf's
@@ -829,6 +836,7 @@ func main() {
 	runner.Register(mesh.ReconcileWorkflow(meshSvc, invStore, jobStore, runner, busSrv.Conn()))
 	runner.Register(mesh.EnrollNodeWorkflow(meshSvc, invStore, busSrv.Conn()))
 	runner.Register(nodeTrust.ConvergeWorkflow())
+	runner.Register(storeAud.workflow)
 	// The controlplane's ONE leaf-renewal driver (§7.1). Everything holding a
 	// controlplane-CA leaf registers with the sweeper — the api's own HTTPS leaf and
 	// Headscale's below — and the leaf lifecycles that own a delivery contract of their own run as
@@ -1351,7 +1359,7 @@ func main() {
 			parseDurationOr(os.Getenv("RASPUTIN_BACKUP_CHECK_INTERVAL"), time.Hour),
 			storage.DueFunc(backupStore, setupStore, true),
 		),
-	}...), obsCollectorEntries...))
+	}...), append(obsCollectorEntries, storeAud.entries()...)...))
 	sched.Start(ctx)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
@@ -1542,6 +1550,9 @@ func main() {
 	// operator has to see it (#500). Nothing is reported while no token has
 	// been taken over.
 	alertsSvc.SetBusSessionAlerts(busTokenStore.SessionAlerts)
+	// Low free space on the data partition, which the store, its audit log,
+	// this api's database and Docker share (#799).
+	alertsSvc.SetDiskAlerts(storeAud.diskAlerts)
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps

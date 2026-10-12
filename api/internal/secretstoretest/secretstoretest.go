@@ -79,6 +79,9 @@ type Config struct {
 	Now func() time.Time
 	// Rand feeds the CA, the leaves and the seal key.
 	Rand io.Reader
+	// Audit turns on a declarative file audit device writing
+	// <root>/audit/audit.log (Store.AuditPath). Off by default.
+	Audit bool
 }
 
 // Harness starts stores. It holds only its Config.
@@ -118,6 +121,7 @@ type Store struct {
 	clientTLS  *tls.Config
 	clientLeaf tlsca.LeafPaths
 	sealKey    string   // the seal key's path
+	auditPath  string   // the audit file, or "" when Config.Audit is off
 	args       []string // the store's command line after the binary
 
 	cmd     *exec.Cmd
@@ -137,6 +141,24 @@ func (s *Store) URL() string { return s.url }
 // client leaf (CN ClientRole, EKU clientAuth), read from disk at each
 // handshake. Each call returns a fresh copy.
 func (s *Store) ClientTLS() *tls.Config { return s.clientTLS.Clone() }
+
+// AuditPath is the file the store's audit device writes, or "" when
+// Config.Audit is off.
+func (s *Store) AuditPath() string { return s.auditPath }
+
+// Reload sends the store SIGHUP, which makes it reopen its audit file. It
+// returns once the signal is delivered, as systemctl kill does.
+func (s *Store) Reload(context.Context) error {
+	select {
+	case <-s.exited:
+		return errors.New("secretstoretest: Reload: the store is not running")
+	default:
+	}
+	if err := s.cmd.Process.Signal(syscall.SIGHUP); err != nil {
+		return fmt.Errorf("secretstoretest: SIGHUP pid %d: %w", s.cmd.Process.Pid, err)
+	}
+	return nil
+}
 
 // ClientLeaf is where the client leaf ClientTLS presents lives on disk.
 func (s *Store) ClientLeaf() tlsca.LeafPaths { return s.clientLeaf }
@@ -269,6 +291,16 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 		Storage:    filepath.Join(s.root, "data"),
 	}
 	s.sealKey = paths.SealKey
+	if h.cfg.Audit {
+		// The store creates the file but would make a missing directory with
+		// the file's 0600 mode, which it then cannot enter.
+		auditDir := filepath.Join(s.root, "audit")
+		if err := atrest.EnsureSecretDir(auditDir); err != nil {
+			return fmt.Errorf("secretstoretest: audit dir: %w", err)
+		}
+		paths.AuditLog = filepath.Join(auditDir, "audit.log")
+		s.auditPath = paths.AuditLog
+	}
 	if err := h.writeSealKey(paths.SealKey); err != nil {
 		return err
 	}

@@ -13,6 +13,7 @@ type serverPaths struct {
 	ServerKey  string
 	SealKey    string // the 32-byte static seal key, mode 0600
 	Storage    string // the PebbleDB directory
+	AuditLog   string // the file audit device's file_path; "" renders no audit stanza
 }
 
 // renderServerHCL is the store's main config: S8's transport and S6's
@@ -28,8 +29,11 @@ type serverPaths struct {
 //   - PebbleDB with clustering disabled opens only the API listener
 //     (D679-07).
 //   - The static seal reads a file:// key at a literal path (D679-08).
+//   - Only when p.AuditLog is set: a declarative file audit device writing
+//     there, the shape #804 ships (geekdojo-brain#799). Opt-in, so every
+//     other functional test runs without audit, as before.
 func renderServerHCL(p serverPaths, port int) string {
-	return fmt.Sprintf(`api_addr           = "https://127.0.0.1:%[1]d"
+	hcl := fmt.Sprintf(`api_addr           = "https://127.0.0.1:%[1]d"
 disable_clustering = true
 
 listener "tcp" {
@@ -51,6 +55,16 @@ seal "static" {
   current_key    = %[6]q
 }
 `, port, p.ServerCert, p.ServerKey, p.StoreCA, p.Storage, "file://"+p.SealKey)
+	if p.AuditLog != "" {
+		hcl += fmt.Sprintf(`
+audit "file" "file" {
+  options {
+    file_path = %q
+  }
+}
+`, p.AuditLog)
+	}
+	return hcl
 }
 
 // initRequest is one self-init request: an API call the store makes against

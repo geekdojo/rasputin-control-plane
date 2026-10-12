@@ -481,6 +481,36 @@ func TestList_BusSessionAlertsHook(t *testing.T) {
 	}
 }
 
+// TC-799-24: the disk source's alerts join the list in severity order; an
+// unwired source adds nothing.
+func TestList_DiskAlertsHook(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+	f.insertFailedJob(t, "j1", "apps.deploy", "The deploy failed.", 2*time.Hour)
+
+	quiet, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(quiet) != 1 {
+		t.Fatalf("an unwired disk source changed the list: %+v", quiet)
+	}
+
+	f.svc.SetDiskAlerts(func(now time.Time) []proto.Alert {
+		return []proto.Alert{
+			{ID: "disk-warn", Severity: proto.AlertWarn, Source: proto.AlertSourceNode, Title: "w", Since: now},
+			{ID: "disk-crit", Severity: proto.AlertCrit, Source: proto.AlertSourceNode, Title: "c", Since: now},
+		}
+	})
+	loud, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := alertIDs(loud); len(got) != 3 || got[0] != "disk-crit" || got[1] != "job-failed:j1" || got[2] != "disk-warn" {
+		t.Fatalf("List ids = %v, want disk-crit, then the older job-failed warn, then disk-warn", got)
+	}
+}
+
 // ============================================================================
 // Empty / sort / stability
 // ============================================================================
