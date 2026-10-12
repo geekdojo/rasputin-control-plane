@@ -75,8 +75,7 @@ type Monitor struct {
 	// auditBlocked is the #684 guard-4 fact, raised and cleared only by
 	// ObserveAudited and a not-ready reading.
 	auditBlocked bool
-	holds        map[uint64]*hold
-	nextHold     uint64
+	holds        map[*hold]struct{}
 }
 
 // hold is one Quiesce call that has not been released.
@@ -99,7 +98,7 @@ func New(d Deps) (*Monitor, error) {
 	case d.JobRunning == nil:
 		return nil, errors.New("storestate: Deps.JobRunning is nil")
 	}
-	return &Monitor{store: d.Store, now: d.Now, log: d.Log, jobRunning: d.JobRunning, holds: map[uint64]*hold{}}, nil
+	return &Monitor{store: d.Store, now: d.Now, log: d.Log, jobRunning: d.JobRunning, holds: map[*hold]struct{}{}}, nil
 }
 
 // State asks sys/health once and returns the store's state. It returns an
@@ -239,10 +238,9 @@ func (m *Monitor) clearAuditBlocked(ctx context.Context, why string) {
 // geekdojo/geekdojo-brain#765). release ends the hold; calling it again does
 // nothing.
 func (m *Monitor) Quiesce(jobID string) (release func()) {
+	h := &hold{jobID: jobID}
 	m.mu.Lock()
-	id := m.nextHold
-	m.nextHold++
-	m.holds[id] = &hold{jobID: jobID}
+	m.holds[h] = struct{}{}
 	m.mu.Unlock()
 	m.log.Info("secret store quiesced for a backup",
 		"component", "secretstore", "event", "secretstore.quiesced", "job_id", jobID)
@@ -250,7 +248,7 @@ func (m *Monitor) Quiesce(jobID string) (release func()) {
 	return func() {
 		once.Do(func() {
 			m.mu.Lock()
-			delete(m.holds, id)
+			delete(m.holds, h)
 			m.mu.Unlock()
 			m.log.Info("secret store quiesce released",
 				"component", "secretstore", "event", "secretstore.quiesce_released", "job_id", jobID)
@@ -264,7 +262,7 @@ func (m *Monitor) Quiesce(jobID string) (release func()) {
 func (m *Monitor) quiesced(ctx context.Context) bool {
 	m.mu.Lock()
 	holds := make([]*hold, 0, len(m.holds))
-	for _, h := range m.holds {
+	for h := range m.holds {
 		holds = append(holds, h)
 	}
 	m.mu.Unlock()

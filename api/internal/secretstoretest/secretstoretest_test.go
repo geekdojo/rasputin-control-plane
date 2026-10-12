@@ -910,6 +910,20 @@ func TestStopRestart_Refusals(t *testing.T) {
 	if got := rec.Matching(slog.LevelInfo, "secret store stopped; data kept"); len(got) != 1 {
 		t.Errorf("%d stop records, want 1", len(got))
 	}
+	// Restart reports a binary it cannot start, and a store that exits
+	// before it is healthy, with that store's stderr.
+	h.cfg.BinaryPath = filepath.Join(t.TempDir(), "missing-bao")
+	if err := s.Restart(t.Context()); err == nil || !strings.Contains(err.Error(), "secretstoretest: start") {
+		t.Fatalf("Restart with no binary = %v, want the start error", err)
+	}
+	h.cfg.BinaryPath = writeFake(t, "echo restart-refused >&2\nexit 3\n")
+	if err := s.Restart(t.Context()); err == nil || !strings.Contains(err.Error(), "exited before it was healthy") ||
+		!strings.Contains(err.Error(), "restart-refused") {
+		t.Fatalf("Restart of a store that exits = %v, want the exit error with its stderr", err)
+	}
+	if got := rec.Matching(slog.LevelInfo, "secret store restarted"); len(got) != 0 {
+		t.Errorf("%d restarted records for restarts that failed", len(got))
+	}
 	if err := s.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "Stop: the store is not running") {
 		t.Fatalf("Stop on a stopped store = %v, want a refusal", err)
 	}
