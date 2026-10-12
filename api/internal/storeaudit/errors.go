@@ -13,8 +13,11 @@ func (e jobError) Error() string { return string(e) }
 // One sentence per failure, each describing that failure and no other
 // (geekdojo/geekdojo-brain#799, the plan's Errors and logging table).
 const (
-	// errNotMoved: the live file could not be read, or linked aside, or its
-	// old name could not be removed. Nothing was signalled.
+	// errNotChecked: the live file could not be read, had no inode to follow,
+	// or the audit directory could not be listed. No move was attempted.
+	errNotChecked jobError = "The audit file could not be checked, so it was not rotated."
+	// errNotMoved: the live file could not be linked aside, or its old name
+	// could not be removed. Nothing was signalled.
 	errNotMoved jobError = "The audit file could not be moved aside, so it was not rotated."
 	// errRolledBack: the signal or the wait for the reopen failed, and the
 	// copy was put back at the live path.

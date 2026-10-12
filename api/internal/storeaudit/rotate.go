@@ -267,18 +267,18 @@ func (r *Rotator) rotateStep(sc *jobs.StepCtx) (json.RawMessage, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, r.fail(sc, errNotMoved, "audit file could not be read", "file", live, "err", err.Error())
+		return nil, r.fail(sc, errNotChecked, "audit file could not be read", "file", live, "err", err.Error())
 	}
 	if !fi.Mode().IsRegular() || fi.Size() < r.cfg.RotateAt {
 		return nil, nil
 	}
 	ino, ok := inodeOf(fi)
 	if !ok {
-		return nil, r.fail(sc, errNotMoved, "audit file has no inode to follow", "file", live)
+		return nil, r.fail(sc, errNotChecked, "audit file has no inode to follow", "file", live)
 	}
 	copies, err := r.listCopies()
 	if err != nil {
-		return nil, r.fail(sc, errNotMoved, "audit directory could not be listed", "file", r.cfg.Dir, "err", err.Error())
+		return nil, r.fail(sc, errNotChecked, "audit directory could not be listed", "file", r.cfg.Dir, "err", err.Error())
 	}
 	seq := nextSeq(copies)
 	cp := filepath.Join(r.cfg.Dir, LiveName+"."+strconv.FormatUint(seq, 10))

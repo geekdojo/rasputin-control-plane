@@ -142,6 +142,39 @@ func TestDue_FailedInodeRetriedOnFact(t *testing.T) {
 	}
 }
 
+// TC-799-05 and TC-799-10, a file that grows during the wait: the store keeps
+// appending to the copy's inode until the rollback, so the retry threshold is
+// counted from the size after the rollback, not the size when the job read it.
+func TestRotate_RollbackRemembersSizeAfterTheWait(t *testing.T) {
+	const grown = 40
+	f := newFixture(t, activeStore)
+	f.open.effect = func() error {
+		// The store writes to the inode now named audit.log.1.
+		f.write(t, LiveName+".1", grown)
+		return errInjected
+	}
+	f.write(t, LiveName, testRotateAt)
+	ino := f.inode(t, LiveName)
+	sc, _ := stepCtx(t)
+	if _, err := f.rot.rotateStep(sc); !errors.Is(err, errRolledBack) {
+		t.Fatalf("rotate = %v, want the rolled-back error", err)
+	}
+	f.rot.mu.Lock()
+	mem := f.rot.failedRotate
+	f.rot.mu.Unlock()
+	if mem == nil || mem.inode != ino || mem.size != testRotateAt+grown {
+		t.Fatalf("remembered failure = %+v, want inode %d size %d", mem, ino, testRotateAt+grown)
+	}
+	f.write(t, LiveName, testRotateAt-1)
+	if due, _ := f.rot.Due(t.Context()); due {
+		t.Error("Due at the post-rollback size + RotateAt - 1 = true, want false")
+	}
+	f.write(t, LiveName, 1)
+	if due, _ := f.rot.Due(t.Context()); !due {
+		t.Error("Due at the post-rollback size + RotateAt = false, want true")
+	}
+}
+
 // TC-799-06: prune is due only when it could remove a copy, and not again on
 // a copy set whose prune failed until the set changes.
 func TestDue_PruneOnlyWhenItCanRemove(t *testing.T) {
@@ -577,6 +610,26 @@ func TestPrune_OldestFirst(t *testing.T) {
 	}
 }
 
+// TC-799-15: a prune with every copy within the cap removes nothing and logs
+// no removal INFO.
+func TestPrune_WithinCapLogsNothing(t *testing.T) {
+	f := newFixture(t, activeStore)
+	for i := 1; i <= 3; i++ {
+		f.write(t, LiveName+"."+strconv.Itoa(i), 100) // 300, at the cap
+	}
+	sc, _ := stepCtx(t)
+	if _, err := f.rot.pruneStep(sc); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{LiveName + ".1", LiveName + ".2", LiveName + ".3"}
+	if got := f.names(t); !slices.Equal(got, want) {
+		t.Errorf("dir = %v, want %v", got, want)
+	}
+	if infos := f.rec.Matching(slog.LevelInfo, "rotated audit copies removed"); len(infos) != 0 {
+		t.Errorf("records:\n%s\nwant no removal INFO", f.rec.Text())
+	}
+}
+
 // TC-799-15 (the newest copy is always kept), on the pure planner.
 func TestPlanPrune(t *testing.T) {
 	c := func(sizes ...int64) []auditCopy {
@@ -945,13 +998,13 @@ func TestRotate_NothingToRotate(t *testing.T) {
 	}
 	g := newFixture(t, activeStore)
 	g.files.stat = func(string) error { return errInjected }
-	if _, err := g.rot.rotateStep(sc); !errors.Is(err, errNotMoved) {
-		t.Errorf("rotate on an unreadable file = %v, want the not-moved error", err)
+	if _, err := g.rot.rotateStep(sc); !errors.Is(err, errNotChecked) {
+		t.Errorf("rotate on an unreadable file = %v, want the not-checked error", err)
 	}
 	h := newFixture(t, activeStore)
 	h.write(t, LiveName, testRotateAt)
 	h.files.readDir = func(string) error { return errInjected }
-	if _, err := h.rot.rotateStep(sc); !errors.Is(err, errNotMoved) {
-		t.Errorf("rotate on an unlistable dir = %v, want the not-moved error", err)
+	if _, err := h.rot.rotateStep(sc); !errors.Is(err, errNotChecked) {
+		t.Errorf("rotate on an unlistable dir = %v, want the not-checked error", err)
 	}
 }

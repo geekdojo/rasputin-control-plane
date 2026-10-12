@@ -160,7 +160,9 @@ RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIO
 ```
 
 Expect `--- PASS: TestStoreAudit_RotateUnderLoad` with one `PASS` line per step, the
-`audit: N writes, N response entries` lines, and exit status 0.
+`audit: writes A to B, N response entries across the live file and the copies` lines
+(A and B are the first and last write numbers checked; N is how many response entries
+those writes left), and exit status 0.
 
 ## The pin, and bumping it
 
