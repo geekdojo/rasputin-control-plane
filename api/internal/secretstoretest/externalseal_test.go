@@ -3,6 +3,7 @@ package secretstoretest
 import (
 	"bytes"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -22,17 +23,26 @@ func TestExternalSealRender(t *testing.T) {
 		t.Errorf("fragment =\n%s\nwant\n%s", got, want)
 	}
 
-	h := &Harness{cfg: Config{Rand: bytes.NewReader(bytes.Repeat([]byte{0xff}, 16))}}
-	got, err := h.keyID()
+	got, err := SealKeyID(bytes.NewReader(bytes.Repeat([]byte{0xff}, 16)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !regexp.MustCompile(`^rasputin-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(got) {
 		t.Errorf("key id %q is not rasputin-<v4 uuid>", got)
 	}
-	h = &Harness{cfg: Config{Rand: bytes.NewReader(nil)}}
-	if _, err := h.keyID(); err == nil {
+	if _, err := SealKeyID(bytes.NewReader(nil)); err == nil {
 		t.Error("an empty Rand made a key id")
+	}
+}
+
+// The seal fragment reaches the store only as a third -config; without
+// ExternalSeal there is no fragment and no empty -config.
+func TestServerArgs(t *testing.T) {
+	if got, want := serverArgs("/m.hcl", "/i.json", ""), []string{"server", "-config", "/m.hcl", "-config", "/i.json"}; !slices.Equal(got, want) {
+		t.Errorf("args = %q, want %q", got, want)
+	}
+	if got, want := serverArgs("/m.hcl", "/i.json", "/seal/seal.hcl"), []string{"server", "-config", "/m.hcl", "-config", "/i.json", "-config", "/seal/seal.hcl"}; !slices.Equal(got, want) {
+		t.Errorf("ExternalSeal args = %q, want %q", got, want)
 	}
 }
 

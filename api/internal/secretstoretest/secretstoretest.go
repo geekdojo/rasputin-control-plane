@@ -467,7 +467,7 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 		}
 		paths.SealKey = filepath.Join(s.sealDir, "seal-key")
 		fragment = filepath.Join(s.sealDir, "seal.hcl")
-		keyID, err := h.keyID()
+		keyID, err := SealKeyID(h.cfg.Rand)
 		if err != nil {
 			return err
 		}
@@ -525,10 +525,7 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 		return fmt.Errorf("secretstoretest: init config: %w", err)
 	}
 
-	s.args = []string{"server", "-config", mainPath, "-config", initPath}
-	if fragment != "" {
-		s.args = append(s.args, "-config", fragment)
-	}
+	s.args = serverArgs(mainPath, initPath, fragment)
 	if err := s.launch(h.cfg.BinaryPath, s.args...); err != nil {
 		return err
 	}
@@ -538,6 +535,17 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 	s.log.Info("secret store started", "addr", strings.TrimPrefix(s.url, "https://"),
 		"pid", s.cmd.Process.Pid, "version", version, "dir", s.root)
 	return nil
+}
+
+// serverArgs is the store's command line: the main config, the init config,
+// and with ExternalSeal the seal fragment as a third -config, the way the
+// image's unit passes it (#830). fragment is "" without ExternalSeal.
+func serverArgs(mainPath, initPath, fragment string) []string {
+	args := []string{"server", "-config", mainPath, "-config", initPath}
+	if fragment != "" {
+		args = append(args, "-config", fragment)
+	}
+	return args
 }
 
 // checkVersion runs `bao version` and refuses any binary but the pinned
@@ -572,11 +580,12 @@ func (h *Harness) writeSealKey(path string) error {
 	return nil
 }
 
-// keyID is a seal key id in #803's format, rasputin-<uuid>, its uuid from
-// Config.Rand.
-func (h *Harness) keyID() (string, error) {
+// SealKeyID is a seal key id in #803's format, rasputin-<v4 uuid>, its uuid
+// read from r. The harness names its own store's key with it, and a test that
+// needs a further key id (a seal rotation's) takes it from here too.
+func SealKeyID(r io.Reader) (string, error) {
 	var u [16]byte
-	if _, err := io.ReadFull(h.cfg.Rand, u[:]); err != nil {
+	if _, err := io.ReadFull(r, u[:]); err != nil {
 		return "", fmt.Errorf("secretstoretest: seal key id: %w", err)
 	}
 	u[6] = u[6]&0x0f | 0x40

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -190,6 +191,25 @@ func TestFiles_KeyRoundTrip(t *testing.T) {
 	}
 	if err := s.files.WriteFragment(Fragment{Shape: Staged, Current: idB}); err == nil {
 		t.Error("a staged fragment with no previous was written")
+	}
+}
+
+// RemoveRotation reports an entry it could not remove, naming rotation/,
+// and still removes the rest: settle then fails rather than reporting a
+// rotation/ it left holding a key as emptied.
+func TestFiles_RemoveRotationReportsAFailure(t *testing.T) {
+	s := newSeal(t)
+	s.rot(idB, keyB)
+	stuck := filepath.Join(s.dir, RotationDirName, "stuck")
+	if err := os.MkdirAll(filepath.Join(stuck, "inner"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err := s.files.RemoveRotation()
+	if err == nil || !strings.Contains(err.Error(), filepath.Join(s.dir, RotationDirName)) {
+		t.Fatalf("RemoveRotation with an entry it cannot remove = %v, want an error naming rotation/", err)
+	}
+	if names := s.rotationNames(); !slices.Equal(names, []string{"stuck"}) {
+		t.Errorf("rotation/ = %v, want only the entry it could not remove", names)
 	}
 }
 

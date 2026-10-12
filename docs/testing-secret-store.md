@@ -280,7 +280,8 @@ beside `seal-key` and an empty `rotation/`, in the shape `rasputin-seal-key.sh` 
 image. Self-init creates the `rasputin-secrets` mount, the api's role and the
 `rasputin-seal-rotate` role from `storepolicy`'s files. The job runs on a real runner with the
 real `Files`, `Gate` and `Rotator`, and the production rotation client, which mints a new store-CA
-leaf for the rotation role on every handshake. The harness stands in for systemd: a restart is
+leaf for the rotation role on every handshake through the api's own mint,
+`sealrotate.MintRotationLeaf`. The harness stands in for systemd: a restart is
 `Stop` and then `StartNoWait`, and the rotator waits on `sys/health` itself.
 
 What it proves, against OpenBao v2.7.1:
@@ -300,14 +301,17 @@ What it proves, against OpenBao v2.7.1:
 - **A run stopped part way is finished by the next (TC-830-20).** With the tree left as a run
   stopped after the Staged write (the store still running on the old key), after the Verify write,
   and after the Clean write, the next job ends `resumed`, mints no key, leaves a Clean tree under
-  the newest key, and the store opens on it alone after a cold restart.
+  the newest key, and the store opens on it alone after a cold restart. The resume restarts the
+  store on the Staged fragment before it re-wraps, so verify opens first time and never takes its
+  retry.
 - **The rotation token re-wraps and nothing else (TC-830-21).** `sys/rotate/root` answers 204
   with an empty body; its siblings under `sys/rotate` (`root/init`, `update`, `verify`, `backup`,
   `keyring`, `keyring/config`, `config`), `sys/seal`, `sys/raw/core/keyring`, `sys/key-status`,
   `sys/generate-recovery-token/attempt` and `sys/capabilities-self` answer 403; the token-less
   `sys/rekey/init` and `sys/generate-root/attempt` answer 405 at the listener (T43).
 - **No key or token in the logs (TC-830-22).** Every seal key the test saw, raw, hex and base64,
-  every token it holds, and anything shaped like a store token are absent from the captured api
+  every rotation leaf key the mint made (PKCS#8, raw, hex, base64 and a PEM line), every token it
+  holds, and anything shaped like a store token are absent from the captured api
   log and the store's own output.
 
 What it does not prove:

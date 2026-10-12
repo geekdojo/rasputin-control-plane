@@ -450,9 +450,12 @@ func TestMonitor_QuiesceReasonCopy(t *testing.T) {
 		reason       QuiesceReason
 		says, notSay string
 		logMsg       string
+		// field is the record's reason field, which log queries filter on:
+		// one value per reason.
+		field string
 	}{
-		{QuiesceBackup, "backup", "seal-key", "secret store quiesced for a backup"},
-		{QuiesceSealRotation, "seal-key rotation", "backup", "secret store quiesced for a seal-key rotation"},
+		{QuiesceBackup, "backup", "seal-key", "secret store quiesced for a backup", "backup"},
+		{QuiesceSealRotation, "seal-key rotation", "backup", "secret store quiesced for a seal-key rotation", "seal-rotation"},
 	} {
 		t.Run(tc.reason.String(), func(t *testing.T) {
 			f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
@@ -467,8 +470,12 @@ func TestMonitor_QuiesceReasonCopy(t *testing.T) {
 			if !strings.Contains(copy, tc.says) || strings.Contains(copy, tc.notSay) {
 				t.Errorf("copy %q: want %q and not %q", copy, tc.says, tc.notSay)
 			}
-			if len(f.rec.Matching(slog.LevelInfo, tc.logMsg)) != 1 {
-				t.Errorf("no %q record", tc.logMsg)
+			recs := f.rec.Matching(slog.LevelInfo, tc.logMsg)
+			if len(recs) != 1 {
+				t.Fatalf("no %q record", tc.logMsg)
+			}
+			if got, _ := logkittest.Attr(recs[0], "reason"); got != tc.field {
+				t.Errorf("reason field = %q, want %q", got, tc.field)
 			}
 		})
 	}

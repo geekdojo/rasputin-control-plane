@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -554,4 +556,54 @@ func attr(t *testing.T, r slog.Record, key string) string {
 		t.Fatalf("record %q has no %s field", r.Message, key)
 	}
 	return v
+}
+
+// secretEncodings is every form a secret's bytes could take on a text
+// surface: raw, hex, base64 padded and unpadded.
+func secretEncodings(b []byte) []string {
+	return []string{string(b), hexOf(b), b64(b), b64raw(b)}
+}
+
+// leafKeys tees a mint: every leaf key it mints is recorded as PKCS#8 DER,
+// so a surface scan can look for the leaf key the client really presented
+// (TC-830-15). The mint itself is the production one, untouched.
+type leafKeys struct {
+	mu   sync.Mutex
+	ders [][]byte
+}
+
+func (l *leafKeys) tee(t *testing.T, mint func() (*tls.Certificate, error)) func() (*tls.Certificate, error) {
+	return func() (*tls.Certificate, error) {
+		c, err := mint()
+		if err != nil {
+			return c, err
+		}
+		der, merr := x509.MarshalPKCS8PrivateKey(c.PrivateKey)
+		if merr != nil {
+			t.Errorf("leaf key: %v", merr)
+			return c, err
+		}
+		l.mu.Lock()
+		l.ders = append(l.ders, der)
+		l.mu.Unlock()
+		return c, err
+	}
+}
+
+// needles is every recorded leaf key in each encoding, plus the first line
+// of its PEM body. It fails the test when no leaf was minted, so a scan over
+// it is never vacuous.
+func (l *leafKeys) needles(t *testing.T) []string {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.ders) == 0 {
+		t.Fatal("no rotation leaf was minted, so the scan would prove nothing")
+	}
+	var out []string
+	for _, der := range l.ders {
+		out = append(out, secretEncodings(der)...)
+		out = append(out, b64(der)[:64])
+	}
+	return out
 }

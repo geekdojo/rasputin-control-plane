@@ -3,8 +3,6 @@ package sealrotate
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,7 +23,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storepolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -49,7 +46,8 @@ type realStore struct {
 	paths    Paths
 	canaryP  secretstore.KVPath
 	canary   string
-	tokenTxt []string // every token the test itself holds, for TC-830-22's scan
+	tokenTxt []string  // every token the test itself holds, for TC-830-22's scan
+	leaves   *leafKeys // every rotation leaf key minted, for TC-830-22's scan
 }
 
 // startReal starts a store whose self-init creates the rasputin-secrets mount,
@@ -95,7 +93,8 @@ func startReal(t *testing.T, logger *slog.Logger) *realStore {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotTLS, err := secretstore.NewMintedTLSConfig(store.StoreCA().CertPEM, mintRotationLeaf(store.StoreCA()))
+	leaves := &leafKeys{}
+	rotTLS, err := secretstore.NewMintedTLSConfig(store.StoreCA().CertPEM, leaves.tee(t, MintRotationLeaf(store.StoreCA())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,25 +125,7 @@ func startReal(t *testing.T, logger *slog.Logger) *realStore {
 		t.Fatal(err)
 	}
 	return &realStore{store: store, api: api, rot: rot, apiTok: apiTok, files: files, paths: paths,
-		canaryP: p, canary: canary, tokenTxt: []string{string(apiTok.Reveal())}}
-}
-
-// mintRotationLeaf is the production mint (cmd/rasputin-api sealRotateMint)
-// under the harness's store CA: a new clientAuth leaf for the rotation role on
-// each handshake, never written to disk.
-func mintRotationLeaf(ca *tlsca.CA) func() (*tls.Certificate, error) {
-	return func() (*tls.Certificate, error) {
-		certPEM, key, err := ca.MintLeaf(tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: RotationRole})
-		if err != nil {
-			return nil, err
-		}
-		defer key.Destroy()
-		cert, err := tls.X509KeyPair(certPEM, key.Reveal())
-		if err != nil {
-			return nil, err
-		}
-		return &cert, nil
-	}
+		canaryP: p, canary: canary, tokenTxt: []string{string(apiTok.Reveal())}, leaves: leaves}
 }
 
 // restart is the harness's stand-in for restartStoreUnit: stop the store if
@@ -179,17 +160,15 @@ func (rs *realStore) rotator(t *testing.T, logger *slog.Logger) *Rotator {
 	return rot
 }
 
-// randomKeyID is a key id from crypto/rand in #803's format; the kernel uuid
-// file is Linux's, and the functional test runs on any OS.
+// randomKeyID is a key id from crypto/rand through the harness's own key-id
+// helper; the kernel uuid file is Linux's, and the functional test runs on
+// any OS.
 func randomKeyID() (KeyID, error) {
-	var u [16]byte
-	if _, err := rand.Read(u[:]); err != nil {
+	id, err := secretstoretest.SealKeyID(rand.Reader)
+	if err != nil {
 		return "", err
 	}
-	u[6] = u[6]&0x0f | 0x40
-	u[8] = u[8]&0x3f | 0x80
-	return ParseKeyID("rasputin-" + hex.EncodeToString(u[0:4]) + "-" + hex.EncodeToString(u[4:6]) + "-" +
-		hex.EncodeToString(u[6:8]) + "-" + hex.EncodeToString(u[8:10]) + "-" + hex.EncodeToString(u[10:16]))
+	return ParseKeyID(id)
 }
 
 type noRestore struct{}
@@ -320,7 +299,7 @@ func TestSealRotate_AgainstTheRealStore(t *testing.T) {
 		}
 		defer tok.Destroy()
 		rs.tokenTxt = append(rs.tokenTxt, string(tok.Reveal()))
-		rotTLS, err := secretstore.NewMintedTLSConfig(rs.store.StoreCA().CertPEM, mintRotationLeaf(rs.store.StoreCA()))
+		rotTLS, err := secretstore.NewMintedTLSConfig(rs.store.StoreCA().CertPEM, rs.leaves.tee(t, MintRotationLeaf(rs.store.StoreCA())))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -427,9 +406,15 @@ func TestSealRotate_AgainstTheRealStore(t *testing.T) {
 			}
 			keys = append(keys, writeKeyFile(t, filepath.Join(rs.paths.SealDir, RotationDirName, string(b))))
 			stopAt(t, rs, point, a, b)
+			retries := len(rec.Matching(slog.LevelWarn, "trying once more"))
 			j, res := runRotation(t, rs.rotator(t, logger))
 			if j.Status != jobs.StatusSucceeded || res.Outcome != "resumed" {
 				t.Fatalf("%s: job %s (%s), outcome %q, want succeeded and resumed", point, j.Status, j.Error, res.Outcome)
+			}
+			// F-830-14: the resume restarts under Staged before it re-wraps,
+			// so verify opens first time and never takes its retry.
+			if n := len(rec.Matching(slog.LevelWarn, "trying once more")); n != retries {
+				t.Fatalf("%s: verify needed its retry", point)
 			}
 			if got := rs.clean(t); got != b {
 				t.Fatalf("%s: key id after the resume = %s, want %s and no third", point, got, b)
@@ -442,10 +427,15 @@ func TestSealRotate_AgainstTheRealStore(t *testing.T) {
 	t.Run("TC-830-22 no key or token in the api log or the store's output", func(t *testing.T) {
 		text := rec.Text()
 		for i, k := range keys {
-			for _, enc := range []string{string(k), hex.EncodeToString(k), base64.StdEncoding.EncodeToString(k), base64.RawStdEncoding.EncodeToString(k)} {
+			for _, enc := range secretEncodings(k) {
 				if strings.Contains(text, enc) {
 					t.Fatalf("key %d reached the log", i)
 				}
+			}
+		}
+		for _, enc := range rs.leaves.needles(t) {
+			if strings.Contains(text, enc) {
+				t.Fatal("a rotation leaf key reached the log")
 			}
 		}
 		for _, tok := range rs.tokenTxt {

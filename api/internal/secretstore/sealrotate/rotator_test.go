@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -377,10 +378,24 @@ func TestRotator_Resume(t *testing.T) {
 		storeUp bool
 		check   func(t *testing.T, g *rig)
 	}{
-		{"staged, store at 200: re-wrap before any restart", staged, true, func(t *testing.T, g *rig) {
-			rw, rs := g.rec.index("rotate_root", 0), g.rec.index("restart", 0)
-			if rw < 0 || (rs >= 0 && rs < rw) {
-				t.Errorf("calls %v: want rotate_root before any restart", g.rec.list())
+		// F-830-14: a 200 does not prove the store loaded Staged, so it is
+		// restarted on the Staged fragment as found before the re-wrap, and
+		// verify opens first time, with no retry.
+		{"staged, store at 200: restart under staged, then re-wrap", staged, true, func(t *testing.T, g *rig) {
+			rs, rw := g.rec.index("restart", 0), g.rec.index("rotate_root", 0)
+			if rs < 0 || rw < rs {
+				t.Errorf("calls %v: want restart, then rotate_root", g.rec.list())
+			}
+			for _, c := range g.rec.list()[:max(rs, 0)] {
+				if strings.HasPrefix(c, "fragment ") {
+					t.Errorf("calls %v: a fragment was written before the restart under staged", g.rec.list())
+				}
+			}
+			if n := g.rec.count("rotate_root"); n != 1 {
+				t.Errorf("rotate_root called %d times, want 1 (no verify retry)", n)
+			}
+			if len(g.log.Matching(slog.LevelWarn, "trying once more")) != 0 {
+				t.Errorf("verify retried:\n%s", g.log.Text())
 			}
 		}},
 		{"staged, store not at 200: restart, then re-wrap", staged, false, func(t *testing.T, g *rig) {
@@ -496,9 +511,6 @@ func TestRotator_ResumeFailures(t *testing.T) {
 // buffer and the read-back buffer are zero after their secret.New; every key
 // handed to a write is destroyed once the write returns.
 func TestRotator_NoSecretOnAnySurface(t *testing.T) {
-	encodings := func(b []byte) []string {
-		return []string{string(b), hexOf(b), b64(b), b64raw(b)}
-	}
 	rows := []func(g *rig){
 		func(*rig) {},
 		func(g *rig) { g.files.fail = failOn("write rotation/"+string(idB), errors.New("x")) },
@@ -529,7 +541,7 @@ func TestRotator_NoSecretOnAnySurface(t *testing.T) {
 			surfaces.WriteString(st.Error)
 		}
 		text := surfaces.String()
-		for _, secretText := range append(append(encodings(keyA), encodings(keyB)...), g.rotate.token) {
+		for _, secretText := range append(append(secretEncodings(keyA), secretEncodings(keyB)...), g.rotate.token) {
 			if strings.Contains(text, secretText) {
 				t.Fatalf("row %d: a key or the token reached a surface", i)
 			}
@@ -598,3 +610,84 @@ var _ io.Reader = (*fakeRand)(nil)
 func hexOf(b []byte) string  { return hex.EncodeToString(b) }
 func b64(b []byte) string    { return base64.StdEncoding.EncodeToString(b) }
 func b64raw(b []byte) string { return base64.RawStdEncoding.EncodeToString(b) }
+
+// The job's step log carries each record at its own level, so the job view
+// shows a failure as an error and a refusal as a warning, as the api log does.
+func TestRotator_StepLogLevels(t *testing.T) {
+	for _, tc := range []struct {
+		name, msg, level string
+		set              func(g *rig)
+	}{
+		{"success", "seal key rotated", "info", func(*rig) {}},
+		{"refusal", "seal-key rotation refused", "warn", func(g *rig) { g.store.up = false }},
+		{"failure", "seal-key rotation failed", "error", func(g *rig) {
+			g.rotate.rewrapErr = &secretstore.Error{Op: "rotate_root", Kind: secretstore.ErrDenied}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSeal(t)
+			s.clean()
+			g := newRig(t, s)
+			tc.set(g)
+			g.build(t)
+			r := g.run(t)
+			var got []string
+			for _, e := range r.events {
+				if e.Type != string(proto.JobLog) {
+					continue
+				}
+				var d proto.LogEventData
+				if err := json.Unmarshal(e.Data, &d); err != nil {
+					t.Fatal(err)
+				}
+				if d.Message == tc.msg {
+					got = append(got, d.Level)
+				}
+			}
+			if len(got) != 1 || got[0] != tc.level {
+				t.Errorf("step log levels for %q = %v, want [%s]", tc.msg, got, tc.level)
+			}
+		})
+	}
+}
+
+// Each step's timeout covers every full UnsealWait the step can spend waiting
+// for sys/health, plus the I/O slack, so the runner never cancels a step
+// while a wait it is allowed to make is still running.
+func TestRotator_StepTimeoutsCoverTheirWaits(t *testing.T) {
+	c := &counting{}
+	log, _ := logkittest.New()
+	rot, err := NewRotator(Config{Enabled: true, UnsealWait: UnsealWait}, Deps{
+		Store: c, Rotate: c, Files: c, Gate: c, Restores: c, Rand: c,
+		Restart:    func(context.Context) error { return nil },
+		Quiesce:    func(string, storestate.QuiesceReason) func() { return func() {} },
+		KeyID:      func() (KeyID, error) { return "", nil },
+		Log:        log,
+		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Now:        time.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// waits is the most waitReady calls each step makes on its worst path.
+	waits := map[string]int{
+		"validate": 0, "stage": 0,
+		"unseal_staged": 1, // restartAndWait; the rollback restarts without waiting
+		"rewrap":        0,
+		"verify":        3, // Verify, Staged again, Verify again
+		"settle":        1, // Clean
+	}
+	steps := rot.Workflow().Steps
+	if len(steps) != len(waits) {
+		t.Fatalf("%d steps, want %d", len(steps), len(waits))
+	}
+	for _, s := range steps {
+		n, ok := waits[s.Name]
+		if !ok {
+			t.Fatalf("unexpected step %q", s.Name)
+		}
+		if need := time.Duration(n)*UnsealWait + ioSlack; s.Timeout < need {
+			t.Errorf("step %s timeout %s, want at least %s (%d waits of %s plus %s)", s.Name, s.Timeout, need, n, UnsealWait, ioSlack)
+		}
+	}
+}

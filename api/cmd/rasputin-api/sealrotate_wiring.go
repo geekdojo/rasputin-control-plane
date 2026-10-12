@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -107,7 +106,7 @@ func sealRotateWiring(d sealRotateDeps) (sealRotate, error) {
 	if err != nil {
 		return sealRotate{}, fmt.Errorf("seal rotation: %w", err)
 	}
-	tlsCfg, err := secretstore.NewMintedTLSConfig(d.storeCA.CertPEM, sealRotateMint(d.storeCA))
+	tlsCfg, err := secretstore.NewMintedTLSConfig(d.storeCA.CertPEM, sealrotate.MintRotationLeaf(d.storeCA))
 	if err != nil {
 		return sealRotate{}, fmt.Errorf("seal rotation: %w", err)
 	}
@@ -142,31 +141,6 @@ func sealRotateWiring(d sealRotateDeps) (sealRotate, error) {
 		return sealRotate{}, fmt.Errorf("seal rotation: %w", err)
 	}
 	return sealRotate{workflow: rot.Workflow(), gate: gate, alerts: rot.Alerts}, nil
-}
-
-// sealRotateLeafSpec is the rotation client's leaf: clientAuth, with the
-// CommonName the store's rasputin-seal-rotate cert role admits (#804).
-func sealRotateLeafSpec() tlsca.LeafSpec {
-	return tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: sealrotate.RotationRole}
-}
-
-// sealRotateMint mints the rotation client's leaf under the store CA for one
-// handshake. It is never written to disk: a standing credential for a rare,
-// privileged role is not kept (plan, Alternatives rejected). The key's PEM
-// leaves its secret.Value only into tls.X509KeyPair.
-func sealRotateMint(ca *tlsca.CA) func() (*tls.Certificate, error) {
-	return func() (*tls.Certificate, error) {
-		certPEM, key, err := ca.MintLeaf(sealRotateLeafSpec())
-		if err != nil {
-			return nil, err
-		}
-		defer key.Destroy()
-		cert, err := tls.X509KeyPair(certPEM, key.Reveal())
-		if err != nil {
-			return nil, err
-		}
-		return &cert, nil
-	}
 }
 
 // errSealRotateOff is every stand-in's refusal.

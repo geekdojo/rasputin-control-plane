@@ -370,8 +370,10 @@ func (r *Rotator) stageFailed(sc *jobs.StepCtx, ru *run, cause error) error {
 
 // unsealStaged restarts the store on the Staged fragment and waits for 200.
 // A fresh run that gets none rolls back to Clean. A resume of a Staged tree
-// whose store already answers 200 does not restart it: the running store is
-// re-wrapped first.
+// restarts it too, even when the store already answers 200: a 200 does not
+// prove the running store loaded Staged (the run may have stopped before its
+// restart), and a re-wrap under the old seal alone would leave Verify unable
+// to open (F-830-14).
 func (r *Rotator) unsealStaged(sc *jobs.StepCtx) (json.RawMessage, error) {
 	const phase = "unseal_staged"
 	ru := r.get(sc.JobID)
@@ -381,9 +383,6 @@ func (r *Rotator) unsealStaged(sc *jobs.StepCtx) (json.RawMessage, error) {
 	switch {
 	case ru.fresh:
 	case ru.tree.Resume == RewrapFirst:
-		if r.ready(sc.Ctx) {
-			return nil, nil
-		}
 		if err := r.restartAndWait(sc.Ctx); err != nil {
 			return nil, r.fail(sc, phase, errStagedResume, ru, "err", err.Error())
 		}
@@ -540,12 +539,6 @@ func (r *Rotator) restartAndWait(ctx context.Context) error {
 		return fmt.Errorf("restart the secret store: %w", err)
 	}
 	return r.waitReady(ctx)
-}
-
-// ready is one sys/health question: 200, initialised and unsealed.
-func (r *Rotator) ready(ctx context.Context) bool {
-	h, err := r.d.Store.Health(ctx)
-	return secretstore.InactiveReason(h, err) == ""
 }
 
 // waitReady returns once sys/health answers 200, or UnsealWait's error.
