@@ -249,8 +249,19 @@ func TestTransportFailures(t *testing.T) {
 		assertKind(t, err, secretstore.ErrUnreachable)
 	})
 
+	// A stalled server never answers. A handler that merely returned once the
+	// client left would make net/http write an implicit 200 with an empty
+	// body, and that late answer can win the race with the client tearing
+	// the connection down, so the call would see a 200 instead of its own
+	// bound or cancel (geekdojo/geekdojo-brain#805, F-805-21). Aborting the
+	// handler closes the connection with no response written.
+	stall := func(r *http.Request) {
+		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
+	}
+
 	t.Run("(b) a stalled server runs out the call bound", func(t *testing.T) {
-		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() })
+		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) { stall(r) })
 		u, _ := secretstore.ParseAddr(f.srv.URL)
 		c, err := secretstore.New(secretstore.Config{Addr: u, TLS: mustTLS(t, f.ca.CertPEM, f.leaf), CallTimeout: 200 * time.Millisecond, Logger: slog.New(slog.DiscardHandler)})
 		if err != nil {
@@ -267,7 +278,7 @@ func TestTransportFailures(t *testing.T) {
 		arrived := make(chan struct{})
 		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) {
 			close(arrived)
-			<-r.Context().Done()
+			stall(r)
 		})
 		ctx, cancel := context.WithCancel(t.Context())
 		go func() { <-arrived; cancel() }()

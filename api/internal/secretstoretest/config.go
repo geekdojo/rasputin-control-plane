@@ -208,7 +208,7 @@ func (b Bootstrap) policies() []policyFile {
 		}
 	}
 	for _, p := range b.Policies {
-		out = append(out, policyFile{Name: p.Name, Text: p.Text})
+		out = append(out, policyFile(p))
 	}
 	return out
 }
