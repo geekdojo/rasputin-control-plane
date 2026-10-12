@@ -28,6 +28,9 @@
 //     last five-minute health check found it missing, unmounted, unwritable
 //     or unreachable (#398, backup_target.go). Resolves on the next healthy
 //     poll.
+//   - disk       → disk-free:data-partition (warn below 5 GiB free, crit below
+//     1 GiB), at most one, from the source SetDiskAlerts wires
+//     (storeaudit.FreeSpace, geekdojo/geekdojo-brain#799).
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -105,6 +108,9 @@ type Service struct {
 	// SessionAlerts). Nil (dev wiring, tests) means no such alert, exactly as
 	// before it existed.
 	busSessionAlerts func(now time.Time) []proto.Alert
+	// diskAlerts, when set, reports low free space on the api's data
+	// partition (storeaudit.FreeSpace.Alerts). Nil means no such alert.
+	diskAlerts func(now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -116,6 +122,11 @@ func (s *Service) SetBusTLSAlert(fn func(now time.Time) *proto.Alert) { s.busTLS
 // itself, for the same reason SetBusTLSAlert is one: this package stays free
 // of a dependency on the bus packages.
 func (s *Service) SetBusSessionAlerts(fn func(now time.Time) []proto.Alert) { s.busSessionAlerts = fn }
+
+// SetDiskAlerts wires the data partition's free-space alert
+// (storeaudit.FreeSpace.Alerts). Set before List. A func, like the bus
+// sources, so this package does not depend on storeaudit.
+func (s *Service) SetDiskAlerts(fn func(now time.Time) []proto.Alert) { s.diskAlerts = fn }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
@@ -171,6 +182,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 		out = append(out, alerts...)
 	}
 	out = append(out, s.securityAlerts(now)...)
+	if s.diskAlerts != nil {
+		out = append(out, s.diskAlerts(now)...)
+	}
 	if alerts, err := s.backupAlerts(ctx, now); err != nil {
 		return nil, fmt.Errorf("alerts: backups: %w", err)
 	} else {

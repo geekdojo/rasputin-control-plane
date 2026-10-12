@@ -51,7 +51,7 @@ Around it:
 
 - `scripts/install-openbao.sh` reads the release and the sha256 out of `pin.go`, so CI
   downloads exactly what the const names, and a stale hash fails the install.
-- Rows T20 to T37 of `.github/third-party-capabilities.tsv` point at the const, so changing the
+- Rows T20 to T41 of `.github/third-party-capabilities.tsv` point at the const, so changing the
   tag fails `go test ./api/internal/gatereg` until each row is re-verified at the new release.
 
 ## What it does not prove
@@ -121,6 +121,47 @@ Expect `--- PASS: TestClient_AgainstTheRealStore` with one `PASS` line per step,
 status 0. With the binary absent and the switch set it fails, naming the variable, exactly as
 the smoke test does.
 
+## The audit rotation's functional test
+
+`TestStoreAudit_RotateUnderLoad`, in `api/internal/storeaudit/functional_test.go`, runs the
+audit rotation ([geekdojo-brain#799](https://github.com/geekdojo/geekdojo-brain/issues/799))
+against the same harness and binary, under the same switch, in the same CI step. The harness
+starts the store with `Config.Audit` set, which adds a declarative file audit device writing
+`<root>/audit/audit.log` (`Store.AuditPath`). The rotation runs as real jobs on a real
+`jobs.Runner` over a temporary ledger with in-process NATS, and the reopen is the harness's
+`Store.Reload`, which sends the store SIGHUP. The threshold is 64 KiB so a few hundred writes
+rotate the file. A writer makes KV writes continuously through the api's store client, and the
+test waits on the writer's progress and on the rotator's own `Due` gate, never on a duration.
+The steps run in order on one store:
+
+- **Rotation under load (T38 to T41).** Three rotations, each a job that succeeded with an
+  `audit file rotated` step line and INFO record. Then the audit `response` entries for the
+  writer's paths, counted across the live file and every copy, equal the writes the store
+  accepted, one per path: no audited response is lost across a rotation.
+- **Prune on real copies.** A rotator whose cap holds only the two newest copies removes the
+  older ones, oldest first.
+- **Forced failure.** A rotator whose reopen does nothing waits 2 s, then rolls back: the job
+  fails with the rolled-back sentence, the live path holds the original inode again, no copy
+  from the attempt is left, an `alerts.Service` over the same ledger lists the `job-failed`
+  alert with that sentence and no path, the ERROR record carries the job's id, and the
+  response entries still equal the writes.
+- **Redaction.** Neither the client token nor any KV value written appears in the log records
+  or in the jobs' events.
+
+It does not prove the production route to the store: `systemctl kill` to the sandboxed
+`openbao.service`, and the store re-creating the file under the unit's filesystem protections.
+That is the secrets-store bench skill's case SST-16. It also does not prove the free-space
+alert against a real full disk (SST-12 there), or the image's `audit` stanza (#804).
+
+Run it the same way as the smoke test, with `-run TestStoreAudit_ ./api/internal/storeaudit`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestStoreAudit_ ./api/internal/storeaudit
+```
+
+Expect `--- PASS: TestStoreAudit_RotateUnderLoad` with one `PASS` line per step, the
+`audit: N writes, N response entries` lines, and exit status 0.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -135,7 +176,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T37 at it before editing their `version` column.
+  release, and re-verifies T20 to T41 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -209,7 +250,7 @@ The cases for geekdojo-brain#753, and where each is checked:
 | TC-753-12 | The smoke case: real store, cert login, KV write and read, asserted teardown | `TestSecretStore_SmokeWriteReadKV`, in the `backend` job |
 | TC-753-13 | No client certificate fails at the handshake; token-less generate-root answers 405 | `TestSecretStore_SmokeWriteReadKV` |
 | TC-753-14 | In CI, removing the install step fails the `backend` job | A recorded run on the PR |
-| TC-753-15 | Changing the const without re-verifying T20 to T37 fails gatereg | `go test ./api/internal/gatereg` with the tag edited |
+| TC-753-15 | Changing the const without re-verifying T20 to T41 fails gatereg | `go test ./api/internal/gatereg` with the tag edited |
 | TC-753-16 | The capability rows resolve and timer-audit row K22 matches | `go test ./api/internal/gatereg` |
 | TC-753-17 | The install follows the const, and a stale hash fails | The CI install step's log, and a local run with the hash edited |
 | TC-753-18 | The install fails before any download when a const cannot be read | A local run with the const renamed |
@@ -231,3 +272,13 @@ The cases for geekdojo-brain#758 that this document's tests check:
 | TC-758-30 | No client certificate, and a foreign-CA leaf, are `ErrDenied` | `TestClient_AgainstTheRealStore` |
 | TC-758-31 | Redaction against the real store | `TestClient_AgainstTheRealStore` |
 | TC-758-32 | Binary absent with the switch set fails | The `env -u` command above, with `-run TestClient_ ./api/internal/secretstore` |
+
+The cases for geekdojo-brain#799 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-799-27 | The harness's audit stanza is opt-in, under the harness root | `TestRenderServerHCL_AuditOptIn`, `TestStart_AuditPathUnderRoot`, `TestRenderServerHCL` |
+| TC-799-29 | Rotation under load, no audited response lost | `TestStoreAudit_RotateUnderLoad` |
+| TC-799-30 | Prune on real copies | `TestStoreAudit_RotateUnderLoad` |
+| TC-799-31 | Forced failure: rolled back, alert, no line lost | `TestStoreAudit_RotateUnderLoad` |
+| TC-799-32 | No token or KV value in the logs or job events | `TestStoreAudit_RotateUnderLoad` |

@@ -369,6 +369,7 @@ var identityExclusions = []string{
 	"observability data (`vm-data/`, Loki) — re-accumulates",
 	"IDS JSONL — bounded and re-accumulates",
 	"the backup staging directory itself — an archive containing the previous archive fills disks",
+	"the secret store's audit log (`openbao-audit/`) — S11: audit does not survive a restore",
 }
 
 // MeasureIdentitySet reports the total size of the §4.5 identity set on disk,
