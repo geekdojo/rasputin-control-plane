@@ -139,7 +139,8 @@ jobs:
 
       # Every api tarball carries the secrets store's fixed policy text as
       # openbao-policy/, byte-equal to api/internal/secretstore/storepolicy
-      # (geekdojo/geekdojo-brain#804, F-804-09). rasputin-os installs those
+      # (geekdojo/geekdojo-brain#804, F-804-09; #805 adds rasputin-provisioner and
+      # rasputin-bindable). rasputin-os installs those
       # files and the store's self-init reads them, so a tarball without them,
       # or with different bytes, must never publish. Runs before the publish
       # step on every path, dry runs included, and lists what it found.
@@ -147,7 +148,7 @@ jobs:
         run: |
           set -euo pipefail
           src=api/internal/secretstore/storepolicy
-          for need in rasputin-api.hcl rasputin-seal-rotate.hcl; do
+          for need in rasputin-api.hcl rasputin-bindable.hcl rasputin-provisioner.hcl rasputin-seal-rotate.hcl; do
             [ -f "$src/$need" ] || { echo "::error::$src/$need is missing, so there is no policy text to check against."; exit 1; }
           done
           want=$(cd "$src" && ls -1 -- *.hcl)

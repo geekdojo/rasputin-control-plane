@@ -334,3 +334,49 @@ require (
 		t.Fatal("goModVersion found a module that is not required")
 	}
 }
+
+// TC-805-06 (F-805-06): the eleven OpenBao behaviours the store provisioner
+// relies on (geekdojo/geekdojo-brain#805) each keep a row, verified by the
+// test that exercises it, so deleting one fails here rather than leaving the
+// provisioner resting on an unrecorded upstream behaviour.
+func TestStoreProvisionerCapabilityRows(t *testing.T) {
+	rows := readRegister(t, filepath.Join(root(t), capRegisterPath), capCols)
+	byID := map[string]map[string]string{}
+	for _, r := range rows {
+		byID[r["id"]] = r
+	}
+	const policyTest = "TestProvisionerPolicy_AgainstTheRealStore (api/internal/secretstore/storepolicy)"
+	const osTest = "rasputin-os test/store-unit-functional.sh"
+	want := []struct{ id, needle, verifier string }{
+		{"T47", "matches only a string request value", policyTest},
+		{"T48", "the deprecated alias is honoured", policyTest},
+		{"T49", "required_parameters is checked on a read", policyTest},
+		{"T50", "type=kv-v2 makes a kv mount at version 2", policyTest},
+		{"T51", "No secret engine mount at", policyTest},
+		{"T52", `has no "*" key`, policyTest},
+		{"T53", "values are globs", policyTest},
+		{"T54", "have no existence check", policyTest},
+		{"T55", "LIST on auth/cert/certs/ returns the cert role names", policyTest},
+		{"T56", "the longest matching prefix", policyTest},
+		{"T57", "unsealed with stored key", osTest},
+	}
+	for _, w := range want {
+		r, ok := byID[w.id]
+		switch {
+		case !ok:
+			t.Errorf("%s: row %s (%s) is missing; the store provisioner relies on it", capRegisterPath, w.id, w.needle)
+		case r["vendor"] != "OpenBao" || !strings.Contains(r["capability"], w.needle):
+			t.Errorf("%s: row %s is %s %q, want the OpenBao capability naming %q", capRegisterPath, w.id, r["vendor"], r["capability"], w.needle)
+		case !strings.Contains(r["verified"], w.verifier):
+			t.Errorf("%s: row %s is verified by %q, want it to name %s", capRegisterPath, w.id, r["verified"], w.verifier)
+		}
+	}
+	if r := byID["T57"]; r != nil {
+		for _, line := range []string{"failed to unseal core", "vault still sealed after using stored unseal key",
+			"error unsealing core", "failed to automatically unseal after initialization", "none were found: is the server initialized?"} {
+			if !strings.Contains(r["capability"], line) {
+				t.Errorf("%s: row T57 does not name the unseal line %q", capRegisterPath, line)
+			}
+		}
+	}
+}

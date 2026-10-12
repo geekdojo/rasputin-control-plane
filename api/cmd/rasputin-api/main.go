@@ -2001,9 +2001,11 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 //   - headscale exists only for the self-hosted Docker backend. The mock has no
 //     container, and an external Headscale brings its own certificate — neither
 //     is ours to renew.
-//   - the two store-CA leaves exist only when RASPUTIN_SECRETSTORE_BACKEND is
-//     openbao. They are registered with the store CA's own sweeper, so the
-//     caller checks the union of both sweepers' names.
+//   - the three store-CA leaves (the store's server leaf, the api's client
+//     leaf and the store provisioner's leaf, #805) exist only when
+//     RASPUTIN_SECRETSTORE_BACKEND is openbao. They are registered with the
+//     store CA's own sweeper, so the caller checks the union of both
+//     sweepers' names.
 func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []string {
 	var want []string
 	if httpsEnabled {
@@ -2013,7 +2015,7 @@ func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []s
 		want = append(want, mesh.HeadscaleLeafName)
 	}
 	if storeSelected {
-		want = append(want, storeServerLeafName, storeClientLeafName)
+		want = append(want, storeServerLeafName, storeClientLeafName, storeProvisionerLeafName)
 	}
 	return want
 }

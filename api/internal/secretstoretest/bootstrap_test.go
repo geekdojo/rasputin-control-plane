@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -171,6 +172,129 @@ func TestStartWith_RefusesBadBootstrap(t *testing.T) {
 	}
 	if pols := b.policies(); len(pols) != 1 || pols[0].Name != "p" {
 		t.Errorf("policies() = %v, want p once", pols)
+	}
+}
+
+// TC-805-39 (F-805-07): each Policies entry is loaded through its own file
+// source, after the roles' policies, with no role bound to it; a Bootstrap
+// without Policies renders as before (TestStartWith_RendersTwoRoles pins that
+// list, and an empty Policies renders the same bytes as none).
+func TestStartWith_RendersPoliciesWithNoRole(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "seen")
+	cfg := validConfig(t)
+	cfg.BinaryPath = writeFake(t, `case "$1" in
+version) echo "OpenBao v2.7.1 (fake)" ;;
+server) cp -R "$(dirname "$5")" "`+out+`"; exit 3 ;;
+esac
+`)
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := twoRoles()
+	b.Policies = []Policy{{Name: "pol-free", Text: []byte(`path "auth/token/lookup-self" { capabilities = ["read"] }` + "\n")}}
+	if s, err := h.StartWith(t.Context(), b); s != nil || err == nil || !strings.Contains(err.Error(), "exit status 3") {
+		t.Fatalf("StartWith = %v, %v; want the fake's exit", s, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(out, "init.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Initialize []map[string]struct {
+			Request []map[string]initRequest `json:"request"`
+		} `json:"initialize"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("init.json is not JSON: %v", err)
+	}
+	var order []string
+	byPath := map[string]initRequest{}
+	for _, block := range doc.Initialize {
+		for _, stanza := range block {
+			for _, named := range stanza.Request {
+				for _, r := range named {
+					order = append(order, r.Path)
+					byPath[r.Path] = r
+				}
+			}
+		}
+	}
+	want := []string{
+		"sys/policies/acl/pol-a", "sys/policies/acl/pol-b", "sys/policies/acl/pol-free", "sys/mounts/kv-two", "sys/auth/cert",
+		"auth/cert/certs/role-a", "auth/cert/certs/role-b",
+	}
+	if !reflect.DeepEqual(order, want) {
+		t.Errorf("request paths = %v, want exactly %v: one more policy, no more roles", order, want)
+	}
+	src, _ := byPath["sys/policies/acl/pol-free"].Data["policy"].(map[string]any)
+	p, _ := src["path"].(string)
+	if src["eval_source"] != "file" || src["eval_type"] != "string" || filepath.Base(p) != "pol-free.hcl" {
+		t.Errorf("pol-free source = %v, want an eval_source file string source at <root>/policies/pol-free.hcl", src)
+	}
+	got, err := os.ReadFile(filepath.Join(out, "policies", "pol-free.hcl"))
+	if err != nil || !bytes.Equal(got, b.Policies[0].Text) {
+		t.Errorf("pol-free.hcl = %q, %v; want the entry's Text byte for byte", got, err)
+	}
+	for path, r := range byPath {
+		if strings.HasPrefix(path, "auth/cert/certs/") {
+			if pols, _ := r.Data["token_policies"].([]any); slices.Contains(pols, any("pol-free")) {
+				t.Errorf("role %s binds pol-free", path)
+			}
+		}
+	}
+
+	ca := []byte("ca")
+	pp := func(name string) string { return "/p/" + name }
+	none, err := renderInitJSON(twoRoles(), ca, pp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := twoRoles()
+	empty.Policies = []Policy{}
+	withEmpty, err := renderInitJSON(empty, ca, pp)
+	if err != nil || !bytes.Equal(none, withEmpty) {
+		t.Errorf("an empty Policies renders differently from none (%v)", err)
+	}
+}
+
+// TC-805-39: each Policies entry self-init cannot be given is refused before
+// any I/O, naming the entry; an empty Roles is still refused.
+func TestStartWith_RefusesBadPolicies(t *testing.T) {
+	role := Role{Name: "r", Policy: "p", PolicyText: []byte("x")}
+	cases := []struct {
+		name   string
+		b      Bootstrap
+		needle string
+	}{
+		{"empty name", Bootstrap{Mount: "kv", Roles: []Role{role}, Policies: []Policy{{Text: []byte("x")}}}, "Bootstrap.Policies[0].Name is empty"},
+		{"empty text", Bootstrap{Mount: "kv", Roles: []Role{role}, Policies: []Policy{{Name: "q"}}}, "Bootstrap.Policies[0].Text is empty"},
+		{"name outside the name rule", Bootstrap{Mount: "kv", Roles: []Role{role}, Policies: []Policy{{Name: "a/b", Text: []byte("x")}}}, `Bootstrap.Policies[0].Name "a/b" is not a name matching`},
+		{"duplicate name", Bootstrap{Mount: "kv", Roles: []Role{role}, Policies: []Policy{{Name: "q", Text: []byte("x")}, {Name: "q", Text: []byte("x")}}}, `Bootstrap.Policies[1].Name "q" is a duplicate policy`},
+		{"a role's policy", Bootstrap{Mount: "kv", Roles: []Role{role}, Policies: []Policy{{Name: "p", Text: []byte("x")}}}, `Bootstrap.Policies[0].Name "p" is also a role's policy`},
+		{"policies but no roles", Bootstrap{Mount: "kv", Policies: []Policy{{Name: "q", Text: []byte("x")}}}, "Bootstrap.Roles is empty"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "ran")
+			cfg := validConfig(t)
+			cfg.BinaryPath = writeFake(t, `touch "`+marker+`"`+"\n")
+			h, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := h.StartWith(t.Context(), tc.b)
+			if s != nil || err == nil {
+				t.Fatalf("StartWith = %v, %v; want a refusal", s, err)
+			}
+			if !strings.HasPrefix(err.Error(), "secretstoretest: ") || !strings.Contains(err.Error(), tc.needle) {
+				t.Errorf("err = %v, want it to name %q", err, tc.needle)
+			}
+			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("the binary ran (stat %v)", err)
+			}
+			assertEmpty(t, cfg.TempParent)
+		})
 	}
 }
 

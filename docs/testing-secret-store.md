@@ -51,7 +51,7 @@ Around it:
 
 - `scripts/install-openbao.sh` reads the release and the sha256 out of `pin.go`, so CI
   downloads exactly what the const names, and a stale hash fails the install.
-- Rows T20 to T46 of `.github/third-party-capabilities.tsv` point at the const, so changing the
+- Rows T20 to T57 of `.github/third-party-capabilities.tsv` point at the const, so changing the
   tag fails `go test ./api/internal/gatereg` until each row is re-verified at the new release.
 
 ## What it does not prove
@@ -251,19 +251,47 @@ What it proves, against OpenBao v2.7.1:
 
 It does not prove the image: that the tarball's files reach `/usr/share/rasputin/openbao-policy/`,
 the image's `init.json`, the audit stanza, or the store under systemd. Those are rasputin-os's
-tests. It does not cover the provisioner's role and policy
-([geekdojo-brain#805](https://github.com/geekdojo/geekdojo-brain/issues/805)). What the rotation
+tests. What the rotation
 token can do beyond `sys/rotate/root` is the seal rotation's functional test, below
 ([geekdojo-brain#830](https://github.com/geekdojo/geekdojo-brain/issues/830)).
 
-Run it the same way as the smoke test, with `-run TestStorePolicy_`:
+### The store provisioner's policy
+
+`TestProvisionerPolicy_AgainstTheRealStore`, in the same file, runs the store provisioner's policy,
+`rasputin-provisioner.hcl`, and the one policy its roles may bind, `rasputin-bindable.hcl`
+([geekdojo-brain#805](https://github.com/geekdojo/geekdojo-brain/issues/805)). The store starts with
+the api's, the rotation job's and the provisioner's roles, and with `rasputin-bindable` loaded
+through `Bootstrap.Policies` with no role, as the image's `init.json` loads it. Four test-only
+roles, each labelled in the test, let it read what must not change, show `required_parameters` is
+checked on a read, and show the `policies` alias is honoured.
+
+What it proves, against OpenBao v2.7.1:
+
+- **The positive path, with no root token.** The provisioner mounts `rasputin-rel-t` as `kv-v2`,
+  reads it back as kv version 2, lists the roles, and writes the role `rasputin-rel-t` with string
+  parameters. A leaf with that CommonName logs in carrying exactly `["rasputin-bindable"]`, reads
+  its own lookup, and gets 403 on the new mount's data and on every `denied` probe (TC-805-07).
+- **No policy write.** Every write to `sys/policies/acl/`, and its list and read, get 403, and each
+  fixed policy's text is unchanged (TC-805-08).
+- **A role binds only `rasputin-bindable`.** Every other policy, in `token_policies` or in
+  `policies`, a comma-joined pair, a JSON list and a JSON boolean, get 403 (TC-805-09).
+- **No fixed role is written or deleted** (TC-805-10), **every role field is pinned** (TC-805-11),
+  and **a mount is only a namespace `kv-v2`**, with no tune, delete or remount (TC-805-12).
+- **Every root and admin route is refused** (TC-805-13), **every route to `rasputin-seal-rotate`**
+  is refused, and only that role's own login carries it (TC-805-14), and **the api's token cannot
+  provision** (TC-805-15).
+- Rows T47 to T56 of `.github/third-party-capabilities.tsv` rest on it. Row T57, the unseal log
+  lines the provisioner's wait reads, rests on rasputin-os's `test/store-unit-functional.sh`.
+
+Run both tests the same way as the smoke test, with `-run AgainstTheRealStore`:
 
 ```sh
-RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestStorePolicy_ ./api/internal/secretstore/storepolicy
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run AgainstTheRealStore ./api/internal/secretstore/storepolicy
 ```
 
-Expect `--- PASS: TestStorePolicy_AgainstTheRealStore` with one `PASS` line per test case, each
-probe's status in the log, and exit status 0. The static checks on the same text
+Expect `--- PASS: TestStorePolicy_AgainstTheRealStore` and
+`--- PASS: TestProvisionerPolicy_AgainstTheRealStore`, each with one `PASS` line per test case,
+each probe's status in the log, and exit status 0. The static checks on the same text
 (`go test ./api/internal/secretstore/storepolicy` with no binary) and the packing script's tests
 (`./scripts/test-pack-store-policy.sh`) need no store.
 
@@ -347,7 +375,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T46 at it before editing their `version` column.
+  release, and re-verifies T20 to T57 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -469,7 +497,7 @@ The cases for geekdojo-brain#804 that this document's tests check:
 
 | ID | What | Where |
 |---|---|---|
-| TC-804-01 | `Names` and `Text`: exactly the two policies, the embedded bytes, an unknown name refused | `TestNamesAndText` |
+| TC-804-01 | `Names` and `Text`: exactly the policies (four since #805), the embedded bytes, an unknown name refused | `TestNamesAndText` |
 | TC-804-02 | The api policy's allow-list, and six injected stanzas refused | `TestAPIPolicy_AllowList` |
 | TC-804-03 | The rotation policy is one stanza; no never-grant path in either file | `TestSealRotatePolicy_AndNeverGrantPaths` |
 | TC-804-04 | `StartWith` renders the roles and file sources, and refuses each bad `Bootstrap` | `TestStartWith_RendersTwoRoles`, `TestStartWith_RefusesBadBootstrap`, `TestLogin` |
@@ -478,3 +506,16 @@ The cases for geekdojo-brain#804 that this document's tests check:
 | TC-804-07 | The rotation token rotates and nothing else; neither half of its policy rotates | `TestStorePolicy_AgainstTheRealStore` |
 | TC-804-08 | t=0 n=0 after self-init | `TestStorePolicy_AgainstTheRealStore` |
 | TC-804-09 | The policy files are packed byte-equal, an empty source is refused, and the release checks each api tarball | `./scripts/test-pack-store-policy.sh`; the release workflow's `api tarballs carry the store policy` step |
+
+The cases for geekdojo-brain#805 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-805-01 | `Names`: exactly the four policies | `TestNamesAndText` |
+| TC-805-02 | The provisioner's policy is binding-only, with string pins | `TestProvisionerPolicy_BindingOnly` |
+| TC-805-03 | The static checker refuses each injected fault | `TestProvisionerPolicy_CheckerRefusesFaults` |
+| TC-805-04 | The bindable policy is lookup-self only; no never-grant path in any file | `TestBindablePolicy_LookupSelfOnly`, `TestSealRotatePolicy_AndNeverGrantPaths` |
+| TC-805-05 | The api mints and renews the provisioner's leaf before the store restarts | `TestStoreProvisionerLeaf` (`api/cmd/rasputin-api`) |
+| TC-805-06 | The capability and auth registers and the release step | `TestStoreProvisionerCapabilityRows` (`api/internal/gatereg`), `scripts/auth-register.sh --gate`, the release workflow's `api tarballs carry the store policy` step |
+| TC-805-07 to TC-805-15 | The provisioner against the real store | `TestProvisionerPolicy_AgainstTheRealStore` |
+| TC-805-39 | `Bootstrap.Policies` | `TestStartWith_RendersPoliciesWithNoRole`, `TestStartWith_RefusesBadPolicies` |

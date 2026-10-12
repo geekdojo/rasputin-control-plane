@@ -27,6 +27,16 @@ const (
 	// SealRotatePolicy is the seal rotation job's policy (#830), bound to its
 	// own cert role.
 	SealRotatePolicy = "rasputin-seal-rotate"
+	// ProvisionerPolicy is the store provisioner's policy (#805), bound to its
+	// own cert role: it adds mounts and roles under Namespace and binds them
+	// only to BindablePolicy.
+	ProvisionerPolicy = "rasputin-provisioner"
+	// BindablePolicy is the one policy a provisioned role may bind (#805,
+	// D-805-A): a lookup of the token's own self.
+	BindablePolicy = "rasputin-bindable"
+	// Namespace is the prefix of every mount and role the provisioner may add.
+	// No fixed mount, role or policy name starts with it.
+	Namespace = "rasputin-rel-"
 )
 
 const ext = ".hcl"
