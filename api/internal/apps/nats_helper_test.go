@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/deadlinetest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -144,17 +145,23 @@ func TestDeployPush_AgentReportsFailure(t *testing.T) {
 	}
 }
 
-// TestDeployPush_RPCFails: no agent subscribes, request times out, step
-// records "deploy rpc failed" + emits AppFailed.
+// TestDeployPush_RPCFails: the agent takes the command and never answers, the
+// request times out, and the step records "deploy rpc failed" + emits
+// AppFailed. The deadline fires once the command has reached the agent, not on
+// a wall clock, so it cannot be spent by the loads ahead of the rpc instead.
 func TestDeployPush_RPCFails(t *testing.T) {
 	ctx := context.Background()
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", testAppID, "minecraft")
+	deadline := deadlinetest.New()
+	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(*nats.Msg) { deadline.Fire() })
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
-	tctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-	defer cancel()
-	sc.Ctx = tctx
+	sc.Ctx = deadline
 	if _, err := deployPush(store, inv, nc, testSource(t))(sc); err == nil {
 		t.Error("RPC timeout: want error")
 	}

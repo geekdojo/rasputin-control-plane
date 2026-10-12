@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/deadlinetest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -26,32 +27,6 @@ import (
 // These tests hold a poll in flight until the deadline has fired, driven by a
 // signal from the simulated node rather than by a sleep racing a timer, so the
 // ordering is the same on every run.
-
-// manualDeadline is a context whose deadline fires exactly when the test says
-// so. Err reports context.DeadlineExceeded, the same value a real step deadline
-// produces, and child contexts (waitForNewBoot's per-request one) inherit it.
-type manualDeadline struct {
-	context.Context
-	done chan struct{}
-	once sync.Once
-}
-
-func newManualDeadline() *manualDeadline {
-	return &manualDeadline{Context: context.Background(), done: make(chan struct{})}
-}
-
-func (d *manualDeadline) Done() <-chan struct{} { return d.done }
-
-func (d *manualDeadline) Err() error {
-	select {
-	case <-d.done:
-		return context.DeadlineExceeded
-	default:
-		return nil
-	}
-}
-
-func (d *manualDeadline) fire() { d.once.Do(func() { close(d.done) }) }
 
 // pollKind is what the simulated node does with one precheck poll.
 type pollKind int
@@ -92,7 +67,7 @@ func runDeadlineScript(t *testing.T, priorBootID string, script []pollScript) de
 	nc := startNATS(t)
 	const nodeID = "deadline"
 
-	d := newManualDeadline()
+	d := deadlinetest.New()
 	release := make(chan struct{})
 	// Registered after startNATS, so it runs first: held handlers return before
 	// the connection and server go away.
@@ -167,7 +142,7 @@ func runDeadlineScript(t *testing.T, priorBootID string, script []pollScript) de
 	var res result
 	select {
 	case <-fireNow:
-		d.fire()
+		d.Fire()
 		select {
 		case res = <-resCh:
 		case <-time.After(bound):

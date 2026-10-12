@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/deadlinetest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
@@ -494,51 +495,49 @@ func TestReconcileSweep_AnOutdatedSurvivorDoesNotRecoverAFailedApp(t *testing.T)
 }
 
 // A pull whose reply never arrives, or arrives unreadable, is the failed-pull
-// branch too. The timeout case pins why the status write is detached: the
-// step's own context is spent by the time the status goes back, and a write on
-// it would silently leave the app DEPLOYING.
+// branch too. The never-answered case pins why the status write is detached:
+// the step's own context is spent by the time the status goes back, and a
+// write on it would silently leave the app DEPLOYING.
+//
+// That case's deadline fires when the pull command reaches the agent, not on
+// a wall clock: a deadline set before the step starts is spent by whatever runs
+// first, and on a loaded runner the volumes check ahead of the pull used it
+// all, so the step failed before the pull rpc was ever sent.
 func TestPullStep_ATimedOutOrUnreadableReplyChangesNothing(t *testing.T) {
 	cases := []struct {
 		name  string
-		agent func(t *testing.T, nc *nats.Conn)
-		ctx   func() (context.Context, context.CancelFunc)
+		agent func(t *testing.T, nc *nats.Conn, expire func())
 		says  string
 	}{
-		{"rpc times out", func(t *testing.T, nc *nats.Conn) {
+		{"rpc times out", func(t *testing.T, nc *nats.Conn, expire func()) {
 			fakeVolumeCheckAgent(t, nc)
-			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) {}) // never answers
+			// Never answers: the step's deadline passes while the pull rpc waits.
+			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) { expire() })
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = sub.Unsubscribe() })
-		}, func() (context.Context, context.CancelFunc) {
-			return context.WithTimeout(context.Background(), 200*time.Millisecond)
 		}, "pull rpc"},
-		{"ack is not json", func(t *testing.T, nc *nats.Conn) {
+		{"ack is not json", func(t *testing.T, nc *nats.Conn, _ func()) {
 			fakeVolumeCheckAgent(t, nc)
 			sub, err := nc.Subscribe(proto.AppPullSubject("n"), func(m *nats.Msg) { _ = m.Respond([]byte("not-json")) })
 			if err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = sub.Unsubscribe() })
-		}, func() (context.Context, context.CancelFunc) {
-			return context.WithCancel(context.Background())
 		}, "decode pull ack"},
-		{"ack fails with no detail", func(t *testing.T, nc *nats.Conn) {
+		{"ack fails with no detail", func(t *testing.T, nc *nats.Conn, _ func()) {
 			fakePullAgent(t, nc, proto.AppPullAck{OK: false}, nil)
-		}, func() (context.Context, context.CancelFunc) {
-			return context.WithCancel(context.Background())
 		}, "agent reported the pull failed"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			store, inv, before, row := upgradedToV2(t)
 			nc := startNATS(t)
-			c.agent(t, nc)
-			ctx, cancel := c.ctx()
-			defer cancel()
+			deadline := deadlinetest.New()
+			c.agent(t, nc, deadline.Fire)
 			sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
-			sc.Ctx = ctx
+			sc.Ctx = deadline
 
 			_, err := pullStep(store, inv, nc, "upgrade", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, upgradePullSource(lookupOf(tileV3(), 3)))(sc)
 			if err == nil || !strings.Contains(err.Error(), c.says) {
