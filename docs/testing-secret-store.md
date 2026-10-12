@@ -51,7 +51,7 @@ Around it:
 
 - `scripts/install-openbao.sh` reads the release and the sha256 out of `pin.go`, so CI
   downloads exactly what the const names, and a stale hash fails the install.
-- Rows T20 to T41 of `.github/third-party-capabilities.tsv` point at the const, so changing the
+- Rows T20 to T42 of `.github/third-party-capabilities.tsv` point at the const, so changing the
   tag fails `go test ./api/internal/gatereg` until each row is re-verified at the new release.
 
 ## What it does not prove
@@ -164,6 +164,54 @@ Expect `--- PASS: TestStoreAudit_RotateUnderLoad` with one `PASS` line per step,
 (A and B are the first and last write numbers checked; N is how many response entries
 those writes left), and exit status 0.
 
+## The readiness gate's functional test
+
+`TestStoreGate_AgainstTheRealStore`, in `api/internal/apps/storegate_functional_test.go`, runs
+the api's handling of a store that cannot serve secrets
+([geekdojo-brain#760](https://github.com/geekdojo/geekdojo-brain/issues/760)) against the same
+harness and binary, under the same switch, in the same CI step. It wires the real
+`secretstore.Client`, a real `storestate.Monitor` and `storestate.Gate` around the HKDF secret
+source, a real `jobs.Runner` with in-process NATS and a fake deploy agent, and an
+`alerts.Service` with `SetStoreAlerts` set to the monitor. Nothing in it waits on a duration:
+each step reads the state the store is in when it asks. The steps run in order on one store,
+because each changes it:
+
+- **Up.** No `secret-store:*` alert, and a deploy whose compose has a `${secret:}` token
+  succeeds with the derived value in the deploy command.
+- **Stopped.** After the harness's `Stop`, the list holds `secret-store:unreachable` (crit). The
+  secret-bearing deploy fails with an error carrying `secret_store_not_ready`, no deploy command
+  reaches the agent, and no DEPLOYING is announced. A deploy with no token still succeeds.
+- **Restarted.** After `Restart`, which returns once `sys/health` answers 200 unsealed, the next
+  list has no `secret-store:*` alert and the same deploy succeeds with the same value.
+- **Sealed.** After `RestartSealed`, the list holds only `secret-store:sealed` (crit), and the
+  deploy is refused with the code.
+- **Copy and redaction.** No alert or job error names the vendor, and the derived value appears
+  in no log record, job step or job event.
+
+`TestSecretStore_StopAndRestartKeepData`, in
+`api/internal/secretstoretest/restart_functional_test.go`, proves the two harness calls the
+test above uses: `Stop` leaves the process exited and the data in place, `Restart` brings the
+store back unsealed with a KV value written before the stop, `RestartSealed` still ends sealed,
+and `Close` leaves no process and no temporary directory.
+
+They do not prove the api process booting while the store is down under systemd, an
+uninitialised store against the real binary (row T32 stays `unverified`), audit-blocked against
+the real store (row T42 is `unverified` until
+[geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762) gives the store
+audited callers), or the backup quiesce end to end
+([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)).
+
+Run them the same way as the smoke test:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestStoreGate_ ./api/internal/apps
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestSecretStore_StopAndRestart ./api/internal/secretstoretest
+```
+
+Expect `--- PASS: TestStoreGate_AgainstTheRealStore` with one `PASS` line per step, then
+`--- PASS: TestSecretStore_StopAndRestartKeepData`, and exit status 0. With the binary absent and
+the switch set, each fails naming the variable, exactly as the smoke test does.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -178,7 +226,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T41 at it before editing their `version` column.
+  release, and re-verifies T20 to T42 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -284,3 +332,14 @@ The cases for geekdojo-brain#799 that this document's tests check:
 | TC-799-30 | Prune on real copies | `TestStoreAudit_RotateUnderLoad` |
 | TC-799-31 | Forced failure: rolled back, alert, no line lost | `TestStoreAudit_RotateUnderLoad` |
 | TC-799-32 | No token or KV value in the logs or job events | `TestStoreAudit_RotateUnderLoad` |
+
+The cases for geekdojo-brain#760 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-760-24 | The harness's `Stop` and `Restart`, with KV data surviving | `TestSecretStore_StopAndRestartKeepData`, `TestStopRestart_Refusals` |
+| TC-760-25 | Store up: no alert, the deploy succeeds | `TestStoreGate_AgainstTheRealStore` |
+| TC-760-26 | Store stopped: unreachable alert, the deploy refused with the code, a token-free deploy succeeds | `TestStoreGate_AgainstTheRealStore` |
+| TC-760-27 | Store restarted: the alert clears, the deploy succeeds | `TestStoreGate_AgainstTheRealStore` |
+| TC-760-28 | Store sealed: sealed alert, the deploy refused | `TestStoreGate_AgainstTheRealStore` |
+| TC-760-29 | No vendor name in the copy, no secret in the logs or job events; required mode | `TestStoreGate_AgainstTheRealStore`, and the `env -u` command above with `-run TestStoreGate_ ./api/internal/apps` |

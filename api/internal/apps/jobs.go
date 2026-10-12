@@ -877,9 +877,12 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		// resolved is a refusal, and refusing before anything was announced
 		// leaves the app where it was instead of stranding it in DEPLOYING with
 		// nothing on the node having changed.
-		compose, err := secrets.ResolveCompose(sc.Ctx, app.ID, app.ComposeYAML)
+		//
+		// The ctx carries the job's id, so a source that refuses can log the
+		// refusal under the id of the job it failed (geekdojo/geekdojo-brain#760).
+		compose, err := secrets.ResolveCompose(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app.ID, app.ComposeYAML)
 		if err != nil {
-			return nil, fmt.Errorf("apps: resolve compose for %s: %w", app.ID, err)
+			return nil, resolveError(app.ID, err)
 		}
 		defer compose.Destroy()
 		cmd, err := deployCommand(app, compose)

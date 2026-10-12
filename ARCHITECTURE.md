@@ -250,6 +250,10 @@ secret store's listener alone and enters no node, browser or collector trust.
 It signs the store's server leaf and the api's client leaf at the store, which
 the api's store client (`api/internal/secretstore`, selected by
 `RASPUTIN_SECRETSTORE_BACKEND`) presents over TLS 1.3 to a loopback address.
+The api boots whatever state the store is in: `api/internal/secretstore/storestate`
+reads its readiness from `sys/health` when asked, raises a `secret-store:*` alert
+while it cannot serve secrets, and refuses a secret-bearing deploy with
+`secret_store_not_ready` until it can.
 Every leaf carries exactly one explicit EKU. A node's trust bundle (the
 controlplane CA, plus the certificates parsed from the operator's CA file on an
 external Headscale) reaches it on

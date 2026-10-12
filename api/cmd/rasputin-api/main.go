@@ -487,7 +487,8 @@ func main() {
 	// the startup sweep mints them, in its own goroutine, behind the same clock
 	// gate, and independent of RASPUTIN_HTTPS_ADDR. Nothing consumes the store
 	// yet; login (#759) and the business rules (#761) do.
-	storeW, err := wireSecretStore(ctx, logger, secretStoreBackendFromEnv(), secretStoreAddrFromEnv(),
+	storeBackend := secretStoreBackendFromEnv()
+	storeW, err := wireSecretStore(ctx, logger, storeBackend, secretStoreAddrFromEnv(),
 		storeCA, dataDir, execrun.CombinedOutput)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store", "err", err.Error())
@@ -495,9 +496,19 @@ func main() {
 	}
 	startStoreSweep(ctx, storeW.sweeper, logger)
 	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
+	// The store's readiness (geekdojo/geekdojo-brain#760): with a backend
+	// requested, secret-bearing deploys go through a Gate that refuses until
+	// the store reads ready, and the alerts list reports a store that cannot
+	// serve secrets. It makes no store call, so the api starts whatever state
+	// the store is in. Every store consumer below takes readiness.store.
+	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, appSecrets, jobStore, time.Now, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store readiness", "err", err.Error())
+		os.Exit(1)
+	}
 	// The store's audit file rotation and the data partition's free-space alert
 	// (ADR-0010 S11, geekdojo/geekdojo-brain#799).
-	storeAud, err := storeAuditWiring(storeW.mode, dataDir, storeW.store, execrun.CombinedOutput, logger)
+	storeAud, err := storeAuditWiring(storeW.mode, dataDir, readiness.store, execrun.CombinedOutput, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store audit", "err", err.Error())
 		os.Exit(1)
@@ -796,18 +807,18 @@ func main() {
 	// The deploy-family constructors refuse a missing secret source; must
 	// turns that refusal into a FATAL exit instead of a saga that cannot run.
 	must := workflowOrExit(ctx, logger, os.Exit)
-	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecrets)))
+	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, readiness.source)))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
 	// compose comes from the row, so unlike app.upgrade it needs nothing from
 	// the catalog.
-	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, appSecrets)))
+	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, readiness.source)))
 	// app.edit (#410): replace a custom app's compose with one its owner sent.
 	// The compose is held in composeStash, never in the job spec; the server
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, appSecrets)))
+	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, readiness.source)))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
@@ -884,7 +895,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, appSecrets)))
+	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, readiness.source)))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.
@@ -1553,6 +1564,9 @@ func main() {
 	// Low free space on the data partition, which the store, its audit log,
 	// this api's database and Docker share (#799).
 	alertsSvc.SetDiskAlerts(storeAud.diskAlerts)
+	if readiness.alerts != nil {
+		alertsSvc.SetStoreAlerts(readiness.alerts)
+	}
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps

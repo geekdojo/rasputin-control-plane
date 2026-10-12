@@ -31,6 +31,11 @@
 //   - disk       → disk-free:data-partition (warn below 5 GiB free, crit below
 //     1 GiB), at most one, from the source SetDiskAlerts wires
 //     (storeaudit.FreeSpace, geekdojo/geekdojo-brain#799).
+//   - secret store → secret-store:<state> (crit when sealed, uninitialised,
+//     unreachable or audit-blocked; warn when paused for a backup), at most
+//     one, from the source SetStoreAlerts wires (storestate.Monitor.Alerts,
+//     geekdojo/geekdojo-brain#760). It reads the store's sys/health on each
+//     List, so it raises and clears on the store's own answer.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -111,6 +116,9 @@ type Service struct {
 	// diskAlerts, when set, reports low free space on the api's data
 	// partition (storeaudit.FreeSpace.Alerts). Nil means no such alert.
 	diskAlerts func(now time.Time) []proto.Alert
+	// storeAlerts, when set, reports a secret store that cannot serve
+	// secrets (storestate.Monitor.Alerts). Nil means no such alert.
+	storeAlerts func(ctx context.Context, now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -127,6 +135,13 @@ func (s *Service) SetBusSessionAlerts(fn func(now time.Time) []proto.Alert) { s.
 // (storeaudit.FreeSpace.Alerts). Set before List. A func, like the bus
 // sources, so this package does not depend on storeaudit.
 func (s *Service) SetDiskAlerts(fn func(now time.Time) []proto.Alert) { s.diskAlerts = fn }
+
+// SetStoreAlerts wires the secret store's readiness alert
+// (storestate.Monitor.Alerts). Set before List. It takes List's ctx because
+// it asks the store, so a request that ends stops the question.
+func (s *Service) SetStoreAlerts(fn func(ctx context.Context, now time.Time) []proto.Alert) {
+	s.storeAlerts = fn
+}
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
 // dev-time wiring may pass nil for both (the aggregator still works).
@@ -184,6 +199,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	out = append(out, s.securityAlerts(now)...)
 	if s.diskAlerts != nil {
 		out = append(out, s.diskAlerts(now)...)
+	}
+	if s.storeAlerts != nil {
+		out = append(out, s.storeAlerts(ctx, now)...)
 	}
 	if alerts, err := s.backupAlerts(ctx, now); err != nil {
 		return nil, fmt.Errorf("alerts: backups: %w", err)

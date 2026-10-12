@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -508,6 +509,45 @@ func TestList_DiskAlertsHook(t *testing.T) {
 	}
 	if got := alertIDs(loud); len(got) != 3 || got[0] != "disk-crit" || got[1] != "job-failed:j1" || got[2] != "disk-warn" {
 		t.Fatalf("List ids = %v, want disk-crit, then the older job-failed warn, then disk-warn", got)
+	}
+}
+
+// TC-760-14: the secret store's source joins the list in severity order and
+// receives List's ctx and clock; unwired, List adds no secret-store alert.
+func TestList_StoreAlertsHook(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+	f.insertFailedJob(t, "j1", "apps.deploy", "The deploy failed.", 2*time.Hour)
+	fixed := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	f.svc.SetNow(func() time.Time { return fixed })
+
+	quiet, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, a := range quiet {
+		if strings.HasPrefix(a.ID, "secret-store:") {
+			t.Fatalf("an unwired store source added %+v", a)
+		}
+	}
+
+	type ctxKey struct{}
+	ctx := context.WithValue(f.ctx, ctxKey{}, "list")
+	var gotCtx context.Context
+	var gotNow time.Time
+	f.svc.SetStoreAlerts(func(c context.Context, now time.Time) []proto.Alert {
+		gotCtx, gotNow = c, now
+		return []proto.Alert{{ID: "secret-store:sealed", Severity: proto.AlertCrit, Source: proto.AlertSourceSecurity, Title: "s", Since: now}}
+	})
+	loud, err := f.svc.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if got := alertIDs(loud); len(got) != 2 || got[0] != "secret-store:sealed" || got[1] != "job-failed:j1" {
+		t.Fatalf("List ids = %v, want the store crit before the job-failed warn", got)
+	}
+	if gotCtx != ctx || !gotNow.Equal(fixed) {
+		t.Fatalf("the source got ctx %v and now %v, want List's ctx and %v", gotCtx, gotNow, fixed)
 	}
 }
 
