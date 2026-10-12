@@ -19,8 +19,9 @@ import (
 //
 //   - unset or empty: the store is off (secretstore.Disabled), at INFO;
 //   - exactly "mock": the in-memory secretstore.Mock, at WARN;
-//   - exactly "openbao": the real client, and the two store-CA leaves it
-//     needs, registered with a sweeper of their own;
+//   - exactly "openbao": the real client, the two store-CA leaves it needs
+//     and the store provisioner's leaf (#805), registered with a sweeper of
+//     their own;
 //   - anything else, a refused address, or no store CA: off, with one ERROR
 //     record carrying configfault=true and the setting. The api still starts,
 //     as the agent's configfault rule has it.
@@ -34,9 +35,15 @@ const (
 	// in the leaf sweep and its job report.
 	storeServerLeafName = "openbao-server"
 	storeClientLeafName = "openbao-client"
+	// storeProvisionerLeafName is the store provisioner's leaf (#805), which
+	// rasputin-os's rasputin-store-provision oneshot presents at the store.
+	storeProvisionerLeafName = "openbao-provisioner"
 	// storeClientCN is the client leaf's CommonName. The store's cert role
 	// (#804) pins allowed_common_names to it.
 	storeClientCN = "rasputin-api"
+	// storeProvisionerCN is the provisioner leaf's CommonName. The store's
+	// rasputin-provisioner cert role (#805) pins allowed_common_names to it.
+	storeProvisionerCN = "rasputin-provisioner"
 	// storeUnit is the systemd unit rasputin-os ships for the store (#755).
 	storeUnit = "openbao.service"
 	// storeCallTimeout bounds one call to the store, a sys/health question
@@ -125,6 +132,17 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 	}
 
 	sweeper := tlsca.NewLeafSweeper(storeCA)
+	// The provisioner's leaf first: a sweep mints in registration order, and
+	// the server leaf's reload restarts the store, whose start pulls in the
+	// provisioner oneshot that loads this leaf (#805). It has no reload: the
+	// oneshot reads it through LoadCredential= at each run.
+	if err := sweeper.Register(tlsca.LeafConsumer{
+		Name: storeProvisionerLeafName,
+		Dir:  filepath.Join(dataDir, "tls", storeProvisionerLeafName),
+		Spec: func() (tlsca.LeafSpec, error) { return storeProvisionerLeafSpec(), nil },
+	}); err != nil {
+		return off, fmt.Errorf("secret store: %w", err)
+	}
 	if err := sweeper.Register(tlsca.LeafConsumer{
 		Name:   storeServerLeafName,
 		Dir:    filepath.Join(dataDir, "tls", storeServerLeafName),
@@ -165,6 +183,14 @@ func storeClientLeafSpec() tlsca.LeafSpec {
 	return tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: storeClientCN}
 }
 
+// storeProvisionerLeafSpec is the store provisioner's leaf (#805): clientAuth,
+// with the CommonName the store's rasputin-provisioner cert role allows. The
+// api mints and renews it; rasputin-store-provision.service reads it through
+// LoadCredential=, so only the store's unit user and root read the copy.
+func storeProvisionerLeafSpec() tlsca.LeafSpec {
+	return tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: storeProvisionerCN}
+}
+
 // restartStoreUnit is the server leaf's reload: the store reads its leaf only
 // at start, through LoadCredential. On first boot the unit was skipped because
 // the leaf did not exist, and after a crash loop it sits in failed, so the
@@ -183,7 +209,7 @@ func restartStoreUnit(run runFunc) func(context.Context, tlsca.LeafPaths) error 
 }
 
 // startStoreSweep mints and renews the store leaves once, now, in a goroutine
-// of its own, so both leaves exist soon after start whether or not HTTPS is
+// of its own, so the leaves exist soon after start whether or not HTTPS is
 // configured (F-758-02). Start never waits on it: a mint waits on the store
 // CA's LeafClock (the clock gate), and a restart on systemd. The scheduled
 // leaf sweep renews them after that. It does nothing, and returns nil, when

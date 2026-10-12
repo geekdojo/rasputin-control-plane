@@ -99,6 +99,19 @@ type Bootstrap struct {
 	// Roles are created in order. Two roles may share a policy only with the
 	// same text.
 	Roles []Role
+	// Policies are loaded with no role, after the roles' policies, through a
+	// file source each, as the image's init.json loads rasputin-bindable
+	// (geekdojo/geekdojo-brain#805). A name may not also be a Role's policy.
+	Policies []Policy
+}
+
+// Policy is a policy self-init loads with no role bound to it.
+type Policy struct {
+	// Name is the policy's name.
+	Name string
+	// Text is the policy's text, read by self-init from a file the harness
+	// writes, as for a Role's PolicyText.
+	Text []byte
 }
 
 // Role is one cert role and the policy it grants.
@@ -163,10 +176,28 @@ func (b Bootstrap) validate() error {
 		roles[r.Name] = true
 		texts[r.Policy] = r.PolicyText
 	}
+	extra := map[string]bool{}
+	for i, p := range b.Policies {
+		switch {
+		case p.Name == "":
+			return fmt.Errorf("secretstoretest: Bootstrap.Policies[%d].Name is empty", i)
+		case !nameRE.MatchString(p.Name):
+			return fmt.Errorf("secretstoretest: Bootstrap.Policies[%d].Name %q is not a name matching %s", i, p.Name, nameRE)
+		case len(p.Text) == 0:
+			return fmt.Errorf("secretstoretest: Bootstrap.Policies[%d].Text is empty", i)
+		case extra[p.Name]:
+			return fmt.Errorf("secretstoretest: Bootstrap.Policies[%d].Name %q is a duplicate policy", i, p.Name)
+		}
+		if _, ok := texts[p.Name]; ok {
+			return fmt.Errorf("secretstoretest: Bootstrap.Policies[%d].Name %q is also a role's policy", i, p.Name)
+		}
+		extra[p.Name] = true
+	}
 	return nil
 }
 
-// policies is each distinct policy, in the order the roles first name it.
+// policies is each distinct policy, in the order the roles first name it,
+// then each of Policies in order.
 func (b Bootstrap) policies() []policyFile {
 	var out []policyFile
 	seen := map[string]bool{}
@@ -176,6 +207,9 @@ func (b Bootstrap) policies() []policyFile {
 			out = append(out, policyFile{Name: r.Policy, Text: r.PolicyText})
 		}
 	}
+	for _, p := range b.Policies {
+		out = append(out, policyFile{Name: p.Name, Text: p.Text})
+	}
 	return out
 }
 
@@ -183,9 +217,9 @@ func (b Bootstrap) policies() []policyFile {
 // stanzas in the shape geekdojo-brain#680 proved (probe680 renderInit). On
 // an empty store they run once and leave no root token (D680-01):
 //
-//   - one policy per distinct Role.Policy, its text read from the file
-//     policyPath names through an eval_source "file" source, as the image's
-//     init.json does (T34);
+//   - one policy per distinct Role.Policy, then one per Policies entry, its
+//     text read from the file policyPath names through an eval_source "file"
+//     source, as the image's init.json does (T34);
 //   - a kv-v2 mount at b.Mount;
 //   - the cert auth method;
 //   - per Role, a cert role trusting the store CA, admitting only the

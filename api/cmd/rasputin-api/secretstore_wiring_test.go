@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/big"
@@ -79,7 +80,8 @@ func ensureStoreCA(t *testing.T, trustDir string, d tlsca.Deps) *tlsca.CA {
 }
 
 func storeLeafDirs(dataDir string) []string {
-	return []string{filepath.Join(dataDir, "tls", storeServerLeafName), filepath.Join(dataDir, "tls", storeClientLeafName)}
+	return []string{filepath.Join(dataDir, "tls", storeServerLeafName), filepath.Join(dataDir, "tls", storeClientLeafName),
+		filepath.Join(dataDir, "tls", storeProvisionerLeafName)}
 }
 
 func assertNoStoreLeafDirs(t *testing.T, dataDir string) {
@@ -171,7 +173,7 @@ func TestWireSecretStore_Selection(t *testing.T) {
 				if w.client == nil || w.store != secretStore(w.client) {
 					t.Errorf("store = %T, want the real client", w.store)
 				}
-				if !slices.Equal(w.registeredNames(), []string{storeClientLeafName, storeServerLeafName}) {
+				if !slices.Equal(w.registeredNames(), []string{storeClientLeafName, storeProvisionerLeafName, storeServerLeafName}) {
 					t.Errorf("registered = %v", w.registeredNames())
 				}
 				if errs := rec.AtLevel(slog.LevelError); len(errs) != 0 {
@@ -241,9 +243,9 @@ func TestStoreStartupSweep(t *testing.T) {
 	if !slices.Equal(run.got(), restartPair) {
 		t.Errorf("run calls = %v, want %v", run.got(), restartPair)
 	}
-	if !slices.Equal(rep.Renewed, []string{storeServerLeafName, storeClientLeafName}) ||
+	if !slices.Equal(rep.Renewed, []string{storeProvisionerLeafName, storeServerLeafName, storeClientLeafName}) ||
 		!slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName}) || len(rep.Failed) != 0 {
-		t.Errorf("report = %+v, want both minted and reloaded once", rep)
+		t.Errorf("report = %+v, want all three minted, and the server and client leaves reloaded once", rep)
 	}
 
 	// TC-758-19: the leaves' content.
@@ -363,8 +365,8 @@ func TestLeafSweepJob_RenewsTheStoreLeaves(t *testing.T) {
 
 	clock.advance(310 * 24 * time.Hour) // 55 days left of a 365-day leaf: inside the 60-day window
 	rep := sweep()
-	want := []string{"api-https", storeServerLeafName, storeClientLeafName}
-	if !slices.Equal(rep.Renewed, want) || !slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName}) || rep.Checked != 3 {
+	want := []string{"api-https", storeProvisionerLeafName, storeServerLeafName, storeClientLeafName}
+	if !slices.Equal(rep.Renewed, want) || !slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName}) || rep.Checked != 4 {
 		t.Errorf("report = %+v, want renewed %v and both store reloads", rep, want)
 	}
 	after := serials(t, dataDir)
@@ -466,7 +468,7 @@ func TestStoreClientLeafReload_ClosesIdleConnections(t *testing.T) {
 func serials(t *testing.T, dataDir string) map[string]*big.Int {
 	t.Helper()
 	out := map[string]*big.Int{}
-	for _, name := range []string{storeServerLeafName, storeClientLeafName} {
+	for _, name := range []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName} {
 		out[name] = parseLeaf(t, filepath.Join(dataDir, "tls", name, "leaf.pem")).SerialNumber
 	}
 	return out
@@ -476,10 +478,10 @@ func serials(t *testing.T, dataDir string) map[string]*big.Int {
 // not register its client leaf.
 func TestRequiredLeafConsumers_StoreSelected(t *testing.T) {
 	required := requiredLeafConsumers(false, false, true)
-	if !slices.Equal(required, []string{storeServerLeafName, storeClientLeafName}) {
+	if !slices.Equal(required, []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName}) {
 		t.Fatalf("required = %v", required)
 	}
-	err := verifyLeafConsumers([]string{storeServerLeafName}, required)
+	err := verifyLeafConsumers([]string{storeServerLeafName, storeProvisionerLeafName}, required)
 	if err == nil || !strings.Contains(err.Error(), storeClientLeafName) {
 		t.Errorf("err = %v, want it to name %s", err, storeClientLeafName)
 	}
@@ -548,14 +550,94 @@ func TestSecretStore_UpgradeFromThePreviousRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitSweep(t, startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)))
-	for _, name := range []string{storeServerLeafName, storeClientLeafName} {
+	for _, name := range []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName} {
 		if err := verifyAgainst(parseLeaf(t, filepath.Join(dataDir, "tls", name, "leaf.pem")), store.CertPEM, map[string]x509.ExtKeyUsage{
 			storeServerLeafName: x509.ExtKeyUsageServerAuth, storeClientLeafName: x509.ExtKeyUsageClientAuth,
+			storeProvisionerLeafName: x509.ExtKeyUsageClientAuth,
 		}[name]); err != nil {
 			t.Errorf("%s does not chain to the existing store CA: %v", name, err)
 		}
 	}
 	if !slices.Equal(run.got(), restartPair) {
 		t.Errorf("run calls = %v, want exactly one restart pair", run.got())
+	}
+}
+
+// TC-805-05: in openbao mode the api registers, mints and renews the store
+// provisioner's leaf: clientAuth, CN rasputin-provisioner, in
+// <data>/tls/openbao-provisioner, with no reload; it is on disk before the
+// server leaf's reload restarts the store, whose start runs the provisioner;
+// it is required only when the store is selected; and a configuration that
+// does not register it is refused at startup.
+func TestStoreProvisionerLeaf(t *testing.T) {
+	dataDir := t.TempDir()
+	ca := ensureStoreCA(t, t.TempDir(), tlscatest.Deps())
+	leafPEM := filepath.Join(dataDir, "tls", storeProvisionerLeafName, "leaf.pem")
+	// The run func records, with each systemctl call, whether the
+	// provisioner's leaf was on disk when the call was made.
+	var mu sync.Mutex
+	var calls []string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		_, err := os.Stat(leafPEM)
+		mu.Lock()
+		defer mu.Unlock()
+		calls = append(calls, fmt.Sprintf("%s %s provisioner-leaf=%t", name, strings.Join(args, " "), err == nil))
+		return nil, nil
+	}
+	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, ca, dataDir, run)
+	if err != nil || w.mode != storeModeOpenBao {
+		t.Fatalf("wireSecretStore = %v, %v; want openbao", w.mode, err)
+	}
+	if !slices.Contains(w.registeredNames(), storeProvisionerLeafName) {
+		t.Fatalf("registered = %v, want %s among them", w.registeredNames(), storeProvisionerLeafName)
+	}
+	rep := waitSweep(t, startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)))
+	if !slices.Contains(rep.Renewed, storeProvisionerLeafName) || slices.Contains(rep.Reloaded, storeProvisionerLeafName) {
+		t.Errorf("report = %+v, want %s minted and never reloaded", rep, storeProvisionerLeafName)
+	}
+	want := []string{
+		"systemctl reset-failed openbao.service provisioner-leaf=true",
+		"systemctl restart openbao.service provisioner-leaf=true",
+	}
+	mu.Lock()
+	got := slices.Clone(calls)
+	mu.Unlock()
+	if !slices.Equal(got, want) {
+		t.Errorf("run calls = %v, want %v: the provisioner's leaf on disk before the store restarts", got, want)
+	}
+	leaf := parseLeaf(t, leafPEM)
+	if !slices.Equal(leaf.ExtKeyUsage, []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}) || leaf.Subject.CommonName != storeProvisionerCN ||
+		len(leaf.DNSNames) != 0 || len(leaf.IPAddresses) != 0 {
+		t.Errorf("provisioner leaf EKU %v CN %q DNS %v IP %v; want clientAuth, %s, no SAN",
+			leaf.ExtKeyUsage, leaf.Subject.CommonName, leaf.DNSNames, leaf.IPAddresses, storeProvisionerCN)
+	}
+	if storeProvisionerCN != "rasputin-provisioner" {
+		t.Errorf("storeProvisionerCN = %q, want rasputin-provisioner, the role init.json creates", storeProvisionerCN)
+	}
+	if err := verifyAgainst(leaf, ca.CertPEM, x509.ExtKeyUsageClientAuth); err != nil {
+		t.Errorf("the provisioner leaf does not chain to the store CA: %v", err)
+	}
+	for _, f := range []string{"leaf.pem", "leaf.key"} {
+		if _, err := os.Stat(filepath.Join(dataDir, "tls", storeProvisionerLeafName, f)); err != nil {
+			t.Errorf("%s is not in <data>/tls/%s: %v", f, storeProvisionerLeafName, err)
+		}
+	}
+
+	if !slices.Contains(requiredLeafConsumers(false, false, true), storeProvisionerLeafName) {
+		t.Error("the provisioner's leaf is not required with the store selected")
+	}
+	if slices.Contains(requiredLeafConsumers(true, true, false), storeProvisionerLeafName) {
+		t.Error("the provisioner's leaf is required with the store off")
+	}
+	// The Register removed: the names the wiring would then carry.
+	var without []string
+	for _, n := range w.registeredNames() {
+		if n != storeProvisionerLeafName {
+			without = append(without, n)
+		}
+	}
+	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true)); err == nil ||
+		!strings.Contains(err.Error(), storeProvisionerLeafName) {
+		t.Errorf("verifyLeafConsumers without the provisioner = %v, want an error naming %s", err, storeProvisionerLeafName)
 	}
 }
