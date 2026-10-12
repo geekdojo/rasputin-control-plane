@@ -256,7 +256,7 @@ func (r *Rotator) rotateStep(sc *jobs.StepCtx) (json.RawMessage, error) {
 	// A sealed store has no audit reload to run, so a rename now would leave
 	// it appending to the copy with nothing to reopen it.
 	h, err := r.store.Health(sc.Ctx)
-	if kind := inactiveKind(h, err); kind != "" {
+	if kind := secretstore.InactiveReason(h, err); kind != "" {
 		r.stepLog(sc, slog.LevelWarn, "secret store not active; audit file not rotated", "kind", kind)
 		return nil, jobs.ErrStopWorkflow
 	}
@@ -464,26 +464,4 @@ func signature(copies []auditCopy) string {
 		fmt.Fprintf(&b, "%s=%d;", c.name, c.size)
 	}
 	return b.String()
-}
-
-// inactiveKind names why the store is not active, or "" when it is
-// initialised and unsealed.
-func inactiveKind(h secretstore.Health, err error) string {
-	switch {
-	case errors.Is(err, secretstore.ErrSealed):
-		return "sealed"
-	case errors.Is(err, secretstore.ErrUninitialised):
-		return "uninitialised"
-	case errors.Is(err, secretstore.ErrUnreachable):
-		return "unreachable"
-	case errors.Is(err, secretstore.ErrDisabled):
-		return "disabled"
-	case err != nil:
-		return "error"
-	case !h.Initialized:
-		return "uninitialised"
-	case h.Sealed:
-		return "sealed"
-	}
-	return ""
 }
