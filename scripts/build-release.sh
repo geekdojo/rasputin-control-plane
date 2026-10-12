@@ -14,9 +14,12 @@
 #
 # Tarball contents:
 #   agent: rasputin-agent                 (binary at root)
-#   api:   rasputin-api + ui/             (binary + Next.js static export;
-#          rasputin-os installs ui/ to /usr/share/rasputin/ui, which is the
-#          api's RASPUTIN_UI_DIR default)
+#   api:   rasputin-api + ui/ + openbao-policy/
+#          (binary + Next.js static export; rasputin-os installs ui/ to
+#          /usr/share/rasputin/ui, which is the api's RASPUTIN_UI_DIR default,
+#          and openbao-policy/*.hcl to /usr/share/rasputin/openbao-policy, where
+#          the secrets store's self-init reads its fixed policies:
+#          geekdojo/geekdojo-brain#804)
 #
 # Requires: go, node/npm (for the UI build).
 #
@@ -66,6 +69,12 @@ echo ">> building web UI (next static export)"
 [ -f "$ROOT/ui/out/index.html" ] || { echo "ui build produced no out/index.html" >&2; exit 1; }
 cp -R "$ROOT/ui/out" "$DIST/ui"
 
+# The secrets store's fixed policy text, packed beside the binary. This
+# repository owns the text (ADR-0010 S9), so it publishes the files that ship,
+# as with mesh-images.json below; the script refuses an empty source, so no api
+# tarball is ever built without them (geekdojo/geekdojo-brain#804).
+"$ROOT/scripts/pack-store-policy.sh" "$ROOT/api/internal/secretstore/storepolicy" "$DIST/openbao-policy"
+
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
 # -X stamps the version into the agent binary (reported as the node's
 # control-plane software version). main.AgentVersion must be a var, not a const,
@@ -92,7 +101,7 @@ for comp in $COMPONENTS; do
 
 		tarball="$DIST/$bin-$VERSION-linux-$arch.tar.gz"
 		if [ "$name" = "api" ]; then
-			tar -C "$DIST" -czf "$tarball" "$bin" ui
+			tar -C "$DIST" -czf "$tarball" "$bin" ui openbao-policy
 		else
 			tar -C "$DIST" -czf "$tarball" "$bin"
 		fi
@@ -106,7 +115,7 @@ for comp in $COMPONENTS; do
 	done
 done
 
-rm -rf "$DIST/ui"   # packed into the api tarballs; not an artifact itself
+rm -rf "$DIST/ui" "$DIST/openbao-policy"   # packed into the api tarballs; not artifacts themselves
 
 # The mesh image pin, published verbatim so the OS build can read it instead of
 # carrying its own copy of the refs.

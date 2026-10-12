@@ -1,8 +1,11 @@
 package secretstoretest
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"regexp"
 )
 
 // serverPaths are the files the store's main config names. Every one lives
@@ -79,52 +82,152 @@ type initRequest struct {
 // the KV mount, and nothing on any other path.
 const kvPolicy = `path "` + KVMount + `/*" { capabilities = ["create", "read", "update"] }` + "\n"
 
+// Bootstrap is what the store's self-init creates: one kv-v2 mount and, for
+// each Role, its policy and a cert role bound to it (geekdojo/geekdojo-brain#804).
+// Start uses defaultBootstrap; StartWith takes one from the test.
+type Bootstrap struct {
+	// Mount is the kv-v2 mount's path.
+	Mount string
+	// Roles are created in order. Two roles may share a policy only with the
+	// same text.
+	Roles []Role
+}
+
+// Role is one cert role and the policy it grants.
+type Role struct {
+	// Name is the role's name and the only CommonName it admits
+	// (allowed_common_names). Log in with Store.Login or Store.TokenFor.
+	Name string
+	// Policy is the policy's name, the role's only token policy: the role
+	// sets token_no_default_policy, so its tokens carry nothing else.
+	Policy string
+	// PolicyText is the policy's text. Self-init reads it from a file the
+	// harness writes, through an eval_source "file" source, as the image's
+	// self-init does.
+	PolicyText []byte
+}
+
+// nameRE is what a mount, role or policy name may be: it is placed in request
+// paths and file names, so nothing else is allowed.
+var nameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)
+
+// defaultBootstrap is the store Start makes: the harness-kv mount and the
+// harness-client role holding kvPolicy.
+func defaultBootstrap() Bootstrap {
+	return Bootstrap{Mount: KVMount, Roles: []Role{{Name: ClientRole, Policy: KVMount, PolicyText: []byte(kvPolicy)}}}
+}
+
+// policyFile is one policy self-init loads, and the text its file holds.
+type policyFile struct {
+	Name string
+	Text []byte
+}
+
+// validate refuses a Bootstrap self-init cannot be given, naming the input.
+func (b Bootstrap) validate() error {
+	if b.Mount == "" {
+		return errors.New("secretstoretest: Bootstrap.Mount is empty")
+	}
+	if !nameRE.MatchString(b.Mount) {
+		return fmt.Errorf("secretstoretest: Bootstrap.Mount %q is not a name matching %s", b.Mount, nameRE)
+	}
+	if len(b.Roles) == 0 {
+		return errors.New("secretstoretest: Bootstrap.Roles is empty")
+	}
+	roles := map[string]bool{}
+	texts := map[string][]byte{}
+	for i, r := range b.Roles {
+		switch {
+		case r.Name == "":
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Name is empty", i)
+		case !nameRE.MatchString(r.Name):
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Name %q is not a name matching %s", i, r.Name, nameRE)
+		case roles[r.Name]:
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Name %q is a duplicate role", i, r.Name)
+		case !nameRE.MatchString(r.Policy):
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Policy %q is not a name matching %s", i, r.Policy, nameRE)
+		case len(r.PolicyText) == 0:
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].PolicyText is empty", i)
+		}
+		if prev, ok := texts[r.Policy]; ok && !bytes.Equal(prev, r.PolicyText) {
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Policy %q is given two different texts", i, r.Policy)
+		}
+		roles[r.Name] = true
+		texts[r.Policy] = r.PolicyText
+	}
+	return nil
+}
+
+// policies is each distinct policy, in the order the roles first name it.
+func (b Bootstrap) policies() []policyFile {
+	var out []policyFile
+	seen := map[string]bool{}
+	for _, r := range b.Roles {
+		if !seen[r.Policy] {
+			seen[r.Policy] = true
+			out = append(out, policyFile{Name: r.Policy, Text: r.PolicyText})
+		}
+	}
+	return out
+}
+
 // renderInitJSON is the store's second config file: self-init `initialize`
 // stanzas in the shape geekdojo-brain#680 proved (probe680 renderInit). On
 // an empty store they run once and leave no root token (D680-01):
 //
-//   - a policy granting create/read/update on the KV mount;
-//   - a kv-v2 mount;
+//   - one policy per distinct Role.Policy, its text read from the file
+//     policyPath names through an eval_source "file" source, as the image's
+//     init.json does (T34);
+//   - a kv-v2 mount at b.Mount;
 //   - the cert auth method;
-//   - a cert role trusting the store CA, for the one client CN, with that
-//     policy.
+//   - per Role, a cert role trusting the store CA, admitting only the
+//     CommonName Role.Name, with Role.Policy as its only token policy and
+//     token_no_default_policy set (T37).
 //
 // The role's certificate is the store CA PEM itself, inline.
-func renderInitJSON(storeCAPEM []byte) ([]byte, error) {
+func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string) string) ([]byte, error) {
 	block := func(name string, reqs ...map[string]initRequest) map[string]any {
 		return map[string]any{name: map[string]any{"request": reqs}}
 	}
-	doc := map[string]any{"initialize": []any{
-		block("policies", map[string]initRequest{"policy-" + KVMount: {
+	var pols []map[string]initRequest
+	for _, p := range b.policies() {
+		pols = append(pols, map[string]initRequest{"policy-" + p.Name: {
 			Operation: "update",
-			Path:      "sys/policies/acl/" + KVMount,
-			Data:      map[string]any{"policy": kvPolicy},
-		}}),
+			Path:      "sys/policies/acl/" + p.Name,
+			Data: map[string]any{"policy": map[string]any{
+				"eval_source": "file", "eval_type": "string", "path": policyPath(p.Name),
+			}},
+		}})
+	}
+	auth := []map[string]initRequest{{"enable-cert": {
+		Operation: "update",
+		Path:      "sys/auth/cert",
+		Data:      map[string]any{"type": "cert"},
+	}}}
+	for _, r := range b.Roles {
+		auth = append(auth, map[string]initRequest{"role-" + r.Name: {
+			Operation: "update",
+			Path:      "auth/cert/certs/" + r.Name,
+			Data: map[string]any{
+				"certificate":             string(storeCAPEM),
+				"allowed_common_names":    []string{r.Name},
+				"token_policies":          []string{r.Policy},
+				"token_no_default_policy": true,
+			},
+		}})
+	}
+	doc := map[string]any{"initialize": []any{
+		block("policies", pols...),
 		block("secrets", map[string]initRequest{"kv-mount": {
 			Operation: "update",
-			Path:      "sys/mounts/" + KVMount,
+			Path:      "sys/mounts/" + b.Mount,
 			Data:      map[string]any{"type": "kv", "options": map[string]any{"version": "2"}},
 		}}),
-		block("auth",
-			map[string]initRequest{"enable-cert": {
-				Operation: "update",
-				Path:      "sys/auth/cert",
-				Data:      map[string]any{"type": "cert"},
-			}},
-			map[string]initRequest{"role-" + ClientRole: {
-				Operation: "update",
-				Path:      "auth/cert/certs/" + ClientRole,
-				Data: map[string]any{
-					"certificate":          string(storeCAPEM),
-					"allowed_common_names": []string{ClientRole},
-					"token_policies":       []string{KVMount},
-				},
-			}},
-		),
+		block("auth", auth...),
 	}}
-	b, err := json.MarshalIndent(doc, "", "  ")
+	out, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("secretstoretest: render init config: %w", err)
 	}
-	return b, nil
+	return out, nil
 }

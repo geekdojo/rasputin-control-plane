@@ -7,7 +7,9 @@ name: ci
 #              (scripts/embed-catalog.sh --verify).
 #
 #   release-target-guard — tests for scripts/release-target-guard.sh, which
-#              release.yml runs to prove a release tag is on the built commit.
+#              release.yml runs to prove a release tag is on the built commit,
+#              and for scripts/pack-store-policy.sh, which build-release.sh
+#              runs to pack the secrets store's policy text.
 #
 #   auth-register — .github/auth-register.tsv still describes the code it
 #              anchors to (scripts/auth-register.sh --gate), plus the gate's
@@ -121,6 +123,12 @@ jobs:
           persist-credentials: false
       - name: guard tests
         run: ./scripts/test-release-target-guard.sh
+      # scripts/pack-store-policy.sh, which build-release.sh runs to put the
+      # secrets store's policy text in every api tarball: the copy is
+      # byte-equal, and an empty source is refused (geekdojo/geekdojo-brain#804,
+      # TC-804-09).
+      - name: store policy packing tests
+        run: ./scripts/test-pack-store-policy.sh
 
   auth-register:
     # The auth exception register: one canonical authentication method per cell,

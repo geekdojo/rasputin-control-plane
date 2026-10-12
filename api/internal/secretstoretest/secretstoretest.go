@@ -4,7 +4,10 @@
 // through cert auth. Tests import it; nothing in a shipped binary does.
 //
 // The store is built from the production store CA code (tlsca.StoreConfig)
-// and the harness's rendered config (config.go). Start waits on the store's
+// and the harness's rendered config (config.go). Start's self-init creates the
+// harness-kv mount and the harness-client role; StartWith takes a Bootstrap
+// instead, so a test can run real policy text (geekdojo/geekdojo-brain#804),
+// and Login logs in with a store-CA leaf of any CommonName against any role. Start waits on the store's
 // own health answer, never on a duration it picks, and Close proves teardown:
 // no process and no temporary directory are left behind
 // (geekdojo/geekdojo-brain#753, docs/testing-secret-store.md).
@@ -120,9 +123,10 @@ type Store struct {
 	url        string
 	clientTLS  *tls.Config
 	clientLeaf tlsca.LeafPaths
-	sealKey    string   // the seal key's path
-	auditPath  string   // the audit file, or "" when Config.Audit is off
-	args       []string // the store's command line after the binary
+	ca         *tlsca.CA // the store CA, which mints Login's leaves
+	sealKey    string    // the seal key's path
+	auditPath  string    // the audit file, or "" when Config.Audit is off
+	args       []string  // the store's command line after the binary
 
 	cmd     *exec.Cmd
 	stderr  *lineLog
@@ -131,6 +135,9 @@ type Store struct {
 
 	closeOnce sync.Once
 	closeErr  error
+
+	leafMu sync.Mutex
+	leaves map[string]tlsca.LeafPaths // client leaves by CommonName
 }
 
 // URL is the store's API address, https://127.0.0.1:<port>.
@@ -166,22 +173,44 @@ func (s *Store) ClientLeaf() tlsca.LeafPaths { return s.clientLeaf }
 // Token logs in through cert auth with the client leaf and returns the token.
 // It is test support: production login is geekdojo/geekdojo-brain#759's.
 func (s *Store) Token(ctx context.Context) (secret.Value, error) {
-	client := &http.Client{Transport: &http.Transport{TLSClientConfig: s.ClientTLS()}}
-	defer client.CloseIdleConnections()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/auth/cert/login",
-		bytes.NewReader([]byte(`{"name":"`+ClientRole+`"}`)))
+	return s.Login(ctx, ClientRole, ClientRole)
+}
+
+// TokenFor logs in against role with a store-CA leaf whose CommonName is the
+// role's own name, which is the leaf the role admits.
+func (s *Store) TokenFor(ctx context.Context, role string) (secret.Value, error) {
+	return s.Login(ctx, role, role)
+}
+
+// Login logs in through cert auth against role, presenting a store-CA client
+// leaf with CommonName leafCN (minted on first use, see ClientTLSFor), and
+// returns the token. A login the store refuses is an error naming the role,
+// the leaf and the status; the body is never repeated, because it may hold a
+// token.
+func (s *Store) Login(ctx context.Context, leafCN, role string) (secret.Value, error) {
+	tlsCfg, err := s.ClientTLSFor(leafCN)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+		return secret.Value{}, err
+	}
+	reqBody, err := json.Marshal(map[string]string{"name": role})
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login as %q: %w", role, err)
+	}
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}}
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.url+"/v1/auth/cert/login", bytes.NewReader(reqBody))
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secretstoretest: login as %q: %w", role, err)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+		return secret.Value{}, fmt.Errorf("secretstoretest: login as %q with leaf %q: %w", role, leafCN, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	defer clear(body)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("secretstoretest: login: %w", err)
+		return secret.Value{}, fmt.Errorf("secretstoretest: login as %q with leaf %q: %w", role, leafCN, err)
 	}
 	var login struct {
 		Auth struct {
@@ -189,9 +218,49 @@ func (s *Store) Token(ctx context.Context) (secret.Value, error) {
 		} `json:"auth"`
 	}
 	if resp.StatusCode != http.StatusOK || json.Unmarshal(body, &login) != nil || login.Auth.ClientToken == "" {
-		return secret.Value{}, fmt.Errorf("secretstoretest: login answered %d with no token", resp.StatusCode)
+		return secret.Value{}, fmt.Errorf("secretstoretest: login as %q with leaf %q answered %d with no token",
+			role, leafCN, resp.StatusCode)
 	}
 	return secret.New([]byte(login.Auth.ClientToken)), nil
+}
+
+// ClientTLSFor is the production client's TLS config (as ClientTLS) presenting
+// a store-CA client leaf with CommonName cn. The leaf is minted on first use
+// under the store's temporary root and reused after; cn must match the name
+// rule a Bootstrap's names follow. ClientTLSFor(ClientRole) presents the same
+// leaf as ClientTLS.
+func (s *Store) ClientTLSFor(cn string) (*tls.Config, error) {
+	leaf, err := s.leafFor(cn)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := secretstore.NewTLSConfig(s.ca.CertPEM, leaf.CertPath, leaf.KeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("secretstoretest: client TLS for %q: %w", cn, err)
+	}
+	return cfg, nil
+}
+
+func (s *Store) leafFor(cn string) (tlsca.LeafPaths, error) {
+	if !nameRE.MatchString(cn) {
+		return tlsca.LeafPaths{}, fmt.Errorf("secretstoretest: leaf CommonName %q is not a name matching %s", cn, nameRE)
+	}
+	s.leafMu.Lock()
+	defer s.leafMu.Unlock()
+	if p, ok := s.leaves[cn]; ok {
+		return p, nil
+	}
+	p, err := s.ca.MintLeafToDisk(filepath.Join(s.root, "leaves", cn), tlsca.LeafSpec{
+		Usage: tlsca.UsageClient, CommonName: cn,
+	})
+	if err != nil {
+		return tlsca.LeafPaths{}, fmt.Errorf("secretstoretest: client leaf %q: %w", cn, err)
+	}
+	if s.leaves == nil {
+		s.leaves = map[string]tlsca.LeafPaths{}
+	}
+	s.leaves[cn] = p
+	return p, nil
 }
 
 // RestartSealed stops the store, overwrites its seal key with fresh random
@@ -268,13 +337,25 @@ func (s *Store) stop(ctx context.Context, op string) error {
 	}
 }
 
-// Start brings up a store and returns once it answers healthy. On any failure
-// it tears down whatever it made, so nothing is left behind, and returns the
-// error joined with any teardown error.
+// Start brings up a store with the default bootstrap (the harness-kv mount
+// and the harness-client role) and returns once it answers healthy. It is
+// StartWith(ctx, defaultBootstrap()).
+func (h *Harness) Start(ctx context.Context) (*Store, error) {
+	return h.StartWith(ctx, defaultBootstrap())
+}
+
+// StartWith brings up a store whose self-init creates b, and returns once it
+// answers healthy. It refuses a Bootstrap self-init cannot be given before it
+// does any I/O. On any later failure it tears down whatever it made, so
+// nothing is left behind, and returns the error joined with any teardown
+// error.
 //
 // ctx bounds the wait for health. A store that never becomes healthy and
 // never exits (a wrong seal key, for one) is the case only ctx can end.
-func (h *Harness) Start(ctx context.Context) (*Store, error) {
+func (h *Harness) StartWith(ctx context.Context, b Bootstrap) (*Store, error) {
+	if err := b.validate(); err != nil {
+		return nil, err
+	}
 	version, err := h.checkVersion(ctx)
 	if err != nil {
 		return nil, err
@@ -284,7 +365,7 @@ func (h *Harness) Start(ctx context.Context) (*Store, error) {
 		return nil, fmt.Errorf("secretstoretest: temp root: %w", err)
 	}
 	s := &Store{h: h, log: h.cfg.Logger, root: root}
-	if err := h.start(ctx, s, version); err != nil {
+	if err := h.start(ctx, s, version, b); err != nil {
 		// Teardown waits for the store to honour SIGTERM. The caller's ctx may
 		// be the very thing that ended (a cancelled or expired wait), and a
 		// cancelled ctx would turn that wait into an immediate SIGKILL, so the
@@ -294,7 +375,7 @@ func (h *Harness) Start(ctx context.Context) (*Store, error) {
 	return s, nil
 }
 
-func (h *Harness) start(ctx context.Context, s *Store, version string) error {
+func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstrap) error {
 	if err := atrest.EnsureSecretDir(s.root); err != nil {
 		return fmt.Errorf("secretstoretest: temp root: %w", err)
 	}
@@ -320,6 +401,8 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 		return fmt.Errorf("secretstoretest: client leaf: %w", err)
 	}
 	s.clientLeaf = client
+	s.ca = ca
+	s.leaves = map[string]tlsca.LeafPaths{ClientRole: client}
 	if s.clientTLS, err = secretstore.NewTLSConfig(ca.CertPEM, client.CertPath, client.KeyPath); err != nil {
 		return fmt.Errorf("secretstoretest: client TLS: %w", err)
 	}
@@ -360,7 +443,19 @@ func (h *Harness) start(ctx context.Context, s *Store, version string) error {
 	if err := atrest.WriteSecretFile(mainPath, []byte(renderServerHCL(paths, port))); err != nil {
 		return fmt.Errorf("secretstoretest: main config: %w", err)
 	}
-	initJSON, err := renderInitJSON(ca.CertPEM)
+	// Each policy's text goes in a file of its own, owner-only like the
+	// configs, and self-init reads it from there (T34).
+	policyDir := filepath.Join(s.root, "policies")
+	if err := atrest.EnsureSecretDir(policyDir); err != nil {
+		return fmt.Errorf("secretstoretest: policy dir: %w", err)
+	}
+	policyPath := func(name string) string { return filepath.Join(policyDir, name+".hcl") }
+	for _, p := range b.policies() {
+		if err := atrest.WriteSecretFile(policyPath(p.Name), p.Text); err != nil {
+			return fmt.Errorf("secretstoretest: policy %s: %w", p.Name, err)
+		}
+	}
+	initJSON, err := renderInitJSON(b, ca.CertPEM, policyPath)
 	if err != nil {
 		return err
 	}

@@ -330,13 +330,15 @@ wait
 }
 
 // TC-753-03: the init config is self-init stanzas creating exactly the
-// policy, the kv-v2 mount, cert auth and the role, and nothing else.
+// policy, the kv-v2 mount, cert auth and the role, and nothing else. Since
+// geekdojo-brain#804 the policy text comes through a file source (T34), so
+// the policy check reads the source and the default bootstrap's text.
 func TestRenderInitJSON(t *testing.T) {
 	if KVMount != "harness-kv" || ClientRole != "harness-client" {
 		t.Fatalf("KVMount, ClientRole = %q, %q", KVMount, ClientRole)
 	}
 	pem := []byte("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
-	b, err := renderInitJSON(pem)
+	b, err := renderInitJSON(defaultBootstrap(), pem, func(name string) string { return "/t/policies/" + name + ".hcl" })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +379,15 @@ func TestRenderInitJSON(t *testing.T) {
 	}
 
 	pol := byPath["sys/policies/acl/"+KVMount]
-	text, _ := pol.Data["policy"].(string)
+	src, _ := pol.Data["policy"].(map[string]any)
+	if !reflect.DeepEqual(src, map[string]any{"eval_source": "file", "eval_type": "string", "path": "/t/policies/" + KVMount + ".hcl"}) {
+		t.Errorf("policy source = %v, want the file /t/policies/%s.hcl", pol.Data["policy"], KVMount)
+	}
+	pols := defaultBootstrap().policies()
+	if len(pols) != 1 || pols[0].Name != KVMount {
+		t.Fatalf("default bootstrap policies = %v, want only %s", pols, KVMount)
+	}
+	text := string(pols[0].Text)
 	if text != `path "harness-kv/*" { capabilities = ["create", "read", "update"] }`+"\n" {
 		t.Errorf("policy = %q, want create/read/update on harness-kv/* and nothing else", text)
 	}
