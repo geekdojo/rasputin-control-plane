@@ -137,6 +137,41 @@ jobs:
       - name: Build release artifacts
         run: ./scripts/build-release.sh "${{ steps.ver.outputs.version }}"
 
+      # Every api tarball carries the secrets store's fixed policy text as
+      # openbao-policy/, byte-equal to api/internal/secretstore/storepolicy
+      # (geekdojo/geekdojo-brain#804, F-804-09). rasputin-os installs those
+      # files and the store's self-init reads them, so a tarball without them,
+      # or with different bytes, must never publish. Runs before the publish
+      # step on every path, dry runs included, and lists what it found.
+      - name: api tarballs carry the store policy
+        run: |
+          set -euo pipefail
+          src=api/internal/secretstore/storepolicy
+          for need in rasputin-api.hcl rasputin-seal-rotate.hcl; do
+            [ -f "$src/$need" ] || { echo "::error::$src/$need is missing, so there is no policy text to check against."; exit 1; }
+          done
+          want=$(cd "$src" && ls -1 -- *.hcl)
+          n=0
+          for t in dist/rasputin-api-*.tar.gz; do
+            [ -f "$t" ] || continue
+            n=$((n + 1))
+            x=$(mktemp -d)
+            echo "$t:"
+            tar -tzvf "$t" | grep ' openbao-policy/' || true
+            tar -xzf "$t" -C "$x" openbao-policy \
+              || { echo "::error::$t holds no openbao-policy/ directory."; exit 1; }
+            got=$(cd "$x/openbao-policy" && ls -1A)
+            [ "$got" = "$want" ] \
+              || { echo "::error::$t openbao-policy/ holds [$(echo $got)], want exactly [$(echo $want)]."; exit 1; }
+            for f in $want; do
+              cmp -s "$src/$f" "$x/openbao-policy/$f" \
+                || { echo "::error::$t openbao-policy/$f differs from $src/$f."; exit 1; }
+            done
+            rm -rf "$x"
+          done
+          [ "$n" -eq 2 ] || { echo "::error::found $n api tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
+          echo "every api tarball carries openbao-policy/ byte-equal to $src: $(echo $want)"
+
       # Tag push → publish a GitHub Release with the tarballs + checksums.
       # rasputin-os fetches these from
       #   .../releases/download/v<version>/rasputin-<comp>-<version>-linux-<arch>.tar.gz

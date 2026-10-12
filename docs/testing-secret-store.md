@@ -64,11 +64,10 @@ Around it:
 - **The rest of the listener matrix.** A wrong-EKU leaf is not run here. It rests on #679's
   evidence (row T20).
 - **Production use of the store.** It does not cover the api's login
-  ([geekdojo-brain#759](https://github.com/geekdojo/geekdojo-brain/issues/759)), a role pinned to
-  the api's identity, a least-privilege production policy
-  ([geekdojo-brain#804](https://github.com/geekdojo/geekdojo-brain/issues/804)), restore
+  ([geekdojo-brain#759](https://github.com/geekdojo/geekdojo-brain/issues/759)), restore
   ([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)), or an audit
-  device. The api's store client has its own test, below.
+  device. The api's store client has its own test, and so do the production policies
+  ([geekdojo-brain#804](https://github.com/geekdojo/geekdojo-brain/issues/804)), both below.
 - **A clean stop when `go test` times out.** Start waits for the store's health for as long as
   its ctx allows. The test passes `t.Context()`, so a store that never becomes healthy and never
   exits (a wrong seal key, for one) is bounded only by `go test -timeout`. That timeout panics
@@ -212,6 +211,62 @@ Expect `--- PASS: TestStoreGate_AgainstTheRealStore` with one `PASS` line per st
 `--- PASS: TestSecretStore_StopAndRestartKeepData`, and exit status 0. With the binary absent and
 the switch set, each fails naming the variable, exactly as the smoke test does.
 
+## The store policy's functional test
+
+`TestStorePolicy_AgainstTheRealStore`, in
+`api/internal/secretstore/storepolicy/policy_functional_test.go`, runs the secrets store's
+shipped policy text in the same harness and binary, under the same switch, in the same CI step
+([geekdojo-brain#804](https://github.com/geekdojo/geekdojo-brain/issues/804)).
+
+The text has one source, `api/internal/secretstore/storepolicy/*.hcl`. `scripts/build-release.sh`
+packs those files into every api tarball as `openbao-policy/`, through
+`scripts/pack-store-policy.sh`, and the release workflow refuses to publish a tarball whose copy
+is missing or differs. rasputin-os installs them, and the image's self-init reads them through a
+`file` source. This test starts the store with `secretstoretest.StartWith`, which creates the
+`rasputin-secrets` kv-v2 mount and one cert role per policy the same way: each policy read from a
+file, each role admitting only its own CommonName, carrying only its own policy, with
+`token_no_default_policy` set. Two test-only roles hold half of the rotation policy each.
+
+What it proves, against OpenBao v2.7.1:
+
+- **Self-init leaves no recovery material.** `sys/seal-status` shows t=0 and n=0 (T35,
+  TC-804-08).
+- **The api's token has its own paths and nothing else.** It creates, reads, updates and deletes
+  under `rasputin-secrets/data/apps/` and `data/devices/`, reads and deletes their metadata, and
+  its lookup-self shows exactly `["rasputin-api"]`, with no `default` and no `root` (T37,
+  TC-804-05). It gets 403 on every other path the test tries: other data, `sys/mounts`, the
+  policy endpoints (list, read and write), `sys/audit`, `sys/auth`, `sys/capabilities-self`,
+  `sys/tools/hash`, `sys/rotate/root`, the recovery-key and raft snapshot paths, `identity/`,
+  `auth/token/create` (also asking for the rotation policy), `create-orphan`,
+  `auth/token/accessors`, and writes to both cert roles. `sys/generate-root/attempt` answers
+  405 instead: the listener refuses it before any policy applies (T21). Its leaf cannot log in
+  against the rotation role (TC-804-06).
+- **The rotation policy is the minimum.** The rotation token gets 204 on `sys/rotate/root` and
+  403 on every other path above, the api's data paths included (405 on
+  `sys/generate-root/attempt`, at the listener, as for the api). A sudo-only and an update-only
+  policy on `sys/rotate/root` each get 403, so `update` plus `sudo` is what rotation needs
+  (TC-804-07).
+- **Policy text through a file source** works on the pinned release (T34).
+- No token appears in the test's log.
+
+It does not prove the image: that the tarball's files reach `/usr/share/rasputin/openbao-policy/`,
+the image's `init.json`, the audit stanza, or the store under systemd. Those are rasputin-os's
+tests. It does not cover the provisioner's role and policy
+([geekdojo-brain#805](https://github.com/geekdojo/geekdojo-brain/issues/805)), or whether `sudo` on
+`sys/rotate/root` alone is safe
+([geekdojo-brain#830](https://github.com/geekdojo/geekdojo-brain/issues/830)).
+
+Run it the same way as the smoke test, with `-run TestStorePolicy_`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestStorePolicy_ ./api/internal/secretstore/storepolicy
+```
+
+Expect `--- PASS: TestStorePolicy_AgainstTheRealStore` with one `PASS` line per test case, each
+probe's status in the log, and exit status 0. The static checks on the same text
+(`go test ./api/internal/secretstore/storepolicy` with no binary) and the packing script's tests
+(`./scripts/test-pack-store-policy.sh`) need no store.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -343,3 +398,17 @@ The cases for geekdojo-brain#760 that this document's tests check:
 | TC-760-27 | Store restarted: the alert clears, the deploy succeeds | `TestStoreGate_AgainstTheRealStore` |
 | TC-760-28 | Store sealed: sealed alert, the deploy refused | `TestStoreGate_AgainstTheRealStore` |
 | TC-760-29 | No vendor name in the copy, no secret in the logs or job events; required mode | `TestStoreGate_AgainstTheRealStore`, and the `env -u` command above with `-run TestStoreGate_ ./api/internal/apps` |
+
+The cases for geekdojo-brain#804 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-804-01 | `Names` and `Text`: exactly the two policies, the embedded bytes, an unknown name refused | `TestNamesAndText` |
+| TC-804-02 | The api policy's allow-list, and six injected stanzas refused | `TestAPIPolicy_AllowList` |
+| TC-804-03 | The rotation policy is one stanza; no never-grant path in either file | `TestSealRotatePolicy_AndNeverGrantPaths` |
+| TC-804-04 | `StartWith` renders the roles and file sources, and refuses each bad `Bootstrap` | `TestStartWith_RendersTwoRoles`, `TestStartWith_RefusesBadBootstrap`, `TestLogin` |
+| TC-804-05 | The api token's own paths and lookup-self | `TestStorePolicy_AgainstTheRealStore` |
+| TC-804-06 | The api token is refused everywhere else, and cannot log in as the rotation role | `TestStorePolicy_AgainstTheRealStore` |
+| TC-804-07 | The rotation token rotates and nothing else; neither half of its policy rotates | `TestStorePolicy_AgainstTheRealStore` |
+| TC-804-08 | t=0 n=0 after self-init | `TestStorePolicy_AgainstTheRealStore` |
+| TC-804-09 | The policy files are packed byte-equal, an empty source is refused, and the release checks each api tarball | `./scripts/test-pack-store-policy.sh`; the release workflow's `api tarballs carry the store policy` step |
