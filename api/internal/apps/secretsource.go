@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -22,6 +23,26 @@ import (
 // honour the step's deadline.
 type SecretSource interface {
 	ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error)
+}
+
+// codedRefusal is a source's refusal that is already the sentence a person
+// reads, carrying a stable code (the secret store's not-ready refusal,
+// geekdojo/geekdojo-brain#760). The push step returns it as it is, so the
+// job's recorded error is that sentence and nothing is prefixed to it.
+type codedRefusal interface {
+	error
+	Code() string
+}
+
+// resolveError is the push step's error for a source that refused appID's
+// compose: a coded refusal unchanged, and any other error wrapped with the
+// app it was for.
+func resolveError(appID string, err error) error {
+	var coded codedRefusal
+	if errors.As(err, &coded) {
+		return coded
+	}
+	return fmt.Errorf("apps: resolve compose for %s: %w", appID, err)
 }
 
 // requireSecretSource refuses a nil source for the named workflow kind. Every

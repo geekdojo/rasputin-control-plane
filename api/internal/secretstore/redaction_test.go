@@ -300,3 +300,38 @@ func TestLogRecords(t *testing.T) {
 		})
 	}
 }
+
+// TC-760-21: a Health call that finds the store sealed, uninitialised or
+// unreachable is recorded at DEBUG, because its callers log that outcome
+// themselves; a protocol error stays ERROR. TestLogRecords above keeps the KV
+// levels unchanged.
+func TestHealthLogLevels(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		health func(http.ResponseWriter)
+		kind   string
+		level  slog.Level
+	}{
+		{"sealed", healthAnswer(503, true, true), "sealed", slog.LevelDebug},
+		{"uninitialised", healthAnswer(501, false, true), "uninitialised", slog.LevelDebug},
+		{"unreachable", hangUp, "unreachable", slog.LevelDebug},
+		{"protocol", healthAnswer(200, true, true), "protocol error", slog.LevelError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, scripted(t, kvAnswer{health: tc.health}))
+			if _, err := f.client.Health(t.Context()); err == nil {
+				t.Fatal("Health succeeded")
+			}
+			recs := f.rec.Records()
+			if len(recs) != 1 {
+				t.Fatalf("%d records, want exactly 1", len(recs))
+			}
+			if recs[0].Level != tc.level {
+				t.Errorf("level = %v, want %v", recs[0].Level, tc.level)
+			}
+			if got, _ := logkittest.Attr(recs[0], "kind"); got != tc.kind {
+				t.Errorf("kind = %q, want %q", got, tc.kind)
+			}
+		})
+	}
+}

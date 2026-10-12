@@ -171,6 +171,12 @@ func (c *Client) Versions(ctx context.Context, token secret.Value, p KVPath) (Me
 // failed writes the client's one record for a failed call and returns e. The
 // level is DEBUG for the outcomes a caller expects (not found, a lost
 // check-and-set race), ERROR for a protocol error, and WARN for the rest.
+//
+// A Health call that finds the store sealed, uninitialised or unreachable is
+// DEBUG too: asking whether the store is ready is how its callers find out it
+// is not, and each logs that outcome itself (the readiness monitor once per
+// change, the audit rotator per run), so a WARN here would repeat on every
+// alerts poll while the store is down (geekdojo/geekdojo-brain#760).
 func (c *Client) failed(ctx context.Context, e *Error) error {
 	level := slog.LevelWarn
 	switch e.Kind {
@@ -178,6 +184,10 @@ func (c *Client) failed(ctx context.Context, e *Error) error {
 		level = slog.LevelDebug
 	case ErrProtocol:
 		level = slog.LevelError
+	case ErrSealed, ErrUninitialised, ErrUnreachable:
+		if e.Op == "health" {
+			level = slog.LevelDebug
+		}
 	}
 	c.log.LogAttrs(ctx, level, "secret store call failed",
 		append([]slog.Attr{slog.String("component", "secretstore")}, e.LogAttrs()...)...)
