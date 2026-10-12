@@ -43,9 +43,40 @@ const (
 	// out of time on the client's own bound at that moment (#684 guard 4).
 	AuditBlocked State = "audit-blocked"
 	// Quiesced: the store is not ready while a running job holds a quiesce
-	// for a backup (F4.1).
+	// for a backup (F4.1) or a seal-key rotation (#830).
 	Quiesced State = "quiesced"
 )
+
+// QuiesceReason is why a job holds the store quiesced. The alert's ID is the
+// same for every reason; its title and detail name the reason, so the copy
+// never describes one job as the other (ERR-MESSAGE,
+// geekdojo/geekdojo-brain#830).
+type QuiesceReason int
+
+// The reasons.
+const (
+	// QuiesceBackup: a backup is capturing the store (F4.1).
+	QuiesceBackup QuiesceReason = iota
+	// QuiesceSealRotation: the seal-key rotation restarts the store
+	// (geekdojo/geekdojo-brain#830).
+	QuiesceSealRotation
+)
+
+// String names the reason in log fields.
+func (r QuiesceReason) String() string {
+	if r == QuiesceSealRotation {
+		return "seal-rotation"
+	}
+	return "backup"
+}
+
+// phrase is the reason as the log message words it.
+func (r QuiesceReason) phrase() string {
+	if r == QuiesceSealRotation {
+		return "a seal-key rotation"
+	}
+	return "a backup"
+}
 
 // Store is the one store call the Monitor makes.
 type Store interface {
@@ -76,11 +107,14 @@ type Monitor struct {
 	// ObserveAudited and a not-ready reading.
 	auditBlocked bool
 	holds        map[*hold]struct{}
+	// reason is the reason of the hold that made the last reading Quiesced.
+	reason QuiesceReason
 }
 
 // hold is one Quiesce call that has not been released.
 type hold struct {
-	jobID string
+	jobID  string
+	reason QuiesceReason
 	// warned is set once the hold has been logged as ignored, so a leaked
 	// hold is reported once rather than on every reading.
 	warned bool
@@ -121,8 +155,11 @@ func (m *Monitor) read(ctx context.Context) (State, time.Time, error) {
 		// A store that went down dropped the request its audit sink held,
 		// and a restarted one opens a new sink.
 		m.clearAuditBlocked(ctx, "the store is not ready")
-		if m.quiesced(ctx) {
+		if reason, ok := m.quiesced(ctx); ok {
 			st = Quiesced
+			m.mu.Lock()
+			m.reason = reason
+			m.mu.Unlock()
 		}
 	} else if m.isAuditBlocked() {
 		st, kind = AuditBlocked, string(AuditBlocked)
@@ -233,17 +270,17 @@ func (m *Monitor) clearAuditBlocked(ctx context.Context, why string) {
 	}
 }
 
-// Quiesce records that jobID holds the store quiesced for a backup, so a
+// Quiesce records that jobID holds the store quiesced for reason, so a
 // not-ready store reads Quiesced while that job runs (F4.1,
-// geekdojo/geekdojo-brain#765). release ends the hold; calling it again does
-// nothing.
-func (m *Monitor) Quiesce(jobID string) (release func()) {
-	h := &hold{jobID: jobID}
+// geekdojo/geekdojo-brain#765, #830). release ends the hold; calling it again
+// does nothing.
+func (m *Monitor) Quiesce(jobID string, reason QuiesceReason) (release func()) {
+	h := &hold{jobID: jobID, reason: reason}
 	m.mu.Lock()
 	m.holds[h] = struct{}{}
 	m.mu.Unlock()
-	m.log.Info("secret store quiesced for a backup",
-		"component", "secretstore", "event", "secretstore.quiesced", "job_id", jobID)
+	m.log.Info("secret store quiesced for "+reason.phrase(),
+		"component", "secretstore", "event", "secretstore.quiesced", "job_id", jobID, "reason", reason.String())
 	var once sync.Once
 	return func() {
 		once.Do(func() {
@@ -251,15 +288,17 @@ func (m *Monitor) Quiesce(jobID string) (release func()) {
 			delete(m.holds, h)
 			m.mu.Unlock()
 			m.log.Info("secret store quiesce released",
-				"component", "secretstore", "event", "secretstore.quiesce_released", "job_id", jobID)
+				"component", "secretstore", "event", "secretstore.quiesce_released", "job_id", jobID, "reason", reason.String())
 		})
 	}
 }
 
-// quiesced reports whether a hold is held by a job that is running now. A
-// hold whose job is not running, or whose status cannot be read, is ignored
-// with a WARN, so a leaked hold cannot hide an outage.
-func (m *Monitor) quiesced(ctx context.Context) bool {
+// quiesced reports whether a hold is held by a job that is running now, and
+// that hold's reason. A hold whose job is not running, or whose status cannot
+// be read, is ignored with a WARN, so a leaked hold cannot hide an outage.
+// With two running holds, a seal rotation's reason wins: it is the one that
+// restarts the store.
+func (m *Monitor) quiesced(ctx context.Context) (QuiesceReason, bool) {
 	m.mu.Lock()
 	holds := make([]*hold, 0, len(m.holds))
 	for h := range m.holds {
@@ -267,10 +306,12 @@ func (m *Monitor) quiesced(ctx context.Context) bool {
 	}
 	m.mu.Unlock()
 	running := false
+	reason := QuiesceBackup
 	for _, h := range holds {
 		ok, err := m.jobRunning(ctx, h.jobID)
 		if err == nil && ok {
 			running = true
+			reason = max(reason, h.reason)
 			continue
 		}
 		if err == nil {
@@ -285,7 +326,7 @@ func (m *Monitor) quiesced(ctx context.Context) bool {
 				slog.String("component", "secretstore"), slog.String("job_id", h.jobID), slog.String("err", err.Error()))
 		}
 	}
-	return running
+	return reason, running
 }
 
 // Alerts reads the state now and returns its alert, or none when the store
@@ -296,7 +337,10 @@ func (m *Monitor) Alerts(ctx context.Context, _ time.Time) []proto.Alert {
 	if err != nil {
 		return nil
 	}
-	a, ok := alertFor(st)
+	m.mu.Lock()
+	reason := m.reason
+	m.mu.Unlock()
+	a, ok := alertFor(st, reason)
 	if !ok {
 		return nil
 	}
@@ -304,8 +348,9 @@ func (m *Monitor) Alerts(ctx context.Context, _ time.Time) []proto.Alert {
 	return []proto.Alert{a}
 }
 
-// alertFor is the alert a state raises. The copy never names the vendor.
-func alertFor(st State) (proto.Alert, bool) {
+// alertFor is the alert a state raises; reason words the Quiesced copy. The
+// copy never names the vendor.
+func alertFor(st State, reason QuiesceReason) (proto.Alert, bool) {
 	const unaffected = " Running apps are not affected."
 	a := proto.Alert{ID: "secret-store:" + string(st), Severity: proto.AlertCrit, Source: proto.AlertSourceSecurity}
 	switch st {
@@ -327,6 +372,12 @@ func alertFor(st State) (proto.Alert, bool) {
 			"Apps that use secrets cannot be deployed until it recovers." + unaffected + " The api log names the cause."
 	case Quiesced:
 		a.Severity = proto.AlertWarn
+		if reason == QuiesceSealRotation {
+			a.Title = "The secret store is paused for a seal-key rotation."
+			a.Detail = "The secret store is paused while its seal key is rotated. " +
+				"Apps that use secrets cannot be deployed until the rotation finishes." + unaffected
+			break
+		}
 		a.Title = "The secret store is paused for a backup."
 		a.Detail = "The secret store is paused while a backup runs. " +
 			"Apps that use secrets cannot be deployed until the backup finishes." + unaffected

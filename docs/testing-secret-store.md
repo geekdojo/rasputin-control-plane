@@ -51,7 +51,7 @@ Around it:
 
 - `scripts/install-openbao.sh` reads the release and the sha256 out of `pin.go`, so CI
   downloads exactly what the const names, and a stale hash fails the install.
-- Rows T20 to T42 of `.github/third-party-capabilities.tsv` point at the const, so changing the
+- Rows T20 to T46 of `.github/third-party-capabilities.tsv` point at the const, so changing the
   tag fails `go test ./api/internal/gatereg` until each row is re-verified at the new release.
 
 ## What it does not prove
@@ -252,8 +252,8 @@ What it proves, against OpenBao v2.7.1:
 It does not prove the image: that the tarball's files reach `/usr/share/rasputin/openbao-policy/`,
 the image's `init.json`, the audit stanza, or the store under systemd. Those are rasputin-os's
 tests. It does not cover the provisioner's role and policy
-([geekdojo-brain#805](https://github.com/geekdojo/geekdojo-brain/issues/805)), or whether `sudo` on
-`sys/rotate/root` alone is safe
+([geekdojo-brain#805](https://github.com/geekdojo/geekdojo-brain/issues/805)). What the rotation
+token can do beyond `sys/rotate/root` is the seal rotation's functional test, below
 ([geekdojo-brain#830](https://github.com/geekdojo/geekdojo-brain/issues/830)).
 
 Run it the same way as the smoke test, with `-run TestStorePolicy_`:
@@ -266,6 +266,72 @@ Expect `--- PASS: TestStorePolicy_AgainstTheRealStore` with one `PASS` line per 
 probe's status in the log, and exit status 0. The static checks on the same text
 (`go test ./api/internal/secretstore/storepolicy` with no binary) and the packing script's tests
 (`./scripts/test-pack-store-policy.sh`) need no store.
+
+## The seal rotation's functional test
+
+`TestSealRotate_AgainstTheRealStore`, in
+`api/internal/secretstore/sealrotate/functional_test.go`, runs the seal-key rotation job against
+the real store, under the same switch, in the same CI step
+([geekdojo-brain#830](https://github.com/geekdojo/geekdojo-brain/issues/830)).
+
+The harness starts the store with `Config.ExternalSeal`, so the seal is not in the main config: it
+is a third `-config`, the fragment `seal.hcl` in the store's seal directory (`Store.SealDir`),
+beside `seal-key` and an empty `rotation/`, in the shape `rasputin-seal-key.sh` writes on the
+image. Self-init creates the `rasputin-secrets` mount, the api's role and the
+`rasputin-seal-rotate` role from `storepolicy`'s files. The job runs on a real runner with the
+real `Files`, `Gate` and `Rotator`, and the production rotation client, which mints a new store-CA
+leaf for the rotation role on every handshake through the api's own mint,
+`sealrotate.MintRotationLeaf`. The harness stands in for systemd: a restart is
+`Stop` and then `StartNoWait`, and the rotator waits on `sys/health` itself.
+
+What it proves, against OpenBao v2.7.1:
+
+- **Rotation and re-wrap (TC-830-17).** Two rotations in a row each succeed as `rotated`, change
+  the key id, leave `rotation/` empty and the fragment naming `seal-key` alone, and survive a cold
+  stop and start, after which a canary written before the first rotation reads back (T44, T45,
+  T46).
+- **A second rotation with no re-wrap fails closed (TC-830-18).** With a key staged and opened
+  but never re-wrapped, staging a third key with the second as previous leaves the store at 503,
+  initialised and sealed, and its output names the unknown key id (T45).
+- **Cold copies on either side of a rotation each open (TC-830-19).** A copy of the data
+  directory, `seal-key` and the fragment, taken with the store stopped before a rotation and
+  another after it, each start, unseal under their own key id and return the canary. The copy is
+  put back in place of the store's own files; the identity archive's round trip is
+  [geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)'s.
+- **A run stopped part way is finished by the next (TC-830-20).** With the tree left as a run
+  stopped after the Staged write (the store still running on the old key), after the Verify write,
+  and after the Clean write, the next job ends `resumed`, mints no key, leaves a Clean tree under
+  the newest key, and the store opens on it alone after a cold restart. A resume that finds
+  Staged with the store answering 200 re-wraps the running store first, then restarts it on the
+  Staged fragment and re-wraps again, so verify opens first time and never takes its retry.
+- **The rotation token re-wraps and nothing else (TC-830-21).** `sys/rotate/root` answers 204
+  with an empty body; its siblings under `sys/rotate` (`root/init`, `update`, `verify`, `backup`,
+  `keyring`, `keyring/config`, `config`), `sys/seal`, `sys/raw/core/keyring`, `sys/key-status`,
+  `sys/generate-recovery-token/attempt` and `sys/capabilities-self` answer 403; the token-less
+  `sys/rekey/init` and `sys/generate-root/attempt` answer 405 at the listener (T43).
+- **No key or token in the logs (TC-830-22).** Every seal key the test saw, raw, hex and base64,
+  every rotation leaf key the mint made (PKCS#8, raw, hex, base64 and a PEM line), every token it
+  holds, and anything shaped like a store token are absent from the captured api
+  log and the store's own output.
+
+What it does not prove:
+
+- **systemd.** The image delivers the staged key through a `LoadCredential=` directory and the
+  oneshot reads the new fragment shapes at boot. Those are rasputin-os's tests
+  (`test/store-unit-functional.sh` scenario 9, `test/seal-key-test.sh`).
+- **The api as a non-root user**
+  ([geekdojo-brain#670](https://github.com/geekdojo/geekdojo-brain/issues/670)), which will need
+  a root helper for `openbao-seal/`.
+
+Run it the same way as the smoke test, with `-run TestSealRotate_`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestSealRotate_ ./api/internal/secretstore/sealrotate
+```
+
+Expect `--- PASS: TestSealRotate_AgainstTheRealStore` with one `PASS` line per test case and exit
+status 0. It takes about 5 seconds; no resume waits out an `UnsealWait`. The unit tests in the
+same package need no store.
 
 ## The pin, and bumping it
 
@@ -281,7 +347,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T42 at it before editing their `version` column.
+  release, and re-verifies T20 to T46 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1

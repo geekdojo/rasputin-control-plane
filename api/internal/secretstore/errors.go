@@ -51,7 +51,7 @@ var (
 // caller that maps this error logs the full reason under its own correlation
 // id (geekdojo/geekdojo-brain#758, F-758-06).
 type Error struct {
-	Op     string // health, read, write or versions
+	Op     string // health, read, write, versions, login or rotate_root
 	Mount  string
 	Path   string
 	Status int // the HTTP status, 0 when none was received

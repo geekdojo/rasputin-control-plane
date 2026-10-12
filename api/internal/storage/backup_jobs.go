@@ -159,6 +159,52 @@ type RunConfig struct {
 	// prune could delete the generation the restore is reading. Nil means
 	// no restore surface is wired and nothing is checked.
 	Restores *RestoreSessions
+	// CaptureLock is the seal-key rotation's backup capture lock
+	// (geekdojo/geekdojo-brain#830, AC4). Step 3 acquires it before it
+	// captures anything, waiting while a rotation holds it, and step 5
+	// releases it once the archive is assembled; the terminal hook releases
+	// it on every other path. Nil means no secret store is wired and there
+	// is nothing to wait for.
+	CaptureLock CaptureLock
+}
+
+// CaptureLock is the one lock a backup takes around its capture (ARCH-ISP):
+// sealrotate.Gate is the implementation main wires.
+type CaptureLock interface {
+	// Acquire waits for the lock and takes it for jobID, or refuses with an
+	// error whose text is a sentence, or returns ctx's error.
+	Acquire(ctx context.Context, jobID string) error
+	// Release frees the lock when jobID holds it; it is idempotent.
+	Release(jobID string)
+}
+
+// sentenceError is an error whose text is a sentence a person reads as the
+// job's error (ERR-MESSAGE); the string type follows storeaudit's jobError.
+type sentenceError string
+
+func (e sentenceError) Error() string { return string(e) }
+
+// errCaptureLockWait is a backup whose wait for a seal-key rotation outlived
+// the snapshot step's budget.
+const errCaptureLockWait sentenceError = "This backup waited for a seal-key rotation to finish and ran out of time, so it did not capture anything. Run the backup again once the rotation has finished."
+
+// acquireCapture takes cfg.CaptureLock for the job, when one is wired.
+func acquireCapture(sc *jobs.StepCtx, cfg RunConfig) error {
+	if cfg.CaptureLock == nil {
+		return nil
+	}
+	err := cfg.CaptureLock.Acquire(sc.Ctx, sc.JobID)
+	if err != nil && sc.Ctx.Err() != nil {
+		return errCaptureLockWait
+	}
+	return err
+}
+
+// releaseCapture frees cfg.CaptureLock for jobID, when one is wired.
+func releaseCapture(cfg RunConfig, jobID string) {
+	if cfg.CaptureLock != nil {
+		cfg.CaptureLock.Release(jobID)
+	}
 }
 
 // stagingRootRef carries the agent-reported staging root from step 2 to
@@ -771,6 +817,11 @@ func runSnapshotDB(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		// Before anything is captured: a seal-key rotation holding the lock
+		// finishes first, so the capture sees one settled key (#830, AC4).
+		if err := acquireCapture(sc, cfg); err != nil {
+			return nil, err
+		}
 		stagingDir, err := runStagingDir(sc)
 		if err != nil {
 			return nil, err
@@ -995,6 +1046,9 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		for _, e := range manifest.Entries {
 			sc.Log("info", fmt.Sprintf("captured %s (%s)", e.Path, humanBytes(byteCount(e.SizeBytes))))
 		}
+		// The capture is done: the archive holds everything this run takes
+		// from the control plane, so a seal-key rotation may start (#830).
+		releaseCapture(cfg, sc.JobID)
 		// The scope, in the job feed, on every run — the fourth of the six
 		// surfaces that carry it, and the one an operator is watching live.
 		level := "warn"
@@ -1331,6 +1385,10 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 // on.
 func finalizeRunRow(store *Store, cfg RunConfig) func(context.Context, string, bool, string) {
 	return func(ctx context.Context, jobID string, success bool, errMsg string) {
+		// Every terminal path frees the capture lock this run may still hold
+		// (#830); a run that released it at assemble, or never took it,
+		// releases nothing.
+		releaseCapture(cfg, jobID)
 		row, err := store.GetRun(ctx, jobID)
 		if err != nil || row == nil {
 			return // not a backup run, or the row was never created

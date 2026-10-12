@@ -32,10 +32,13 @@
 //     1 GiB), at most one, from the source SetDiskAlerts wires
 //     (storeaudit.FreeSpace, geekdojo/geekdojo-brain#799).
 //   - secret store → secret-store:<state> (crit when sealed, uninitialised,
-//     unreachable or audit-blocked; warn when paused for a backup), at most
-//     one, from the source SetStoreAlerts wires (storestate.Monitor.Alerts,
-//     geekdojo/geekdojo-brain#760). It reads the store's sys/health on each
-//     List, so it raises and clears on the store's own answer.
+//     unreachable or audit-blocked; warn when paused for a backup or a
+//     seal-key rotation), at most one, from the source SetStoreAlerts wires
+//     (storestate.Monitor.Alerts, geekdojo/geekdojo-brain#760). It reads the
+//     store's sys/health on each List, so it raises and clears on the store's
+//     own answer. Under openbao the same source also carries
+//     secret-store:seal-rotation-incomplete (crit), raised while a seal-key
+//     rotation has stopped part way (sealrotate.Rotator.Alerts, #830).
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
