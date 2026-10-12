@@ -280,7 +280,7 @@ What it proves, against OpenBao v2.7.1:
 - **Every root and admin route is refused** (TC-805-13), **every route to `rasputin-seal-rotate`**
   is refused, and only that role's own login carries it (TC-805-14), and **the api's token cannot
   provision** (TC-805-15).
-- Rows T43 to T52 of `.github/third-party-capabilities.tsv` rest on it. Row T53, the unseal log
+- Rows T47 to T56 of `.github/third-party-capabilities.tsv` rest on it. Row T57, the unseal log
   lines the provisioner's wait reads, rests on rasputin-os's `test/store-unit-functional.sh`.
 
 Run both tests the same way as the smoke test, with `-run AgainstTheRealStore`:
