@@ -17,14 +17,18 @@
 //  200. A fresh run that gets no 200 rolls back to Clean: no re-wrap has
 //     been sent, so the old key alone still opens the store.
 //  4. rewrap: sys/rotate/root, so the root key is wrapped by the new key.
-//     A failure keeps Staged and never restarts the store; the next run
-//     re-wraps the running store first.
+//     A failure keeps Staged and never restarts the store.
 //  5. verify: write Verify (the new key alone), restart, wait for 200.
 //  6. settle: copy the new key over seal-key, write Clean, restart, wait for
 //     200, and empty rotation/.
 //
 // A run that finds any tree but a Clean, empty one finishes it and mints
-// nothing; its outcome is "resumed", and a new rotation is a fresh run.
+// nothing; its outcome is "resumed", and a new rotation is a fresh run. A
+// run that finds Staged with the store answering 200 re-wraps the running
+// store first, because after a failed re-wrap only that store may hold a
+// good keyring, and only then restarts it on Staged, re-wraps again and
+// verifies. A run that finds Staged with the store down restarts it on
+// Staged, then re-wraps and verifies.
 //
 // The seal key is only ever a secret.Value. Files.writeKey is the one place
 // its bytes leave, into a 0600 file through atrest.
@@ -369,11 +373,17 @@ func (r *Rotator) stageFailed(sc *jobs.StepCtx, ru *run, cause error) error {
 }
 
 // unsealStaged restarts the store on the Staged fragment and waits for 200.
-// A fresh run that gets none rolls back to Clean. A resume of a Staged tree
-// restarts it too, even when the store already answers 200: a 200 does not
-// prove the running store loaded Staged (the run may have stopped before its
-// restart), and a re-wrap under the old seal alone would leave Verify unable
-// to open (F-830-14).
+// A fresh run that gets none rolls back to Clean.
+//
+// A resume of a Staged tree restarts it too, so the rewrap step re-wraps a
+// store that loaded Staged and verify opens first time (F-830-14). When the
+// store answered 200 at validate, the running store is re-wrapped before
+// that restart (F-830-16): after a re-wrap that failed part way only the
+// running store may hold a good keyring, and a restart before it is
+// repaired would leave a store that cannot open. A re-wrap under the old
+// key alone is harmless, because the restart that follows still loads the
+// old key as previous. A failure of that re-wrap keeps Staged and never
+// restarts the store.
 func (r *Rotator) unsealStaged(sc *jobs.StepCtx) (json.RawMessage, error) {
 	const phase = "unseal_staged"
 	ru := r.get(sc.JobID)
@@ -383,6 +393,12 @@ func (r *Rotator) unsealStaged(sc *jobs.StepCtx) (json.RawMessage, error) {
 	switch {
 	case ru.fresh:
 	case ru.tree.Resume == RewrapFirst:
+		if ru.storeUp {
+			if err := r.rotateRoot(sc.Ctx, ru); err != nil {
+				return nil, r.rewrapFailed(sc, phase, ru, err)
+			}
+			r.log(sc, slog.LevelInfo, phase, "running secret store re-wrapped before its restart under the staged key", ru)
+		}
 		if err := r.restartAndWait(sc.Ctx); err != nil {
 			return nil, r.fail(sc, phase, errStagedResume, ru, "err", err.Error())
 		}
@@ -418,14 +434,20 @@ func (r *Rotator) rewrap(sc *jobs.StepCtx) (json.RawMessage, error) {
 		return nil, nil
 	}
 	if err := r.rotateRoot(sc.Ctx, ru); err != nil {
-		e := errRewrap
-		if errors.Is(err, errLoginFailed) {
-			e = errRewrapLogin
-		}
-		return nil, r.fail(sc, phase, e, ru, errAttrs(err)...)
+		return nil, r.rewrapFailed(sc, phase, ru, err)
 	}
 	r.log(sc, slog.LevelInfo, phase, "root key re-wrapped under the new seal key", ru)
 	return nil, nil
+}
+
+// rewrapFailed logs one ERROR for a failed re-wrap and returns its sentence.
+// The caller keeps Staged and does not restart the store.
+func (r *Rotator) rewrapFailed(sc *jobs.StepCtx, phase string, ru *run, err error) error {
+	e := errRewrap
+	if errors.Is(err, errLoginFailed) {
+		e = errRewrapLogin
+	}
+	return r.fail(sc, phase, e, ru, errAttrs(err)...)
 }
 
 // errLoginFailed marks a re-wrap that never reached sys/rotate/root.

@@ -75,8 +75,9 @@ const (
 	Fresh Resume = iota + 1
 	// CleanUp: Clean with leftovers in rotation/, which are removed.
 	CleanUp
-	// RewrapFirst: Staged; the running store is re-wrapped, then verify and
-	// settle.
+	// RewrapFirst: Staged; the running store, if it answers 200, is
+	// re-wrapped, then restarted on Staged and re-wrapped again, then verify
+	// and settle.
 	RewrapFirst
 	// VerifyThenSettle: Verify; the new key alone is proven, then settled.
 	VerifyThenSettle

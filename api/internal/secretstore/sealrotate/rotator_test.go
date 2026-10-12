@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -378,21 +379,25 @@ func TestRotator_Resume(t *testing.T) {
 		storeUp bool
 		check   func(t *testing.T, g *rig)
 	}{
-		// F-830-14: a 200 does not prove the store loaded Staged, so it is
-		// restarted on the Staged fragment as found before the re-wrap, and
-		// verify opens first time, with no retry.
-		{"staged, store at 200: restart under staged, then re-wrap", staged, true, func(t *testing.T, g *rig) {
-			rs, rw := g.rec.index("restart", 0), g.rec.index("rotate_root", 0)
-			if rs < 0 || rw < rs {
-				t.Errorf("calls %v: want restart, then rotate_root", g.rec.list())
+		// F-830-16: the running store is re-wrapped before any restart, so a
+		// re-wrap that failed part way is repaired from its keyring. F-830-14:
+		// it is then restarted on the Staged fragment as found and re-wrapped
+		// again, so verify opens first time, with no retry.
+		{"staged, store at 200: re-wrap, restart under staged, re-wrap again", staged, true, func(t *testing.T, g *rig) {
+			first := g.rec.index("rotate_root", 0)
+			rs := g.rec.index("restart", 0)
+			second := g.rec.index("rotate_root", first+1)
+			vf := g.rec.index("fragment verify", 0)
+			if first < 0 || rs < first || second < rs || vf < second {
+				t.Errorf("calls %v: want rotate_root, restart, rotate_root, then the verify fragment", g.rec.list())
 			}
 			for _, c := range g.rec.list()[:max(rs, 0)] {
 				if strings.HasPrefix(c, "fragment ") {
 					t.Errorf("calls %v: a fragment was written before the restart under staged", g.rec.list())
 				}
 			}
-			if n := g.rec.count("rotate_root"); n != 1 {
-				t.Errorf("rotate_root called %d times, want 1 (no verify retry)", n)
+			if n := g.rec.count("rotate_root"); n != 2 {
+				t.Errorf("rotate_root called %d times, want 2 (no verify retry)", n)
 			}
 			if len(g.log.Matching(slog.LevelWarn, "trying once more")) != 0 {
 				t.Errorf("verify retried:\n%s", g.log.Text())
@@ -448,6 +453,60 @@ func TestRotator_Resume(t *testing.T) {
 func staged(s *seal) {
 	s.clean().rot(idB, keyB)
 	s.fragment(Fragment{Shape: Staged, Current: idB, Previous: idA})
+}
+
+// F-830-16: a fresh run whose re-wrap fails leaves Staged; the next run on
+// that tree, with the store still at 200, re-wraps the running store before
+// it restarts anything. When that first re-wrap fails too, the run never
+// restarts the store, fails, and Staged stays.
+func TestRotator_ResumeAfterRewrapFailure(t *testing.T) {
+	rewrapErr := &secretstore.Error{Op: "rotate_root", Kind: secretstore.ErrUnreachable, Err: errors.New("connection reset")}
+	for _, tc := range []struct {
+		name   string
+		second error // the re-wrap error on the next run
+		check  func(t *testing.T, g *rig, s *seal, r result, calls []string)
+	}{
+		{"the next run re-wraps before any restart", nil, func(t *testing.T, g *rig, s *seal, r result, calls []string) {
+			if r.job.Status != jobs.StatusSucceeded {
+				t.Fatalf("job %s: %s", r.job.Status, r.job.Error)
+			}
+			if len(calls) == 0 || slices.Index(calls, "rotate_root") < 0 || slices.Index(calls, "restart") < slices.Index(calls, "rotate_root") {
+				t.Errorf("next run's calls %v: want rotate_root before any restart", calls)
+			}
+			if tree := s.state(); tree.Fragment.Shape != Clean || tree.Fragment.Current != idB {
+				t.Errorf("tree after = %+v", tree)
+			}
+		}},
+		{"the next run's first re-wrap fails: no restart, staged kept", rewrapErr, func(t *testing.T, g *rig, s *seal, r result, calls []string) {
+			failedWith(t, r, "unseal_staged", errRewrap)
+			if slices.Index(calls, "restart") >= 0 {
+				t.Errorf("next run's calls %v: a restart after the re-wrap error", calls)
+			}
+			if tree := s.state(); tree.Fragment.Shape != Staged || tree.Fragment.Current != idB || tree.Fragment.Previous != idA {
+				t.Errorf("tree after = %+v, want Staged B over A", tree)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSeal(t)
+			s.clean()
+			g := newRig(t, s)
+			g.rotate.rewrapErr = rewrapErr
+			g.build(t)
+			failedWith(t, g.run(t), "rewrap", errRewrap)
+			if tree := s.state(); tree.Resume != RewrapFirst {
+				t.Fatalf("tree after the failed re-wrap = %+v, want Staged", tree)
+			}
+			g.rotate.rewrapErr = tc.second
+			from := len(g.rec.list())
+			r := g.run(t)
+			calls := g.rec.list()[from:]
+			tc.check(t, g, s, r, calls)
+			if g.keyIDs != 1 {
+				t.Errorf("key ids minted = %d, want only the first run's", g.keyIDs)
+			}
+		})
+	}
 }
 
 // A resume whose restart or login fails stops with the tree as it was.

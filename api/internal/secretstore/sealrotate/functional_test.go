@@ -411,8 +411,9 @@ func TestSealRotate_AgainstTheRealStore(t *testing.T) {
 			if j.Status != jobs.StatusSucceeded || res.Outcome != "resumed" {
 				t.Fatalf("%s: job %s (%s), outcome %q, want succeeded and resumed", point, j.Status, j.Error, res.Outcome)
 			}
-			// F-830-14: the resume restarts under Staged before it re-wraps,
-			// so verify opens first time and never takes its retry.
+			// F-830-16 and F-830-14: a Staged resume at 200 re-wraps the
+			// running store, restarts it under Staged and re-wraps again, so
+			// verify opens first time and never takes its retry.
 			if n := len(rec.Matching(slog.LevelWarn, "trying once more")); n != retries {
 				t.Fatalf("%s: verify needed its retry", point)
 			}

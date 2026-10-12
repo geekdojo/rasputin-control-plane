@@ -301,9 +301,9 @@ What it proves, against OpenBao v2.7.1:
 - **A run stopped part way is finished by the next (TC-830-20).** With the tree left as a run
   stopped after the Staged write (the store still running on the old key), after the Verify write,
   and after the Clean write, the next job ends `resumed`, mints no key, leaves a Clean tree under
-  the newest key, and the store opens on it alone after a cold restart. The resume restarts the
-  store on the Staged fragment before it re-wraps, so verify opens first time and never takes its
-  retry.
+  the newest key, and the store opens on it alone after a cold restart. A resume that finds
+  Staged with the store answering 200 re-wraps the running store first, then restarts it on the
+  Staged fragment and re-wraps again, so verify opens first time and never takes its retry.
 - **The rotation token re-wraps and nothing else (TC-830-21).** `sys/rotate/root` answers 204
   with an empty body; its siblings under `sys/rotate` (`root/init`, `update`, `verify`, `backup`,
   `keyring`, `keyring/config`, `config`), `sys/seal`, `sys/raw/core/keyring`, `sys/key-status`,
@@ -330,9 +330,8 @@ RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIO
 ```
 
 Expect `--- PASS: TestSealRotate_AgainstTheRealStore` with one `PASS` line per test case and exit
-status 0. It takes about 40 seconds: the run stopped after the Staged write, whose store was still
-on the old key, first fails to open on the new key alone, waits out one `UnsealWait`, then puts
-the Staged fragment back, re-wraps and opens. The unit tests in the same package need no store.
+status 0. It takes about 5 seconds; no resume waits out an `UnsealWait`. The unit tests in the
+same package need no store.
 
 ## The pin, and bumping it
 
