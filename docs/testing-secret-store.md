@@ -236,12 +236,14 @@ What it proves, against OpenBao v2.7.1:
   its lookup-self shows exactly `["rasputin-api"]`, with no `default` and no `root` (T37,
   TC-804-05). It gets 403 on every other path the test tries: other data, `sys/mounts`, the
   policy endpoints (list, read and write), `sys/audit`, `sys/auth`, `sys/capabilities-self`,
-  `sys/tools/hash`, `sys/rotate/root`, the recovery-key, generate-root and raft snapshot paths,
-  `identity/`, `auth/token/create` (also asking for the rotation policy), `create-orphan`,
-  `auth/token/accessors`, and writes to both cert roles. Its leaf cannot log in against the
-  rotation role (TC-804-06).
+  `sys/tools/hash`, `sys/rotate/root`, the recovery-key and raft snapshot paths, `identity/`,
+  `auth/token/create` (also asking for the rotation policy), `create-orphan`,
+  `auth/token/accessors`, and writes to both cert roles. `sys/generate-root/attempt` answers
+  405 instead: the listener refuses it before any policy applies (T21). Its leaf cannot log in
+  against the rotation role (TC-804-06).
 - **The rotation policy is the minimum.** The rotation token gets 204 on `sys/rotate/root` and
-  403 on every other path above, the api's data paths included. A sudo-only and an update-only
+  403 on every other path above, the api's data paths included (405 on
+  `sys/generate-root/attempt`, at the listener, as for the api). A sudo-only and an update-only
   policy on `sys/rotate/root` each get 403, so `update` plus `sudo` is what rotation needs
   (TC-804-07).
 - **Policy text through a file source** works on the pinned release (T34).

@@ -41,7 +41,7 @@ type probe struct {
 }
 
 // denied is every path the api token, and the rotation token, must get 403
-// on. A method of LIST is a GET with ?list=true.
+// on (listenerRefused is the one probe that answers otherwise). A method of LIST is a GET with ?list=true.
 var denied = []probe{
 	{http.MethodGet, "rasputin-secrets/data/other", nil},
 	{http.MethodPost, "rasputin-secrets/data/other", map[string]any{"data": map[string]string{"k": "v"}}},
@@ -56,7 +56,6 @@ var denied = []probe{
 	{http.MethodPost, "sys/tools/hash", map[string]string{"input": "eA=="}},
 	{http.MethodPost, "sys/rotate/root", nil},
 	{http.MethodPost, "sys/rotate/recovery/init", nil},
-	{http.MethodGet, "sys/generate-root-token/attempt", nil},
 	{http.MethodGet, "sys/storage/raft/snapshot", nil},
 	{"LIST", "identity/entity/id", nil},
 	{http.MethodPost, "identity/entity", map[string]string{"name": "injected"}},
@@ -67,6 +66,22 @@ var denied = []probe{
 	{"LIST", "auth/token/accessors", nil},
 	{http.MethodPost, "auth/cert/certs/" + storepolicy.APIPolicy, map[string]any{"token_policies": []string{storepolicy.SealRotatePolicy}}},
 	{http.MethodPost, "auth/cert/certs/" + storepolicy.SealRotatePolicy, map[string]any{"allowed_common_names": []string{storepolicy.APIPolicy}}},
+}
+
+// listenerRefused is refused at the listener before any policy applies: the
+// store's listener disables the unauthenticated generate-root endpoints
+// (register row T21; TC-756-14 sees the same 405 token-less), so a token makes
+// no difference and the answer is 405, not 403 (TC-804-06).
+var listenerRefused = probe{http.MethodGet, "sys/generate-root/attempt", nil}
+
+// refusedAtListener asserts listenerRefused answers 405 to token.
+func refusedAtListener(t *testing.T, do func(*testing.T, string, probe) (int, []byte), who, token string) {
+	t.Helper()
+	code, _ := do(t, token, listenerRefused)
+	t.Logf("%s %s %s -> %d", who, listenerRefused.method, listenerRefused.path, code)
+	if code != http.StatusMethodNotAllowed {
+		t.Errorf("%s %s %s = %d, want 405 (refused at the listener, T21)", who, listenerRefused.method, listenerRefused.path, code)
+	}
 }
 
 // dataProbes are the api's own data and metadata paths, which the rotation
@@ -208,6 +223,7 @@ func TestStorePolicy_AgainstTheRealStore(t *testing.T) {
 				t.Errorf("api %s %s = %d, want 403", p.method, p.path, code)
 			}
 		}
+		refusedAtListener(t, do, "api", api)
 		if v, err := s.Login(t.Context(), storepolicy.APIPolicy, storepolicy.SealRotatePolicy); err == nil {
 			tokens = append(tokens, string(v.Reveal()))
 			t.Error("the api's leaf logged in against the rotation role")
@@ -231,6 +247,7 @@ func TestStorePolicy_AgainstTheRealStore(t *testing.T) {
 				t.Errorf("rotation token %s %s = %d, want 403", p.method, p.path, code)
 			}
 		}
+		refusedAtListener(t, do, "rotate", rot)
 		for _, half := range []string{sudoOnly, updateOnly} {
 			tok := token(t, half)
 			tokens = append(tokens, tok)

@@ -233,7 +233,7 @@ func TestSealRotatePolicy_AndNeverGrantPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, never := range []string{"sys/rotate/recovery/init", "sys/generate-root-token", "sys/storage/raft"} {
+		for _, never := range []string{"sys/rotate/recovery/init", "sys/generate-root", "sys/storage/raft"} {
 			if bytes.Contains(text, []byte(never)) {
 				t.Errorf("%s.hcl names the never-grant path %s", name, never)
 			}
