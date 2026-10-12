@@ -445,17 +445,21 @@ func (s *Store) launch(bin string, args ...string) error {
 		return fmt.Errorf("secretstoretest: stderr pipe: %w", err)
 	}
 	out := newLineLog(s.log, "stdout", 0)
-	s.stderr = newLineLog(s.log, "stderr", stderrTail)
+	errLog := newLineLog(s.log, "stderr", stderrTail)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("secretstoretest: start %s: %w", bin, err)
 	}
+	// The goroutines below get this launch's values as locals, never through
+	// s: Restart and RestartSealed call launch again and rewrite s.cmd,
+	// s.stderr and s.exited (geekdojo/geekdojo-brain#760).
 	s.cmd = cmd
+	s.stderr = errLog
 	exited := make(chan struct{})
 	s.exited = exited
 	var readers sync.WaitGroup
 	readers.Add(2)
 	go func() { defer readers.Done(); out.consume(stdout) }()
-	go func() { defer readers.Done(); s.stderr.consume(stderr) }()
+	go func() { defer readers.Done(); errLog.consume(stderr) }()
 	go func() {
 		readers.Wait()
 		s.waitErr = cmd.Wait()
@@ -492,12 +496,23 @@ func sealedAndInitialised(code int, hb health) bool {
 // No request carries a timeout of its own: each runs under a ctx that ends
 // when the caller's ctx does or when the store exits, which are the two facts
 // that can make an answer never come.
+//
+// The exit channel is read from s once, here, and the watcher goroutine is
+// joined before waitHealthy returns: a later launch rewrites s.exited, so
+// nothing may read the field from another goroutine
+// (geekdojo/geekdojo-brain#760).
 func (h *Harness) waitHealthy(ctx context.Context, s *Store, want healthWant) error {
+	exited := s.exited
 	reqCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	watched := make(chan struct{})
+	defer func() {
+		cancel()
+		<-watched
+	}()
 	go func() {
+		defer close(watched)
 		select {
-		case <-s.exited:
+		case <-exited:
 			cancel()
 		case <-reqCtx.Done():
 		}
@@ -526,12 +541,12 @@ func (h *Harness) waitHealthy(ctx context.Context, s *Store, want healthWant) er
 			}
 		}
 		select {
-		case <-s.exited:
+		case <-exited:
 			return s.exitError()
 		default:
 		}
 		select {
-		case <-s.exited:
+		case <-exited:
 			return s.exitError()
 		case <-ctx.Done():
 			return fmt.Errorf("secretstoretest: store at %s not healthy when ctx ended (last health: %s): %w",
