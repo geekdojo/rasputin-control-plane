@@ -11,6 +11,9 @@ package busauth
 import (
 	"context"
 	"errors"
+	"os"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,12 +110,22 @@ type admission struct {
 
 // admitRecorder passes every call to the real validator and reports each
 // admitted connection, so the test can see a reconnect go through the callout.
+//
+// When hold is set, the holdAt-th call (counting from 1) waits on hold before
+// it reaches the validator: the test keeps that connection's callout open
+// until the client has given up on the connection, then releases it.
 type admitRecorder struct {
 	inner  Validator
 	admits chan<- admission
+	calls  *atomic.Int32
+	holdAt int32
+	hold   <-chan struct{}
 }
 
 func (a admitRecorder) Admit(ctx context.Context, conn Conn, plaintext, presentedNodeID string) (bool, error) {
+	if a.hold != nil && a.calls.Add(1) == a.holdAt {
+		<-a.hold
+	}
 	ok, err := a.inner.Admit(ctx, conn, plaintext, presentedNodeID)
 	if ok && err == nil {
 		select {
@@ -150,6 +163,21 @@ type clientEvent struct {
 // callout's admission — each bounded by a hard deadline that fails naming what
 // never happened.
 //
+// # A reconnect attempt the client gives up on
+//
+// The client bounds each connect handshake (INFO, TLS, CONNECT, the callout,
+// PONG) with its connect timeout, nats.go's 2s default, as the agent does. An
+// attempt that runs past it — a loaded host is enough — is reported to the
+// error handler as a read deadline (nats.go v1.53.1 sendConnect,
+// nats.go:3166-3172) and abandoned, and the client dials again. The callout
+// admitted the abandoned attempt too, so between the expiry and the
+// reconnect the test can see more admissions than one. Each must be a new
+// connection for this node, there may be no more of them than attempts the
+// client reported abandoning, and the client must end up on one of them. Any
+// other error before the reconnect still fails the test. The second subtest
+// forces that path: it holds the first reconnect's callout until the client
+// has given up on it.
+//
 // # Why the client's own events prove the SERVER closed the connection
 //
 // nats-server ends an expired credential's session in one place:
@@ -176,6 +204,18 @@ type clientEvent struct {
 // admission was not the expiry, whatever it was told; observing it later than
 // the server sent it only makes the interval longer.
 func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T) {
+	t.Run("first reconnect attempt completes", func(t *testing.T) {
+		expiryCycles(t, false)
+	})
+	t.Run("first reconnect attempt abandoned by the client is retried", func(t *testing.T) {
+		expiryCycles(t, true)
+	})
+}
+
+// expiryCycles runs the expiry and reconnect cycles. With holdFirstReconnect
+// the first reconnect's callout is held until the client reports giving up on
+// that attempt, and the cycle must show it did.
+func expiryCycles(t *testing.T, holdFirstReconnect bool) {
 	const (
 		injectedTTL = 2 * time.Second
 		cycles      = 2
@@ -184,11 +224,22 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 	waitLimit := injectedTTL + busWaitLimit
 
 	admits := make(chan admission, 64)
+	rec := admitRecorder{admits: admits}
+	release := func() {}
+	if holdFirstReconnect {
+		hold := make(chan struct{})
+		var once sync.Once
+		release = func() { once.Do(func() { close(hold) }) }
+		t.Cleanup(release) // never leave the callout blocked past the test
+		// Call 1 is the initial connect; call 2 is the first reconnect.
+		rec.calls, rec.holdAt, rec.hold = new(atomic.Int32), 2, hold
+	}
 	// Loopback: every connection goes through the token check and so through
 	// the admission observed here (geekdojo-brain#140).
 	eb := startEnforcedBus(t, "127.0.0.1", func(r *Responder) {
 		r.userTTL = injectedTTL
-		r.tokens = admitRecorder{inner: r.tokens, admits: admits}
+		rec.inner = r.tokens
+		r.tokens = rec
 	})
 	token, _, err := eb.tokens.MintBound(context.Background(), "expiry", node, "compute")
 	if err != nil {
@@ -286,17 +337,48 @@ func TestExpiredUserJWT_ServerDisconnects_ReconnectReauthenticates(t *testing.T)
 
 		// 3. Getting back on means authenticating through the callout again:
 		//    a new connection, admitted by the token check, then connected.
-		next := nextAdmission("reconnect after expiry")
-		if next.cid == admitted.cid {
-			t.Fatalf("cycle %d: reconnect admitted under the expired connection's id %d", cycle, next.cid)
+		//    Attempts the client abandons on its connect timeout are the only
+		//    events allowed before the reconnect (see the doc comment).
+		abandoned := 0
+		var back clientEvent
+		for back.kind == "" {
+			select {
+			case e := <-events:
+				switch {
+				case e.kind == "reconnected":
+					back = e
+				case e.kind == "error" && errors.Is(e.err, os.ErrDeadlineExceeded):
+					abandoned++
+					release()
+				default:
+					t.Fatalf("cycle %d: client reconnecting after expiry: client saw %s (%v), want reconnected", cycle, e.kind, e.err)
+				}
+			case <-time.After(waitLimit):
+				t.Fatalf("cycle %d: client reconnecting after expiry: client saw no reconnected within %s", cycle, waitLimit)
+			}
 		}
-		back := nextClientEvent("reconnected", "client reconnecting after expiry")
-		if back.cid != next.cid {
-			t.Fatalf("cycle %d: the client reconnected as %d, the callout admitted %d", cycle, back.cid, next.cid)
+		if holdFirstReconnect && cycle == 1 && abandoned == 0 {
+			t.Fatalf("cycle 1: the held reconnect attempt was never abandoned by the client")
+		}
+		// Every admission is recorded before the server answers the
+		// connection, so the one the client reconnected on is already queued.
+		var next admission
+		for superseded := 0; ; superseded++ {
+			next = nextAdmission("reconnect after expiry")
+			if next.cid == admitted.cid {
+				t.Fatalf("cycle %d: reconnect admitted under the expired connection's id %d", cycle, next.cid)
+			}
+			if next.cid == back.cid {
+				break
+			}
+			if superseded == abandoned {
+				t.Fatalf("cycle %d: the callout admitted connection %d, which the client neither reconnected on (%d) nor abandoned (%d abandoned)",
+					cycle, next.cid, back.cid, abandoned)
+			}
 		}
 		current = back.cid
-		t.Logf("cycle %d: connection %d expired and closed by the server; reconnect re-authenticated as %d",
-			cycle, admitted.cid, next.cid)
+		t.Logf("cycle %d: connection %d expired and closed by the server; reconnect re-authenticated as %d (%d attempts abandoned)",
+			cycle, admitted.cid, next.cid, abandoned)
 		admitted = next
 	}
 }
