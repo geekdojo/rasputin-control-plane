@@ -48,8 +48,8 @@ const (
 
 	// healthRecheckInterval is how often waitHealthy re-asks the store's
 	// sys/health. It decides nothing: the wait ends on the store's own answer
-	// (200 initialized and unsealed after Start; 503 initialized and sealed
-	// after RestartSealed), a store that exits fails at once, and the
+	// (200 initialized and unsealed after Start and Restart; 503 initialized
+	// and sealed after RestartSealed), a store that exits fails at once, and the
 	// wait as a whole is bounded only by the caller's ctx. The interval only
 	// sets how soon after the fact becomes true the harness notices it; a
 	// PebbleDB store is healthy on its first answer (geekdojo-brain#679 Q4).
@@ -200,19 +200,8 @@ func (s *Store) Token(ctx context.Context) (secret.Value, error) {
 // initialized=true and sealed=true, which is the fact a sealed store reports;
 // if ctx ends first, the error names the last health answer.
 func (s *Store) RestartSealed(ctx context.Context) error {
-	select {
-	case <-s.exited:
-		return errors.New("secretstoretest: RestartSealed: the store is not running")
-	default:
-	}
-	pid := s.cmd.Process.Pid
-	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err)
-	}
-	select {
-	case <-s.exited:
-	case <-ctx.Done():
-		return fmt.Errorf("secretstoretest: pid %d did not stop for RestartSealed: %w", pid, ctx.Err())
+	if err := s.stop(ctx, "RestartSealed"); err != nil {
+		return err
 	}
 	if err := s.h.writeSealKey(s.sealKey); err != nil {
 		return err
@@ -225,6 +214,58 @@ func (s *Store) RestartSealed(ctx context.Context) error {
 	}
 	s.log.Info("secret store restarted sealed", "pid", s.cmd.Process.Pid, "dir", s.root)
 	return nil
+}
+
+// Stop sends the store SIGTERM and returns once the process has exited. Its
+// root, data and seal key stay, so Restart brings the same store back. It is
+// how a test takes the store away from a running client
+// (geekdojo/geekdojo-brain#760); Close still tears down a stopped store.
+func (s *Store) Stop(ctx context.Context) error {
+	if err := s.stop(ctx, "Stop"); err != nil {
+		return err
+	}
+	s.log.Info("secret store stopped; data kept", "pid", s.cmd.Process.Pid, "dir", s.root)
+	return nil
+}
+
+// Restart starts a stopped store again with the same command line and seal
+// key, so it unseals itself on the same data, and returns once sys/health
+// answers 200 initialized and unsealed. If ctx ends first, the error names the
+// last health answer. It refuses a store that is still running.
+func (s *Store) Restart(ctx context.Context) error {
+	select {
+	case <-s.exited:
+	default:
+		return errors.New("secretstoretest: Restart: the store is still running; Stop it first")
+	}
+	if err := s.launch(s.h.cfg.BinaryPath, s.args...); err != nil {
+		return err
+	}
+	if err := s.h.waitHealthy(ctx, s, healthyAndUnsealed); err != nil {
+		return err
+	}
+	s.log.Info("secret store restarted", "pid", s.cmd.Process.Pid, "dir", s.root)
+	return nil
+}
+
+// stop sends SIGTERM and waits for the process to exit, or for ctx to end.
+// op names the caller in its errors.
+func (s *Store) stop(ctx context.Context, op string) error {
+	select {
+	case <-s.exited:
+		return fmt.Errorf("secretstoretest: %s: the store is not running", op)
+	default:
+	}
+	pid := s.cmd.Process.Pid
+	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err)
+	}
+	select {
+	case <-s.exited:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("secretstoretest: pid %d did not stop for %s: %w", pid, op, ctx.Err())
+	}
 }
 
 // Start brings up a store and returns once it answers healthy. On any failure

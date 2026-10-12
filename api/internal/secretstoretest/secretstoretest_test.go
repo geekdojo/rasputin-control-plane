@@ -881,3 +881,53 @@ func TestRestartSealed_CtxEndsBeforeSealed(t *testing.T) {
 		t.Errorf("%d 'restarted sealed' records for a restart that never sealed", len(got))
 	}
 }
+
+// TC-760-24 (the paths no real store reaches): Stop on a stopped store and
+// Restart on a running one refuse, naming the call; Stop whose ctx ends
+// before the store exits says so; and Close still tears down a stopped store.
+func TestStopRestart_Refusals(t *testing.T) {
+	log, rec := logkittest.New()
+	cfg := validConfig(t)
+	cfg.Logger = log
+	cfg.BinaryPath = writeFake(t, "exec tail -f /dev/null\n")
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, pid, root := launched(t, log, "", "exec tail -f /dev/null\n")
+	s.h = h
+
+	if err := s.Restart(t.Context()); err == nil || !strings.Contains(err.Error(), "still running") {
+		t.Fatalf("Restart on a running store = %v, want a refusal", err)
+	}
+	if err := s.Stop(t.Context()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	assertReaped(t, pid)
+	if _, err := os.Stat(root); err != nil {
+		t.Fatalf("Stop removed the root: %v", err)
+	}
+	if got := rec.Matching(slog.LevelInfo, "secret store stopped; data kept"); len(got) != 1 {
+		t.Errorf("%d stop records, want 1", len(got))
+	}
+	if err := s.Stop(t.Context()); err == nil || !strings.Contains(err.Error(), "Stop: the store is not running") {
+		t.Fatalf("Stop on a stopped store = %v, want a refusal", err)
+	}
+	if err := s.RestartSealed(t.Context()); err == nil || !strings.Contains(err.Error(), "RestartSealed: the store is not running") {
+		t.Fatalf("RestartSealed on a stopped store = %v, want a refusal", err)
+	}
+	if err := s.Close(context.Background()); err != nil {
+		t.Fatalf("Close after Stop: %v", err)
+	}
+	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("root still there after Close: %v", err)
+	}
+
+	stubborn, _, _ := launched(t, log, "trap '' TERM\n", "exec tail -f /dev/null\n")
+	t.Cleanup(func() { _ = stubborn.Close(t.Context()) })
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := stubborn.Stop(ctx); err == nil || !strings.Contains(err.Error(), "did not stop for Stop") {
+		t.Fatalf("Stop with an ended ctx = %v, want it named", err)
+	}
+}
