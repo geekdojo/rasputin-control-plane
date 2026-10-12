@@ -168,6 +168,35 @@ func (c *Client) Versions(ctx context.Context, token secret.Value, p KVPath) (Me
 	return m, nil
 }
 
+// CertLogin logs in through the store's cert auth method against role,
+// presenting whatever client leaf this client's TLS config presents, and
+// returns the token. A 200 with no token, or a body of another shape, is
+// ErrProtocol; a refusal is classified as every call's is (403 ErrDenied, a
+// 503 by asking sys/health). The token is decoded straight into a
+// secret.Value and the body is cleared (geekdojo/geekdojo-brain#830; #759
+// reuses it).
+func (c *Client) CertLogin(ctx context.Context, role string) (secret.Value, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	tok, e := c.certLogin(ctx, role)
+	if e != nil {
+		return secret.Value{}, c.failed(ctx, e)
+	}
+	return tok, nil
+}
+
+// RotateRoot asks the store to re-encrypt its root key under the seal it
+// holds now (sys/rotate/root). 204 is success; anything else fails as every
+// call does, and the store's text reaches only the log record.
+func (c *Client) RotateRoot(ctx context.Context, token secret.Value) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	if e := c.rotateRoot(ctx, token); e != nil {
+		return c.failed(ctx, e)
+	}
+	return nil
+}
+
 // failed writes the client's one record for a failed call and returns e. The
 // level is DEBUG for the outcomes a caller expects (not found, a lost
 // check-and-set race), ERROR for a protocol error, and WARN for the rest.
@@ -402,6 +431,58 @@ func (c *Client) versions(ctx context.Context, token secret.Value, p KVPath) (Me
 		return Metadata{}, withStatus(fail(op, p, ErrProtocol, err), status)
 	}
 	return m, nil
+}
+
+func (c *Client) certLogin(ctx context.Context, role string) (secret.Value, *Error) {
+	const op = "login"
+	p := KVPath{mount: "auth/cert", path: "login"}
+	if role == "" {
+		return secret.Value{}, fail(op, p, ErrInvalidValue, errors.New("the role is empty"))
+	}
+	reqBody := appendJSONString([]byte(`{"name":`), []byte(role))
+	reqBody = append(reqBody, '}')
+	status, body, e := c.round(ctx, op, p, http.MethodPost, "/v1/auth/cert/login", nil, reqBody)
+	if e != nil {
+		return secret.Value{}, e
+	}
+	defer clear(body)
+	if status != http.StatusOK {
+		return secret.Value{}, c.statusError(ctx, op, p, status, body)
+	}
+	var env struct {
+		Auth *struct {
+			ClientToken json.RawMessage `json:"client_token"`
+		} `json:"auth"`
+	}
+	if err := decodeJSON(body, &env); err != nil {
+		return secret.Value{}, withStatus(fail(op, p, ErrProtocol, err), status)
+	}
+	if env.Auth == nil || len(env.Auth.ClientToken) == 0 {
+		return secret.Value{}, withStatus(fail(op, p, ErrProtocol, errors.New("the answer carries no token")), status)
+	}
+	defer clear(env.Auth.ClientToken)
+	tok, err := decodeValue(env.Auth.ClientToken)
+	if err != nil {
+		return secret.Value{}, withStatus(fail(op, p, ErrProtocol, errors.New("the token is not a string")), status)
+	}
+	if tok.Len() == 0 {
+		return secret.Value{}, withStatus(fail(op, p, ErrProtocol, errors.New("the token is empty")), status)
+	}
+	return tok, nil
+}
+
+func (c *Client) rotateRoot(ctx context.Context, token secret.Value) *Error {
+	const op = "rotate_root"
+	p := KVPath{mount: "sys", path: "rotate/root"}
+	status, body, e := c.round(ctx, op, p, http.MethodPost, "/v1/sys/rotate/root", &token, nil)
+	if e != nil {
+		return e
+	}
+	defer clear(body)
+	if status != http.StatusNoContent {
+		return c.statusError(ctx, op, p, status, body)
+	}
+	return nil
 }
 
 // statusError is the *Error for a KV call's non-200 answer. A 503 is

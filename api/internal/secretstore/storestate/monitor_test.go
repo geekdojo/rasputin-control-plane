@@ -194,7 +194,7 @@ func TestMonitor_AlertPerState(t *testing.T) {
 		{"quiesced", func(f *fixture) {
 			f.store.set(secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
 			f.running["job-q"] = true
-			f.m.Quiesce("job-q")
+			f.m.Quiesce("job-q", QuiesceBackup)
 		}, "secret-store:quiesced", proto.AlertWarn},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -234,7 +234,7 @@ func TestMonitor_AlertPerState(t *testing.T) {
 func TestMonitor_Quiesce(t *testing.T) {
 	f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
 	f.running["job-1"] = true
-	release := f.m.Quiesce("job-1")
+	release := f.m.Quiesce("job-1", QuiesceBackup)
 
 	q := f.rec.Matching(slog.LevelInfo, "secret store quiesced for a backup")
 	if len(q) != 1 {
@@ -276,7 +276,7 @@ func TestMonitor_Quiesce(t *testing.T) {
 
 	ready := newFixture(t, readyHealth, nil)
 	ready.running["job-2"] = true
-	ready.m.Quiesce("job-2")
+	ready.m.Quiesce("job-2", QuiesceBackup)
 	if got := ready.state(t); got != Ready {
 		t.Fatalf("a ready store with a hold reads %q, want ready", got)
 	}
@@ -297,7 +297,7 @@ func TestMonitor_StaleHoldIgnored(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
 			f.runErr = tc.runErr
-			f.m.Quiesce("job-stale")
+			f.m.Quiesce("job-stale", QuiesceBackup)
 			if got := f.state(t); got != Unreachable {
 				t.Fatalf("State = %q, want unreachable", got)
 			}
@@ -440,5 +440,36 @@ func TestMonitor_AlertsOnEndedCtx(t *testing.T) {
 	cancel()
 	if a := f.m.Alerts(ctx, f.clock.now()); a != nil {
 		t.Fatalf("Alerts on an ended ctx = %+v, want none", a)
+	}
+}
+
+// TC-830-11: a quiesce for a backup and one for a seal-key rotation raise the
+// same warn alert ID, each with copy naming its own job and not the other.
+func TestMonitor_QuiesceReasonCopy(t *testing.T) {
+	for _, tc := range []struct {
+		reason       QuiesceReason
+		says, notSay string
+		logMsg       string
+	}{
+		{QuiesceBackup, "backup", "seal-key", "secret store quiesced for a backup"},
+		{QuiesceSealRotation, "seal-key rotation", "backup", "secret store quiesced for a seal-key rotation"},
+	} {
+		t.Run(tc.reason.String(), func(t *testing.T) {
+			f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
+			f.running["job"] = true
+			release := f.m.Quiesce("job", tc.reason)
+			defer release()
+			a := f.m.Alerts(context.Background(), f.clock.now())
+			if len(a) != 1 || a[0].ID != "secret-store:quiesced" || a[0].Severity != proto.AlertWarn {
+				t.Fatalf("alerts = %+v", a)
+			}
+			copy := a[0].Title + " " + a[0].Detail
+			if !strings.Contains(copy, tc.says) || strings.Contains(copy, tc.notSay) {
+				t.Errorf("copy %q: want %q and not %q", copy, tc.says, tc.notSay)
+			}
+			if len(f.rec.Matching(slog.LevelInfo, tc.logMsg)) != 1 {
+				t.Errorf("no %q record", tc.logMsg)
+			}
+		})
 	}
 }

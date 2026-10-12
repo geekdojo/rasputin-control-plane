@@ -17,6 +17,9 @@ type serverPaths struct {
 	SealKey    string // the 32-byte static seal key, mode 0600
 	Storage    string // the PebbleDB directory
 	AuditLog   string // the file audit device's file_path; "" renders no audit stanza
+	// ExternalSeal leaves the seal stanza out: the seal comes from a third
+	// -config, the fragment in the store's seal directory (Config.ExternalSeal).
+	ExternalSeal bool
 }
 
 // renderServerHCL is the store's main config: S8's transport and S6's
@@ -31,7 +34,9 @@ type serverPaths struct {
 //     look right because both default to true (geekdojo-brain#679, D679-05).
 //   - PebbleDB with clustering disabled opens only the API listener
 //     (D679-07).
-//   - The static seal reads a file:// key at a literal path (D679-08).
+//   - The static seal reads a file:// key at a literal path (D679-08). With
+//     p.ExternalSeal the stanza is left out, and the store reads it from the
+//     seal fragment, as the image's store does (geekdojo/geekdojo-brain#830).
 //   - Only when p.AuditLog is set: a declarative file audit device writing
 //     there, the shape #804 ships (geekdojo-brain#799). Opt-in, so every
 //     other functional test runs without audit, as before.
@@ -52,12 +57,15 @@ listener "tcp" {
 storage "pebbledb" {
   path = %[5]q
 }
-
+`, port, p.ServerCert, p.ServerKey, p.StoreCA, p.Storage)
+	if !p.ExternalSeal {
+		hcl += fmt.Sprintf(`
 seal "static" {
   current_key_id = "secretstoretest"
-  current_key    = %[6]q
+  current_key    = %q
 }
-`, port, p.ServerCert, p.ServerKey, p.StoreCA, p.Storage, "file://"+p.SealKey)
+`, "file://"+p.SealKey)
+	}
 	if p.AuditLog != "" {
 		hcl += fmt.Sprintf(`
 audit "file" "file" {
@@ -230,4 +238,11 @@ func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string)
 		return nil, fmt.Errorf("secretstoretest: render init config: %w", err)
 	}
 	return out, nil
+}
+
+// renderSealFragment is a seal fragment in the shape rasputin-seal-key.sh
+// writes (#803), byte for byte, naming keyPath. The harness's ExternalSeal
+// store starts on it.
+func renderSealFragment(keyID, keyPath string) []byte {
+	return fmt.Appendf(nil, "seal \"static\" {\n  current_key_id = %q\n  current_key    = %q\n}\n", keyID, "file://"+keyPath)
 }

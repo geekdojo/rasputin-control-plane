@@ -85,6 +85,13 @@ type Config struct {
 	// Audit turns on a declarative file audit device writing
 	// <root>/audit/audit.log (Store.AuditPath). Off by default.
 	Audit bool
+	// ExternalSeal moves the seal out of the main config, as the image has
+	// it (geekdojo/geekdojo-brain#803, #830): the store reads a third -config,
+	// the fragment seal.hcl in <root>/seal/ (Store.SealDir), which names the
+	// key seal-key beside it under a rasputin-<uuid> key id, in the shape
+	// rasputin-seal-key.sh writes. An empty rotation/ directory is made
+	// beside them. Off by default.
+	ExternalSeal bool
 }
 
 // Harness starts stores. It holds only its Config.
@@ -125,6 +132,7 @@ type Store struct {
 	clientLeaf tlsca.LeafPaths
 	ca         *tlsca.CA // the store CA, which mints Login's leaves
 	sealKey    string    // the seal key's path
+	sealDir    string    // the seal directory, or "" when Config.ExternalSeal is off
 	auditPath  string    // the audit file, or "" when Config.Audit is off
 	args       []string  // the store's command line after the binary
 
@@ -153,6 +161,10 @@ func (s *Store) ClientTLS() *tls.Config { return s.clientTLS.Clone() }
 // Config.Audit is off.
 func (s *Store) AuditPath() string { return s.auditPath }
 
+// SealDir is the directory holding seal-key, seal.hcl and rotation/, or ""
+// when Config.ExternalSeal is off. The store reads seal.hcl at every start.
+func (s *Store) SealDir() string { return s.sealDir }
+
 // Reload sends the store SIGHUP, which makes it reopen its audit file. It
 // returns once the signal is delivered, as systemctl kill does.
 func (s *Store) Reload(context.Context) error {
@@ -166,6 +178,10 @@ func (s *Store) Reload(context.Context) error {
 	}
 	return nil
 }
+
+// StoreCA is the store CA the listener trusts, so a test can mint its own
+// client leaves under it (geekdojo/geekdojo-brain#830's minted rotation leaf).
+func (s *Store) StoreCA() *tlsca.CA { return s.ca }
 
 // ClientLeaf is where the client leaf ClientTLS presents lives on disk.
 func (s *Store) ClientLeaf() tlsca.LeafPaths { return s.clientLeaf }
@@ -317,6 +333,34 @@ func (s *Store) Restart(ctx context.Context) error {
 	return nil
 }
 
+// StartNoWait starts a stopped store again with the same command line and
+// returns once the process is running, whatever its health: a test that
+// expects a store which cannot unseal asks sys/health itself
+// (geekdojo/geekdojo-brain#830). It refuses a store that is still running.
+// A store that exits at once is seen by the next health question or Close.
+func (s *Store) StartNoWait(context.Context) error {
+	select {
+	case <-s.exited:
+	default:
+		return errors.New("secretstoretest: StartNoWait: the store is still running; Stop it first")
+	}
+	if err := s.launch(s.h.cfg.BinaryPath, s.args...); err != nil {
+		return err
+	}
+	s.log.Info("secret store started without a health wait", "pid", s.cmd.Process.Pid, "dir", s.root)
+	return nil
+}
+
+// Running reports whether the store's process has not exited.
+func (s *Store) Running() bool {
+	select {
+	case <-s.exited:
+		return false
+	default:
+		return true
+	}
+}
+
 // stop sends SIGTERM and waits for the process to exit, or for ctx to end.
 // op names the caller in its errors.
 func (s *Store) stop(ctx context.Context, op string) error {
@@ -408,11 +452,28 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 	}
 
 	paths := serverPaths{
-		StoreCA:    filepath.Join(s.root, "ca", tlsca.StoreCertFile),
-		ServerCert: server.CertPath,
-		ServerKey:  server.KeyPath,
-		SealKey:    filepath.Join(s.root, "seal-key"),
-		Storage:    filepath.Join(s.root, "data"),
+		StoreCA:      filepath.Join(s.root, "ca", tlsca.StoreCertFile),
+		ServerCert:   server.CertPath,
+		ServerKey:    server.KeyPath,
+		SealKey:      filepath.Join(s.root, "seal-key"),
+		Storage:      filepath.Join(s.root, "data"),
+		ExternalSeal: h.cfg.ExternalSeal,
+	}
+	var fragment string
+	if h.cfg.ExternalSeal {
+		s.sealDir = filepath.Join(s.root, "seal")
+		if err := atrest.EnsureSecretDir(filepath.Join(s.sealDir, "rotation")); err != nil {
+			return fmt.Errorf("secretstoretest: seal dir: %w", err)
+		}
+		paths.SealKey = filepath.Join(s.sealDir, "seal-key")
+		fragment = filepath.Join(s.sealDir, "seal.hcl")
+		keyID, err := h.keyID()
+		if err != nil {
+			return err
+		}
+		if err := atrest.WriteSecretFile(fragment, renderSealFragment(keyID, paths.SealKey)); err != nil {
+			return fmt.Errorf("secretstoretest: seal fragment: %w", err)
+		}
 	}
 	s.sealKey = paths.SealKey
 	if h.cfg.Audit {
@@ -465,6 +526,9 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 	}
 
 	s.args = []string{"server", "-config", mainPath, "-config", initPath}
+	if fragment != "" {
+		s.args = append(s.args, "-config", fragment)
+	}
 	if err := s.launch(h.cfg.BinaryPath, s.args...); err != nil {
 		return err
 	}
@@ -506,6 +570,18 @@ func (h *Harness) writeSealKey(path string) error {
 		return fmt.Errorf("secretstoretest: seal key: %w", err)
 	}
 	return nil
+}
+
+// keyID is a seal key id in #803's format, rasputin-<uuid>, its uuid from
+// Config.Rand.
+func (h *Harness) keyID() (string, error) {
+	var u [16]byte
+	if _, err := io.ReadFull(h.cfg.Rand, u[:]); err != nil {
+		return "", fmt.Errorf("secretstoretest: seal key id: %w", err)
+	}
+	u[6] = u[6]&0x0f | 0x40
+	u[8] = u[8]&0x3f | 0x80
+	return fmt.Sprintf("rasputin-%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), nil
 }
 
 // freePort asks the kernel for a free loopback port and releases it for the

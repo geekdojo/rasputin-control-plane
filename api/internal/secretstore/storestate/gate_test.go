@@ -118,7 +118,7 @@ func TestGate_NotReadyRefuses(t *testing.T) {
 		{Quiesced, func(f *fixture) {
 			f.store.set(secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
 			f.running["job-backup"] = true
-			f.m.Quiesce("job-backup")
+			f.m.Quiesce("job-backup", QuiesceBackup)
 		}},
 	} {
 		t.Run(string(tc.state), func(t *testing.T) {

@@ -44,7 +44,7 @@ func stateClause(s State) string {
 	case AuditBlocked:
 		return "is not accepting audit records"
 	case Quiesced:
-		return "is paused for a backup"
+		return "is paused for a backup or a seal-key rotation"
 	}
 	return "is not ready"
 }

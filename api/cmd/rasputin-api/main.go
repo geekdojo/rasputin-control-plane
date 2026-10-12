@@ -982,6 +982,21 @@ func main() {
 		Store:      backupStore,
 	}
 	runner.Register(storage.RestoreAppWorkflow(backupStore, appRestoreCfg))
+	// The seal-key rotation (geekdojo/geekdojo-brain#830): an on-demand job,
+	// registered in every mode and never scheduled. Under openbao its gate is
+	// the backup's capture lock below, and its incomplete-rotation alert joins
+	// the store's readiness alerts.
+	sealRot, err := sealRotateWiring(sealRotateDeps{
+		mode: storeW.mode, addr: secretStoreAddrFromEnv(), storeCA: storeCA,
+		store: readiness.store, run: execrun.CombinedOutput, monitor: readiness.monitor,
+		restores: restoreSessions, jobRunning: jobRunning(jobStore),
+		rand: cryptorand.Reader, now: time.Now, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: seal rotation", "err", err.Error())
+		os.Exit(1)
+	}
+	runner.Register(sealRot.workflow)
 	// storage.reconcile — #398: every five minutes, storage.inspect plus a
 	// write probe on each claimed target, recorded on the row beside the
 	// claim status, alerted on, and cited by backup.run's refusal. The gap
@@ -1031,6 +1046,9 @@ func main() {
 		// volume-less; see the catalogStore comment above.
 		Apps:  appsStore,
 		Tiles: catalogStore,
+		// A backup's capture waits while a seal-key rotation runs, and is
+		// refused while one has stopped part way (#830, AC4).
+		CaptureLock: sealRot.captureLock(),
 	}))
 	runner.Register(bmc.PowerWorkflow(bmcSvc, invStore))
 	// bmc.configure is registered after NewServer below — it needs the
@@ -1564,8 +1582,10 @@ func main() {
 	// Low free space on the data partition, which the store, its audit log,
 	// this api's database and Docker share (#799).
 	alertsSvc.SetDiskAlerts(storeAud.diskAlerts)
-	if readiness.alerts != nil {
-		alertsSvc.SetStoreAlerts(readiness.alerts)
+	// The store's readiness alert, and under openbao the incomplete
+	// seal-key rotation's (#830), as one source.
+	if storeAlerts := sealRot.storeAlerts(readiness.alerts); storeAlerts != nil {
+		alertsSvc.SetStoreAlerts(storeAlerts)
 	}
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed

@@ -501,6 +501,10 @@ type runHarnessOpts struct {
 	ingestLog *slog.Logger
 	// noRouter leaves RunConfig.Router nil, for the step-1 refusal.
 	noRouter bool
+	// captureLock is RunConfig.CaptureLock (#830).
+	captureLock CaptureLock
+	// appLister, when set, replaces the fakeApps the run reads.
+	appLister AppLister
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -644,6 +648,7 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		Jobs:     js,
 
 		heldUploadCredential: opts.heldUploadCredential,
+		CaptureLock:          opts.captureLock,
 	}
 	if !opts.noIngest {
 		cfg.Ingest = ingest
@@ -673,6 +678,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 			tiles = fakeTiles{}
 		}
 		cfg.Apps = &fakeApps{list: opts.apps, err: opts.appsErr}
+		if opts.appLister != nil {
+			cfg.Apps = opts.appLister
+		}
 		cfg.Tiles = tiles
 	}
 	if opts.restore {
