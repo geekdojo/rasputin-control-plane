@@ -1291,7 +1291,7 @@ func main() {
 	obsEnabled := func(ctx context.Context) (bool, error) {
 		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, dataDir, selfNodeID, metricsSvc, idsLogDir, obsEnabled)
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, obsEnabled)
 	defer func() {
 		// Only tear down what we brought up. Stop shells out to `docker
 		// compose stop`; on a never-started stack that's a pointless
@@ -2837,10 +2837,17 @@ func splitCSV(s string) []string {
 // Side effect: when the stored setting says on, this starts the stack in the
 // background and calls metricsSvc.SetSink so every received MetricsEvt fans
 // out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
+	}
+	journalDir := journalStoreDir(dataDir)
+	if journalDir == "" {
+		// A dev host has no journal store, and an appliance whose store
+		// failed already fails its own unit. Neither takes obs down.
+		logger.Info("obs journal source off",
+			"dir", filepath.Join(dataDir, journalStoreSubdir), "reason", "not a directory")
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
 		StateDir:           stateDir,
@@ -2871,6 +2878,9 @@ func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *me
 		// rename in one place trips a build error not a runtime miss.
 		IDSLogDir:     idsLogDir,
 		EnableIDSPipe: envBoolPtr("RASPUTIN_OBS_IDS_PIPE"),
+		// The persistent journal, read by Alloy for the first-boot outcome
+		// lines only (obs.outcomeJournalIdentifiers).
+		JournalDir: journalDir,
 	})
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
@@ -2918,6 +2928,25 @@ func mustWireObs(ctx context.Context, dataDir, selfNodeID string, metricsSvc *me
 	}()
 	metricsSvc.SetSink(sink)
 	return sup, sink, status
+}
+
+// journalStoreSubdir is the journal store under dataDir:
+// /var/lib/rasputin/journal on an appliance (rasputin-os
+// rasputin-journal-store.service).
+const journalStoreSubdir = "journal"
+
+// journalStoreDir returns the journal store, <dataDir>/journal, when it is a
+// directory, and "" otherwise. It is the store and not /var/log/journal
+// because /var/log/journal is only a bind of it, made after growfs: a
+// container dockerd restarts before that bind lands would keep the empty
+// squashfs directory, Docker binds being rprivate. The store is on
+// /var/lib/rasputin, which dockerd already needs for its data root.
+func journalStoreDir(dataDir string) string {
+	p := filepath.Join(dataDir, journalStoreSubdir)
+	if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
+		return ""
+	}
+	return p
 }
 
 // seedObsEnabled captures RASPUTIN_OBS_ENABLED as the initial value of the

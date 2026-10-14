@@ -3,15 +3,20 @@ package obs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -1121,3 +1126,360 @@ var errShim = errShimT("docker daemon down")
 type errShimT string
 
 func (e errShimT) Error() string { return string(e) }
+
+// ----- Outcome journal source (geekdojo/geekdojo-brain#853) ---------------
+
+// journalTestDir is a JournalDir for render tests. Rendering never stats it.
+const journalTestDir = "/var/lib/rasputin/journal"
+
+// journalSup builds a supervisor for the outcome-journal render tests.
+func journalSup(t *testing.T, journalDir string, loki bool) *DockerComposeSupervisor {
+	t.Helper()
+	sup, err := NewDockerComposeSupervisor(DockerComposeSupervisorConfig{
+		StateDir:           t.TempDir(),
+		ControlPlaneNodeID: "cp-1",
+		EnableLoki:         &loki,
+		IDSLogDir:          "/var/lib/rasputin/obs/ids-alerts",
+		JournalDir:         journalDir,
+	})
+	if err != nil {
+		t.Fatalf("NewDockerComposeSupervisor: %v", err)
+	}
+	return sup
+}
+
+func renderAlloy(t *testing.T, sup *DockerComposeSupervisor) string {
+	t.Helper()
+	body, err := sup.renderAlloyConfig()
+	if err != nil {
+		t.Fatalf("render alloy: %v", err)
+	}
+	return string(body)
+}
+
+// riverBlock returns the body of the one top-level block whose header is
+// header (e.g. `loki.source.journal "outcomes"`), and how many blocks of
+// that kind (the header's first word) the config holds.
+func riverBlock(cfg, header string) (body string, count int) {
+	kind := strings.Fields(header)[0]
+	count = len(regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(kind)+` "`).FindAllStringIndex(cfg, -1))
+	i := strings.Index(cfg, header+" {")
+	if i < 0 {
+		return "", count
+	}
+	rest := cfg[i+len(header)+2:]
+	depth := 1
+	for j, r := range rest {
+		switch r {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return rest[:j], count
+			}
+		}
+	}
+	return "", count
+}
+
+// riverAttr returns the value of a top-level `key = value` line in body.
+func riverAttr(body, key string) (string, bool) {
+	m := regexp.MustCompile(`(?m)^\s*` + regexp.QuoteMeta(key) + `\s*=\s*(.+?)\s*$`).FindStringSubmatch(body)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+// checkJournalSource is TC-853-15's assertion as a function, so the test can
+// also prove it fails on a mutated allowlist. It checks the rendered Alloy
+// config holds exactly one loki.source.journal, shaped as the plan says, and
+// that its matches select exactly wantIDs.
+func checkJournalSource(cfg string, wantIDs []string) error {
+	src, n := riverBlock(cfg, `loki.source.journal "outcomes"`)
+	if n != 1 || src == "" {
+		return fmt.Errorf("%d loki.source.journal blocks (outcomes found: %v), want exactly 1", n, src != "")
+	}
+	for key, want := range map[string]string{
+		"path":          `"/var/log/journal"`,
+		"max_age":       `"` + lokiRejectOldSamplesMaxAge + `"`,
+		"labels":        `{job = "rasputin-outcome"}`,
+		"forward_to":    `[loki.write.local.receiver]`,
+		"relabel_rules": `loki.relabel.outcome_journal.rules`,
+	} {
+		if got, ok := riverAttr(src, key); !ok || got != want {
+			return fmt.Errorf("%s = %q (set: %v), want %q", key, got, ok, want)
+		}
+	}
+	if v, ok := riverAttr(src, "format_as_json"); ok && v == "true" {
+		return errors.New("format_as_json = true: every journal field would leave the host")
+	}
+	matches, ok := riverAttr(src, "matches")
+	if !ok {
+		return errors.New("no matches: the whole journal would ship")
+	}
+	var got []string
+	for _, term := range strings.Fields(strings.Trim(matches, `"`)) {
+		id, found := strings.CutPrefix(term, "SYSLOG_IDENTIFIER=")
+		if !found {
+			return fmt.Errorf("match term %q is not a SYSLOG_IDENTIFIER term", term)
+		}
+		got = append(got, id)
+	}
+	want := slices.Clone(wantIDs)
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		return fmt.Errorf("matches select %v, want exactly %v", got, want)
+	}
+	rel, n := riverBlock(cfg, `loki.relabel "outcome_journal"`)
+	if n != 1 || rel == "" {
+		return fmt.Errorf("%d loki.relabel blocks (outcome_journal found: %v), want exactly 1", n, rel != "")
+	}
+	if v, _ := riverAttr(rel, "forward_to"); v != "[]" {
+		return fmt.Errorf("relabel forward_to = %q, want [] (rules only)", v)
+	}
+	rules := map[string]string{}
+	for _, m := range regexp.MustCompile(`rule \{\s*source_labels = \["([^"]+)"\]\s*target_label\s*=\s*"([^"]+)"\s*\}`).FindAllStringSubmatch(rel, -1) {
+		rules[m[1]] = m[2]
+	}
+	wantRules := map[string]string{
+		"__journal__systemd_unit":     "unit",
+		"__journal_syslog_identifier": "syslog_identifier",
+	}
+	if len(rules) != len(wantRules) {
+		return fmt.Errorf("relabel rules %v, want %v", rules, wantRules)
+	}
+	for from, to := range wantRules {
+		if rules[from] != to {
+			return fmt.Errorf("relabel rules %v, want %v", rules, wantRules)
+		}
+	}
+	return nil
+}
+
+// TC-853-15: with JournalDir set and Loki on, the Alloy config holds exactly
+// one loki.source.journal, whose matches are exactly the allowlist, and the
+// allowlist is the literal cross-repo contract with rasputin-os. A mutated
+// allowlist (one extra term, one missing) makes the same assertion fail.
+func TestRenderAlloyConfig_JournalSourceIsExactlyTheAllowlist(t *testing.T) {
+	contract := []string{"rasputin-seal-key.sh", "rasputin-store-init.sh", "rasputin-store-provision.sh"}
+	if got := slices.Sorted(slices.Values(outcomeJournalIdentifiers)); !slices.Equal(got, contract) {
+		t.Fatalf("outcomeJournalIdentifiers = %v, want the rasputin-os script names %v", got, contract)
+	}
+	if lokiRejectOldSamplesMaxAge != "168h" {
+		t.Fatalf("lokiRejectOldSamplesMaxAge = %q, want 168h", lokiRejectOldSamplesMaxAge)
+	}
+	cfg := renderAlloy(t, journalSup(t, journalTestDir, true))
+	if err := checkJournalSource(cfg, contract); err != nil {
+		t.Fatalf("journal source: %v\n--- alloy ---\n%s", err, cfg)
+	}
+
+	orig := outcomeJournalIdentifiers
+	t.Cleanup(func() { outcomeJournalIdentifiers = orig })
+	for name, mutated := range map[string][]string{
+		"extra term":   append(slices.Clone(orig), "rasputin-api"),
+		"missing term": slices.Clone(orig[1:]),
+	} {
+		outcomeJournalIdentifiers = mutated
+		cfg := renderAlloy(t, journalSup(t, journalTestDir, true))
+		if err := checkJournalSource(cfg, contract); err == nil {
+			t.Errorf("%s: allowlist %v rendered and the check passed; want it to fail", name, mutated)
+		} else {
+			t.Logf("%s: fails as it should: %v", name, err)
+		}
+	}
+	outcomeJournalIdentifiers = orig
+}
+
+// journalBlockRE matches the whole rendered journal-source section, so a test
+// can compare a render with it against one without it.
+var journalBlockRE = regexp.MustCompile(`(?s)\n\n// ----- First-boot outcome lines.*?\nloki\.source\.journal "outcomes" \{.*?\n\}`)
+
+// TC-853-16: the journal source is absent when JournalDir is empty (Loki on)
+// and when Loki is off (JournalDir set), and every other block — the docker
+// source, the IDS pipe — renders exactly as it does without the source.
+func TestRenderAlloyConfig_JournalSourceAbsentWhenItCannotRun(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		journalDir string
+		loki       bool
+	}{
+		{"no JournalDir, Loki on", "", true},
+		{"JournalDir set, Loki off", journalTestDir, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := renderAlloy(t, journalSup(t, tc.journalDir, tc.loki))
+			for _, absent := range []string{"loki.source.journal", `loki.relabel "outcome_journal"`} {
+				if strings.Contains(cfg, absent) {
+					t.Errorf("config holds %s\n--- alloy ---\n%s", absent, cfg)
+				}
+			}
+			// Everything else is byte-identical to the render with the source
+			// on (Loki on) or with no JournalDir at all (Loki off).
+			var other string
+			if tc.loki {
+				with := renderAlloy(t, journalSup(t, journalTestDir, true))
+				if !journalBlockRE.MatchString(with) {
+					t.Fatalf("journal block not found in the Loki-on render\n%s", with)
+				}
+				other = journalBlockRE.ReplaceAllString(with, "")
+			} else {
+				other = renderAlloy(t, journalSup(t, "", false))
+			}
+			if cfg != other {
+				t.Errorf("the rest of the config changed\n--- got ---\n%s\n--- want ---\n%s", cfg, other)
+			}
+			hasDocker := strings.Contains(cfg, `loki.source.docker "containers"`)
+			hasIDS := strings.Contains(cfg, `loki.source.file "ids_alerts"`)
+			if hasDocker != tc.loki || hasIDS != tc.loki {
+				t.Errorf("docker source %v, IDS pipe %v; want both %v (Loki on=%v)", hasDocker, hasIDS, tc.loki, tc.loki)
+			}
+		})
+	}
+}
+
+// TC-853-17: Loki's reject_old_samples_max_age and the journal source's
+// max_age are one constant, 168h, and neither file carries its own literal.
+func TestJournalMaxAgeIsLokisRejectAge(t *testing.T) {
+	sup := journalSup(t, journalTestDir, true)
+	if err := sup.prepareHostDirs(); err != nil {
+		t.Fatalf("prepareHostDirs: %v", err)
+	}
+	if err := sup.writeLokiConfig(); err != nil {
+		t.Fatalf("writeLokiConfig: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(sup.cfg.StateDir, lokiConfigSubdir, lokiConfigFile))
+	if err != nil {
+		t.Fatalf("read loki config: %v", err)
+	}
+	loki := string(raw)
+	alloy := renderAlloy(t, sup)
+	if lokiRejectOldSamplesMaxAge != "168h" {
+		t.Fatalf("lokiRejectOldSamplesMaxAge = %q, want 168h", lokiRejectOldSamplesMaxAge)
+	}
+	if !strings.Contains(loki, "reject_old_samples_max_age: "+lokiRejectOldSamplesMaxAge+"\n") {
+		t.Errorf("loki config has no reject_old_samples_max_age: %s\n%s", lokiRejectOldSamplesMaxAge, loki)
+	}
+	src, _ := riverBlock(alloy, `loki.source.journal "outcomes"`)
+	if v, _ := riverAttr(src, "max_age"); v != `"`+lokiRejectOldSamplesMaxAge+`"` {
+		t.Errorf("journal max_age = %s, want %q", v, lokiRejectOldSamplesMaxAge)
+	}
+	// One occurrence each: the rendered constant, and no second literal.
+	for name, body := range map[string]string{"loki": loki, "alloy": alloy} {
+		if n := strings.Count(body, lokiRejectOldSamplesMaxAge); n != 1 {
+			t.Errorf("%s config holds %q %d times, want once", name, lokiRejectOldSamplesMaxAge, n)
+		}
+	}
+}
+
+// alloyService is the slice of the rendered compose file TC-853-18 reads.
+type alloyService struct {
+	Command []string `yaml:"command"`
+	Volumes []string `yaml:"volumes"`
+}
+
+func renderAlloyService(t *testing.T, sup *DockerComposeSupervisor) alloyService {
+	t.Helper()
+	body, err := sup.renderCompose()
+	if err != nil {
+		t.Fatalf("render compose: %v", err)
+	}
+	var doc struct {
+		Services map[string]alloyService `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("parse compose: %v\n%s", err, body)
+	}
+	svc, ok := doc.Services["alloy"]
+	if !ok {
+		t.Fatalf("compose has no alloy service\n%s", body)
+	}
+	return svc
+}
+
+// TC-853-18 (F-853-09): the host journal is mounted read-only into Alloy only
+// when the source is on — JournalDir set AND Loki on — and never with Loki
+// off. In every case Alloy keeps its state on the host (<StateDir>/alloy-data
+// at --storage.path), prepareHostDirs creates that directory, and the
+// existing config, IDS and cAdvisor mounts are unchanged.
+func TestRenderCompose_JournalMountAndDurablePositions(t *testing.T) {
+	const journalMount = journalTestDir + ":/var/log/journal:ro"
+	for _, tc := range []struct {
+		name       string
+		journalDir string
+		loki       bool
+		wantMount  bool
+	}{
+		{"JournalDir set, Loki on", journalTestDir, true, true},
+		{"no JournalDir, Loki on", "", true, false},
+		{"JournalDir set, Loki off", journalTestDir, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup := journalSup(t, tc.journalDir, tc.loki)
+			svc := renderAlloyService(t, sup)
+
+			var journal []string
+			var rest []string
+			dataMounted := false
+			for _, v := range svc.Volumes {
+				parts := strings.Split(v, ":")
+				switch {
+				case len(parts) > 1 && parts[1] == "/var/log/journal":
+					journal = append(journal, v)
+				case len(parts) == 2 && parts[1] == alloyContainerDataDir:
+					if filepath.Join(sup.cfg.StateDir, parts[0]) == filepath.Join(sup.cfg.StateDir, alloyDataDir) {
+						dataMounted = true
+					} else {
+						t.Errorf("alloy data volume %q is not <StateDir>/%s", v, alloyDataDir)
+					}
+				default:
+					rest = append(rest, v)
+				}
+			}
+			if tc.wantMount && !slices.Equal(journal, []string{journalMount}) {
+				t.Errorf("journal volumes %v, want exactly [%s]", journal, journalMount)
+			}
+			if !tc.wantMount && len(journal) != 0 {
+				t.Errorf("journal volumes %v, want none", journal)
+			}
+			if !dataMounted {
+				t.Errorf("no <StateDir>/%s:%s volume in %v", alloyDataDir, alloyContainerDataDir, svc.Volumes)
+			}
+			if !slices.Contains(svc.Command, "--storage.path="+alloyContainerDataDir) {
+				t.Errorf("command %v has no --storage.path=%s", svc.Command, alloyContainerDataDir)
+			}
+
+			wantRest := []string{
+				"./" + alloyConfigSubdir + ":/etc/alloy:ro",
+				"/var/run/docker.sock:/var/run/docker.sock:ro",
+				"/sys:/sys:ro",
+				defaultDockerDataRoot + ":" + defaultDockerDataRoot + ":ro",
+			}
+			if tc.loki {
+				wantRest = append(wantRest, "/var/lib/rasputin/obs/ids-alerts:/var/log/rasputin:ro")
+			}
+			if !slices.Equal(rest, wantRest) {
+				t.Errorf("other alloy volumes %v, want %v", rest, wantRest)
+			}
+
+			if err := sup.prepareHostDirs(); err != nil {
+				t.Fatalf("prepareHostDirs: %v", err)
+			}
+			fi, err := os.Stat(filepath.Join(sup.cfg.StateDir, alloyDataDir))
+			if err != nil || !fi.IsDir() {
+				t.Errorf("<StateDir>/%s after prepareHostDirs: %v (dir=%v)", alloyDataDir, err, err == nil && fi.IsDir())
+			}
+		})
+	}
+}
+
+// A relative JournalDir is made absolute, like IDSLogDir: compose reads a
+// relative volume source as a named volume and rejects the project.
+func TestNewDockerComposeSupervisor_MakesJournalDirAbsolute(t *testing.T) {
+	sup := journalSup(t, filepath.Join("data", "journal"), true)
+	if !filepath.IsAbs(sup.JournalDir()) || !strings.HasSuffix(sup.JournalDir(), filepath.Join("data", "journal")) {
+		t.Errorf("JournalDir = %q; want an absolute path ending in data/journal", sup.JournalDir())
+	}
+}
