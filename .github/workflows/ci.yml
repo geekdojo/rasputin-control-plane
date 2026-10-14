@@ -452,16 +452,22 @@ jobs:
           pull grafana/grafana:11.5.1
           pull victoriametrics/victoria-metrics:v1.103.0
           pull grafana/alloy:v1.4.2
+          pull grafana/loki:3.4.1
           pull curlimages/curl:8.11.1
 
       - name: build the obs test binary
         run: go test -c -race -o "$RUNNER_TEMP/obs.test" ./api/internal/obs
 
       - name: run the obs tests as root, against real grafana
-        # The whole package, so the root-only unit tests run too.
+        # The whole package, so the root-only unit tests run too. That
+        # includes the outcome journal source against the real pinned Alloy
+        # and Loki, reading this runner's own journal
+        # (journal_pipe_functional_linux_test.go, geekdojo-brain#853);
+        # RASPUTIN_JOURNAL_FUNCTIONAL=required makes it fail rather than skip.
         run: |
           sudo env \
             RASPUTIN_GRAFANA_FUNCTIONAL=required \
+            RASPUTIN_JOURNAL_FUNCTIONAL=required \
             PATH="$PATH" \
             "$RUNNER_TEMP/obs.test" -test.v -test.count=1 -test.timeout=25m
 

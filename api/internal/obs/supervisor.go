@@ -244,6 +244,19 @@ type DockerComposeSupervisorConfig struct {
 	// or leaving IDSLogDir empty.
 	EnableIDSPipe *bool
 
+	// JournalDir is the host directory holding the control plane's
+	// persistent systemd journal (the journal store, /var/lib/rasputin/journal
+	// on an appliance). The Alloy container mounts it read-only at
+	// /var/log/journal so loki.source.journal can ship the first-boot outcome
+	// lines of outcomeJournalIdentifiers, and nothing else, to Loki with
+	// labels {job=rasputin-outcome, node_id=...}. Empty (default) disables
+	// the source, and with Loki off it is neither mounted nor read
+	// (journalSourceEnabled).
+	//
+	// The api wires it (journalStoreDir in main.go); the supervisor just
+	// mounts it.
+	JournalDir string
+
 	// GrafanaImage overrides the Grafana image reference. Defaults to
 	// the pinned upstream tag. Grafana joins the stack at Slice 1.4
 	// and is reached via the api's auth-proxy at /observability/*.
@@ -397,6 +410,19 @@ const (
 	lokiConfigSubdir  = "loki-config"
 	lokiConfigFile    = "loki-config.yaml"
 	lokiDataDir       = "loki-data"
+	// alloyDataDir holds Alloy's --storage.path: component state, including
+	// the read positions of loki.source.file and loki.source.journal. Without
+	// it the positions live in the container's own filesystem and die with
+	// every recreate, so the journal source would re-read its whole max_age
+	// window each time the config changes.
+	alloyDataDir          = "alloy-data"
+	alloyContainerDataDir = "/var/lib/alloy/data"
+
+	// lokiRejectOldSamplesMaxAge is the oldest entry Loki accepts
+	// (reject_old_samples_max_age) AND how far back the journal source reads
+	// (max_age). One value for both, so Alloy never reads a line Loki would
+	// refuse: a refused entry fails its whole push batch, good lines included.
+	lokiRejectOldSamplesMaxAge = "168h"
 
 	grafanaConfigSubdir = "grafana-config"
 	grafanaIniFile      = "grafana.ini"
@@ -501,24 +527,30 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 		t := true
 		cfg.EnableLoki = &t
 	}
-	if cfg.IDSLogDir != "" {
-		// Compose only reads a volume source as a BIND MOUNT when it's an
-		// absolute path (or starts with ./ — which then resolves against the
-		// project dir, not our cwd, so it'd be wrong here anyway). A bare
-		// relative source like "data/obs/ids-alerts" is parsed as a *named
-		// volume* and the whole project is rejected:
-		//
-		//   service "alloy" refers to undefined volume data/obs/ids-alerts
-		//
-		// dataDir is relative in dev (./data) and absolute on an appliance
-		// (/var/lib/rasputin), so this only ever bit dev — and dev couldn't
-		// reach obs at all until it became UI-toggleable. Normalize here
-		// rather than trusting every caller to pass an absolute path.
-		abs, err := filepath.Abs(cfg.IDSLogDir)
-		if err != nil {
-			return nil, fmt.Errorf("obs supervisor: resolve IDSLogDir: %w", err)
+	// Compose only reads a volume source as a BIND MOUNT when it's an
+	// absolute path (or starts with ./ — which then resolves against the
+	// project dir, not our cwd, so it'd be wrong here anyway). A bare
+	// relative source like "data/obs/ids-alerts" is parsed as a *named
+	// volume* and the whole project is rejected:
+	//
+	//   service "alloy" refers to undefined volume data/obs/ids-alerts
+	//
+	// dataDir is relative in dev (./data) and absolute on an appliance
+	// (/var/lib/rasputin), so this only ever bit dev — and dev couldn't
+	// reach obs at all until it became UI-toggleable. Normalize here
+	// rather than trusting every caller to pass an absolute path.
+	for _, d := range []struct {
+		name string
+		p    *string
+	}{{"IDSLogDir", &cfg.IDSLogDir}, {"JournalDir", &cfg.JournalDir}} {
+		if *d.p == "" {
+			continue
 		}
-		cfg.IDSLogDir = abs
+		abs, err := filepath.Abs(*d.p)
+		if err != nil {
+			return nil, fmt.Errorf("obs supervisor: resolve %s: %w", d.name, err)
+		}
+		*d.p = abs
 	}
 	if cfg.EnableIDSPipe == nil {
 		// Implicit-on when both Loki and an IDS log dir are configured.
@@ -880,7 +912,7 @@ func (s *DockerComposeSupervisor) compose(ctx context.Context, args ...string) (
 // ----- Host state + config ------------------------------------------------
 
 func (s *DockerComposeSupervisor) prepareHostDirs() error {
-	subs := []string{vmDataDir, alloyConfigSubdir}
+	subs := []string{vmDataDir, alloyConfigSubdir, alloyDataDir}
 	if s.lokiEnabled() {
 		subs = append(subs, lokiConfigSubdir, lokiDataDir)
 	}
@@ -937,6 +969,33 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 	return nil
 }
 
+// outcomeJournalIdentifiers is the allowlist of journal SYSLOG_IDENTIFIERs
+// the control plane's Alloy ships to Loki: the first-boot outcome lines of
+// the three rasputin-os scripts rasputin-seal-key.sh, rasputin-store-init.sh
+// and rasputin-store-provision.sh (each logs through outcome.sh's
+// outcome_log). A stdout line's identifier is the basename of the script
+// systemd runs, so renaming one of those scripts silently stops it shipping.
+//
+// Nothing else in the host journal reaches Loki. That is a security
+// property, not a convenience: the #686 leak inventory's "cannot reach"
+// verdicts rest on host-process logs staying out of Loki. Add an identifier
+// only for a script whose every journal line has been audited for secrets.
+var outcomeJournalIdentifiers = []string{
+	"rasputin-seal-key.sh",
+	"rasputin-store-init.sh",
+	"rasputin-store-provision.sh",
+}
+
+// outcomeJournalMatches renders ids as loki.source.journal's matches string.
+// sd-journal ORs terms on the same field, so this selects any one of them.
+func outcomeJournalMatches(ids []string) string {
+	terms := make([]string, len(ids))
+	for i, id := range ids {
+		terms[i] = "SYSLOG_IDENTIFIER=" + id
+	}
+	return strings.Join(terms, " ")
+}
+
 // lokiEnabled is a small accessor so the rest of the package doesn't
 // have to chase the (nil-vs-pointer)? shape of EnableLoki everywhere.
 func (s *DockerComposeSupervisor) lokiEnabled() bool {
@@ -952,6 +1011,18 @@ func (s *DockerComposeSupervisor) idsPipeEnabled() bool {
 	}
 	return s.lokiEnabled() && s.cfg.IDSLogDir != ""
 }
+
+// journalSourceEnabled reports whether Alloy should read the host journal.
+// Requires Loki on AND a non-empty JournalDir. The one accessor gates both
+// the config block and the compose mount, so the journal is never mounted
+// into a container that has nothing to send it to.
+func (s *DockerComposeSupervisor) journalSourceEnabled() bool {
+	return s.lokiEnabled() && s.cfg.JournalDir != ""
+}
+
+// JournalDir is the host journal directory the supervisor was configured
+// with, or "" when it has none. Loki off still disables the source.
+func (s *DockerComposeSupervisor) JournalDir() string { return s.cfg.JournalDir }
 
 // cadvisorEnabled mirrors lokiEnabled — single-source-of-truth for the
 // "is this optional component on" question.
@@ -975,8 +1046,9 @@ func (s *DockerComposeSupervisor) vmalertEnabled() bool {
 // file content changes, which the next Start does for free.
 func (s *DockerComposeSupervisor) writeLokiConfig() error {
 	var buf bytes.Buffer
-	if err := lokiConfigTmpl.Execute(&buf, struct{ Retention string }{
+	if err := lokiConfigTmpl.Execute(&buf, struct{ Retention, MaxAge string }{
 		Retention: s.cfg.LokiRetention,
+		MaxAge:    lokiRejectOldSamplesMaxAge,
 	}); err != nil {
 		return fmt.Errorf("obs supervisor: render loki config: %w", err)
 	}
@@ -1434,7 +1506,7 @@ schema_config:
 limits_config:
   allow_structured_metadata: true
   reject_old_samples: true
-  reject_old_samples_max_age: 168h
+  reject_old_samples_max_age: {{.MaxAge}}
   # How far back logs are kept. Enforced by the compactor below; without
   # BOTH of these Loki keeps every line forever, which is how it shipped.
   retention_period: {{.Retention}}
@@ -1477,6 +1549,9 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 		EnableCadvisor: s.cadvisorEnabled(),
 		EnableLoki:     s.lokiEnabled(),
 		EnableIDSPipe:  s.idsPipeEnabled(),
+		EnableJournal:  s.journalSourceEnabled(),
+		JournalMatches: outcomeJournalMatches(outcomeJournalIdentifiers),
+		JournalMaxAge:  lokiRejectOldSamplesMaxAge,
 		NodeID:         s.cfg.ControlPlaneNodeID,
 	}
 	var buf bytes.Buffer
@@ -1490,6 +1565,9 @@ type alloyConfigData struct {
 	EnableCadvisor bool
 	EnableLoki     bool
 	EnableIDSPipe  bool
+	EnableJournal  bool
+	JournalMatches string
+	JournalMaxAge  string
 	// NodeID, when set, tags every sample this controlplane Alloy writes with
 	// external_labels{node_id} so its containers filter uniformly with the
 	// per-node collectors (§3.10 piece 5).
@@ -1624,6 +1702,36 @@ loki.process "ids_alerts" {
   }
 }
 {{- end }}
+{{- if .EnableJournal }}
+
+// ----- First-boot outcome lines (host journal → here → Loki) -----
+// Reads the host's persistent journal, mounted read-only, and ships ONLY the
+// outcomeJournalIdentifiers allowlist. MESSAGE only (no format_as_json), so
+// no other journal field leaves the host. max_age is Loki's own
+// reject_old_samples_max_age. node_id comes from loki.write.local.
+loki.relabel "outcome_journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+
+  rule {
+    source_labels = ["__journal_syslog_identifier"]
+    target_label  = "syslog_identifier"
+  }
+}
+
+loki.source.journal "outcomes" {
+  path          = "/var/log/journal"
+  matches       = "{{.JournalMatches}}"
+  max_age       = "{{.JournalMaxAge}}"
+  relabel_rules = loki.relabel.outcome_journal.rules
+  labels        = {job = "rasputin-outcome"}
+  forward_to    = [loki.write.local.receiver]
+}
+{{- end }}
 {{- end }}
 `))
 
@@ -1733,6 +1841,9 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		EnableLoki:           s.lokiEnabled(),
 		EnableIDSPipe:        s.idsPipeEnabled(),
 		IDSLogHostDir:        s.cfg.IDSLogDir,
+		AlloyDataDir:         "./" + alloyDataDir,
+		EnableJournal:        s.journalSourceEnabled(),
+		JournalHostDir:       s.cfg.JournalDir,
 		LokiImage:            s.cfg.LokiImage,
 		LokiHost:             lokiHost,
 		LokiPort:             lokiPort,
@@ -1781,6 +1892,9 @@ type composeData struct {
 	EnableLoki         bool
 	EnableIDSPipe      bool
 	IDSLogHostDir      string // absolute host path, mounted into Alloy at /var/log/rasputin
+	AlloyDataDir       string
+	EnableJournal      bool
+	JournalHostDir     string // absolute host path, mounted into Alloy at /var/log/journal
 	LokiImage          string
 	LokiHost           string
 	LokiPort           string
@@ -1878,12 +1992,15 @@ services:
       # No pprof: it is a debug surface nothing here uses, and the server
       # it hangs off has no authentication of any kind. geekdojo-brain#452.
       - --server.http.enable-pprof=false
+      # On the host, so read positions survive a recreate (see alloyDataDir).
+      - --storage.path=` + alloyContainerDataDir + `
       - /etc/alloy/{{.AlloyConfigFile}}
     # NO ports: stanza — Alloy's HTTP server is NOT published to the host. See
     # DockerComposeSupervisorConfig. It stays on the compose network, where
     # only this stack's own services can reach it.
     volumes:
       - {{.AlloyConfigDir}}:/etc/alloy:ro
+      - {{.AlloyDataDir}}:` + alloyContainerDataDir + `
 {{- if .EnableCadvisor }}
       # cAdvisor needs read access to the host's cgroup tree and the
       # Docker socket to enumerate containers. These are Linux paths;
@@ -1903,6 +2020,11 @@ services:
       # api owns the file lifecycle (open/rotate/close); Alloy just
       # follows it.
       - {{.IDSLogHostDir}}:/var/log/rasputin:ro
+{{- end }}
+{{- if .EnableJournal }}
+      # The host's persistent journal, for loki.source.journal (see
+      # alloyConfigTmpl). Read-only: journald owns it.
+      - {{.JournalHostDir}}:/var/log/journal:ro
 {{- end }}
     depends_on:
       - victoriametrics
