@@ -242,7 +242,8 @@ func TestDisabled(t *testing.T) {
 	kv, e2 := d.Read(ctx, secret.Value{}, p, 0)
 	n, e3 := d.Write(ctx, secret.Value{}, p, map[string]secret.Value{"k": tok("v")}, 0)
 	md, e4 := d.Versions(ctx, secret.Value{}, p)
-	for i, err := range []error{e1, e2, e3, e4} {
+	e5 := d.Delete(ctx, secret.Value{}, p) // TC-761-19
+	for i, err := range []error{e1, e2, e3, e4, e5} {
 		if !errors.Is(err, secretstore.ErrDisabled) {
 			t.Errorf("method %d: err = %v, want ErrDisabled", i, err)
 		}

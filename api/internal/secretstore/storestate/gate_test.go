@@ -318,6 +318,14 @@ func TestObservedStore_Transparent(t *testing.T) {
 	check(t, spy, ctx, "write", kv.args, []any{"write", "t2", p, 1, 1}, n == 4, err, want)
 	md, err := o.Versions(ctx, tokenOf("t3"), p)
 	check(t, spy, ctx, "versions", kv.args, []any{"versions", "t3", p}, md.CurrentVersion == 5, err, want)
+	// TC-761-19: Delete is forwarded unchanged and reported once, with the
+	// caller's ctx.
+	reports := len(spy.errs)
+	err = o.Delete(ctx, tokenOf("t4"), p)
+	check(t, spy, ctx, "delete", kv.args, []any{"delete", "t4", p}, true, err, want)
+	if len(spy.errs) != reports+1 {
+		t.Errorf("delete: %d observer reports, want exactly 1", len(spy.errs)-reports)
+	}
 
 	before := len(spy.errs)
 	h, err := o.Health(ctx)

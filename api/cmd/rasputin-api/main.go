@@ -486,7 +486,7 @@ func main() {
 	// starts anyway. Wiring reads no leaf: on first boot neither exists until
 	// the startup sweep mints them, in its own goroutine, behind the same clock
 	// gate, and independent of RASPUTIN_HTTPS_ADDR. The login session (#759)
-	// is wired below; the business rules (#761) will consume it.
+	// is wired below, and the secrets service (#761) over it.
 	storeBackend := secretStoreBackendFromEnv()
 	storeW, err := wireSecretStore(ctx, logger, storeBackend, secretStoreAddrFromEnv(),
 		storeCA, dataDir, execrun.CombinedOutput)
@@ -514,7 +514,13 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store session", "err", err.Error())
 		os.Exit(1)
 	}
-	_ = storeSession
+	// The secrets service and its KV repository (geekdojo/geekdojo-brain#761).
+	secretsSvc, err := secretsWiring(storeSession, appsStore, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
+		os.Exit(1)
+	}
+	_ = secretsSvc // #762 is the first consumer
 	// The store's audit file rotation and the data partition's free-space alert
 	// (ADR-0010 S11, geekdojo/geekdojo-brain#799).
 	storeAud, err := storeAuditWiring(storeW.mode, dataDir, readiness.store, execrun.CombinedOutput, logger)

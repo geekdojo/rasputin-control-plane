@@ -10,7 +10,7 @@
 //
 // The session reads no clock and no TTL, and starts no timer: the store's
 // refusal is the only fact that makes it log in again (ARCH-FACTS). The token
-// never leaves this package; consumers call Read, Write and Versions.
+// never leaves this package; consumers call Read, Write, Versions and Delete.
 package storesession
 
 import (
@@ -36,6 +36,7 @@ type Store interface {
 	Read(ctx context.Context, token secret.Value, p secretstore.KVPath, version int) (secretstore.KV, error)
 	Write(ctx context.Context, token secret.Value, p secretstore.KVPath, data map[string]secret.Value, cas int) (int, error)
 	Versions(ctx context.Context, token secret.Value, p secretstore.KVPath) (secretstore.Metadata, error)
+	Delete(ctx context.Context, token secret.Value, p secretstore.KVPath) error
 }
 
 // Observer takes each login's outcome, with the caller's ctx
@@ -135,6 +136,15 @@ func (s *Session) Versions(ctx context.Context, p secretstore.KVPath) (secretsto
 	return call(s, ctx, func(tok secret.Value) (secretstore.Metadata, error) {
 		return s.store.Versions(ctx, tok, p)
 	})
+}
+
+// Delete removes the secret at p with every version
+// (geekdojo/geekdojo-brain#761).
+func (s *Session) Delete(ctx context.Context, p secretstore.KVPath) error {
+	_, err := call(s, ctx, func(tok secret.Value) (struct{}, error) {
+		return struct{}{}, s.store.Delete(ctx, tok, p)
+	})
+	return err
 }
 
 // call is the one retry rule. It runs f with the held token, logging in first

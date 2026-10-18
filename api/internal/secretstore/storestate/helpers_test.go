@@ -169,6 +169,11 @@ func (k *kvStore) Versions(_ context.Context, token secret.Value, p secretstore.
 	return secretstore.Metadata{CurrentVersion: 5}, k.err
 }
 
+func (k *kvStore) Delete(_ context.Context, token secret.Value, p secretstore.KVPath) error {
+	k.note("delete", string(token.Reveal()), p)
+	return k.err
+}
+
 func (k *kvStore) note(op string, args ...any) {
 	if k.order != nil {
 		*k.order = append(*k.order, op)

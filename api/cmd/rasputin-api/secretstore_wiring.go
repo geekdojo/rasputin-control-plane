@@ -66,6 +66,7 @@ type secretStore interface {
 	Read(ctx context.Context, token secret.Value, p secretstore.KVPath, version int) (secretstore.KV, error)
 	Write(ctx context.Context, token secret.Value, p secretstore.KVPath, data map[string]secret.Value, cas int) (int, error)
 	Versions(ctx context.Context, token secret.Value, p secretstore.KVPath) (secretstore.Metadata, error)
+	Delete(ctx context.Context, token secret.Value, p secretstore.KVPath) error
 }
 
 // storeWiring is what wireSecretStore built.

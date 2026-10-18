@@ -99,6 +99,12 @@ func (c *capturingStore) Versions(ctx context.Context, tok secret.Value, p secre
 	return m, err
 }
 
+func (c *capturingStore) Delete(ctx context.Context, tok secret.Value, p secretstore.KVPath) error {
+	err := c.inner.Delete(ctx, tok, p)
+	c.seen(tok, err)
+	return err
+}
+
 func (c *capturingStore) lastToken() secret.Value {
 	c.mu.Lock()
 	defer c.mu.Unlock()

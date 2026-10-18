@@ -168,6 +168,18 @@ func (c *Client) Versions(ctx context.Context, token secret.Value, p KVPath) (Me
 	return m, nil
 }
 
+// Delete removes the secret at p with every one of its versions, by deleting
+// its metadata. A path that does not exist is not an error: the end state, no
+// secret at p, holds either way (geekdojo/geekdojo-brain#761).
+func (c *Client) Delete(ctx context.Context, token secret.Value, p KVPath) error {
+	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	defer cancel()
+	if e := c.delete(ctx, token, p); e != nil {
+		return c.failed(ctx, e)
+	}
+	return nil
+}
+
 // CertLogin logs in through the store's cert auth method against role,
 // presenting whatever client leaf this client's TLS config presents, and
 // returns the token. A 200 with no token, or a body of another shape, is
@@ -431,6 +443,23 @@ func (c *Client) versions(ctx context.Context, token secret.Value, p KVPath) (Me
 		return Metadata{}, withStatus(fail(op, p, ErrProtocol, err), status)
 	}
 	return m, nil
+}
+
+func (c *Client) delete(ctx context.Context, token secret.Value, p KVPath) *Error {
+	const op = "delete"
+	if !p.valid() {
+		return fail(op, p, ErrInvalidValue, errors.New("the path is the zero KVPath"))
+	}
+	status, body, e := c.round(ctx, op, p, http.MethodDelete, "/v1/"+p.mount+"/metadata/"+p.path, &token, nil)
+	if e != nil {
+		return e
+	}
+	defer clear(body)
+	switch status {
+	case http.StatusNoContent, http.StatusNotFound:
+		return nil
+	}
+	return c.statusError(ctx, op, p, status, body)
 }
 
 func (c *Client) certLogin(ctx context.Context, role string) (secret.Value, *Error) {

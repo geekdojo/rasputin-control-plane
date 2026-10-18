@@ -127,6 +127,18 @@ func (m *Mock) Versions(_ context.Context, _ secret.Value, p KVPath) (Metadata, 
 	return md, nil
 }
 
+// Delete drops the secret at p with every version, as the client's metadata
+// delete does. A path that does not exist is not an error.
+func (m *Mock) Delete(_ context.Context, _ secret.Value, p KVPath) error {
+	if !p.valid() {
+		return fail("delete", p, ErrInvalidValue, errors.New("the path is the zero KVPath"))
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.secrets, p)
+	return nil
+}
+
 // mockToken is the token Mock.CertLogin returns. Mock ignores tokens, so its
 // value means nothing; it is non-empty only because a real login never
 // returns an empty one.

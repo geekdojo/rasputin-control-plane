@@ -148,6 +148,11 @@ func (c *countingStore) Versions(ctx context.Context, tok secret.Value, p secret
 	return c.inner.Versions(ctx, tok, p)
 }
 
+func (c *countingStore) Delete(ctx context.Context, tok secret.Value, p secretstore.KVPath) error {
+	c.n.Add(1)
+	return c.inner.Delete(ctx, tok, p)
+}
+
 type nopObserver struct{}
 
 func (nopObserver) ObserveAudited(context.Context, error) {}
