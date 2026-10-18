@@ -361,6 +361,64 @@ Expect `--- PASS: TestSealRotate_AgainstTheRealStore` with one `PASS` line per t
 status 0. It takes about 5 seconds; no resume waits out an `UnsealWait`. The unit tests in the
 same package need no store.
 
+## The store session's functional test
+
+`TestSession_AgainstTheRealStore`, in `api/internal/secretstore/storesession/functional_test.go`,
+runs the api's login session at the store (`storesession.Session`) against the real store, under
+the same switch, in the same CI step
+([geekdojo-brain#759](https://github.com/geekdojo/geekdojo-brain/issues/759)). The session logs in
+through cert auth on the first call that needs a token, keeps the token in memory, and logs in
+again only when the store refuses a token an earlier call obtained. Its unit tests run it over
+fakes and over the real client against an `httptest` TLS 1.3 server; this test shows the real
+store refuses a dead token the way those fakes do.
+
+Self-init creates the `rasputin-secrets` mount and three cert roles: `rasputin-api`, with the
+shipped `storepolicy` text; a test-only `revoker`, whose only grant is `update` on
+`auth/token/revoke`; and a test-only `rasputin-api-expiring`, with the api's policy and a
+`token_ttl` of 2 seconds (`secretstoretest.Role.TokenTTL`). Each session runs over the production
+client, a real readiness `Monitor` and `ObservedStore`, a login counter, and a store wrapper that
+keeps the token each call carried.
+
+What it proves, against OpenBao v2.7.1:
+
+- **One login serves many calls.** A write and then a read make one login; a second read makes
+  none.
+- **A revoked token costs one re-login (T60).** The revoker revokes the session's token through
+  `auth/token/revoke` (204). The next read is refused 403 once, the session logs in once more (two
+  logins in all), and the value comes back.
+- **An expired token costs one re-login (T61).** A session as `rasputin-api-expiring` writes once
+  (one login). The test then re-asks the store with that token until the store refuses it, which
+  is the fact it waits on, not a sleep; a token still accepted after 30 seconds fails the test,
+  naming the TTL and the store's last answer. The session's next call is then refused once, logs
+  in exactly once more, and succeeds.
+- **No token or key in the logs.** No token the test saw (the session's, the revoked and expired
+  ones, the revoker's) and no rendering of either client leaf's private key appears in any log
+  record or in any rendering of the errors the store returned.
+
+What it does not prove:
+
+- **The image's role and listener.** The image's `rasputin-api` role, its 1-hour `token_ttl` and
+  its listener trust are rasputin-os's and the hardware validation's
+  ([geekdojo-brain#756](https://github.com/geekdojo/geekdojo-brain/issues/756)). This test
+  shows a token past its TTL is refused, not the image's TTL value.
+- **The boot clock floor.** A client leaf newer than the clock fails TLS before any login; the unit
+  test `TestSession_ClockFloorRefusesWithoutLooping` shows that refuses without looping, in Go TLS
+  only.
+- **A login while the store's audit sink is blocked** (row T42 stays `unverified`).
+- **Consumers.** Nothing in the api calls the session yet;
+  [geekdojo-brain#761](https://github.com/geekdojo/geekdojo-brain/issues/761)'s repository will.
+
+Run it the same way as the smoke test, with `-run TestSession_AgainstTheRealStore`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -race -count=1 -v -run TestSession_AgainstTheRealStore ./api/internal/secretstore/storesession
+```
+
+Expect `--- PASS: TestSession_AgainstTheRealStore` with one `PASS` line per step and exit status
+0. It takes about 3 seconds, most of it the 2-second TTL running out. With the binary absent and
+the switch set it fails, naming the variable, exactly as the smoke test does. The package's unit
+tests need no store.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -375,7 +433,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T57 at it before editing their `version` column.
+  release, and re-verifies T20 to T57, T60 and T61 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -519,3 +577,9 @@ The cases for geekdojo-brain#805 that this document's tests check:
 | TC-805-06 | The capability and auth registers and the release step | `TestStoreProvisionerCapabilityRows` (`api/internal/gatereg`), `scripts/auth-register.sh --gate`, the release workflow's `api tarballs carry the store policy` step |
 | TC-805-07 to TC-805-15 | The provisioner against the real store | `TestProvisionerPolicy_AgainstTheRealStore` |
 | TC-805-39 | `Bootstrap.Policies` | `TestStartWith_RendersPoliciesWithNoRole`, `TestStartWith_RefusesBadPolicies` |
+
+The cases for geekdojo-brain#759 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-759-17 | One login for a write and two reads; a revoked token (T60) and an expired one (T61) each cost one 403 and one re-login; no token or leaf key in the logs; required mode | `TestSession_AgainstTheRealStore`, and the `env -u` command above with `-run TestSession_ ./api/internal/secretstore/storesession` |

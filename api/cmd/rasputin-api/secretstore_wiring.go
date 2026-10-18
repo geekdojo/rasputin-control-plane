@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -71,6 +72,9 @@ type secretStore interface {
 type storeWiring struct {
 	mode  string
 	store secretStore
+	// login is the store's cert login (#759): the client under openbao, the
+	// same Mock under mock, and Disabled when the store is off or refused.
+	login storesession.Login
 	// client and sweeper are set only in the openbao mode.
 	client  *secretstore.Client
 	sweeper *tlsca.LeafSweeper
@@ -94,7 +98,7 @@ type runFunc func(ctx context.Context, name string, args ...string) ([]byte, err
 // leaf consumer will not register, which main treats as fatal; every refused
 // setting is a configfault and a Disabled store.
 func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr string, storeCA *tlsca.CA, dataDir string, run runFunc) (storeWiring, error) {
-	off := storeWiring{mode: storeModeOff, store: secretstore.Disabled{}}
+	off := storeWiring{mode: storeModeOff, store: secretstore.Disabled{}, login: secretstore.Disabled{}}
 	configFault := func(setting, value, reason string) (storeWiring, error) {
 		logger.ErrorContext(ctx, "secret store off: configuration refused",
 			"configfault", true, "setting", setting, "value", value, "reason", reason)
@@ -107,7 +111,8 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 	case storeModeMock:
 		logger.WarnContext(ctx, "secret store is the in-memory mock: nothing it holds survives a restart",
 			"setting", "RASPUTIN_SECRETSTORE_BACKEND")
-		return storeWiring{mode: storeModeMock, store: secretstore.NewMock(time.Now)}, nil
+		mock := secretstore.NewMock(time.Now)
+		return storeWiring{mode: storeModeMock, store: mock, login: mock}, nil
 	case storeModeOpenBao:
 	default:
 		return configFault("RASPUTIN_SECRETSTORE_BACKEND", backend, `not "openbao" or "mock"`)
@@ -162,7 +167,7 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 	}); err != nil {
 		return off, fmt.Errorf("secret store: %w", err)
 	}
-	return storeWiring{mode: storeModeOpenBao, store: client, client: client, sweeper: sweeper}, nil
+	return storeWiring{mode: storeModeOpenBao, store: client, login: client, client: client, sweeper: sweeper}, nil
 }
 
 // storeServerLeafSpec is the store listener's leaf: serverAuth, for the one

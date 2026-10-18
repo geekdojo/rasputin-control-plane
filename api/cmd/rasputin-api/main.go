@@ -485,8 +485,8 @@ func main() {
 	// selects it; a refused setting turns it off with a configfault and the api
 	// starts anyway. Wiring reads no leaf: on first boot neither exists until
 	// the startup sweep mints them, in its own goroutine, behind the same clock
-	// gate, and independent of RASPUTIN_HTTPS_ADDR. Nothing consumes the store
-	// yet; login (#759) and the business rules (#761) do.
+	// gate, and independent of RASPUTIN_HTTPS_ADDR. The login session (#759)
+	// is wired below; the business rules (#761) will consume it.
 	storeBackend := secretStoreBackendFromEnv()
 	storeW, err := wireSecretStore(ctx, logger, storeBackend, secretStoreAddrFromEnv(),
 		storeCA, dataDir, execrun.CombinedOutput)
@@ -506,6 +506,15 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store readiness", "err", err.Error())
 		os.Exit(1)
 	}
+	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
+	// logs in on the first call that needs a token, not here. #761's
+	// repository is its first consumer.
+	storeSession, err := storeSessionWiring(storeW.login, readiness.store, readiness.monitor, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store session", "err", err.Error())
+		os.Exit(1)
+	}
+	_ = storeSession
 	// The store's audit file rotation and the data partition's free-space alert
 	// (ADR-0010 S11, geekdojo/geekdojo-brain#799).
 	storeAud, err := storeAuditWiring(storeW.mode, dataDir, readiness.store, execrun.CombinedOutput, logger)

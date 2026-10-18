@@ -6,7 +6,7 @@ package secretstoretest
 // line in the `Name = "value"` form, and keep them in this file.
 //
 // OpenBaoRelease is the GitHub owner/repo:tag. It is also the pin that
-// .github/third-party-capabilities.tsv rows T20-T57 point at
+// .github/third-party-capabilities.tsv rows T20-T57, T60 and T61 point at
 // (go-const:api/internal/secretstoretest/pin.go#OpenBaoRelease), so changing
 // the tag fails gatereg until those rows are re-verified at the new release.
 //
@@ -26,9 +26,9 @@ package secretstoretest
 //     changes, not when this hash does, so nothing but this rule stops a
 //     bump from taking an unverified hash.
 //   - A bump changes both constants together, re-runs that verification for
-//     the new release, and re-verifies T20-T57 at it. The rasputin-os
-//     OPENBAO_VERSION pin is kept in step by hand until geekdojo-brain#769
-//     automates it (docs/testing-secret-store.md).
+//     the new release, and re-verifies T20-T57, T60 and T61 at it. The
+//     rasputin-os OPENBAO_VERSION pin is kept in step by hand until
+//     geekdojo-brain#769 automates it (docs/testing-secret-store.md).
 const (
 	OpenBaoRelease          = "openbao/openbao:v2.7.1"
 	OpenBaoLinuxAMD64SHA256 = "0e2f1ce10d124e03112b50dd2fbec6b78003783253bc3a91587938f39d1e2243"

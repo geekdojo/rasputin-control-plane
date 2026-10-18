@@ -31,3 +31,9 @@ func (Disabled) Write(_ context.Context, _ secret.Value, p KVPath, _ map[string]
 func (Disabled) Versions(_ context.Context, _ secret.Value, p KVPath) (Metadata, error) {
 	return Metadata{}, fail("versions", p, ErrDisabled, nil)
 }
+
+// CertLogin returns ErrDisabled, so a login session built over a store that is
+// off refuses every call with no I/O (geekdojo/geekdojo-brain#759).
+func (Disabled) CertLogin(context.Context, string) (secret.Value, error) {
+	return secret.Value{}, &Error{Op: "login", Kind: ErrDisabled}
+}

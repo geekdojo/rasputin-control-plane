@@ -17,6 +17,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
@@ -122,6 +123,46 @@ esac
 	}
 }
 
+// geekdojo/geekdojo-brain#759 (F-759-03): a Role's TokenTTL renders as its
+// cert role's token_ttl in seconds, and a Role without one renders no
+// token_ttl, leaving the store's default.
+func TestRenderInitJSON_TokenTTL(t *testing.T) {
+	b := Bootstrap{Mount: "kv", Roles: []Role{
+		{Name: "short", Policy: "p", PolicyText: []byte("x"), TokenTTL: 3 * time.Second},
+		{Name: "plain", Policy: "p", PolicyText: []byte("x")},
+	}}
+	if err := b.validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := renderInitJSON(b, []byte("ca"), func(name string) string { return "/p/" + name })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Initialize []map[string]struct {
+			Request []map[string]initRequest `json:"request"`
+		} `json:"initialize"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	ttl := map[string]any{}
+	for _, block := range doc.Initialize {
+		for _, stanza := range block {
+			for _, named := range stanza.Request {
+				for _, r := range named {
+					if v, ok := r.Data["token_ttl"]; ok {
+						ttl[r.Path] = v
+					}
+				}
+			}
+		}
+	}
+	if !reflect.DeepEqual(ttl, map[string]any{"auth/cert/certs/short": "3s"}) {
+		t.Errorf("token_ttl by path = %v, want only auth/cert/certs/short at 3s", ttl)
+	}
+}
+
 // TC-804-04: each Bootstrap self-init cannot be given is refused before any
 // I/O, with an error naming the input: the fake's every subcommand leaves a
 // marker, and none may appear.
@@ -142,6 +183,8 @@ func TestStartWith_RefusesBadBootstrap(t *testing.T) {
 		{"policy name outside the name rule", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", Policy: "a/b", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].Policy "a/b" is not a name`},
 		{"empty policy name", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].Policy "" is not a name`},
 		{"one policy, two texts", Bootstrap{Mount: "kv", Roles: []Role{good(), {Name: "s", Policy: "p", PolicyText: []byte("y")}}}, `Bootstrap.Roles[1].Policy "p" is given two different texts`},
+		{"negative token TTL", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", Policy: "p", PolicyText: []byte("x"), TokenTTL: -time.Second}}}, "Bootstrap.Roles[0].TokenTTL -1s is not zero or a positive whole number of seconds"},
+		{"sub-second token TTL", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", Policy: "p", PolicyText: []byte("x"), TokenTTL: 1500 * time.Millisecond}}}, "Bootstrap.Roles[0].TokenTTL 1.5s is not"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
