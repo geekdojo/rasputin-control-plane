@@ -11,9 +11,10 @@ import (
 )
 
 // loadAppSecrets loads the cluster's app-secret seed from trustDir, minting it
-// on first start, and returns it with the HKDF source the deploy-family
-// workflows resolve ${secret:} tokens through. main still needs the seed
-// itself, for the fingerprint key.
+// on first start, and returns it with the HKDF source, which the deploy-family
+// workflows resolve ${secret:} tokens through when no store backend is
+// requested (deploySourceWiring). main also needs the seed itself, for the
+// fingerprint key and the store source.
 //
 // It fails closed. A seed that does not load means no app secret can be
 // derived, and a start that could not read an EXISTING seed must not carry on

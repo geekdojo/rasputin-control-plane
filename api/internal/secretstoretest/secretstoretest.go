@@ -85,6 +85,11 @@ type Config struct {
 	// Audit turns on a declarative file audit device writing
 	// <root>/audit/audit.log (Store.AuditPath). Off by default.
 	Audit bool
+	// AuditStdout turns on a declarative file audit device writing to the
+	// store's stdout (file_path = "stdout"), the configuration
+	// geekdojo/geekdojo-brain#684 measured, so Store.HoldStdout can block the
+	// audit sink (row T42). It cannot be combined with Audit. Off by default.
+	AuditStdout bool
 	// ExternalSeal moves the seal out of the main config, as the image has
 	// it (geekdojo/geekdojo-brain#803, #830): the store reads a third -config,
 	// the fragment seal.hcl in <root>/seal/ (Store.SealDir), which names the
@@ -112,6 +117,8 @@ func New(cfg Config) (*Harness, error) {
 		return nil, errors.New("secretstoretest: Config.Now is nil")
 	case cfg.Rand == nil:
 		return nil, errors.New("secretstoretest: Config.Rand is nil")
+	case cfg.Audit && cfg.AuditStdout:
+		return nil, errors.New("secretstoretest: Config.Audit and Config.AuditStdout are both set; the store has one audit device")
 	}
 	return &Harness{cfg: cfg}, nil
 }
@@ -135,6 +142,10 @@ type Store struct {
 	sealDir    string    // the seal directory, or "" when Config.ExternalSeal is off
 	auditPath  string    // the audit file, or "" when Config.Audit is off
 	args       []string  // the store's command line after the binary
+
+	// stdoutHold pauses the stdout reader while held (HoldStdout). It is one
+	// per Store, so a hold outlives a Restart's new reader.
+	stdoutHold *holdGate
 
 	cmd     *exec.Cmd
 	stderr  *lineLog
@@ -177,6 +188,18 @@ func (s *Store) Reload(context.Context) error {
 		return fmt.Errorf("secretstoretest: SIGHUP pid %d: %w", s.cmd.Process.Pid, err)
 	}
 	return nil
+}
+
+// HoldStdout stops reading the store's stdout until release is called, so the
+// pipe fills and every write the store makes to it blocks. With
+// Config.AuditStdout that is a blocked audit sink: audited requests hang
+// while sys/health, which is not audited, still answers (row T42,
+// geekdojo/geekdojo-brain#762). release is idempotent, and Stop, the restarts
+// and Close release a hold first so the store can exit.
+func (s *Store) HoldStdout() (release func()) {
+	s.stdoutHold.hold()
+	var once sync.Once
+	return func() { once.Do(s.stdoutHold.release) }
 }
 
 // StoreCA is the store CA the listener trusts, so a test can mint its own
@@ -370,6 +393,7 @@ func (s *Store) stop(ctx context.Context, op string) error {
 	default:
 	}
 	pid := s.cmd.Process.Pid
+	s.stdoutHold.release()
 	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err)
 	}
@@ -408,7 +432,7 @@ func (h *Harness) StartWith(ctx context.Context, b Bootstrap) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("secretstoretest: temp root: %w", err)
 	}
-	s := &Store{h: h, log: h.cfg.Logger, root: root}
+	s := &Store{h: h, log: h.cfg.Logger, root: root, stdoutHold: newHoldGate()}
 	if err := h.start(ctx, s, version, b); err != nil {
 		// Teardown waits for the store to honour SIGTERM. The caller's ctx may
 		// be the very thing that ended (a cancelled or expired wait), and a
@@ -485,6 +509,9 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 		}
 		paths.AuditLog = filepath.Join(auditDir, "audit.log")
 		s.auditPath = paths.AuditLog
+	}
+	if h.cfg.AuditStdout {
+		paths.AuditLog = "stdout"
 	}
 	if err := h.writeSealKey(paths.SealKey); err != nil {
 		return err
@@ -625,6 +652,7 @@ func (s *Store) launch(bin string, args ...string) error {
 		return fmt.Errorf("secretstoretest: stderr pipe: %w", err)
 	}
 	out := newLineLog(s.log, "stdout", 0)
+	out.hold = s.stdoutHold
 	errLog := newLineLog(s.log, "stderr", stderrTail)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("secretstoretest: start %s: %w", bin, err)
@@ -785,6 +813,7 @@ func (s *Store) teardown(ctx context.Context) error {
 	var errs []error
 	if s.cmd != nil {
 		pid := s.cmd.Process.Pid
+		s.stdoutHold.release()
 		select {
 		case <-s.exited:
 		default:
@@ -826,6 +855,8 @@ type lineLog struct {
 	log    *slog.Logger
 	stream string
 	keep   int
+	// hold, when set, is waited on before each line is read.
+	hold *holdGate
 
 	mu    sync.Mutex
 	lines []string
@@ -840,6 +871,7 @@ func newLineLog(log *slog.Logger, stream string, keep int) *lineLog {
 func (l *lineLog) consume(r io.Reader) {
 	br := bufio.NewReader(r)
 	for {
+		l.hold.wait()
 		line, err := br.ReadString('\n')
 		if line != "" {
 			l.emit(strings.TrimRight(line, "\r\n"))
@@ -876,4 +908,47 @@ func (l *lineLog) tail() string {
 		return "(none)"
 	}
 	return strings.Join(l.lines, " | ")
+}
+
+// holdGate pauses a reader between lines while it is held. A nil gate is
+// never held, so a Store a test builds by hand needs none.
+type holdGate struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	held bool
+}
+
+func newHoldGate() *holdGate {
+	g := &holdGate{}
+	g.cond = sync.NewCond(&g.mu)
+	return g
+}
+
+// wait returns once the gate is not held.
+func (g *holdGate) wait() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for g.held {
+		g.cond.Wait()
+	}
+}
+
+func (g *holdGate) hold() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.held = true
+}
+
+// release lets every waiter go; releasing an unheld gate does nothing.
+func (g *holdGate) release() {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.held = false
+	g.cond.Broadcast()
 }

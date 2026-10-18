@@ -15,8 +15,10 @@ var errNoSeed = errors.New("appsecret: HKDF source has no seed")
 // source the apps package declares for its push step, and adds nothing of its
 // own: no Reveal, no rendering, no other policy than the rotation version.
 //
-// Rotation always derives at InitialVersion for now: nothing stores a per-app
-// counter yet (see InitialVersion).
+// It is the deploy family's source when no store backend is requested, as in
+// every release before geekdojo/geekdojo-brain#762; with one requested, main
+// wires StoreSource behind the readiness Gate instead. Rotation always derives
+// at InitialVersion for now (see InitialVersion).
 type HKDFSource struct {
 	seed *Seed
 }

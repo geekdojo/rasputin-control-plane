@@ -26,6 +26,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
@@ -497,11 +498,11 @@ func main() {
 	startStoreSweep(ctx, storeW.sweeper, logger)
 	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
 	// The store's readiness (geekdojo/geekdojo-brain#760): with a backend
-	// requested, secret-bearing deploys go through a Gate that refuses until
-	// the store reads ready, and the alerts list reports a store that cannot
-	// serve secrets. It makes no store call, so the api starts whatever state
+	// requested, a monitor whose Gate (wired below, in front of the store
+	// source) refuses secret-bearing deploys until the store reads ready, and
+	// whose alerts report a store that cannot serve secrets. It makes no store call, so the api starts whatever state
 	// the store is in. Every store consumer below takes readiness.store.
-	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, appSecrets, jobStore, time.Now, logger)
+	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, jobStore, time.Now, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store readiness", "err", err.Error())
 		os.Exit(1)
@@ -520,7 +521,22 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
 	}
-	_ = secretsSvc // #762 is the first consumer
+	// The deploy family's secret source (geekdojo/geekdojo-brain#762, S14):
+	// with a backend requested, the readiness Gate around the store source,
+	// which reads each ${secret:} value through the secrets service and
+	// creates an absent one from the seed; with none, the HKDF source alone.
+	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{
+		Secrets: secretsSvc, Apps: appTargetNodes{store: appsStore}, Seed: appSecretSeed, Log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store secret source", "err", err.Error())
+		os.Exit(1)
+	}
+	deploySource, err := deploySourceWiring(readiness.monitor, storeSource, appSecrets, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: deploy secret source", "err", err.Error())
+		os.Exit(1)
+	}
 	// The store's audit file rotation and the data partition's free-space alert
 	// (ADR-0010 S11, geekdojo/geekdojo-brain#799).
 	storeAud, err := storeAuditWiring(storeW.mode, dataDir, readiness.store, execrun.CombinedOutput, logger)
@@ -822,18 +838,18 @@ func main() {
 	// The deploy-family constructors refuse a missing secret source; must
 	// turns that refusal into a FATAL exit instead of a saga that cannot run.
 	must := workflowOrExit(ctx, logger, os.Exit)
-	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, readiness.source)))
+	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, deploySource)))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
 	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
 	// compose comes from the row, so unlike app.upgrade it needs nothing from
 	// the catalog.
-	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, readiness.source)))
+	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, deploySource)))
 	// app.edit (#410): replace a custom app's compose with one its owner sent.
 	// The compose is held in composeStash, never in the job spec; the server
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, readiness.source)))
+	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, deploySource)))
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
@@ -910,7 +926,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, readiness.source)))
+	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, deploySource)))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.

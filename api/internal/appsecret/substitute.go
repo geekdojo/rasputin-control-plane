@@ -48,20 +48,39 @@ func Resolve(compose, appID string, seed *Seed, version uint32) (secret.Value, e
 		return secret.Value{}, fmt.Errorf("appsecret: %s declares %d ${secret:} token(s) but no app-secret seed is loaded, so the deploy is refused rather than sending the literal placeholder as a credential", appID, len(tokens))
 	}
 
-	var b strings.Builder
-	b.Grow(len(compose))
-	at := 0
-	for _, tok := range tokens {
-		value, derr := seed.derive(appID, tok.Name, version)
-		if derr != nil {
-			return secret.Value{}, derr
+	return splice(compose, tokens, func(name string) ([]byte, error) {
+		value, err := seed.derive(appID, name, version)
+		return []byte(value), err
+	})
+}
+
+// splice returns compose with each token replaced by valueFor(token.Name),
+// as a secret.Value, or the zero Value and valueFor's first error. Resolve
+// and StoreSource both build their result here, so the two cannot disagree on
+// what a resolved compose is. The values are gathered first so the buffer is
+// sized once, and it is zeroed once the Value holds its own copy.
+func splice(compose string, tokens []tileschema.SecretToken, valueFor func(name string) ([]byte, error)) (secret.Value, error) {
+	values := make([][]byte, len(tokens))
+	size := len(compose)
+	for i, tok := range tokens {
+		value, err := valueFor(tok.Name)
+		if err != nil {
+			return secret.Value{}, err
 		}
-		b.WriteString(compose[at:tok.Start])
-		b.WriteString(value)
+		values[i] = value
+		size += len(value) - (tok.End - tok.Start)
+	}
+	buf := make([]byte, 0, size)
+	at := 0
+	for i, tok := range tokens {
+		buf = append(buf, compose[at:tok.Start]...)
+		buf = append(buf, values[i]...)
 		at = tok.End
 	}
-	b.WriteString(compose[at:])
-	return secret.New([]byte(b.String())), nil
+	buf = append(buf, compose[at:]...)
+	out := secret.New(buf)
+	clear(buf)
+	return out, nil
 }
 
 // Escape rewrites every ${secret:<name>} token to $${secret:<name>} so Docker

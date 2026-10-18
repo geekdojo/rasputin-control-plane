@@ -194,11 +194,10 @@ store back unsealed with a KV value written before the stop, `RestartSealed` sti
 and `Close` leaves no process and no temporary directory.
 
 They do not prove the api process booting while the store is down under systemd, an
-uninitialised store against the real binary (row T32 stays `unverified`), audit-blocked against
-the real store (row T42 is `unverified` until
-[geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762) gives the store
-audited callers), or the backup quiesce end to end
-([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)).
+uninitialised store against the real binary (row T32 stays `unverified`), or the backup quiesce
+end to end
+([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)). Audit-blocked
+against the real store (row T42) is the store source's functional test, below.
 
 Run them the same way as the smoke test:
 
@@ -453,8 +452,8 @@ What it does not prove:
 
 - **The policy's limits.** That the api's token is refused outside its own paths, and that
   `devices/` is inside its grant, is TC-804-05 and TC-804-06, on the same policy source.
-- **Any consumer.** Nothing calls the service yet;
-  [geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762) is the first.
+- **Its consumer.** The deploy family's store source calls it; that is the store source's
+  functional test, below.
 - **Device secrets.** The service refuses every operation on them, for every actor.
 
 Run it the same way as the smoke test, with `-run TestService_AgainstTheRealStore`:
@@ -466,6 +465,61 @@ RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIO
 Expect `--- PASS: TestService_AgainstTheRealStore` with one `PASS` line per step and exit
 status 0, in about a second. With the binary absent and the switch set it fails, naming the
 variable, exactly as the smoke test does. The package's unit tests need no store.
+
+## The store source's functional test
+
+`TestStoreSource_AgainstTheRealStore`, in `api/internal/apps/storesource_functional_test.go`,
+runs the deploy family's secret source against the real store, under the same switch, in the
+same CI step ([geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762)).
+With a store backend requested, a deploy resolves each `${secret:}` token through the store: a
+stored entry is used as stored, and an absent one is derived from the seed at version 1,
+created with check-and-set 0 and read back before use. The unit tests in `api/internal/appsecret`
+and `api/internal/apps` run it over fakes; this test shows the real store, under the shipped
+policy, does what the fakes do.
+
+Self-init creates the `rasputin-secrets` mount and the `rasputin-api` cert role with the shipped
+`storepolicy` text, and the harness's audit device writes to the store's stdout
+(`Config.AuditStdout`). The chain is all production code: the client, a real `Monitor` and
+`ObservedStore`, the login session, the repository, the secrets service,
+`appsecret.StoreSource` behind the readiness `Gate`, and a real `jobs.Runner` with in-process
+NATS and a fake deploy agent. The steps run in order on one store, because each changes it:
+
+- **First deploy (TC-762-21).** The deploy succeeds. `apps/<app ID>/db-password` is at version 1,
+  and both the stored value and the one in the deploy command equal the seed's derived value.
+- **Redeploy (TC-762-22).** Still version 1, the same value, and no `secrets.create` record for
+  the job.
+- **The store is the source (TC-762-23).** After an operator replaces the value, the next deploy
+  carries the replaced value at version 2, not the derived one.
+- **Audit blocked (TC-762-24, row T42).** The harness stops reading the store's stdout
+  (`Store.HoldStdout`). Audited reads run until the first runs out of time on the client's bound;
+  the loop is capped, and hitting the cap fails as "the audit sink never blocked". At that moment
+  `sys/health` answers 200 unsealed, the `Monitor` reads audit-blocked, and a secret-bearing
+  deploy refuses with `secret_store_not_ready`, sends no deploy command and leaves the app
+  RUNNING. After the hold is released the next deploy succeeds and the `Monitor` no longer reads
+  audit-blocked.
+- **Sealed.** After `RestartSealed` the deploy refuses and the app is untouched.
+- **Nothing leaks (TC-762-25).** No derived or replaced value appears in any log record, job
+  spec, step, event, job error, alert or the apps row, and no job error or alert names the
+  vendor.
+
+What it does not prove:
+
+- **Hardware.** The real image, its unit and journald as the audit sink are the bench's
+  ([geekdojo-brain#763](https://github.com/geekdojo/geekdojo-brain/issues/763)).
+- **Store-member restore** ([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765))
+  or deleting entries when an app is deleted
+  ([geekdojo-brain#783](https://github.com/geekdojo/geekdojo-brain/issues/783)).
+
+Run it the same way as the smoke test, with `-run TestStoreSource_AgainstTheRealStore`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -race -count=1 -v -run TestStoreSource_AgainstTheRealStore ./api/internal/apps
+```
+
+Expect `--- PASS: TestStoreSource_AgainstTheRealStore` with one `PASS` line per step and exit
+status 0, in under ten seconds: the audit-blocked step waits once for the client's three-second
+bound on the read that hangs, and once more for the refused deploy's probe read. With the binary
+absent and the switch set it fails, naming the variable, exactly as the smoke test does.
 
 ## The pin, and bumping it
 
@@ -640,3 +694,13 @@ The cases for geekdojo-brain#761 that this document's tests check:
 | TC-761-23 | An operator's replace gives version 2, which the deploy job reads | `TestService_AgainstTheRealStore` |
 | TC-761-24 | Delete removes every version, is idempotent, and a create starts again at 1 (T62) | `TestService_AgainstTheRealStore` |
 | TC-761-25 | No value in the api's logs or errors; required mode | `TestService_AgainstTheRealStore`, and the `env -u` command above with `-run TestService_ ./api/internal/secrets` |
+
+The cases for geekdojo-brain#762 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-762-21 | The first deploy creates version 1 equal to the derived value | `TestStoreSource_AgainstTheRealStore` |
+| TC-762-22 | A redeploy reads version 1 and creates nothing | `TestStoreSource_AgainstTheRealStore` |
+| TC-762-23 | After an operator replace, the deploy carries the stored value | `TestStoreSource_AgainstTheRealStore` |
+| TC-762-24 | Audit blocked (T42): health 200 unsealed, the `Monitor` reads audit-blocked, the deploy refuses, then recovers; the harness's `AuditStdout` and `HoldStdout` | `TestStoreSource_AgainstTheRealStore`, `TestAuditStdout_RenderAndRefusal`, `TestHoldStdout_ReleaseResumesTheReader` |
+| TC-762-25 | No value leaks across the steps; no vendor name in the copy; required mode | `TestStoreSource_AgainstTheRealStore`, and the `env -u` command above with `-run TestStoreSource_ ./api/internal/apps` |
