@@ -10,9 +10,10 @@
 //
 // What it does, in order:
 //
-//  1. Writes a per-run token line under each allowlisted identifier with
-//     `systemd-cat -t <id>`, each inside a transient unit (systemd-run) so
-//     the entry carries a _SYSTEMD_UNIT, as the real oneshots' lines do. Then
+//  1. Writes a per-run token line under each allowlisted identifier as the
+//     stdout of a transient unit (systemd-run -p SyslogIdentifier=<id>), the
+//     way the real oneshots write theirs, so the entry carries a
+//     _SYSTEMD_UNIT as theirs do. Then
 //     canary lines under rasputin-api, rasputin-seal-key (the kmsg copy's
 //     identifier) and rasputin-firstboot.sh, then a marker line under an
 //     allowlisted identifier. Each line is waited on in the journal before
@@ -84,7 +85,7 @@ func requireJournalHost(t *testing.T) {
 	if os.Geteuid() != 0 {
 		journalSkipOrFail(t, "must run as root (transient units, and the journal's 0640 files)")
 	}
-	for _, bin := range []string{"docker", "journalctl", "systemd-cat", "systemd-run"} {
+	for _, bin := range []string{"docker", "journalctl", "systemd-run"} {
 		if _, err := exec.LookPath(bin); err != nil {
 			journalSkipOrFail(t, "%s not on PATH: %v", bin, err)
 		}
@@ -120,13 +121,20 @@ type journalLine struct {
 	unit string // _SYSTEMD_UNIT journald recorded
 }
 
-// writeJournal writes msg under identifier id from inside a transient unit,
-// then waits until journald has recorded it, and returns the line with the
-// unit journald attributed it to.
+// writeJournal writes msg under identifier id as the stdout of a transient
+// unit, then waits until journald has recorded it, and returns the line with
+// the unit journald attributed it to.
+//
+// The line goes out on the unit's own stdout, which systemd connects to
+// journald and names the unit in the stream's header, as for the real
+// oneshots (outcome.sh's outcome_log prints to stdout). Not systemd-cat: its
+// stream carries no unit, so journald reads the writer's cgroup from /proc,
+// and when echo has already exited the entry has no _SYSTEMD_UNIT. On
+// systemd 255 that lost the unit on 22 of 300 writes; this way lost none.
 func writeJournal(t *testing.T, unit, id, msg string) journalLine {
 	t.Helper()
 	cmd := exec.Command("systemd-run", "--quiet", "--wait", "--collect",
-		"--unit="+unit, "systemd-cat", "-t", id, "echo", msg)
+		"--unit="+unit, "--property=SyslogIdentifier="+id, "echo", msg)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("systemd-run %s: %v (%s)", unit, err, out)
 	}
