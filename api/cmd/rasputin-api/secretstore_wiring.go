@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -97,8 +98,10 @@ type runFunc func(ctx context.Context, name string, args ...string) ([]byte, err
 // the leaf files: a leaf absent at wiring is every first boot, minted
 // moments later by startStoreSweep (F-758-01). It returns an error only when a
 // leaf consumer will not register, which main treats as fatal; every refused
-// setting is a configfault and a Disabled store.
-func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr string, storeCA *tlsca.CA, dataDir string, run runFunc) (storeWiring, error) {
+// setting is a configfault and a Disabled store. afterStoreRestart runs once
+// each time the server leaf's reload restarts the store (#833); it is
+// required under openbao.
+func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr string, storeCA *tlsca.CA, dataDir string, run runFunc, afterStoreRestart func(context.Context)) (storeWiring, error) {
 	off := storeWiring{mode: storeModeOff, store: secretstore.Disabled{}, login: secretstore.Disabled{}}
 	configFault := func(setting, value, reason string) (storeWiring, error) {
 		logger.ErrorContext(ctx, "secret store off: configuration refused",
@@ -115,6 +118,9 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 		mock := secretstore.NewMock(time.Now)
 		return storeWiring{mode: storeModeMock, store: mock, login: mock}, nil
 	case storeModeOpenBao:
+		if afterStoreRestart == nil {
+			return off, errors.New("secret store: the after-restart hook is nil under openbao")
+		}
 	default:
 		return configFault("RASPUTIN_SECRETSTORE_BACKEND", backend, `not "openbao" or "mock"`)
 	}
@@ -153,7 +159,7 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 		Name:   storeServerLeafName,
 		Dir:    filepath.Join(dataDir, "tls", storeServerLeafName),
 		Spec:   func() (tlsca.LeafSpec, error) { return storeServerLeafSpec(), nil },
-		Reload: restartStoreUnit(run),
+		Reload: restartStoreUnit(run, afterStoreRestart),
 	}); err != nil {
 		return off, fmt.Errorf("secret store: %w", err)
 	}
@@ -202,9 +208,14 @@ func storeProvisionerLeafSpec() tlsca.LeafSpec {
 // the leaf did not exist, and after a crash loop it sits in failed, so the
 // recovery #755 hands over is reset-failed and then restart; try-restart would
 // leave the skipped, inactive unit alone. It runs only on the fact of a fresh
-// mint.
-func restartStoreUnit(run runFunc) func(context.Context, tlsca.LeafPaths) error {
+// mint, or of a seal-key rotation's restart.
+//
+// after runs exactly once when the pair returns, whether or not it
+// succeeded: every store start re-runs the store's oneshots, whose outcome
+// records the hook reads (#833). The pair's error is still returned.
+func restartStoreUnit(run runFunc, after func(context.Context)) func(context.Context, tlsca.LeafPaths) error {
 	return func(ctx context.Context, _ tlsca.LeafPaths) error {
+		defer after(ctx)
 		for _, verb := range []string{"reset-failed", "restart"} {
 			if _, err := run(ctx, "systemctl", verb, storeUnit); err != nil {
 				return err

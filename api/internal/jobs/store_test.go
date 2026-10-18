@@ -108,6 +108,76 @@ func TestStore_JobLifecycleTransitions(t *testing.T) {
 	}
 }
 
+// TC-833-23: RecordFinishedJob inserts a terminal job with its timestamps
+// and error, leaves an existing ID untouched and reports false, and refuses a
+// status that is not terminal.
+func TestStore_RecordFinishedJob(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	started := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	finished := started.Add(2 * time.Second)
+	j := makeJob("os-1", "os.seal_key")
+	j.Status, j.StartedAt, j.FinishedAt, j.Error = StatusFailed, &started, &finished, "The seal broke."
+	inserted, err := s.RecordFinishedJob(ctx, j)
+	if err != nil || !inserted {
+		t.Fatalf("RecordFinishedJob = %v, %v; want inserted", inserted, err)
+	}
+	got, err := s.GetJob(ctx, "os-1")
+	if err != nil || got == nil {
+		t.Fatalf("GetJob: %v, %v", got, err)
+	}
+	if got.Status != StatusFailed || got.Error != "The seal broke." || got.StartedAt == nil || !got.StartedAt.Equal(started) ||
+		got.FinishedAt == nil || !got.FinishedAt.Equal(finished) || got.Kind != "os.seal_key" {
+		t.Fatalf("row = %+v", got)
+	}
+
+	again := makeJob("os-1", "os.seal_key")
+	again.Status, again.FinishedAt, again.Error = StatusSucceeded, &started, ""
+	inserted, err = s.RecordFinishedJob(ctx, again)
+	if err != nil || inserted {
+		t.Fatalf("second RecordFinishedJob = %v, %v; want not inserted", inserted, err)
+	}
+	if row, _ := s.GetJob(ctx, "os-1"); row.Status != StatusFailed || row.Error != "The seal broke." || !row.FinishedAt.Equal(finished) {
+		t.Errorf("row changed: %+v", row)
+	}
+
+	ok := makeJob("os-2", "os.seal_key")
+	ok.Status = StatusSucceeded
+	if inserted, err := s.RecordFinishedJob(ctx, ok); err != nil || !inserted {
+		t.Fatalf("succeeded job = %v, %v", inserted, err)
+	}
+	if row, _ := s.GetJob(ctx, "os-2"); row.Error != "" || row.StartedAt != nil || row.FinishedAt != nil {
+		t.Errorf("succeeded row = %+v, want no error and no timestamps", row)
+	}
+
+	for _, st := range []Status{StatusQueued, StatusRunning} {
+		bad := makeJob("os-"+string(st), "os.seal_key")
+		bad.Status = st
+		if inserted, err := s.RecordFinishedJob(ctx, bad); err == nil || inserted {
+			t.Errorf("%s: %v, %v; want refused", st, inserted, err)
+		}
+		if row, _ := s.GetJob(ctx, bad.ID); row != nil {
+			t.Errorf("%s: a row was written", st)
+		}
+	}
+	cancelled := makeJob("os-c", "os.seal_key")
+	cancelled.Status = StatusCancelled
+	if inserted, err := s.RecordFinishedJob(ctx, cancelled); err != nil || !inserted {
+		t.Errorf("cancelled: %v, %v; want inserted", inserted, err)
+	}
+
+	_ = s.Close()
+	if _, err := s.RecordFinishedJob(ctx, makeJobDone("os-3")); err == nil {
+		t.Error("a closed store accepted a write")
+	}
+}
+
+func makeJobDone(id string) *Job {
+	j := makeJob(id, "os.seal_key")
+	j.Status = StatusSucceeded
+	return j
+}
+
 func TestStore_MarkJobFailedRecordsError(t *testing.T) {
 	ctx := context.Background()
 	s := newStore(t)

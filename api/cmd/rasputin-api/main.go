@@ -329,6 +329,14 @@ func main() {
 		log.Fatalf("rasputin-api: jobs store: %v", err)
 	}
 	defer jobStore.Close()
+	// The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): read
+	// into the job ledger just before READY, and again after each store
+	// restart the api performs; their alert joins the aggregator below.
+	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: os outcomes", "err", err.Error())
+		os.Exit(1)
+	}
 
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -490,7 +498,7 @@ func main() {
 	// is wired below, and the secrets service (#761) over it.
 	storeBackend := secretStoreBackendFromEnv()
 	storeW, err := wireSecretStore(ctx, logger, storeBackend, secretStoreAddrFromEnv(),
-		storeCA, dataDir, execrun.CombinedOutput)
+		storeCA, dataDir, execrun.CombinedOutput, outcomes.AfterStoreRestart)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store", "err", err.Error())
 		os.Exit(1)
@@ -1022,6 +1030,7 @@ func main() {
 		store: readiness.store, run: execrun.CombinedOutput, monitor: readiness.monitor,
 		restores: restoreSessions, jobRunning: jobRunning(jobStore),
 		rand: cryptorand.Reader, now: time.Now, log: logger,
+		afterStoreRestart: outcomes.AfterStoreRestart,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: seal rotation", "err", err.Error())
@@ -1618,6 +1627,9 @@ func main() {
 	if storeAlerts := sealRot.storeAlerts(readiness.alerts); storeAlerts != nil {
 		alertsSvc.SetStoreAlerts(storeAlerts)
 	}
+	// The OS outcome records' crit alert (#833), which replaces the generic
+	// job-failed warn for their kinds.
+	wireOutcomeAlerts(alertsSvc, outcomes)
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps
@@ -1872,8 +1884,10 @@ func main() {
 
 	// systemd integration: declare startup complete, then keep the
 	// watchdog fed for as long as the liveness probe (a trivial SQLite
-	// query) keeps passing. See internal/sdnotify for the war story.
-	sdnotify.Ready()
+	// query) keeps passing. See internal/sdnotify for the war story. The OS
+	// outcome records are read first, so the seal-key job is in the ledger
+	// before READY=1 (#833, #853).
+	readyAfterOutcomes(ctx, outcomes, sdnotify.Ready)
 	sdnotify.StartWatchdog(ctx, func(pctx context.Context) error {
 		_, err := authStore.CountUsers(pctx)
 		return err

@@ -62,7 +62,7 @@ func TestSecretsWiring(t *testing.T) {
 	ca := ensureStoreCA(t, t.TempDir(), tlscatest.Deps())
 	for _, backend := range []string{"", storeModeMock, storeModeOpenBao} {
 		t.Run("mode "+backend, func(t *testing.T) {
-			w, err := wireSecretStore(t.Context(), log, backend, defaultSecretStoreAddr, ca, t.TempDir(), (&recordedRun{}).run)
+			w, err := wireSecretStore(t.Context(), log, backend, defaultSecretStoreAddr, ca, t.TempDir(), (&recordedRun{}).run, noRestartHook)
 			if err != nil {
 				t.Fatal(err)
 			}

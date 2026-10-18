@@ -47,7 +47,7 @@ func TestStoreSessionWiring(t *testing.T) {
 	}
 	build := func(t *testing.T, backend string) built {
 		t.Helper()
-		w, err := wireSecretStore(t.Context(), log, backend, defaultSecretStoreAddr, ca, t.TempDir(), (&recordedRun{}).run)
+		w, err := wireSecretStore(t.Context(), log, backend, defaultSecretStoreAddr, ca, t.TempDir(), (&recordedRun{}).run, noRestartHook)
 		if err != nil {
 			t.Fatal(err)
 		}
