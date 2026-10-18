@@ -15,7 +15,7 @@ require (
 	github.com/miekg/dns v1.1.73
 	github.com/nats-io/jwt/v2 v2.8.2
 	github.com/nats-io/nats-server/v2 v2.15.1
-	github.com/nats-io/nats.go v1.54.0
+	github.com/nats-io/nats.go v1.53.1
 	github.com/nats-io/nkeys v0.4.16
 	github.com/oklog/ulid/v2 v2.1.2
 	golang.org/x/crypto v0.58.0

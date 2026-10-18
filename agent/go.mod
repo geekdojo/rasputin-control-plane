@@ -9,7 +9,7 @@ require (
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats-server/v2 v2.15.1
-	github.com/nats-io/nats.go v1.54.0
+	github.com/nats-io/nats.go v1.53.1
 	github.com/shirou/gopsutil/v4 v4.26.9
 	golang.org/x/net v0.61.0
 	golang.org/x/sys v0.49.0
