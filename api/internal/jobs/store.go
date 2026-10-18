@@ -54,6 +54,41 @@ func (s *Store) CreateJob(ctx context.Context, j *Job) error {
 	return err
 }
 
+// RecordFinishedJob writes j, already terminal, as one statement, and reports
+// whether it was inserted. A job whose ID is already in the ledger is left
+// as it is and reports false, so a caller that derives the ID from the fact
+// it records gets an atomic dedupe. A status that is not terminal is refused.
+func (s *Store) RecordFinishedJob(ctx context.Context, j *Job) (bool, error) {
+	switch j.Status {
+	case StatusSucceeded, StatusFailed, StatusCancelled:
+	default:
+		return false, fmt.Errorf("jobs: record finished job %s: status %q is not terminal", j.ID, j.Status)
+	}
+	var started, finished, errMsg any
+	if j.StartedAt != nil {
+		started = tsMillis(*j.StartedAt)
+	}
+	if j.FinishedAt != nil {
+		finished = tsMillis(*j.FinishedAt)
+	}
+	if j.Error != "" {
+		errMsg = j.Error
+	}
+	res, err := s.db.ExecContext(ctx, `
+        INSERT INTO jobs (id, kind, spec, status, created_by, created_at, started_at, finished_at, error)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO NOTHING`,
+		j.ID, j.Kind, string(j.Spec), string(j.Status), j.CreatedBy, tsMillis(j.CreatedAt), started, finished, errMsg)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // ListChildJobs returns every job whose parent_id matches parentID, ordered
 // by creation time ascending. Used by the api's GET /api/jobs?parentId
 // filter and by the system update UI for the per-node rollup view.

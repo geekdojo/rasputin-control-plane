@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,6 +49,7 @@ func sealDeps(t *testing.T, mode string) sealRotateDeps {
 		restores:   noRestores{},
 		jobRunning: func(context.Context, string) (bool, error) { return false, nil },
 		rand:       rand.Reader, now: time.Now, log: log,
+		afterStoreRestart: noRestartHook,
 	}
 }
 
@@ -146,6 +149,7 @@ func TestSealRotateWiring_Refuses(t *testing.T) {
 		"nil jobRunning":    func(d *sealRotateDeps) { d.jobRunning = nil },
 		"nil rand":          func(d *sealRotateDeps) { d.rand = nil },
 		"nil clock":         func(d *sealRotateDeps) { d.now = nil },
+		"nil restart hook":  func(d *sealRotateDeps) { d.afterStoreRestart = nil },
 		"a refused address": func(d *sealRotateDeps) { d.addr = "http://example.com" },
 	} {
 		d := sealDeps(t, storeModeOpenBao)
@@ -194,5 +198,37 @@ func TestOffSealDeps_Refuse(t *testing.T) {
 	}
 	if _, active := off.Active(); active {
 		t.Error("Active")
+	}
+}
+
+// TC-833-30 (F-833-01): the rotator's store restart runs the after-restart
+// hook once, after the store's reset-failed/restart pair.
+func TestSealRotateWiring_RestartRunsTheHook(t *testing.T) {
+	var mu sync.Mutex
+	var order []string
+	note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+	d := sealDeps(t, storeModeOpenBao)
+	d.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		note(strings.Join(append([]string{name}, args...), " "))
+		return nil, nil
+	}
+	d.afterStoreRestart = func(context.Context) { note("hook") }
+	w, err := sealRotateWiring(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.restart == nil {
+		t.Fatal("no restart under openbao")
+	}
+	if err := w.restart(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want := append(slices.Clone(restartPair), "hook")
+	if !slices.Equal(order, want) {
+		t.Errorf("order = %v, want %v", order, want)
+	}
+	off, err := sealRotateWiring(sealDeps(t, storeModeMock))
+	if err != nil || off.restart != nil {
+		t.Errorf("mock mode: restart %v, err %v; want none", off.restart != nil, err)
 	}
 }

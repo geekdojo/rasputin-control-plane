@@ -39,6 +39,12 @@
 //     own answer. Under openbao the same source also carries
 //     secret-store:seal-rotation-incomplete (crit), raised while a seal-key
 //     rotation has stopped part way (sealrotate.Rotator.Alerts, #830).
+//   - os outcomes → os-outcome:<kind> (crit), one per pre-api outcome record
+//     (seal key, store init, store provision) whose newest job failed or
+//     could not be read, from the source SetOutcomeAlerts wires
+//     (osoutcome.Reader.Alerts, geekdojo/geekdojo-brain#833). Those kinds
+//     raise no job-failed warn. It clears on a newer record that does not
+//     alert.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -122,6 +128,11 @@ type Service struct {
 	// storeAlerts, when set, reports a secret store that cannot serve
 	// secrets (storestate.Monitor.Alerts). Nil means no such alert.
 	storeAlerts func(ctx context.Context, now time.Time) []proto.Alert
+	// outcomeAlerts, when set, reports the OS's pre-api outcome records that
+	// failed or could not be read (osoutcome.Reader.Alerts). outcomeKinds are
+	// the job kinds it covers, which jobAlerts leaves to it.
+	outcomeAlerts func(ctx context.Context, now time.Time) ([]proto.Alert, error)
+	outcomeKinds  map[string]bool
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -144,6 +155,18 @@ func (s *Service) SetDiskAlerts(fn func(now time.Time) []proto.Alert) { s.diskAl
 // it asks the store, so a request that ends stops the question.
 func (s *Service) SetStoreAlerts(fn func(ctx context.Context, now time.Time) []proto.Alert) {
 	s.storeAlerts = fn
+}
+
+// SetOutcomeAlerts wires the OS outcome records' alert
+// (osoutcome.Reader.Alerts). Set before List. A failed job of one of kinds
+// raises fn's crit alert and not the generic job-failed warn as well, so one
+// failure is one banner. fn's error fails List, as a failed job read does.
+func (s *Service) SetOutcomeAlerts(kinds []string, fn func(ctx context.Context, now time.Time) ([]proto.Alert, error)) {
+	s.outcomeKinds = make(map[string]bool, len(kinds))
+	for _, k := range kinds {
+		s.outcomeKinds[k] = true
+	}
+	s.outcomeAlerts = fn
 }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
@@ -206,6 +229,13 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	if s.storeAlerts != nil {
 		out = append(out, s.storeAlerts(ctx, now)...)
 	}
+	if s.outcomeAlerts != nil {
+		alerts, err := s.outcomeAlerts(ctx, now)
+		if err != nil {
+			return nil, fmt.Errorf("alerts: os outcomes: %w", err)
+		}
+		out = append(out, alerts...)
+	}
 	if alerts, err := s.backupAlerts(ctx, now); err != nil {
 		return nil, fmt.Errorf("alerts: backups: %w", err)
 	} else {
@@ -239,6 +269,9 @@ func (s *Service) jobAlerts(ctx context.Context, now time.Time) ([]proto.Alert, 
 	cutoff := now.Add(-failedJobLookback)
 	out := make([]proto.Alert, 0, len(failed))
 	for _, j := range failed {
+		if s.outcomeKinds[j.Kind] {
+			continue // its own crit alert reports it (SetOutcomeAlerts)
+		}
 		// "When did this fail" — prefer FinishedAt, fall back to CreatedAt
 		// (a job marked failed without finished_at is malformed but
 		// shouldn't crash the aggregator).

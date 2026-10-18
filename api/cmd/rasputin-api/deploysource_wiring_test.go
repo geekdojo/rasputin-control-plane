@@ -38,7 +38,7 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	seed, hkdf := loadAppSecrets(ctx, log, func(code int) { t.Fatalf("loadAppSecrets exited %d", code) }, t.TempDir())
 
 	w, err := wireSecretStore(ctx, log, storeModeMock, defaultSecretStoreAddr,
-		ensureStoreCA(t, t.TempDir(), tlscatest.Deps()), t.TempDir(), (&recordedRun{}).run)
+		ensureStoreCA(t, t.TempDir(), tlscatest.Deps()), t.TempDir(), (&recordedRun{}).run, noRestartHook)
 	if err != nil {
 		t.Fatal(err)
 	}

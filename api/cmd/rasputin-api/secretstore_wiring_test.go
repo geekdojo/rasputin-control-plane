@@ -50,6 +50,9 @@ func (r *recordedRun) got() []string {
 	return append([]string(nil), r.calls...)
 }
 
+// noRestartHook is the after-restart hook a test that does not observe it passes.
+func noRestartHook(context.Context) {}
+
 var restartPair = []string{"systemctl reset-failed openbao.service", "systemctl restart openbao.service"}
 
 // testClock is a settable clock for a CA's Deps.
@@ -150,7 +153,7 @@ func TestWireSecretStore_Selection(t *testing.T) {
 			dataDir := t.TempDir()
 			log, rec := logkittest.New()
 			run := &recordedRun{}
-			w, err := wireSecretStore(t.Context(), log, tc.backend, addr, sca, dataDir, run.run)
+			w, err := wireSecretStore(t.Context(), log, tc.backend, addr, sca, dataDir, run.run, noRestartHook)
 			if err != nil {
 				t.Fatalf("wireSecretStore = %v", err)
 			}
@@ -225,7 +228,7 @@ func TestStoreStartupSweep(t *testing.T) {
 	log, rec := logkittest.New()
 	run := &recordedRun{}
 
-	w, err := wireSecretStore(t.Context(), log, "openbao", defaultSecretStoreAddr, ca, dataDir, run.run)
+	w, err := wireSecretStore(t.Context(), log, "openbao", defaultSecretStoreAddr, ca, dataDir, run.run, noRestartHook)
 	if err != nil || w.mode != storeModeOpenBao {
 		t.Fatalf("wireSecretStore = %v, %v; want openbao", w.mode, err)
 	}
@@ -273,7 +276,7 @@ func TestStoreStartupSweep(t *testing.T) {
 
 	// A second start: both leaves usable, nothing restarted.
 	run2 := &recordedRun{}
-	w2, err := wireSecretStore(t.Context(), log, "openbao", defaultSecretStoreAddr, ca, dataDir, run2.run)
+	w2, err := wireSecretStore(t.Context(), log, "openbao", defaultSecretStoreAddr, ca, dataDir, run2.run, noRestartHook)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +288,7 @@ func TestStoreStartupSweep(t *testing.T) {
 	failDir := t.TempDir()
 	failLog, failRec := logkittest.New()
 	failing := &recordedRun{err: errors.New("unit openbao.service not found")}
-	w3, err := wireSecretStore(t.Context(), failLog, "openbao", defaultSecretStoreAddr, ensureStoreCA(t, t.TempDir(), tlscatest.Deps()), failDir, failing.run)
+	w3, err := wireSecretStore(t.Context(), failLog, "openbao", defaultSecretStoreAddr, ensureStoreCA(t, t.TempDir(), tlscatest.Deps()), failDir, failing.run, noRestartHook)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +346,7 @@ func TestLeafSweepJob_RenewsTheStoreLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := &recordedRun{}
-	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, store, dataDir, run.run)
+	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, store, dataDir, run.run, noRestartHook)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +435,7 @@ func TestStoreClientLeafReload_ClosesIdleConnections(t *testing.T) {
 
 	dataDir := t.TempDir()
 	run := &recordedRun{}
-	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", srv.URL, store, dataDir, run.run)
+	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", srv.URL, store, dataDir, run.run, noRestartHook)
 	if err != nil || w.mode != storeModeOpenBao {
 		t.Fatalf("wireSecretStore = %v, %v; want openbao", w.mode, err)
 	}
@@ -525,7 +528,7 @@ func TestSecretStore_UpgradeFromThePreviousRelease(t *testing.T) {
 	previous := report(cpSweeper)
 
 	run := &recordedRun{}
-	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "", defaultSecretStoreAddr, store, dataDir, run.run)
+	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "", defaultSecretStoreAddr, store, dataDir, run.run, noRestartHook)
 	if err != nil || w.mode != storeModeOff {
 		t.Fatalf("unset selector: %v, %v", w.mode, err)
 	}
@@ -545,7 +548,7 @@ func TestSecretStore_UpgradeFromThePreviousRelease(t *testing.T) {
 	if reloaded.Cert.SerialNumber.Cmp(caSerial) != 0 {
 		t.Fatal("the store CA was regenerated on upgrade")
 	}
-	w, err = wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, reloaded, dataDir, run.run)
+	w, err = wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, reloaded, dataDir, run.run, noRestartHook)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +587,7 @@ func TestStoreProvisionerLeaf(t *testing.T) {
 		calls = append(calls, fmt.Sprintf("%s %s provisioner-leaf=%t", name, strings.Join(args, " "), err == nil))
 		return nil, nil
 	}
-	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, ca, dataDir, run)
+	w, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), "openbao", defaultSecretStoreAddr, ca, dataDir, run, noRestartHook)
 	if err != nil || w.mode != storeModeOpenBao {
 		t.Fatalf("wireSecretStore = %v, %v; want openbao", w.mode, err)
 	}
@@ -639,5 +642,55 @@ func TestStoreProvisionerLeaf(t *testing.T) {
 	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true)); err == nil ||
 		!strings.Contains(err.Error(), storeProvisionerLeafName) {
 		t.Errorf("verifyLeafConsumers without the provisioner = %v, want an error naming %s", err, storeProvisionerLeafName)
+	}
+}
+
+// TC-833-25: under openbao a nil after-restart hook is refused; the store
+// restart runs the hook exactly once after its reset-failed/restart pair
+// returns, whether the pair succeeded or restart failed, and still returns
+// the restart's error.
+func TestStoreRestartHook(t *testing.T) {
+	ca := ensureStoreCA(t, t.TempDir(), tlscatest.Deps())
+	if _, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), storeModeOpenBao, defaultSecretStoreAddr,
+		ca, t.TempDir(), (&recordedRun{}).run, nil); err == nil {
+		t.Error("openbao with a nil after-restart hook was accepted")
+	}
+	for _, backend := range []string{"", storeModeMock} {
+		if _, err := wireSecretStore(t.Context(), slog.New(slog.DiscardHandler), backend, defaultSecretStoreAddr,
+			ca, t.TempDir(), (&recordedRun{}).run, nil); err != nil {
+			t.Errorf("backend %q with no hook: %v", backend, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name    string
+		failOn  string
+		wantErr bool
+		want    []string
+	}{
+		{"pair succeeds", "", false, append(slices.Clone(restartPair), "hook")},
+		{"restart fails", "restart", true, append(slices.Clone(restartPair), "hook")},
+		{"reset-failed fails", "reset-failed", true, []string{restartPair[0], "hook"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var order []string
+			note := func(s string) { mu.Lock(); order = append(order, s); mu.Unlock() }
+			restartErr := errors.New("unit failed")
+			run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				note(strings.Join(append([]string{name}, args...), " "))
+				if tc.failOn != "" && args[0] == tc.failOn {
+					return nil, restartErr
+				}
+				return nil, nil
+			}
+			err := restartStoreUnit(run, func(context.Context) { note("hook") })(t.Context(), tlsca.LeafPaths{})
+			if tc.wantErr != errors.Is(err, restartErr) || (!tc.wantErr && err != nil) {
+				t.Errorf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if !slices.Equal(order, tc.want) {
+				t.Errorf("order = %v, want %v", order, tc.want)
+			}
+		})
 	}
 }

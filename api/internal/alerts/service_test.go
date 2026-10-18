@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -548,6 +549,48 @@ func TestList_StoreAlertsHook(t *testing.T) {
 	}
 	if gotCtx != ctx || !gotNow.Equal(fixed) {
 		t.Fatalf("the source got ctx %v and now %v, want List's ctx and %v", gotCtx, gotNow, fixed)
+	}
+}
+
+// TC-833-24: with SetOutcomeAlerts covering os.seal_key, a failed seal-key
+// job shows only fn's alert, another kind's failure still shows its
+// job-failed warn, and fn's error fails List.
+func TestList_OutcomeAlertsHook(t *testing.T) {
+	f := newFixture(t)
+	f.markSetupComplete(t)
+	f.insertFailedJob(t, "seal", "os.seal_key", "The seal broke.", time.Hour)
+	f.insertFailedJob(t, "other", "apps.deploy", "The deploy failed.", time.Hour)
+	before, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := alertIDs(before); len(got) != 2 {
+		t.Fatalf("unwired ids = %v, want both job-failed warns", got)
+	}
+
+	var gotNow time.Time
+	fixed := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+	f.svc.SetNow(func() time.Time { return fixed })
+	f.svc.SetOutcomeAlerts([]string{"os.seal_key"}, func(_ context.Context, now time.Time) ([]proto.Alert, error) {
+		gotNow = now
+		return []proto.Alert{{ID: "os-outcome:os.seal_key", Severity: proto.AlertCrit, Source: proto.AlertSourceJob, Since: now}}, nil
+	})
+	got, err := f.svc.List(f.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := alertIDs(got); len(ids) != 2 || ids[0] != "os-outcome:os.seal_key" || ids[1] != "job-failed:other" {
+		t.Fatalf("ids = %v, want the outcome crit and only the other kind's warn", ids)
+	}
+	if !gotNow.Equal(fixed) {
+		t.Errorf("fn got now %v, want %v", gotNow, fixed)
+	}
+
+	f.svc.SetOutcomeAlerts([]string{"os.seal_key"}, func(context.Context, time.Time) ([]proto.Alert, error) {
+		return nil, errors.New("ledger read failed")
+	})
+	if got, err := f.svc.List(f.ctx); err == nil || got != nil {
+		t.Errorf("List = %v, %v; want an error", got, err)
 	}
 }
 

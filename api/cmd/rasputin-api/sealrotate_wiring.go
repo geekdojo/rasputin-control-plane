@@ -38,6 +38,9 @@ type sealRotateDeps struct {
 	rand       io.Reader
 	now        func() time.Time
 	log        *slog.Logger
+	// afterStoreRestart runs once after each store restart the rotation
+	// performs (#833, F-833-01); required under openbao.
+	afterStoreRestart func(context.Context)
 }
 
 // sealRotate is what sealRotateWiring built.
@@ -50,6 +53,9 @@ type sealRotate struct {
 	// gate and alerts are set only under openbao.
 	gate   *sealrotate.Gate
 	alerts func(ctx context.Context, now time.Time) []proto.Alert
+	// restart is the store restart the rotator was given (Deps.Restart);
+	// set only under openbao.
+	restart func(ctx context.Context) error
 }
 
 // captureLock is the backup's capture lock: the gate under openbao, nil (no
@@ -99,7 +105,7 @@ func sealRotateWiring(d sealRotateDeps) (sealRotate, error) {
 		return sealRotate{}, errors.New("seal rotation: the store CA is nil under openbao")
 	case d.monitor == nil:
 		return sealRotate{}, errors.New("seal rotation: the readiness monitor is nil under openbao")
-	case d.store == nil || d.run == nil || d.restores == nil || d.jobRunning == nil || d.rand == nil || d.now == nil:
+	case d.store == nil || d.run == nil || d.restores == nil || d.jobRunning == nil || d.rand == nil || d.now == nil || d.afterStoreRestart == nil:
 		return sealRotate{}, errors.New("seal rotation: a collaborator is nil")
 	}
 	u, err := secretstore.ParseAddr(d.addr)
@@ -122,11 +128,12 @@ func sealRotateWiring(d sealRotateDeps) (sealRotate, error) {
 	if err != nil {
 		return sealRotate{}, fmt.Errorf("seal rotation: %w", err)
 	}
-	restart := restartStoreUnit(d.run)
+	unit := restartStoreUnit(d.run, d.afterStoreRestart)
+	restart := func(ctx context.Context) error { return unit(ctx, tlsca.LeafPaths{}) }
 	rot, err := sealrotate.NewRotator(sealrotate.Config{Enabled: true, UnsealWait: sealrotate.UnsealWait}, sealrotate.Deps{
 		Store:      d.store,
 		Rotate:     client,
-		Restart:    func(ctx context.Context) error { return restart(ctx, tlsca.LeafPaths{}) },
+		Restart:    restart,
 		Files:      files,
 		Gate:       gate,
 		Quiesce:    d.monitor.Quiesce,
@@ -140,7 +147,7 @@ func sealRotateWiring(d sealRotateDeps) (sealRotate, error) {
 	if err != nil {
 		return sealRotate{}, fmt.Errorf("seal rotation: %w", err)
 	}
-	return sealRotate{workflow: rot.Workflow(), gate: gate, alerts: rot.Alerts}, nil
+	return sealRotate{workflow: rot.Workflow(), gate: gate, alerts: rot.Alerts, restart: restart}, nil
 }
 
 // errSealRotateOff is every stand-in's refusal.
