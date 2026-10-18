@@ -32,6 +32,11 @@ func (Disabled) Versions(_ context.Context, _ secret.Value, p KVPath) (Metadata,
 	return Metadata{}, fail("versions", p, ErrDisabled, nil)
 }
 
+// Delete returns ErrDisabled.
+func (Disabled) Delete(_ context.Context, _ secret.Value, p KVPath) error {
+	return fail("delete", p, ErrDisabled, nil)
+}
+
 // CertLogin returns ErrDisabled, so a login session built over a store that is
 // off refuses every call with no I/O (geekdojo/geekdojo-brain#759).
 func (Disabled) CertLogin(context.Context, string) (secret.Value, error) {

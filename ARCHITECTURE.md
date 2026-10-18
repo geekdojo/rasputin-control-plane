@@ -253,7 +253,9 @@ the api's store client (`api/internal/secretstore`, selected by
 The api boots whatever state the store is in: `api/internal/secretstore/storestate`
 reads its readiness from `sys/health` when asked, raises a `secret-store:*` alert
 while it cannot serve secrets, and refuses a secret-bearing deploy with
-`secret_store_not_ready` until it can.
+`secret_store_not_ready` until it can. Above them, `api/internal/secrets` is the
+secrets service and its KV repository: typed `apps/<app ID>/<name>` and
+`devices/<kind>/<name>` references, authorized in the service before any store call.
 Every leaf carries exactly one explicit EKU. A node's trust bundle (the
 controlplane CA, plus the certificates parsed from the operator's CA file on an
 external Headscale) reaches it on

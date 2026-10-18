@@ -405,8 +405,9 @@ What it does not prove:
   test `TestSession_ClockFloorRefusesWithoutLooping` shows that refuses without looping, in Go TLS
   only.
 - **A login while the store's audit sink is blocked** (row T42 stays `unverified`).
-- **Consumers.** Nothing in the api calls the session yet;
-  [geekdojo-brain#761](https://github.com/geekdojo/geekdojo-brain/issues/761)'s repository will.
+- **Consumers.** The session's one consumer is the secrets service's repository
+  ([geekdojo-brain#761](https://github.com/geekdojo/geekdojo-brain/issues/761)), which has a
+  functional test of its own, below.
 
 Run it the same way as the smoke test, with `-run TestSession_AgainstTheRealStore`:
 
@@ -418,6 +419,53 @@ Expect `--- PASS: TestSession_AgainstTheRealStore` with one `PASS` line per step
 0. It takes about 3 seconds, most of it the 2-second TTL running out. With the binary absent and
 the switch set it fails, naming the variable, exactly as the smoke test does. The package's unit
 tests need no store.
+
+## The secrets service's functional test
+
+`TestService_AgainstTheRealStore`, in `api/internal/secrets/functional_test.go`, runs the api's
+secrets service against the real store, under the same switch, in the same CI step
+([geekdojo-brain#761](https://github.com/geekdojo/geekdojo-brain/issues/761)). The service
+authorizes each call and owns create-only, replace with check-and-set, and delete; its
+repository maps each typed reference to `rasputin-secrets/apps/<app ID>/<name>` and stores one
+`value` key per entry. Its unit tests run it over fakes and the in-memory Mock; this test shows
+the real store, under the shipped policy, behaves the way the Mock does.
+
+Self-init creates the `rasputin-secrets` mount and the `rasputin-api` cert role with the shipped
+`storepolicy` text. The chain is all production code: the client, a real readiness `Monitor` and
+`ObservedStore`, the login session, the repository and the service. Only the apps table is a
+fake, holding one app and its target node.
+
+What it proves, against OpenBao v2.7.1:
+
+- **Deploy round trip (TC-761-22).** A deploy job for the app, on its target node, creates
+  `apps/<app ID>/db-pass` at version 1 and reads the same bytes back. A second create is
+  `ErrExists`.
+- **Operator replace (TC-761-23).** An operator's replace returns version 2, and the deploy job's
+  read returns the new value at version 2.
+- **Delete removes every version (TC-761-24, T62).** After an operator's delete, the service's
+  read, the session's reads of versions 1 and 2, and the metadata read are each `ErrNotFound`. A
+  second delete returns nil, and a create starts again at version 1.
+- **No value in the api's logs or errors (TC-761-25).** Neither value written appears in any
+  record the api-side logger captured or in any error the test collected. The store's own audit
+  HMAC of values is TC-804-18's.
+
+What it does not prove:
+
+- **The policy's limits.** That the api's token is refused outside its own paths, and that
+  `devices/` is inside its grant, is TC-804-05 and TC-804-06, on the same policy source.
+- **Any consumer.** Nothing calls the service yet;
+  [geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762) is the first.
+- **Device secrets.** The service refuses every operation on them, for every actor.
+
+Run it the same way as the smoke test, with `-run TestService_AgainstTheRealStore`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -race -count=1 -v -run TestService_AgainstTheRealStore ./api/internal/secrets
+```
+
+Expect `--- PASS: TestService_AgainstTheRealStore` with one `PASS` line per step and exit
+status 0, in about a second. With the binary absent and the switch set it fails, naming the
+variable, exactly as the smoke test does. The package's unit tests need no store.
 
 ## The pin, and bumping it
 
@@ -433,7 +481,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T57, T60 and T61 at it before editing their `version` column.
+  release, and re-verifies T20 to T57 and T60 to T62 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -583,3 +631,12 @@ The cases for geekdojo-brain#759 that this document's tests check:
 | ID | What | Where |
 |---|---|---|
 | TC-759-17 | One login for a write and two reads; a revoked token (T60) and an expired one (T61) each cost one 403 and one re-login; no token or leaf key in the logs; required mode | `TestSession_AgainstTheRealStore`, and the `env -u` command above with `-run TestSession_ ./api/internal/secretstore/storesession` |
+
+The cases for geekdojo-brain#761 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-761-22 | A deploy job creates and reads its own app's secret; a second create is refused | `TestService_AgainstTheRealStore` |
+| TC-761-23 | An operator's replace gives version 2, which the deploy job reads | `TestService_AgainstTheRealStore` |
+| TC-761-24 | Delete removes every version, is idempotent, and a create starts again at 1 (T62) | `TestService_AgainstTheRealStore` |
+| TC-761-25 | No value in the api's logs or errors; required mode | `TestService_AgainstTheRealStore`, and the `env -u` command above with `-run TestService_ ./api/internal/secrets` |

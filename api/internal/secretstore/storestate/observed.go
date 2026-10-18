@@ -14,6 +14,7 @@ type KVStore interface {
 	Read(ctx context.Context, token secret.Value, p secretstore.KVPath, version int) (secretstore.KV, error)
 	Write(ctx context.Context, token secret.Value, p secretstore.KVPath, data map[string]secret.Value, cas int) (int, error)
 	Versions(ctx context.Context, token secret.Value, p secretstore.KVPath) (secretstore.Metadata, error)
+	Delete(ctx context.Context, token secret.Value, p secretstore.KVPath) error
 }
 
 // Observer takes each audited call's outcome (Monitor.ObserveAudited).
@@ -22,7 +23,7 @@ type Observer interface {
 }
 
 // ObservedStore forwards every call to the store it wraps unchanged, and
-// reports the outcome of each audited one (Read, Write, Versions) to the
+// reports the outcome of each audited one (Read, Write, Versions, Delete) to the
 // Observer with the caller's own ctx. Health is not audited, so it passes
 // straight through.
 type ObservedStore struct {
@@ -65,4 +66,11 @@ func (o *ObservedStore) Versions(ctx context.Context, token secret.Value, p secr
 	m, err := o.inner.Versions(ctx, token, p)
 	o.obs.ObserveAudited(ctx, err)
 	return m, err
+}
+
+// Delete forwards to the store and reports the outcome.
+func (o *ObservedStore) Delete(ctx context.Context, token secret.Value, p secretstore.KVPath) error {
+	err := o.inner.Delete(ctx, token, p)
+	o.obs.ObserveAudited(ctx, err)
+	return err
 }

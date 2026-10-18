@@ -44,6 +44,11 @@ func (c *countingStore) Versions(ctx context.Context, tok secret.Value, p secret
 	return c.secretStore.Versions(ctx, tok, p)
 }
 
+func (c *countingStore) Delete(ctx context.Context, tok secret.Value, p secretstore.KVPath) error {
+	c.calls.Add(1)
+	return c.secretStore.Delete(ctx, tok, p)
+}
+
 // constSource resolves every compose to the same value.
 type constSource struct{}
 

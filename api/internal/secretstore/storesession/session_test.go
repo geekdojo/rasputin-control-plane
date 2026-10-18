@@ -40,6 +40,7 @@ type rig struct {
 	roles   []string
 	kvCalls int
 	kvToks  []string
+	deleted []secretstore.KVPath
 	obs     []observation
 
 	// loginFn answers the nth login (1-based); nil mints sentinel(n).
@@ -113,6 +114,13 @@ func (r *rig) Versions(_ context.Context, tok secret.Value, _ secretstore.KVPath
 		return secretstore.Metadata{}, err
 	}
 	return secretstore.Metadata{CurrentVersion: 7}, nil
+}
+
+func (r *rig) Delete(_ context.Context, tok secret.Value, p secretstore.KVPath) error {
+	r.mu.Lock()
+	r.deleted = append(r.deleted, p)
+	r.mu.Unlock()
+	return r.kv(tok)
 }
 
 func (r *rig) ObserveAudited(ctx context.Context, err error) {
@@ -276,6 +284,40 @@ func TestSession_RefusedTokenGetsOneReloginAndSucceeds(t *testing.T) {
 				t.Errorf("second record reason = %q, want refused", got)
 			}
 		})
+	}
+}
+
+// TC-761-19: Session.Delete passes the held token and the path unchanged,
+// and a token an earlier call obtained that the store refuses gets exactly one
+// re-login and one retry carrying the new token.
+func TestSession_Delete(t *testing.T) {
+	r := newRig(t)
+	r.warm()
+	if err := keep(r.sess.Delete(t.Context(), path(t))); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	r.kvFn = func(n int, _ string) error {
+		if n == 3 {
+			return denied("delete")
+		}
+		return nil
+	}
+	if err := keep(r.sess.Delete(t.Context(), path(t))); err != nil {
+		t.Fatalf("Delete after a refusal = %v, want success after the re-login", err)
+	}
+	logins, kvCalls, _ := r.counts()
+	_, toks, _ := r.snapshot()
+	if logins != 2 || kvCalls != 4 {
+		t.Fatalf("logins = %d KV calls = %d, want 2 and 4", logins, kvCalls)
+	}
+	if toks[1] != sentinel(1) || toks[2] != sentinel(1) || toks[3] != sentinel(2) {
+		t.Errorf("KV tokens = %v, want the held token, the refused one, then the new one", toks)
+	}
+	r.mu.Lock()
+	deleted := append([]secretstore.KVPath(nil), r.deleted...)
+	r.mu.Unlock()
+	if len(deleted) != 3 || deleted[0] != path(t) || deleted[2] != path(t) {
+		t.Errorf("deleted paths = %v, want %v three times", deleted, path(t))
 	}
 }
 

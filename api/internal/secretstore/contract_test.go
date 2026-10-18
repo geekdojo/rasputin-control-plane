@@ -79,6 +79,35 @@ func contractTable(t *testing.T, s kvStore, token secret.Value, p, missing secre
 	}
 }
 
+// contractDelete is TC-761-20's delete step, run after contractTable on the
+// Mock: Delete of p (holding versions 1 and 2) removes every version, a second
+// Delete succeeds, and a check-and-set 0 write starts again at version 1. The
+// real store's delete is TC-761-24's (T62).
+func contractDelete(t *testing.T, s interface {
+	kvStore
+	Delete(ctx context.Context, token secret.Value, p secretstore.KVPath) error
+}, token secret.Value, p secretstore.KVPath) {
+	t.Helper()
+	ctx := t.Context()
+	if err := s.Delete(ctx, token, p); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	for _, version := range []int{0, 1} {
+		if _, err := s.Read(ctx, token, p, version); !errors.Is(err, secretstore.ErrNotFound) {
+			t.Errorf("read version %d after delete: err = %v, want ErrNotFound", version, err)
+		}
+	}
+	if _, err := s.Versions(ctx, token, p); !errors.Is(err, secretstore.ErrNotFound) {
+		t.Errorf("versions after delete: err = %v, want ErrNotFound", err)
+	}
+	if err := s.Delete(ctx, token, p); err != nil {
+		t.Errorf("second delete: %v, want nil", err)
+	}
+	if v, err := s.Write(ctx, token, p, map[string]secret.Value{"k": tok("again")}, 0); err != nil || v != 1 {
+		t.Errorf("write cas 0 after delete = %d, %v; want version 1", v, err)
+	}
+}
+
 func assertKV(t *testing.T, what string, kv secretstore.KV, version int, pass string, wantTime time.Time) {
 	t.Helper()
 	if kv.Version != version || len(kv.Data) != 2 ||
@@ -96,6 +125,11 @@ func TestMock_Contract(t *testing.T) {
 	at := time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC)
 	m := secretstore.NewMock(func() time.Time { return at })
 	contractTable(t, m, secret.Value{}, kvPath(t, "kv", "contract/a"), kvPath(t, "kv", "contract/missing"), at)
+	// TC-761-20, TC-761-19 (Mock.Delete drops every version).
+	contractDelete(t, m, secret.Value{}, kvPath(t, "kv", "contract/a"))
+	if err := m.Delete(t.Context(), secret.Value{}, secretstore.KVPath{}); !errors.Is(err, secretstore.ErrInvalidValue) {
+		t.Errorf("Mock.Delete of the zero KVPath = %v, want ErrInvalidValue", err)
+	}
 
 	if h, err := m.Health(t.Context()); err != nil || !h.Initialized || h.Sealed {
 		t.Errorf("mock Health = %+v, %v", h, err)
