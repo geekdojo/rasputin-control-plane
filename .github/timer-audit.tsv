@@ -57,7 +57,7 @@ L05	api/internal/mesh/preauth.go	UserDeviceKeyDefaultExpiry	ttl	the mesh server 
 L06	api/internal/mesh/preauth.go	UserDeviceKeyMaxExpiry	ttl	the same: a key copied off the page and never used is bounded by nothing else	auth-register.tsv#E10	The cap is what keeps that window short.
 L07	api/internal/mesh/supervisor_docker.go	sessionAPIKeyExpiration	ttl	the api expires the previous key by prefix at every start	auth-register.tsv#E20	Bounds only a key whose api died before it could expire it.
 L08	api/internal/tlsca/ca.go	controlplaneCALifetime	ttl	browsers and the tailnet client enforce NotAfter and Rasputin publishes no revocation list	auth-register.tsv#E16	Long on purpose: the operator installs the CA once.
-L09	api/internal/tlsca/leaf.go	defaultLeafLifetime	ttl	the same third-party verifiers, and renewal is driven by NotAfter approaching	auth-register.tsv#E16	
+L09	api/internal/tlsca/leaf.go	defaultLeafLifetime	ttl	the same third-party verifiers, and renewal is driven by NotAfter approaching	auth-register.tsv#E16	Includes the store client leaf (storeClientLeafSpec sets no lifetime). Its verifier is the store listener, renewal is #758's sweep on NotAfter, and the api's store login reads it from disk at each handshake (geekdojo/geekdojo-brain#759).
 L10	api/internal/tlsca/leaf.go	renewWindow	tick	NotAfter is within the window when the leaf is read		A threshold on a fact the certificate carries, checked on a safety-net sweep.
 L11	api/internal/bustls/key.go	certNotAfter	ttl	the SPKI pin, which is dateless - this constant exists to take the clock OUT of the check		1970 to 9999 deliberately. Nothing verifies these dates.
 L12	api/internal/bustls/key.go	certNotBefore	ttl	the SPKI pin, which is dateless		Same constant pair as L11.

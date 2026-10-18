@@ -127,6 +127,20 @@ func (m *Mock) Versions(_ context.Context, _ secret.Value, p KVPath) (Metadata, 
 	return md, nil
 }
 
+// mockToken is the token Mock.CertLogin returns. Mock ignores tokens, so its
+// value means nothing; it is non-empty only because a real login never
+// returns an empty one.
+const mockToken = "mock-store-token"
+
+// CertLogin returns a fixed token for any non-empty role, and ErrInvalidValue
+// for an empty one, as the client refuses it (geekdojo/geekdojo-brain#759).
+func (m *Mock) CertLogin(_ context.Context, role string) (secret.Value, error) {
+	if role == "" {
+		return secret.Value{}, fail("login", KVPath{mount: "auth/cert", path: "login"}, ErrInvalidValue, errors.New("the role is empty"))
+	}
+	return secret.New([]byte(mockToken)), nil
+}
+
 // copyValues gives every value its own payload, so the copy outlives a
 // Destroy of the original and the original outlives a Destroy of the copy.
 func copyValues(in map[string]secret.Value) map[string]secret.Value {

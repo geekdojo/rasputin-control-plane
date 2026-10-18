@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
+	"time"
 )
 
 // serverPaths are the files the store's main config names. Every one lives
@@ -126,6 +128,10 @@ type Role struct {
 	// harness writes, through an eval_source "file" source, as the image's
 	// self-init does.
 	PolicyText []byte
+	// TokenTTL, when not zero, is the role's token_ttl in whole seconds, so a
+	// test can watch a token the role issued expire at the store
+	// (geekdojo/geekdojo-brain#759). Zero leaves the store's default.
+	TokenTTL time.Duration
 }
 
 // nameRE is what a mount, role or policy name may be: it is placed in request
@@ -169,6 +175,8 @@ func (b Bootstrap) validate() error {
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Policy %q is not a name matching %s", i, r.Policy, nameRE)
 		case len(r.PolicyText) == 0:
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].PolicyText is empty", i)
+		case r.TokenTTL < 0 || r.TokenTTL%time.Second != 0:
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].TokenTTL %v is not zero or a positive whole number of seconds", i, r.TokenTTL)
 		}
 		if prev, ok := texts[r.Policy]; ok && !bytes.Equal(prev, r.PolicyText) {
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Policy %q is given two different texts", i, r.Policy)
@@ -224,7 +232,8 @@ func (b Bootstrap) policies() []policyFile {
 //   - the cert auth method;
 //   - per Role, a cert role trusting the store CA, admitting only the
 //     CommonName Role.Name, with Role.Policy as its only token policy and
-//     token_no_default_policy set (T37).
+//     token_no_default_policy set (T37), and token_ttl when Role.TokenTTL is
+//     set.
 //
 // The role's certificate is the store CA PEM itself, inline.
 func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string) string) ([]byte, error) {
@@ -247,15 +256,19 @@ func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string)
 		Data:      map[string]any{"type": "cert"},
 	}}}
 	for _, r := range b.Roles {
+		data := map[string]any{
+			"certificate":             string(storeCAPEM),
+			"allowed_common_names":    []string{r.Name},
+			"token_policies":          []string{r.Policy},
+			"token_no_default_policy": true,
+		}
+		if r.TokenTTL > 0 {
+			data["token_ttl"] = strconv.FormatInt(int64(r.TokenTTL/time.Second), 10) + "s"
+		}
 		auth = append(auth, map[string]initRequest{"role-" + r.Name: {
 			Operation: "update",
 			Path:      "auth/cert/certs/" + r.Name,
-			Data: map[string]any{
-				"certificate":             string(storeCAPEM),
-				"allowed_common_names":    []string{r.Name},
-				"token_policies":          []string{r.Policy},
-				"token_no_default_policy": true,
-			},
+			Data:      data,
 		}})
 	}
 	doc := map[string]any{"initialize": []any{
