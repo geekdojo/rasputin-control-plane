@@ -17,9 +17,6 @@ import (
 type readinessWiring struct {
 	// monitor is nil when no store backend is requested.
 	monitor *storestate.Monitor
-	// source is the deploy family's secret source: the inner source itself
-	// when no backend is requested, the Gate around it otherwise.
-	source apps.SecretSource
 	// alerts is the store's readiness alert source, or nil.
 	alerts func(ctx context.Context, now time.Time) []proto.Alert
 	// store is the store every consumer uses: the one passed in, or the
@@ -27,21 +24,20 @@ type readinessWiring struct {
 	store secretStore
 }
 
-// storeReadinessWiring builds the store's readiness monitor, the Gate in
-// front of inner and the observed store. It keys on requested, the raw
-// RASPUTIN_SECRETSTORE_BACKEND, not on the effective mode: a backend that was
-// asked for but whose configuration was refused (mode off, a Disabled store)
-// still gets the Gate and reads Unreachable, so its alert is raised and
-// secret-bearing deploys refuse (F-760-02). With nothing requested the inner
-// source is returned unchanged, which is the previous release's behaviour.
+// storeReadinessWiring builds the store's readiness monitor and the observed
+// store. It keys on requested, the raw RASPUTIN_SECRETSTORE_BACKEND, not on
+// the effective mode: a backend that was asked for but whose configuration was
+// refused (mode off, a Disabled store) still gets a monitor, which reads
+// Unreachable, so its alert is raised and secret-bearing deploys refuse
+// (F-760-02). With nothing requested there is no monitor and the store is
+// returned unchanged, which is the previous release's behaviour. The deploy
+// family's source is deploySourceWiring's, once the secrets service exists.
 //
 // It makes no store call: the api starts whatever state the store is in.
-func storeReadinessWiring(requested, mode string, store secretStore, inner apps.SecretSource, js *jobs.Store, now func() time.Time, logger *slog.Logger) (readinessWiring, error) {
+func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.Store, now func() time.Time, logger *slog.Logger) (readinessWiring, error) {
 	switch {
 	case store == nil:
 		return readinessWiring{}, errors.New("store readiness: the store is nil")
-	case inner == nil:
-		return readinessWiring{}, errors.New("store readiness: the inner secret source is nil")
 	case js == nil:
 		return readinessWiring{}, errors.New("store readiness: the job store is nil")
 	case now == nil:
@@ -50,13 +46,9 @@ func storeReadinessWiring(requested, mode string, store secretStore, inner apps.
 		return readinessWiring{}, errors.New("store readiness: the logger is nil")
 	}
 	if requested == "" {
-		return readinessWiring{source: inner, store: store}, nil
+		return readinessWiring{store: store}, nil
 	}
 	monitor, err := storestate.New(storestate.Deps{Store: store, Now: now, Log: logger, JobRunning: jobRunning(js)})
-	if err != nil {
-		return readinessWiring{}, err
-	}
-	gate, err := storestate.NewGate(inner, monitor, logger)
 	if err != nil {
 		return readinessWiring{}, err
 	}
@@ -66,7 +58,32 @@ func storeReadinessWiring(requested, mode string, store secretStore, inner apps.
 	}
 	logger.Info("secret store readiness gate on: secret-bearing deploys wait for the store",
 		"component", "secretstore", "requested", requested, "mode", mode)
-	return readinessWiring{monitor: monitor, source: gate, alerts: monitor.Alerts, store: observed}, nil
+	return readinessWiring{monitor: monitor, alerts: monitor.Alerts, store: observed}, nil
+}
+
+// deploySourceWiring is the deploy family's secret source
+// (geekdojo/geekdojo-brain#762, S14). With a store backend requested (a
+// monitor) it is the readiness Gate around storeSource, and hkdf is not
+// reachable: every secret-bearing deploy resolves through the store or
+// refuses. With none requested it is hkdf, as every release before #762 ran.
+// It makes no store call.
+func deploySourceWiring(monitor *storestate.Monitor, storeSource, hkdf apps.SecretSource, logger *slog.Logger) (apps.SecretSource, error) {
+	switch {
+	case storeSource == nil:
+		return nil, errors.New("deploy source: the store source is nil")
+	case hkdf == nil:
+		return nil, errors.New("deploy source: the HKDF source is nil")
+	case logger == nil:
+		return nil, errors.New("deploy source: the logger is nil")
+	}
+	if monitor == nil {
+		return hkdf, nil
+	}
+	gate, err := storestate.NewGate(storeSource, monitor, logger)
+	if err != nil {
+		return nil, err
+	}
+	return gate, nil
 }
 
 // jobRunning is the monitor's quiesce fact: whether the job is running now in

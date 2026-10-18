@@ -49,10 +49,13 @@ func (c *countingStore) Delete(ctx context.Context, tok secret.Value, p secretst
 	return c.secretStore.Delete(ctx, tok, p)
 }
 
-// constSource resolves every compose to the same value.
-type constSource struct{}
+// countingSource resolves every compose to the same value and counts calls.
+type countingSource struct {
+	calls atomic.Int32
+}
 
-func (constSource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
+func (c *countingSource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
+	c.calls.Add(1)
 	return secret.New([]byte("resolved")), nil
 }
 
@@ -67,25 +70,24 @@ func openJobStore(t *testing.T) *jobs.Store {
 }
 
 // TC-760-22: the readiness wiring keys on the REQUESTED backend. Nothing
-// requested leaves the inner source, the store and the alerts exactly as
-// before; any requested backend, a refused configuration (mode off with a
-// Disabled store) included, gets the Gate, the observed store and the alert
-// source, and the refused configuration reads unreachable and refuses a
-// secret-bearing deploy (F-760-02). Wiring never calls the store.
+// requested leaves the store and the alerts exactly as before, with no
+// monitor; any requested backend, a refused configuration (mode off with a
+// Disabled store) included, gets the monitor, the observed store and the
+// alert source, and the refused configuration reads unreachable
+// (F-760-02). Wiring never calls the store. Whether its deploys refuse is
+// TestDeploySourceWiring's.
 func TestStoreReadinessWiring(t *testing.T) {
 	log, _ := logkittest.New()
 	js := openJobStore(t)
-	inner := constSource{}
-	const tokened = "services:\n  web:\n    environment:\n      P: ${secret:db-password}\n"
 
 	t.Run("nothing requested", func(t *testing.T) {
 		store := &countingStore{secretStore: secretstore.Disabled{}}
-		w, err := storeReadinessWiring("", storeModeOff, store, inner, js, time.Now, log)
+		w, err := storeReadinessWiring("", storeModeOff, store, js, time.Now, log)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if w.source != apps.SecretSource(inner) || w.alerts != nil || w.store != secretStore(store) || w.monitor != nil {
-			t.Fatalf("wiring = %+v, want the inner source, the store passed in, no alerts and no monitor", w)
+		if w.alerts != nil || w.store != secretStore(store) || w.monitor != nil {
+			t.Fatalf("wiring = %+v, want the store passed in, no alerts and no monitor", w)
 		}
 		if n := store.calls.Load(); n != 0 {
 			t.Fatalf("wiring called the store %d time(s)", n)
@@ -104,15 +106,12 @@ func TestStoreReadinessWiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &countingStore{secretStore: tc.store}
-			w, err := storeReadinessWiring(tc.requested, tc.mode, store, inner, js, time.Now, log)
+			w, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, log)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if n := store.calls.Load(); n != 0 {
 				t.Fatalf("wiring called the store %d time(s)", n)
-			}
-			if _, ok := w.source.(*storestate.Gate); !ok {
-				t.Fatalf("source is %T, want *storestate.Gate", w.source)
 			}
 			if _, ok := w.store.(*storestate.ObservedStore); !ok {
 				t.Fatalf("store is %T, want *storestate.ObservedStore", w.store)
@@ -127,34 +126,116 @@ func TestStoreReadinessWiring(t *testing.T) {
 			if len(alerts) != 1 || alerts[0].ID != "secret-store:unreachable" || alerts[0].Severity != proto.AlertCrit {
 				t.Fatalf("alerts = %+v, want the unreachable crit", alerts)
 			}
-			_, err = w.source.ResolveCompose(context.Background(), "a", tokened)
-			var nr *storestate.NotReadyError
-			if !errors.As(err, &nr) || nr.Code() != "secret_store_not_ready" {
-				t.Fatalf("a tokened resolve = %v, want the coded refusal", err)
-			}
 		})
 	}
 
 	t.Run("nil collaborators", func(t *testing.T) {
 		type args struct {
 			store secretStore
-			inner apps.SecretSource
 			js    *jobs.Store
 			now   func() time.Time
 			log   *slog.Logger
 		}
-		full := args{secretstore.Disabled{}, inner, js, time.Now, log}
+		full := args{secretstore.Disabled{}, js, time.Now, log}
 		for name, clear := range map[string]func(*args){
 			"store":  func(a *args) { a.store = nil },
-			"inner":  func(a *args) { a.inner = nil },
 			"jobs":   func(a *args) { a.js = nil },
 			"clock":  func(a *args) { a.now = nil },
 			"logger": func(a *args) { a.log = nil },
 		} {
 			a := full
 			clear(&a)
-			if _, err := storeReadinessWiring("mock", storeModeMock, a.store, a.inner, a.js, a.now, a.log); err == nil {
+			if _, err := storeReadinessWiring("mock", storeModeMock, a.store, a.js, a.now, a.log); err == nil {
 				t.Errorf("storeReadinessWiring with a nil %s = nil error", name)
+			}
+		}
+	})
+}
+
+// TC-762-17 (AC2): the deploy family's source per requested backend. A
+// requested backend (ready, or refused and reading unreachable) gives the
+// Gate around the store source, and no compose ever reaches the HKDF source:
+// the refused one refuses a token compose with secret_store_not_ready and
+// raises the unreachable crit. Nothing requested gives the HKDF source
+// itself, with no monitor and no alerts. In every row the wiring makes no
+// store call and a token-free compose resolves.
+func TestDeploySourceWiring(t *testing.T) {
+	log, _ := logkittest.New()
+	js := openJobStore(t)
+	const tokened = "services:\n  web:\n    environment:\n      P: ${secret:db-password}\n"
+	const plain = "services:\n  web:\n    image: nginx\n"
+	for _, tc := range []struct {
+		name, requested, mode string
+		store                 secretStore
+		// gate: the source is the Gate; refused: its token compose refuses.
+		gate, refused bool
+	}{
+		{"requested, ready", "openbao", storeModeOpenBao, secretstore.NewMock(time.Now), true, false},
+		{"requested, refused configuration", "openbao", storeModeOff, secretstore.Disabled{}, true, true},
+		{"not requested", "", storeModeOff, secretstore.Disabled{}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &countingStore{secretStore: tc.store}
+			r, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			storeSrc, hkdf := &countingSource{}, &countingSource{}
+			src, err := deploySourceWiring(r.monitor, storeSrc, hkdf, log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := store.calls.Load(); n != 0 {
+				t.Fatalf("wiring called the store %d time(s)", n)
+			}
+			if _, ok := src.(*storestate.Gate); ok != tc.gate {
+				t.Fatalf("source is %T, want the Gate: %v", src, tc.gate)
+			}
+			if !tc.gate && src != apps.SecretSource(hkdf) {
+				t.Fatalf("source is %T, want the HKDF source itself", src)
+			}
+			if !tc.gate && (r.monitor != nil || r.alerts != nil) {
+				t.Fatal("nothing requested, yet a monitor or an alert source")
+			}
+
+			_, err = src.ResolveCompose(context.Background(), "a", tokened)
+			var nr *storestate.NotReadyError
+			switch {
+			case tc.refused:
+				if !errors.As(err, &nr) || nr.Code() != "secret_store_not_ready" {
+					t.Fatalf("a tokened resolve = %v, want the coded refusal", err)
+				}
+				alerts := r.alerts(context.Background(), time.Now())
+				if len(alerts) != 1 || alerts[0].ID != "secret-store:unreachable" || alerts[0].Severity != proto.AlertCrit {
+					t.Fatalf("alerts = %+v, want the unreachable crit", alerts)
+				}
+			case err != nil:
+				t.Fatalf("a tokened resolve = %v", err)
+			}
+			if _, err := src.ResolveCompose(context.Background(), "a", plain); err != nil {
+				t.Fatalf("a token-free resolve = %v", err)
+			}
+			if tc.gate && hkdf.calls.Load() != 0 {
+				t.Fatalf("the HKDF source was called %d time(s) behind a requested store", hkdf.calls.Load())
+			}
+			if !tc.gate && (hkdf.calls.Load() != 2 || storeSrc.calls.Load() != 0) {
+				t.Fatalf("HKDF calls %d, store source calls %d; want 2 and 0", hkdf.calls.Load(), storeSrc.calls.Load())
+			}
+		})
+	}
+
+	t.Run("nil collaborators", func(t *testing.T) {
+		s := &countingSource{}
+		for name, args := range map[string][3]any{
+			"store source": {nil, s, log},
+			"hkdf":         {s, nil, log},
+			"logger":       {s, s, nil},
+		} {
+			store, _ := args[0].(apps.SecretSource)
+			hkdf, _ := args[1].(apps.SecretSource)
+			logger, _ := args[2].(*slog.Logger)
+			if src, err := deploySourceWiring(nil, store, hkdf, logger); err == nil || src != nil {
+				t.Errorf("deploySourceWiring with a nil %s = %v, %v; want an error", name, src, err)
 			}
 		}
 	})

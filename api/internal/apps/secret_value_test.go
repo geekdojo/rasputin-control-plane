@@ -131,25 +131,18 @@ func labelSteps(w jobs.Workflow, step *atomic.Value) jobs.Workflow {
 	return w
 }
 
-// TC-825-03: on the real Runner, each workflow of the deploy family sends the
-// derived value in AppDeployCmd and nowhere else: the app row keeps the
-// placeholder, and neither the stored spec nor any step result carries the
-// value.
-//
-// TC-692-04: the secret source is called exactly once per job, during the step
-// named push, with the app's ID and the compose the row holds at push.
-//
-// TC-692-05: the derivation runs through the real HKDF adapter, and the
-// expected value comes from the seed itself, independently of it.
-func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
-	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
+// deployFamilyCase is one workflow of the deploy family: setup seeds the app
+// and returns the workflow, the spec, the prepare hook (or nil) and the
+// compose the row holds afterwards.
+type deployFamilyCase struct {
+	kind  string
+	setup func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string)
+}
 
-	for _, tc := range []struct {
-		kind string
-		// setup seeds the app and returns the workflow, the spec, the
-		// prepare hook (or nil) and the compose the row holds afterwards.
-		setup func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string)
-	}{
+// deployFamilyCases are the four deploy-family workflows over app id, each
+// pushing a compose that asks for db-password.
+func deployFamilyCases(id string) []deployFamilyCase {
+	return []deployFamilyCase{
 		{"app.deploy", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
 			return store, wf(t)(DeployWorkflow(store, inv, nc, nil, src)), DeploySpec{AppID: id}, nil, secretComposeV1
@@ -175,7 +168,23 @@ func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			return store, wf(t)(RevertWorkflow(store, inv, nc, nil, src)), RevertSpec{AppID: id, ComposeSHA256: ComposeHash(secretComposeV1)}, nil, secretComposeV1
 		}},
-	} {
+	}
+}
+
+// TC-825-03: on the real Runner, each workflow of the deploy family sends the
+// derived value in AppDeployCmd and nowhere else: the app row keeps the
+// placeholder, and neither the stored spec nor any step result carries the
+// value.
+//
+// TC-692-04: the secret source is called exactly once per job, during the step
+// named push, with the app's ID and the compose the row holds at push.
+//
+// TC-692-05: the derivation runs through the real HKDF adapter, and the
+// expected value comes from the seed itself, independently of it.
+func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
+	const id = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
+
+	for _, tc := range deployFamilyCases(id) {
 		t.Run(tc.kind, func(t *testing.T) {
 			ctx := context.Background()
 			nc := startNATS(t)

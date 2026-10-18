@@ -67,7 +67,7 @@ func TestSecretsWiring(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := &countingStore{secretStore: w.store}
-			r, err := storeReadinessWiring(backend, w.mode, store, constSource{}, js, time.Now, log)
+			r, err := storeReadinessWiring(backend, w.mode, store, js, time.Now, log)
 			if err != nil {
 				t.Fatal(err)
 			}

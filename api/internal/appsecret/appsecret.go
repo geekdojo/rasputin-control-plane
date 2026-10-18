@@ -14,20 +14,26 @@
 // admin password on a DNS server is the same absence, and so is Linkding being
 // rejected from the catalog for needing a value it does in fact support.
 //
-// # Derived, never stored
+// # Derived, then stored create-only
 //
-// A value is a pure function of (seed, appID, name, version). Nothing is
-// persisted per secret, and that is not a space optimisation — it is what buys
-// the two properties the design is chosen for:
+// A value is a pure function of (seed, appID, name, version), and that is
+// what buys the two properties the design is chosen for:
 //
 //   - Moving an app between nodes is a non-event. An appID does not change when
-//     an app is rescheduled, so the value re-derives byte-identical on the new
-//     node. A stored secret makes every reschedule a data-movement problem with
-//     its own way to fail.
-//   - No new class of secret at rest. One seed file at 0600 in the existing
-//     trustDir beside the controlplane CA's private key, on the dedicated
-//     /var/lib/rasputin partition — so it survives A/B image switches and
-//     rollbacks by the same construction the mesh already relies on.
+//     an app is rescheduled, so its value is the same on the new node.
+//   - An upgraded cluster keeps every credential. Since
+//     geekdojo/geekdojo-brain#762 (S14) a deploy resolves through the secret
+//     store (StoreSource): an entry that is absent is created from this
+//     derivation at InitialVersion, with check-and-set 0, and read back before
+//     use, so the first deploy after the upgrade stores the value the app
+//     already runs with, and a rollback to a release that derives gets the same
+//     bytes again.
+//
+// The seed is one file at 0600 in the existing trustDir beside the
+// controlplane CA's private key, on the dedicated /var/lib/rasputin partition,
+// so it survives A/B image switches and rollbacks by the same construction the
+// mesh already relies on. With no store backend requested the api derives on
+// every deploy (HKDFSource), as releases before #762 did.
 //
 // # The derivation is FROZEN
 //
@@ -52,9 +58,10 @@
 // modernc.org/sqlite with no encryption at rest, so resolving in the install
 // handler would write plaintext credentials into apps.compose_yaml permanently,
 // and the UI's compose preview would show a live credential instead of a
-// placeholder. Resolve is called where the compose is marshalled into
-// proto.AppDeployCmd and nowhere else; the two other node-bound paths escape
-// the token instead (see Escape).
+// placeholder. The deploy family's source (StoreSource, or HKDFSource over
+// Resolve) is called where the compose is marshalled into proto.AppDeployCmd
+// and nowhere else; the two other node-bound paths escape the token instead
+// (see Escape).
 package appsecret
 
 import (
@@ -82,13 +89,12 @@ const (
 	// directly.
 	SeedLen = 32
 
-	// InitialVersion is the rotation counter a secret starts at. ADR-0006
-	// Decision 11a: rotation moves the version field of the derivation tuple,
-	// and what is stored per app is n — a small non-sensitive integer — never
-	// the secret. Storing n, and the API that increments it, is not this issue:
-	// every caller here passes InitialVersion, and the parameter exists so that
-	// adding the counter later is a plumbing change and not a change to a
-	// frozen derivation.
+	// InitialVersion is the rotation counter a secret starts at, and the
+	// version an absent store entry is derived at when StoreSource creates it
+	// (geekdojo/geekdojo-brain#762). ADR-0006 Decision 11a: rotation moves the
+	// version field of the derivation tuple. Nothing rotates yet, so every
+	// caller passes InitialVersion; the parameter exists so that a later
+	// rotation is a plumbing change and not a change to a frozen derivation.
 	InitialVersion uint32 = 1
 
 	// maxAppIDLen bounds the appID that reaches the derivation. An appID is a

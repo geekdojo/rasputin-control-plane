@@ -1,6 +1,8 @@
 package appsecret
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -8,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
 // functionalEnv is the switch that makes this file's skips failures.
@@ -105,5 +109,40 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if !strings.Contains(out, "SESSION_KEY: "+want) {
 		t.Errorf("the derived value must arrive intact and need no quoting (which is why the\n"+
 			"encoding is base64url-nopad). want %q in:\n%s", "SESSION_KEY: "+want, out)
+	}
+
+	// TC-762-26: a compose the store source resolved (geekdojo-brain#762),
+	// from an entry of the derived shape that is not this seed's value, so
+	// the value Compose sees can only have come from the store.
+	other, err := NewSeed(bytes.Repeat([]byte{0x5a}, SeedLen), DerivationVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := str(other.Derive(appID, "session-key", InitialVersion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := secrets.AppSecret(appID, "session-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, _ := logkittest.New()
+	src, err := NewStoreSource(StoreSourceDeps{
+		Secrets: newFakeSecrets(map[string]string{ref.String(): stored}),
+		Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Seed: seed, Log: log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromStore, err := str(src.ResolveCompose(context.Background(), appID, tile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = run(t, fromStore, "config")
+	if err != nil {
+		t.Fatalf("the store-resolved compose must parse: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "SESSION_KEY: "+stored) {
+		t.Errorf("the stored value must arrive intact. want %q in:\n%s", "SESSION_KEY: "+stored, out)
 	}
 }

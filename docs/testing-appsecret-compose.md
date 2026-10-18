@@ -33,6 +33,9 @@ Against the Compose on the machine running it:
 - `Escape` output parses, keeps the `${secret:x}` placeholder literal, and never carries the
   derived value.
 - `Resolve` output parses, and the base64url-nopad value arrives intact and unquoted.
+- A compose the store source resolved (`StoreSource`, over a fake secrets service holding a
+  value of the derived shape) parses, and the stored value arrives intact
+  ([geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762), TC-762-26).
 
 ## What it does not prove
 
@@ -40,9 +43,8 @@ Against the Compose on the machine running it:
   `docker compose version` only, never `up`, so it pulls no image and needs no network.
 - Anything about the Compose version on an appliance. CI checks the runner's Compose, which
   is not pinned and may differ from the one rasputin-os ships.
-- Store-backed resolution
-  ([geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762)), or carrying
-  values beside the deploy command
+- The real secret store: that is `TestStoreSource_AgainstTheRealStore`
+  (docs/testing-secret-store.md). Nor carrying values beside the deploy command
   ([geekdojo-brain#776](https://github.com/geekdojo/geekdojo-brain/issues/776)).
 - That the value stays out of `docker inspect` or `/proc`.
 

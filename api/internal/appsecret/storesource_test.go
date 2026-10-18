@@ -1,0 +1,707 @@
+package appsecret
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storepolicy"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
+)
+
+// The sentinels the store-source tests plant, so a leak scan has something
+// unique to look for.
+const (
+	sentinelStored = "S-762-stored"
+	sentinelOther  = "S-762-other"
+	// storeText is what the fake store puts in a store error's StoreMessages:
+	// the store's own words, which reach the log and never an error string.
+	storeText = "S-762-store-message"
+	node      = "node-a"
+	tokened   = "services:\n  db:\n    environment:\n      PW: ${secret:db-password}\n"
+)
+
+// fakeCall is one call the fake service saw.
+type fakeCall struct {
+	op    string
+	ref   secrets.Ref
+	actor secrets.Actor
+	value string // what Create was given
+}
+
+// fakeSecrets is the secrets service as StoreSource sees it: an in-memory
+// entry per reference, a log of every call in order, and a hook that can
+// answer a call in its place.
+type fakeSecrets struct {
+	mu      sync.Mutex
+	entries map[string][]byte
+	calls   []fakeCall
+	// hook, when it reports handled, answers call i instead of the entries:
+	// for a read, value (or err); for a create, err, storing value when err
+	// is nil.
+	hook func(i int, c fakeCall) (value []byte, err error, handled bool)
+}
+
+func newFakeSecrets(entries map[string]string) *fakeSecrets {
+	f := &fakeSecrets{entries: map[string][]byte{}}
+	for k, v := range entries {
+		f.entries[k] = []byte(v)
+	}
+	return f
+}
+
+func (f *fakeSecrets) record(c fakeCall) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, c)
+	return len(f.calls) - 1
+}
+
+func (f *fakeSecrets) Read(_ context.Context, a secrets.Actor, r secrets.Ref) (secrets.Secret, error) {
+	c := fakeCall{op: "read", ref: r, actor: a}
+	i := f.record(c)
+	if f.hook != nil {
+		if v, err, ok := f.hook(i, c); ok {
+			if err != nil {
+				return secrets.Secret{}, err
+			}
+			return secrets.Secret{Value: secret.New(v), Version: 1}, nil
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	v, ok := f.entries[r.String()]
+	if !ok {
+		return secrets.Secret{}, storeErr("read", r, 404, secretstore.ErrNotFound, nil)
+	}
+	return secrets.Secret{Value: secret.New(v), Version: 1}, nil
+}
+
+func (f *fakeSecrets) Create(_ context.Context, a secrets.Actor, r secrets.Ref, value secret.Value) (int, error) {
+	c := fakeCall{op: "create", ref: r, actor: a, value: string(value.Reveal())}
+	i := f.record(c)
+	if f.hook != nil {
+		if _, err, ok := f.hook(i, c); ok && err != nil {
+			return 0, err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.entries[r.String()]; ok {
+		return 0, fmt.Errorf("%w: %s", secrets.ErrExists, r)
+	}
+	f.entries[r.String()] = bytes.Clone(value.Reveal())
+	return 1, nil
+}
+
+func (f *fakeSecrets) callLog() []fakeCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeCall(nil), f.calls...)
+}
+
+func (f *fakeSecrets) ops() []string {
+	var out []string
+	for _, c := range f.callLog() {
+		out = append(out, c.op+" "+c.ref.String())
+	}
+	return out
+}
+
+// storeErr is a store failure as the repository returns it: the client's
+// *secretstore.Error wrapped with the reference, carrying the store's own
+// words in StoreMessages.
+func storeErr(op string, r secrets.Ref, status int, kind, cause error) error {
+	return fmt.Errorf("secrets: %s %s: %w", op, r, &secretstore.Error{
+		Op: op, Mount: storepolicy.Mount, Path: r.String(), Status: status, Kind: kind, Err: cause,
+		StoreMessages: []string{storeText},
+	})
+}
+
+// fakeNodes answers TargetNode from a map, or with err.
+type fakeNodes struct {
+	nodes map[string]string
+	err   error
+	calls int
+}
+
+func (f *fakeNodes) TargetNode(_ context.Context, appID string) (string, bool, error) {
+	f.calls++
+	if f.err != nil {
+		return "", false, f.err
+	}
+	n, ok := f.nodes[appID]
+	return n, ok, nil
+}
+
+// harness is a StoreSource over a fake service and a fake node lookup, with a
+// log recorder.
+type harness struct {
+	src   *StoreSource
+	svc   *fakeSecrets
+	nodes *fakeNodes
+	rec   *logkittest.Recorder
+	seed  *Seed
+}
+
+func newHarness(t *testing.T, seed *Seed, entries map[string]string) *harness {
+	t.Helper()
+	log, rec := logkittest.New()
+	svc := newFakeSecrets(entries)
+	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
+	src, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Seed: seed, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &harness{src: src, svc: svc, nodes: nodes, rec: rec, seed: seed}
+}
+
+func mustRef(t *testing.T, app, name string) secrets.Ref {
+	t.Helper()
+	r, err := secrets.AppSecret(app, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func derivedValue(t *testing.T, seed *Seed, app, name string) string {
+	t.Helper()
+	v, err := seed.Derive(app, name, InitialVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(v.Reveal())
+}
+
+// jobCtx is a ctx carrying a job id, as the runner's step ctx does.
+func jobCtx() context.Context { return jobs.ContextWithJobID(context.Background(), "job-762") }
+
+// TC-762-12: the leak scan every store-source test ends with. None of the
+// needles may appear in any error string or its %v, %+v and JSON renderings,
+// or in any log record's message or attributes, the recorder taking DEBUG
+// and up.
+func assertNoLeak(t *testing.T, rec *logkittest.Recorder, errs []error, needles ...string) {
+	t.Helper()
+	var texts []string
+	for _, err := range errs {
+		if err == nil {
+			continue
+		}
+		j, _ := json.Marshal(err)
+		texts = append(texts, err.Error(), fmt.Sprintf("%v", err), fmt.Sprintf("%+v", err), string(j))
+	}
+	texts = append(texts, rec.Text())
+	for _, n := range needles {
+		if n == "" {
+			continue
+		}
+		for _, s := range texts {
+			if strings.Contains(s, n) {
+				t.Errorf("a value leaked: %q found in %q", n, s)
+			}
+		}
+	}
+}
+
+// TC-762-01: a compose with no token comes back as the same bytes, with no
+// app lookup and no service call, however a re-renderer would normalise it.
+func TestStoreSource_TokenFreeComposeIsUntouched(t *testing.T) {
+	h := newHarness(t, testSeed(t), nil)
+	for name, compose := range map[string]string{
+		"plain":           "services:\n  web:\n    image: nginx\n",
+		"trailing spaces": "services:  \n  web:   \n    image: nginx   \n",
+		"crlf":            "services:\r\n  web:\r\n    image: nginx\r\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := h.src.ResolveCompose(jobCtx(), appID, compose)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got.Reveal(), []byte(compose)) {
+				t.Fatalf("got %q, want the input bytes", got.Reveal())
+			}
+		})
+	}
+	if n := len(h.svc.callLog()); n != 0 || h.nodes.calls != 0 {
+		t.Fatalf("service calls %d, node lookups %d; want none", n, h.nodes.calls)
+	}
+}
+
+// TC-762-02: a stored value is spliced in as stored, not the HKDF value; one
+// read as the app's deploy job on its target node, and no create.
+func TestStoreSource_StoredValueIsUsedAsStored(t *testing.T) {
+	ref := mustRef(t, appID, "db-password")
+	h := newHarness(t, testSeed(t), map[string]string{ref.String(): sentinelStored})
+	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(tokened, "${secret:db-password}", sentinelStored, 1)
+	if string(got.Reveal()) != want {
+		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	}
+	derived := derivedValue(t, h.seed, appID, "db-password")
+	if strings.Contains(string(got.Reveal()), derived) {
+		t.Fatal("the HKDF value was spliced instead of the stored one")
+	}
+	calls := h.svc.callLog()
+	if len(calls) != 1 || calls[0].op != "read" || calls[0].ref != ref || calls[0].actor != secrets.DeployActor(appID, node) {
+		t.Fatalf("calls %+v, want one read of %s as DeployActor(%s, %s)", calls, ref, appID, node)
+	}
+	assertNoLeak(t, h.rec, nil, sentinelStored, derived)
+}
+
+// TC-762-03: an absent entry is derived at InitialVersion, created, read back
+// and used: read, create (with the value an independent Derive gives), read.
+func TestStoreSource_AbsentEntryIsDerivedCreatedAndReadBack(t *testing.T) {
+	h := newHarness(t, testSeed(t), nil)
+	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := mustRef(t, appID, "db-password")
+	derived := derivedValue(t, h.seed, appID, "db-password")
+	calls := h.svc.callLog()
+	if ops := h.svc.ops(); strings.Join(ops, ",") != "read "+ref.String()+",create "+ref.String()+",read "+ref.String() {
+		t.Fatalf("calls %v, want read, create, read", ops)
+	}
+	if calls[1].value != derived {
+		t.Fatal("the value created is not Seed.Derive at InitialVersion")
+	}
+	if want := strings.Replace(tokened, "${secret:db-password}", derived, 1); string(got.Reveal()) != want {
+		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	}
+	assertNoLeak(t, h.rec, nil, derived)
+}
+
+// TC-762-04: a create that loses the race to another deploy (ErrExists) whose
+// read-back holds the derived value deploys with it.
+func TestStoreSource_CreateRaceWithTheSameValueDeploys(t *testing.T) {
+	h := newHarness(t, testSeed(t), nil)
+	derived := derivedValue(t, h.seed, appID, "db-password")
+	h.svc.hook = func(i int, c fakeCall) ([]byte, error, bool) {
+		switch i {
+		case 0:
+			return nil, storeErr("read", c.ref, 404, secretstore.ErrNotFound, nil), true
+		case 1:
+			return nil, fmt.Errorf("%w: %s", secrets.ErrExists, c.ref), true
+		case 2:
+			return []byte(derived), nil, true
+		}
+		return nil, nil, false
+	}
+	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := strings.Replace(tokened, "${secret:db-password}", derived, 1); string(got.Reveal()) != want {
+		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	}
+	if n := len(h.svc.callLog()); n != 3 {
+		t.Fatalf("%d calls, want 3", n)
+	}
+	assertNoLeak(t, h.rec, nil, derived)
+}
+
+// TC-762-05: a read-back that differs from the derived value refuses with
+// secret_value_conflict, after a lost race (a) and after a create that
+// succeeded (b), with one ERROR record and no value anywhere.
+func TestStoreSource_ReadBackMismatchRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		createErr bool
+	}{{"a: ErrExists then a different value", true}, {"b: created then a different value", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t, testSeed(t), nil)
+			derived := derivedValue(t, h.seed, appID, "db-password")
+			h.svc.hook = func(i int, c fakeCall) ([]byte, error, bool) {
+				switch i {
+				case 0:
+					return nil, storeErr("read", c.ref, 404, secretstore.ErrNotFound, nil), true
+				case 1:
+					if tc.createErr {
+						return nil, fmt.Errorf("%w: %s", secrets.ErrExists, c.ref), true
+					}
+					return nil, nil, false
+				case 2:
+					return []byte(sentinelOther), nil, true
+				}
+				return nil, nil, false
+			}
+			got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+			if got.Len() != 0 {
+				t.Fatal("a refusal returned a value")
+			}
+			var r *Refusal
+			if !errors.As(err, &r) || r.Code() != CodeValueConflict {
+				t.Fatalf("err = %v, want the %s refusal", err, CodeValueConflict)
+			}
+			recs := h.rec.AtLevel(slog.LevelError)
+			if len(recs) != 1 {
+				t.Fatalf("%d ERROR records, want 1", len(recs))
+			}
+			ref := mustRef(t, appID, "db-password")
+			for k, want := range map[string]string{"app_id": appID, "ref": ref.String(), "outcome": CodeValueConflict, "job_id": "job-762"} {
+				if v, _ := logkittest.Attr(recs[0], k); v != want {
+					t.Errorf("record %s = %q, want %q", k, v, want)
+				}
+			}
+			assertNoLeak(t, h.rec, []error{err}, derived, sentinelOther)
+		})
+	}
+}
+
+// TC-762-06: a store failure at each call position, of each kind, refuses
+// with secret_store_unavailable and the zero Value; errors.Is reaches the
+// kind; no later call is made; one WARN record carries the refusal's fields
+// and the store error's own.
+func TestStoreSource_StoreFailuresRefuse(t *testing.T) {
+	kinds := []struct {
+		name  string
+		kind  error
+		cause error
+	}{
+		{"sealed", secretstore.ErrSealed, nil},
+		{"unreachable", secretstore.ErrUnreachable, errors.New("connection refused")},
+		{"client timeout", secretstore.ErrUnreachable, fmt.Errorf("round trip: %w", context.DeadlineExceeded)},
+		{"denied", secretstore.ErrDenied, nil},
+		{"protocol", secretstore.ErrProtocol, nil},
+	}
+	positions := []struct {
+		name string
+		at   int
+	}{{"first read", 0}, {"create", 1}, {"read-back", 2}}
+	for _, p := range positions {
+		for _, k := range kinds {
+			t.Run(p.name+"/"+k.name, func(t *testing.T) {
+				h := newHarness(t, testSeed(t), nil)
+				derived := derivedValue(t, h.seed, appID, "db-password")
+				h.svc.hook = func(i int, c fakeCall) ([]byte, error, bool) {
+					if i == p.at {
+						return nil, storeErr(c.op, c.ref, 503, k.kind, k.cause), true
+					}
+					return nil, nil, false
+				}
+				got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+				if got.Len() != 0 {
+					t.Fatal("a refusal returned a value")
+				}
+				var r *Refusal
+				if !errors.As(err, &r) || r.Code() != CodeStoreUnavailable {
+					t.Fatalf("err = %v, want the %s refusal", err, CodeStoreUnavailable)
+				}
+				if !errors.Is(err, k.kind) {
+					t.Errorf("errors.Is(err, %v) = false", k.kind)
+				}
+				if k.cause != nil && errors.Is(k.cause, context.DeadlineExceeded) && !errors.Is(err, context.DeadlineExceeded) {
+					t.Error("the client timeout is not reachable through the refusal")
+				}
+				if n := len(h.svc.callLog()); n != p.at+1 {
+					t.Fatalf("%d calls, want %d: nothing after the failure", n, p.at+1)
+				}
+				recs := h.rec.AtLevel(slog.LevelWarn)
+				if len(recs) != 1 {
+					t.Fatalf("%d WARN records, want 1", len(recs))
+				}
+				ref := mustRef(t, appID, "db-password")
+				for key, want := range map[string]string{"app_id": appID, "ref": ref.String(), "outcome": CodeStoreUnavailable,
+					"job_id": "job-762", "path": ref.String(), "status": "503"} {
+					if v, _ := logkittest.Attr(recs[0], key); v != want {
+						t.Errorf("record %s = %q, want %q", key, v, want)
+					}
+				}
+				if !strings.Contains(h.rec.Text(), storeText) {
+					t.Error("the store's own words did not reach the log")
+				}
+				assertNoLeak(t, h.rec, []error{err}, derived)
+				if strings.Contains(err.Error(), storeText) {
+					t.Error("the store's own words reached the error")
+				}
+			})
+		}
+	}
+}
+
+// TC-762-07: the refusal's sentence is one a person reads: a capital, a full
+// stop, the code, and no path, status or vendor. Behind the Gate in
+// audit-blocked, a store read that times out on the client's bound is the
+// Gate's not-ready refusal, not the source's.
+func TestStoreSource_RefusalSentenceAndTheGate(t *testing.T) {
+	ref := mustRef(t, appID, "db-password")
+	for _, r := range []*Refusal{storeUnavailable(storeErr("read", ref, 503, secretstore.ErrSealed, nil)), valueConflict()} {
+		s := r.Error()
+		if s == "" || s[0] < 'A' || s[0] > 'Z' || !strings.HasSuffix(s, ".") || !strings.Contains(s, r.Code()) {
+			t.Errorf("sentence %q: want a capital, a full stop and the code", s)
+		}
+		low := strings.ToLower(s)
+		for _, bad := range []string{"openbao", "bao", "vault", storepolicy.Mount, "apps/", "503"} {
+			if strings.Contains(low, bad) {
+				t.Errorf("sentence %q contains %q", s, bad)
+			}
+		}
+	}
+
+	log, _ := logkittest.New()
+	m, err := storestate.New(storestate.Deps{Store: readyHealth{}, Now: time.Now, Log: log,
+		JobRunning: func(context.Context, string) (bool, error) { return false, nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeout := storeErr("read", ref, 0, secretstore.ErrUnreachable, context.DeadlineExceeded)
+	m.ObserveAudited(context.Background(), timeout)
+	if st, _ := m.State(context.Background()); st != storestate.AuditBlocked {
+		t.Fatalf("monitor reads %s, want audit-blocked", st)
+	}
+	h := newHarness(t, testSeed(t), nil)
+	h.svc.hook = func(int, fakeCall) ([]byte, error, bool) { return nil, timeout, true }
+	gate, err := storestate.NewGate(h.src, m, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = gate.ResolveCompose(jobCtx(), appID, tokened)
+	var nr *storestate.NotReadyError
+	if !errors.As(err, &nr) || nr.Code() != storestate.Code {
+		t.Fatalf("gate err = %v, want the not-ready refusal", err)
+	}
+	var r *Refusal
+	if errors.As(err, &r) {
+		t.Fatal("the gate returned the source's refusal")
+	}
+}
+
+// readyHealth answers sys/health 200 unsealed.
+type readyHealth struct{}
+
+func (readyHealth) Health(context.Context) (secretstore.Health, error) {
+	return secretstore.Health{Initialized: true, Version: "2.7.1"}, nil
+}
+
+// TC-762-08: failures that are not store errors fail closed: no value, an
+// error, no store call after the failure, and no value or store text.
+func TestStoreSource_OtherFailuresFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		appID string
+		seed  *Seed
+		setup func(h *harness)
+		// calls is how many service calls are made.
+		calls int
+	}{
+		{"forbidden", appID, nil, func(h *harness) {
+			h.svc.hook = func(_ int, c fakeCall) ([]byte, error, bool) {
+				return nil, fmt.Errorf("%w: read %s: the node is not the app's target node", secrets.ErrForbidden, c.ref), true
+			}
+		}, 1},
+		// A lower-case ULID is not a canonical app ID, so the reference does
+		// not parse and the service is never called.
+		{"non-canonical app ID", strings.ToLower(appID), nil, func(h *harness) {
+			h.nodes.nodes[strings.ToLower(appID)] = node
+		}, 0},
+		// A seed with no derivation (the zero Seed, which NewSeed never makes)
+		// fails Derive after the read finds nothing.
+		{"derive error", appID, &Seed{}, nil, 1},
+		{"node lookup error", appID, nil, func(h *harness) { h.nodes.err = errors.New("apps: database is closed") }, 0},
+		{"app not found", appID, nil, func(h *harness) { h.nodes.nodes = map[string]string{} }, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			seed := tc.seed
+			if seed == nil {
+				seed = testSeed(t)
+			}
+			h := newHarness(t, seed, nil)
+			if tc.setup != nil {
+				tc.setup(h)
+			}
+			got, err := h.src.ResolveCompose(jobCtx(), tc.appID, tokened)
+			if err == nil || got.Len() != 0 {
+				t.Fatalf("got %d bytes, %v; want the zero Value and an error", got.Len(), err)
+			}
+			var r *Refusal
+			if errors.As(err, &r) {
+				t.Fatalf("err = %v, want a plain error, not a store refusal", err)
+			}
+			if n := len(h.svc.callLog()); n != tc.calls {
+				t.Fatalf("%d service calls, want %d", n, tc.calls)
+			}
+			assertNoLeak(t, h.rec, []error{err}, derivedValue(t, testSeed(t), appID, "db-password"), storeText)
+		})
+	}
+}
+
+// TC-762-10: a repeated name is read and created once and both places carry
+// it; a failure partway refuses the whole compose and keeps what was
+// created; the retry reads it back without creating it again.
+func TestStoreSource_SeveralTokensRepeatsAndPartialFailure(t *testing.T) {
+	const compose = "services:\n  a:\n    environment:\n      A1: ${secret:a}\n      B: ${secret:b}\n      A2: ${secret:a}\n"
+	h := newHarness(t, testSeed(t), nil)
+	refA, refB := mustRef(t, appID, "a"), mustRef(t, appID, "b")
+	failB := true
+	h.svc.hook = func(_ int, c fakeCall) ([]byte, error, bool) {
+		if failB && c.op == "create" && c.ref == refB {
+			return nil, storeErr("write", c.ref, 0, secretstore.ErrUnreachable, errors.New("connection refused")), true
+		}
+		return nil, nil, false
+	}
+	got, err := h.src.ResolveCompose(jobCtx(), appID, compose)
+	var r *Refusal
+	if got.Len() != 0 || !errors.As(err, &r) || r.Code() != CodeStoreUnavailable {
+		t.Fatalf("got %d bytes, %v; want the zero Value and the unavailable refusal", got.Len(), err)
+	}
+	if strings.Join(h.svc.ops(), ",") != strings.Join([]string{"read " + refA.String(), "create " + refA.String(), "read " + refA.String(),
+		"read " + refB.String(), "create " + refB.String()}, ",") {
+		t.Fatalf("calls %v", h.svc.ops())
+	}
+	if _, ok := h.svc.entries[refA.String()]; !ok {
+		t.Fatal("a's entry did not stay")
+	}
+
+	failB = false
+	before := len(h.svc.callLog())
+	got, err = h.src.ResolveCompose(jobCtx(), appID, compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := derivedValue(t, h.seed, appID, "a"), derivedValue(t, h.seed, appID, "b")
+	want := "services:\n  a:\n    environment:\n      A1: " + a + "\n      B: " + b + "\n      A2: " + a + "\n"
+	if string(got.Reveal()) != want {
+		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	}
+	retry := h.svc.ops()[before:]
+	if strings.Join(retry, ",") != strings.Join([]string{"read " + refA.String(), "read " + refB.String(), "create " + refB.String(), "read " + refB.String()}, ",") {
+		t.Fatalf("retry calls %v, want a read once and b created", retry)
+	}
+	assertNoLeak(t, h.rec, []error{err}, a, b)
+}
+
+// TC-762-11: the constructor refuses each nil collaborator.
+func TestNewStoreSource_RefusesNil(t *testing.T) {
+	log, _ := logkittest.New()
+	full := StoreSourceDeps{Secrets: newFakeSecrets(nil), Apps: &fakeNodes{}, Seed: testSeed(t), Log: log}
+	for name, clear := range map[string]func(*StoreSourceDeps){
+		"Secrets": func(d *StoreSourceDeps) { d.Secrets = nil },
+		"Apps":    func(d *StoreSourceDeps) { d.Apps = nil },
+		"Seed":    func(d *StoreSourceDeps) { d.Seed = nil },
+		"Log":     func(d *StoreSourceDeps) { d.Log = nil },
+	} {
+		d := full
+		clear(&d)
+		if s, err := NewStoreSource(d); err == nil || s != nil {
+			t.Errorf("nil %s: %v, %v; want an error and no source", name, s, err)
+		}
+	}
+}
+
+// TC-762-13 (AC3): through StoreSource over an empty store, the value created
+// and the value spliced both equal the frozen vector for cases 0, 1, 2 and 7.
+func TestStoreSource_CreatedValuesEqualTheFrozenVectors(t *testing.T) {
+	cases := loadVectors(t).Cases
+	for _, i := range []int{0, 1, 2, 7} {
+		c := cases[i]
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			key, err := hex.DecodeString(c.SeedHex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seed, err := NewSeed(key, DerivationVersion)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.Version != InitialVersion {
+				t.Fatalf("case %d is at version %d, not InitialVersion", i, c.Version)
+			}
+			h := newHarness(t, seed, nil)
+			h.nodes.nodes[c.AppID] = node
+			got, err := h.src.ResolveCompose(jobCtx(), c.AppID, "x: ${secret:"+c.Name+"}\n")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got.Reveal()) != "x: "+c.Want+"\n" {
+				t.Fatalf("spliced %q, want the vector %q", got.Reveal(), c.Want)
+			}
+			calls := h.svc.callLog()
+			if len(calls) != 3 || calls[1].op != "create" || calls[1].value != c.Want {
+				t.Fatalf("the value created is not the vector: %+v", calls)
+			}
+		})
+	}
+}
+
+// noopObserver takes the session's login outcomes.
+type noopObserver struct{}
+
+func (noopObserver) ObserveAudited(context.Context, error) {}
+
+// TC-762-14: an upgrade and a rollback keep the credential. The previous
+// release (HKDFSource), the first deploy after the upgrade (StoreSource over
+// an empty Mock behind the real service), the next deploy (entry present) and
+// a rollback (HKDFSource again) all give the same bytes, and the store then
+// holds version 1 of each name.
+func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
+	const compose = "services:\n  db:\n    environment:\n      PW: ${secret:db-password}\n      KEY: ${secret:session-key}\n"
+	ctx := jobCtx()
+	log, rec := logkittest.New()
+	seed := testSeed(t)
+	mock := secretstore.NewMock(time.Now)
+	sess, err := storesession.New(storesession.Config{Role: "rasputin-api", Login: mock, Store: mock, Observer: noopObserver{}, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := secrets.NewRepository(sess)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: nodes, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Seed: seed, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hkdf, err := NewHKDFSource(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results [][]byte
+	for _, src := range []interface {
+		ResolveCompose(context.Context, string, string) (secret.Value, error)
+	}{hkdf, store, store, hkdf} {
+		v, err := src.ResolveCompose(ctx, appID, compose)
+		if err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, bytes.Clone(v.Reveal()))
+	}
+	for i, r := range results[1:] {
+		if !bytes.Equal(r, results[0]) {
+			t.Fatalf("resolution %d differs from the previous release's", i+1)
+		}
+	}
+	for _, name := range []string{"db-password", "session-key"} {
+		p, err := secretstore.NewKVPath(storepolicy.Mount, mustRef(t, appID, name).String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		md, err := mock.Versions(ctx, secret.Value{}, p)
+		if err != nil || md.CurrentVersion != 1 {
+			t.Fatalf("%s: version %d, %v; want 1", name, md.CurrentVersion, err)
+		}
+	}
+	assertNoLeak(t, rec, nil, derivedValue(t, seed, appID, "db-password"), derivedValue(t, seed, appID, "session-key"))
+}

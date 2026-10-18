@@ -955,3 +955,69 @@ func TestStopRestart_Refusals(t *testing.T) {
 		t.Fatalf("Stop with an ended ctx = %v, want it named", err)
 	}
 }
+
+// geekdojo/geekdojo-brain#762 (row T42): Config.AuditStdout renders a file
+// audit device on stdout, and cannot be combined with Config.Audit.
+func TestAuditStdout_RenderAndRefusal(t *testing.T) {
+	cfg := validConfig(t)
+	cfg.Audit, cfg.AuditStdout = true, true
+	if h, err := New(cfg); h != nil || err == nil || !strings.Contains(err.Error(), "Config.AuditStdout") {
+		t.Fatalf("New with both audit options = %v, %v; want a refusal naming Config.AuditStdout", h, err)
+	}
+
+	copied := filepath.Join(t.TempDir(), "main.hcl")
+	cfg = validConfig(t)
+	cfg.AuditStdout = true
+	cfg.BinaryPath = writeFake(t, `case "$1" in
+version) echo "OpenBao v2.7.1 (fake)" ;;
+server) cp "$3" "`+copied+`"; exit 3 ;;
+esac
+`)
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := h.Start(t.Context()); s != nil || err == nil {
+		t.Fatalf("Start = %v, %v; want the fake's exit", s, err)
+	}
+	b, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `audit "file" "file" {`) || !hasSetting(string(b), "file_path", `"stdout"`) {
+		t.Errorf("the rendered config lacks the stdout audit device:\n%s", b)
+	}
+	assertEmpty(t, cfg.TempParent)
+}
+
+// geekdojo/geekdojo-brain#762: a held stdout reader reads nothing more until
+// release, then reads to EOF; release is idempotent, and a nil gate (a Store
+// built by hand) never holds.
+func TestHoldStdout_ReleaseResumesTheReader(t *testing.T) {
+	s := &Store{stdoutHold: newHoldGate()}
+	release := s.HoldStdout()
+	l := newLineLog(slog.New(slog.DiscardHandler), "stdout", 5)
+	l.hold = s.stdoutHold
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() { defer close(done); l.consume(pr) }()
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := pw.Write([]byte("a\nb\n"))
+		_ = pw.Close()
+		wrote <- err
+	}()
+	release()
+	release()
+	if err := <-wrote; err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if got := l.tail(); got != "a | b" {
+		t.Fatalf("tail = %q, want both lines once released", got)
+	}
+
+	var nilGate *holdGate
+	nilGate.wait()
+	nilGate.release()
+}
