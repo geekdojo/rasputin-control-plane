@@ -79,7 +79,9 @@ asking first (proposed and declined 2026-07-08).
 **Local stack:** UI dev server on :3000 (`npm run dev` in `ui/`) + the api on
 :8080 — run `RASPUTIN_MESH_BACKEND=mock go run ./api/cmd/rasputin-api` from the
 **repo root** so the default `./data` dir resolves; `data/rasputin.db` already
-holds Bryce's account and passkey credential.
+holds Bryce's account and passkey credential. The api has no secret store
+unless `RASPUTIN_SECRETSTORE_BACKEND` names one; to opt in, see
+[Local secret store](#local-secret-store) below.
 
 Run `scripts/pki-init.sh` and copy its `root-ca.pem` into `data/trust/` if it
 is not there: as of 2026-09-01 a missing bundle-signing root CA makes the api
@@ -109,6 +111,95 @@ invents `100.64.0.x` tailnet addresses that `/api/mesh/devices` then serves as
 real, so inferring it on a controlplane means the control plane reports a mesh
 that does not exist. Without the var the api boots fine and every other page
 works; the mesh pages show an "unavailable" banner and mesh verbs refuse.
+
+### Local secret store
+
+`RASPUTIN_SECRETSTORE_BACKEND` selects the store, and nothing infers one. The
+startup log names the result as `secret store wired mode=<off|mock|openbao>`.
+
+- **unset:** no store, logged at INFO as `secret store off: not configured`.
+  Deploys get their secrets from the HKDF source, as every release before
+  geekdojo/geekdojo-brain#762 did.
+- **`mock` or `openbao`:** secret-bearing deploys go through the store's
+  readiness gate, so they resolve through the store or are refused. `mock` logs
+  at WARN: `secret store is the in-memory mock: nothing it holds survives a restart`.
+- **any other value:** one ERROR record `secret store off: configuration refused`
+  with `configfault=true`. The api still starts, but every secret-bearing deploy
+  is refused until the selector is fixed.
+
+The mock is your opt-in, never a default: put `RASPUTIN_SECRETSTORE_BACKEND=mock`
+in front of the local-stack command when you start it.
+
+For the real store, run the pinned OpenBao on 127.0.0.1:8200 with the api's own
+store CA and client leaf. Every block runs at the repo root.
+
+1. Install the pinned OpenBao. `shasum` checks the bytes against the release's
+   own `checksums.txt`, not a signature. Expect `...tar.gz: OK`, then
+   `OpenBao v<the pin.go version> (...)`.
+
+   ```sh
+   v="$(sed -n -E 's/^[[:space:]]*OpenBaoRelease[[:space:]]*=[[:space:]]*"openbao\/openbao:v([^"]+)"[[:space:]]*$/\1/p' api/internal/secretstoretest/pin.go)"
+   a="$(uname -m | sed s/x86_64/amd64/)"; o="$HOME/.cache/openbao"; mkdir -p "$o"
+   curl -fsSL -o "$o/openbao_${v}_darwin_${a}.tar.gz" "https://github.com/openbao/openbao/releases/download/v${v}/openbao_${v}_darwin_${a}.tar.gz"
+   curl -fsSL -o "$o/checksums.txt" "https://github.com/openbao/openbao/releases/download/v${v}/checksums.txt"
+   (cd "$o" && shasum -a 256 --ignore-missing -c checksums.txt && tar -xzf "openbao_${v}_darwin_${a}.tar.gz" bao) && "$o/bao" version
+   ```
+
+2. Start the api with `RASPUTIN_SECRETSTORE_BACKEND=openbao` in front of the
+   local-stack command. Before step 3, wait until both leaf files exist:
+
+   ```sh
+   ls data/tls/openbao-server/leaf.pem data/tls/openbao-client/leaf.pem
+   ```
+
+   On the first run with this `data/`, the api creates `data/trust/store-ca.pem`
+   and logs `leaf sweep: <name>: minted a fresh leaf` for each leaf, plus an
+   `openbao-server: reload: systemctl … not found` WARN, which is expected on a
+   Mac (no systemd; the leaf is on disk anyway). Later runs reuse the leaves and
+   print no leaf-sweep lines.
+
+3. In a new terminal, start the store:
+
+   ```sh
+   o="$HOME/.cache/openbao"
+   cat > "$o/dev-listener.hcl" <<EOF
+   listener "tcp" {
+     address                                  = "127.0.0.1:8200"
+     tls_cert_file                            = "$PWD/data/tls/openbao-server/leaf.pem"
+     tls_key_file                             = "$PWD/data/tls/openbao-server/leaf.key"
+     tls_client_ca_file                       = "$PWD/data/trust/store-ca.pem"
+     tls_require_and_verify_client_cert       = true
+     disable_unauthed_rekey_endpoints         = true
+     disable_unauthed_generate_root_endpoints = true
+   }
+   EOF
+   "$o/bao" server -dev -dev-no-store-token -dev-root-token-id=dev-root -dev-listen-address=127.0.0.1:8210 -config="$o/dev-listener.hcl"
+   ```
+
+4. In another new terminal, configure it. The last command revokes the
+   throwaway root token, which dev mode serves only on the plain-HTTP setup
+   listener at 127.0.0.1:8210.
+
+   ```sh
+   o="$HOME/.cache/openbao"; export BAO_ADDR=http://127.0.0.1:8210 BAO_TOKEN=dev-root
+   "$o/bao" secrets enable -path=rasputin-secrets kv-v2
+   "$o/bao" policy write rasputin-api api/internal/secretstore/storepolicy/rasputin-api.hcl
+   "$o/bao" auth enable cert
+   "$o/bao" write auth/cert/certs/rasputin-api certificate=@data/trust/store-ca.pem allowed_common_names=rasputin-api token_policies=rasputin-api token_no_default_policy=true
+   "$o/bao" token revoke -self
+   ```
+
+5. Check, in the same terminal, that the store accepts the api's own leaf as
+   `rasputin-api`. Expect `200`; the token is discarded, never printed.
+
+   ```sh
+   curl -sS -o /dev/null -w '%{http_code}\n' --cacert data/trust/store-ca.pem --cert data/tls/openbao-client/leaf.pem --key data/tls/openbao-client/leaf.key -X POST -d '{"name":"rasputin-api"}' https://127.0.0.1:8200/v1/auth/cert/login
+   ```
+
+Dev mode holds everything in memory, so a store restart means repeating steps 3
+and 4, and so does a fresh `data/` (a new store CA, which the role pins) or a
+`minted a fresh leaf` line for `openbao-server` in the api log. Ctrl-C stops
+both processes.
 
 Handy always-visible kit components for styling checks: `/metrics` (range Select),
 `/firewall/rules` (proto + target Selects in the ADD RULE form). All shared UI
