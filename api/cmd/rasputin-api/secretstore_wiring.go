@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
@@ -19,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -289,7 +291,11 @@ type sealTree interface {
 // storeBackupControl is storage.SecretStore over the composition root's
 // collaborators (#765): the readiness monitor's state and quiesce, the
 // store's sys/health, the seal files, and the store unit through systemctl.
+// Its reason is the job it quiesces the store for: the backup's capture, or
+// an OS update's pre-update copy (geekdojo/geekdojo-brain#800). Main builds
+// one of each.
 type storeBackupControl struct {
+	reason  storestate.QuiesceReason
 	monitor *storestate.Monitor
 	health  secretstore.HealthReader
 	seal    sealTree
@@ -299,12 +305,12 @@ type storeBackupControl struct {
 	log     *slog.Logger
 }
 
-// storeBackupWiring builds the backup's view of the store when a backend
-// other than the mock is requested, a refused one included: its monitor
-// reads unreachable, so every backup fails closed until it is fixed. With
-// nothing or the mock requested it returns nil: no store step, and a
-// version-2 archive.
-func storeBackupWiring(requested string, monitor *storestate.Monitor, health secretstore.HealthReader, seal sealTree,
+// storeBackupWiring builds the store's cold-copy control for reason when a
+// backend other than the mock is requested, a refused one included: its
+// monitor reads unreachable, so every capture fails closed until it is
+// fixed. With nothing or the mock requested it returns nil: for a backup, no
+// store step and a version-2 archive; for an OS update, no copy.
+func storeBackupWiring(requested string, reason storestate.QuiesceReason, monitor *storestate.Monitor, health secretstore.HealthReader, seal sealTree,
 	run runFunc, afterStoreRestart func(context.Context), log *slog.Logger) (storage.SecretStore, error) {
 	if requested == "" || requested == storeModeMock {
 		return nil, nil
@@ -315,7 +321,7 @@ func storeBackupWiring(requested string, monitor *storestate.Monitor, health sec
 	case health == nil || seal == nil || run == nil || afterStoreRestart == nil || log == nil:
 		return nil, errors.New("store backup: a collaborator is nil")
 	}
-	return &storeBackupControl{monitor: monitor, health: health, seal: seal, run: run,
+	return &storeBackupControl{reason: reason, monitor: monitor, health: health, seal: seal, run: run,
 		start: restartStoreUnit(run, afterStoreRestart), wait: sealrotate.UnsealWait, log: log}, nil
 }
 
@@ -352,10 +358,10 @@ func (c *storeBackupControl) Version(ctx context.Context) (string, error) {
 	return h.Version, nil
 }
 
-// Stop stops the store unit for the backup's cold copy.
+// Stop stops the store unit for its cold copy.
 func (c *storeBackupControl) Stop(ctx context.Context) error {
-	c.log.InfoContext(ctx, "secret store stopping for a backup", "component", "secretstore",
-		"event", "secretstore.backup_stop", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit)
+	c.log.InfoContext(ctx, "secret store stopping for its cold copy", "component", "secretstore",
+		"event", "secretstore.backup_stop", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit, "reason", c.reason.String())
 	if out, err := c.run(ctx, "systemctl", "stop", storeUnit); err != nil {
 		return fmt.Errorf("systemctl stop %s: %w: %s", storeUnit, err, strings.TrimSpace(string(out)))
 	}
@@ -365,8 +371,8 @@ func (c *storeBackupControl) Stop(ctx context.Context) error {
 // Start starts it again through the server leaf's own restart, which runs
 // the after-restart outcome read (F-765-10).
 func (c *storeBackupControl) Start(ctx context.Context) error {
-	c.log.InfoContext(ctx, "secret store starting after a backup", "component", "secretstore",
-		"event", "secretstore.backup_start", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit)
+	c.log.InfoContext(ctx, "secret store starting after its cold copy", "component", "secretstore",
+		"event", "secretstore.backup_start", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit, "reason", c.reason.String())
 	return c.start(ctx, tlsca.LeafPaths{})
 }
 
@@ -375,7 +381,115 @@ func (c *storeBackupControl) WaitReady(ctx context.Context) error {
 	return secretstore.WaitReady(ctx, c.health, c.wait)
 }
 
-// Quiesce holds the store quiesced for the backup.
+// Quiesce holds the store quiesced for the control's reason.
 func (c *storeBackupControl) Quiesce(jobID string) func() {
-	return c.monitor.Quiesce(jobID, storestate.QuiesceBackup)
+	return c.monitor.Quiesce(jobID, c.reason)
+}
+
+// storeRollbackCreatedBy is who the reference check's job names as its
+// submitter.
+const storeRollbackCreatedBy = "store-ready"
+
+// rollbackRunner is the runner as storeRollbackWiring uses it.
+type rollbackRunner interface {
+	Register(w jobs.Workflow)
+	Submit(ctx context.Context, kind string, spec any, createdBy string) (*jobs.Job, error)
+}
+
+// readyReader is the readiness monitor as the reference check's trigger
+// uses it.
+type readyReader interface {
+	OnFirstReady(ctx context.Context, fn func(context.Context))
+	State(ctx context.Context) (storestate.State, error)
+}
+
+// storeRollbackDeps is what the store's rollback wiring takes from main
+// (geekdojo/geekdojo-brain#800).
+type storeRollbackDeps struct {
+	// mode is the wired store's mode; the reference check runs only under
+	// openbao.
+	mode string
+	// copyStore is the store's cold-copy control quiescing for an OS
+	// update, nil when no backend or the mock was requested.
+	copyStore storage.SecretStore
+	// lock is the capture gate under openbao, nil otherwise.
+	lock         storage.UpdateLock
+	storeDataDir string
+	copyPath     string
+	refs         appsecret.RefLister
+	secrets      appsecret.SecretChecker
+	monitor      readyReader
+	runner       rollbackRunner
+	log          *slog.Logger
+}
+
+// storeRollback is what storeRollbackWiring built.
+type storeRollback struct {
+	// copier is updater.Config.StoreCopy: nil when there is no store.
+	copier updater.StoreCopier
+	// arm, run once after runner.Recover, submits the reference check on
+	// the first reading that finds the store ready; it does nothing when the
+	// check is not wired.
+	arm func(ctx context.Context)
+}
+
+// noStoreRotationLock is the copy's lock when a backend other than the mock
+// was requested but refused: no seal-key rotation can run then, so there is
+// nothing to wait for, and the store reads unreachable, so the copy refuses
+// at its readiness check (fail closed).
+type noStoreRotationLock struct{}
+
+func (noStoreRotationLock) AcquireForUpdate(context.Context, string) error { return nil }
+func (noStoreRotationLock) Release(string)                                 {}
+
+// storeRollbackWiring builds the OS update's copy of the store and the
+// reference check that runs after a store's data is put back
+// (geekdojo/geekdojo-brain#800). The copier exists whenever copyStore does;
+// the check is registered, and armed, only under openbao.
+func storeRollbackWiring(d storeRollbackDeps) (storeRollback, error) {
+	off := storeRollback{arm: func(context.Context) {}}
+	if d.log == nil {
+		return off, errors.New("store rollback: the logger is nil")
+	}
+	out := off
+	if d.copyStore != nil {
+		lock := d.lock
+		if lock == nil {
+			lock = noStoreRotationLock{}
+		}
+		c, err := storage.NewPreUpdateCopier(storage.PreUpdateCopierDeps{
+			Store: d.copyStore, Lock: lock, DataDir: d.storeDataDir, CopyPath: d.copyPath, Log: d.log,
+		})
+		if err != nil {
+			return off, fmt.Errorf("store rollback: %w", err)
+		}
+		out.copier = c
+	}
+	if d.mode != storeModeOpenBao {
+		return out, nil
+	}
+	if d.monitor == nil || d.runner == nil {
+		return off, errors.New("store rollback: the readiness monitor or the runner is nil under openbao")
+	}
+	wf, err := appsecret.ReferenceCheckWorkflow(appsecret.ReferenceCheckDeps{Refs: d.refs, Secrets: d.secrets, Log: d.log})
+	if err != nil {
+		return off, fmt.Errorf("store rollback: %w", err)
+	}
+	d.runner.Register(wf)
+	out.arm = func(ctx context.Context) {
+		d.monitor.OnFirstReady(ctx, func(ctx context.Context) {
+			if _, err := d.runner.Submit(ctx, appsecret.ReferenceCheckKind, nil, storeRollbackCreatedBy); err != nil {
+				d.log.ErrorContext(ctx, "secret store reference check not submitted",
+					"component", "appsecret", "event", "appsecret.reference_check_submit_failed", "err", err.Error())
+			}
+		})
+		// One reading now, under the client's own per-call bound: a store
+		// already ready submits the check at once; otherwise the next ready
+		// reading by any reader does. Its answer is recorded by the monitor.
+		if _, err := d.monitor.State(ctx); err != nil {
+			d.log.WarnContext(ctx, "secret store readiness not read at start; the next reading arms the reference check",
+				"component", "appsecret", "err", err.Error())
+		}
+	}
+	return out, nil
 }

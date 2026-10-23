@@ -12,12 +12,15 @@ type stateReader interface {
 	State() (Tree, error)
 }
 
-// Gate is the backup capture lock (AC4). One holder at a time: the rotation
+// Gate is the store capture lock (AC4). One holder at a time: the rotation
 // takes it with TryAcquire and never waits; a backup takes it with Acquire,
-// which waits for a rotation to release it. A backup is refused at once when
-// the seal files are not Clean and no rotation holds the gate, because an
-// archive captured in the middle of a rotation could hold a key that does
-// not open it.
+// and an OS update's pre-update copy with AcquireForUpdate
+// (geekdojo/geekdojo-brain#800), both of which wait for the holder to
+// release it. A capture is refused at once when the seal files are not Clean
+// and no rotation holds the gate, because a copy taken in the middle of a
+// rotation could hold a key that does not open it. The gate records whether
+// a non-rotation holder is a backup or an OS update, so every refusal names
+// the job the reader started (ERR-MESSAGE).
 type Gate struct {
 	state      stateReader
 	jobRunning func(ctx context.Context, jobID string) (bool, error)
@@ -26,6 +29,8 @@ type Gate struct {
 	mu         sync.Mutex
 	holder     string
 	byRotation bool
+	// byUpdate is set while an OS update's pre-update copy holds the gate.
+	byUpdate bool
 	// free is closed when the holder releases; a waiter re-checks then.
 	free chan struct{}
 }
@@ -54,40 +59,70 @@ func (g *Gate) TryAcquire(jobID string) error {
 		return nil
 	case g.holder != "" && g.byRotation:
 		return errAnotherRotation
+	case g.holder != "" && g.byUpdate:
+		return errUpdateHolds
 	case g.holder != "":
 		return errBackupHolds
 	}
-	g.take(jobID, true)
+	g.take(jobID, true, false)
 	return nil
 }
 
 // take records jobID as the holder. The caller holds mu.
-func (g *Gate) take(jobID string, byRotation bool) {
-	g.holder, g.byRotation, g.free = jobID, byRotation, make(chan struct{})
+func (g *Gate) take(jobID string, byRotation, byUpdate bool) {
+	g.holder, g.byRotation, g.byUpdate, g.free = jobID, byRotation, byUpdate, make(chan struct{})
 }
+
+// capturePurpose is who a waiting capture is: its refusal sentences and the
+// words of its WARN record.
+type capturePurpose struct {
+	byUpdate                           bool
+	refused                            string
+	rotationIncomplete, sealUnreadable error
+}
+
+var (
+	backupCapture = capturePurpose{refused: "backup refused",
+		rotationIncomplete: errBackupRotationIncomplete, sealUnreadable: errBackupSealUnreadable}
+	updateCapture = capturePurpose{byUpdate: true, refused: "os update refused",
+		rotationIncomplete: errUpdateRotationIncomplete, sealUnreadable: errUpdateSealUnreadable}
+)
 
 // Acquire takes the gate for the backup jobID. While another job holds it,
 // Acquire waits for the release, unless that job is no longer running, whose
 // hold is dropped. Once free, the seal files must read Clean, or Acquire
 // refuses with a sentence; it returns ctx's error when ctx ends first.
 func (g *Gate) Acquire(ctx context.Context, jobID string) error {
+	return g.acquire(ctx, jobID, backupCapture)
+}
+
+// AcquireForUpdate is Acquire for an OS update's pre-update copy of the
+// store, jobID being the node.update job (geekdojo/geekdojo-brain#800). Its
+// refusals name the OS update, and a rotation tried while it holds the gate
+// is told an update is copying the store.
+func (g *Gate) AcquireForUpdate(ctx context.Context, jobID string) error {
+	return g.acquire(ctx, jobID, updateCapture)
+}
+
+// acquire is the wait loop Acquire and AcquireForUpdate share.
+func (g *Gate) acquire(ctx context.Context, jobID string, p capturePurpose) error {
 	for {
 		g.mu.Lock()
 		if g.holder == "" || g.holder == jobID {
 			defer g.mu.Unlock()
 			tree, err := g.state.State()
 			if err != nil {
-				g.log.WarnContext(ctx, "backup refused: the seal files could not be checked",
+				g.log.WarnContext(ctx, p.refused+": the seal files could not be checked",
 					"component", "secretstore", "event", "secretstore.seal_rotate.capture_refused", "job_id", jobID, "err", err.Error())
-				return errBackupSealUnreadable
+				return p.sealUnreadable
 			}
 			if tree.Fragment.Shape != Clean {
-				g.log.WarnContext(ctx, "backup refused: a seal-key rotation has not finished",
+				g.log.WarnContext(ctx, p.refused+": a seal-key rotation has not finished",
 					"component", "secretstore", "event", "secretstore.seal_rotate.capture_refused", "job_id", jobID,
 					"shape", tree.Fragment.Shape.String(), "key_id", tree.Fragment.Current.String())
-				return errBackupRotationIncomplete
+				return p.rotationIncomplete
 			}
-			g.take(jobID, false)
+			g.take(jobID, false, p.byUpdate)
 			return nil
 		}
 		holder, free := g.holder, g.free
@@ -114,7 +149,7 @@ func (g *Gate) Release(jobID string) {
 		return
 	}
 	close(g.free)
-	g.holder, g.byRotation, g.free = "", false, nil
+	g.holder, g.byRotation, g.byUpdate, g.free = "", false, false, nil
 }
 
 // CheckRestore refuses a restore with a sentence while a rotation holds the

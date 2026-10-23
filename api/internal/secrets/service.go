@@ -59,6 +59,7 @@ const (
 	opCreate  = "create"
 	opReplace = "replace"
 	opDelete  = "delete"
+	opExists  = "exists"
 )
 
 // Read returns r's latest value. Only a deploy job for r's own app, on that
@@ -68,6 +69,24 @@ func (s *Service) Read(ctx context.Context, a Actor, r Ref) (Secret, error) {
 		return Secret{}, err
 	}
 	return s.repo.Get(ctx, r)
+}
+
+// Exists reports whether r is set, from its metadata alone, so no value is
+// fetched. Only the reference check (CheckActor) may ask, and only about an
+// app secret (geekdojo/geekdojo-brain#800). A secret that is not set is
+// (false, nil); any other store failure is returned, never read as present
+// or absent.
+func (s *Service) Exists(ctx context.Context, a Actor, r Ref) (bool, error) {
+	if err := s.authorize(ctx, opExists, a, r); err != nil {
+		return false, err
+	}
+	if _, err := s.repo.CurrentVersion(ctx, r); err != nil {
+		if errors.Is(err, secretstore.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // Create sets r to value only if r is not set yet (check-and-set 0), and
@@ -139,6 +158,8 @@ func (s *Service) Delete(ctx context.Context, a Actor, r Ref) error {
 //     any app's (the app row may already be gone), and never reads.
 //   - A deploy job reads and creates only its own app's secrets, and only for
 //     that app's target node; it never replaces or deletes.
+//   - The reference check asks whether an app secret exists, and nothing
+//     else; nobody else asks that.
 //
 // An app lookup that fails refuses with its error (ERR-CLOSED).
 func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) error {
@@ -150,6 +171,14 @@ func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) erro
 		return s.forbid(ctx, op, a, r, "no actor")
 	case r.kind == refDevice:
 		return s.forbid(ctx, op, a, r, "device secrets have no consumer yet")
+	}
+	switch {
+	case a.kind == actorCheck && op == opExists:
+		return nil
+	case a.kind == actorCheck:
+		return s.forbid(ctx, op, a, r, "the reference check only asks whether a secret exists")
+	case op == opExists:
+		return s.forbid(ctx, op, a, r, "only the reference check asks whether a secret exists")
 	}
 	switch a.kind {
 	case actorOperator:

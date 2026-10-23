@@ -129,7 +129,7 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	log, _ := logkittest.New()
 	src, err := NewStoreSource(StoreSourceDeps{
 		Secrets: newFakeSecrets(map[string]string{ref.String(): stored}),
-		Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Seed: seed, Log: log,
+		Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)

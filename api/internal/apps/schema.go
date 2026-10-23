@@ -35,6 +35,16 @@ CREATE TABLE IF NOT EXISTS apps (
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
+-- app_secret_refs: every secret store entry the cluster has created or read
+-- for an app's ${secret:} token, recorded once the entry was confirmed
+-- (geekdojo/geekdojo-brain#800). The store reference check reads it to tell
+-- an entry created and then lost from one never created. Deleting the app
+-- removes its rows.
+CREATE TABLE IF NOT EXISTS app_secret_refs (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    name   TEXT NOT NULL,
+    PRIMARY KEY (app_id, name)
+);
 `
 
 // migrations are forward-only DDL applied after schema on every open. They must

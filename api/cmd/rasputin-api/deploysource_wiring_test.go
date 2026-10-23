@@ -54,7 +54,7 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appTargetNodes{store: as}, Seed: seed, Log: log})
+	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appTargetNodes{store: as}, Refs: appSecretRefs{store: as}, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

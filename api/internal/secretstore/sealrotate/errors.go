@@ -43,6 +43,19 @@ const (
 	errBackupSealUnreadable     jobError = "The seal key files could not be checked, so this backup did not capture anything. The api log names the defect."
 )
 
+// UpdateCopyRefused opens every sentence that refuses an OS update because
+// the secret store could not be copied first (geekdojo/geekdojo-brain#800):
+// the gate's below and storage.PreUpdateCopier's.
+const UpdateCopyRefused = "The secret store could not be copied before this OS update, so the update was refused and nothing was installed."
+
+// The gate's refusals of an OS update's pre-update copy, and of a rotation
+// tried while that copy holds the gate (geekdojo/geekdojo-brain#800).
+const (
+	errUpdateRotationIncomplete jobError = UpdateCopyRefused + " A seal-key rotation has not finished: start the seal-key rotation again to finish it, then run the update again."
+	errUpdateSealUnreadable     jobError = UpdateCopyRefused + " The seal key files could not be checked; the api log names the defect."
+	errUpdateHolds              jobError = "An OS update is copying the secret store, so the seal key was not rotated. Nothing was changed; start the rotation again once the update's copy finishes."
+)
+
 // The gate's refusals of a restore (geekdojo/geekdojo-brain#765).
 const (
 	errRestoreRotation           jobError = "A seal-key rotation is running, so this restore did not start. Nothing was changed; start the restore again once the rotation finishes."

@@ -570,6 +570,46 @@ RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIO
 Expect `--- PASS: TestStoreBackupRestore_AgainstTheRealStore` with one `PASS` line per subtest
 and exit status 0, in about 5 seconds. The unit tests in the same package need no store.
 
+## The OS update's store copy's functional test
+
+`TestPreUpdateCopy_AgainstTheRealStore`, in `api/internal/storage/preupdate_functional_test.go`,
+takes the copy `node.update` makes of the secret store before it installs on the store's host,
+puts it back as a fallback would, and runs the store reference check, under the same switch, in
+the same CI step ([geekdojo-brain#800](https://github.com/geekdojo/geekdojo-brain/issues/800)).
+
+The store is a harness store with `Config.ExternalSeal` and the shipped roles. The copy is the
+real `PreUpdateCopier`, run as a job's step on the storage package's run harness, over the real
+seal-rotation gate and a `SecretStore` like the backup test's whose quiesce is for an OS update.
+App secrets are resolved by the real `appsecret.StoreSource` over the real secrets service, and
+recorded in a real apps table. The check is the real `store.reference_check` workflow.
+
+What it proves, against OpenBao v2.7.1:
+
+- **The copy (TC-800-22).** App X's secret is resolved and recorded. The copy stops the store,
+  copies it and gets it back ready; the copy's `store/openbao-version` equals sys/health's
+  version, and the job has its copy lines.
+- **A lost entry is reported (TC-800-23).** App Y's secret is created after the copy. With the
+  store stopped, its data directory is replaced by the copy's `store/data` members and the store
+  is started. The check fails naming exactly Y's entry, its job-failed alert is listed, and the
+  job has its lines. X's entry, which the copy holds, is not reported.
+- **Never served empty (TC-800-24).** Y resolves again, to its derived value.
+- **No value in a log (TC-800-25).** Neither app's value is in any record or job line.
+
+What it does not prove:
+
+- **The real fallback and #801's put-back.** The test puts the copy back itself; RAUC, the
+  version gate and the store unit are #801's and the bench's.
+- **systemctl on the appliance's `openbao.service`.** Stop and start are the harness process's.
+- **An api crash mid-copy**, as for the backup.
+
+Run it with `-run TestPreUpdateCopy_`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestPreUpdateCopy_ ./api/internal/storage
+```
+
+Expect `--- PASS: TestPreUpdateCopy_AgainstTheRealStore` and exit status 0, in about a second.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -763,3 +803,12 @@ The cases for geekdojo-brain#765 that this document's tests check:
 | TC-765-36 | K1 and K2 across a real rotation, each restoring and unsealing under its own key id | `TestStoreBackupRestore_AgainstTheRealStore` |
 | TC-765-37 | A version-2 archive onto a running store keeps it intact | `TestStoreBackupRestore_AgainstTheRealStore` |
 | TC-765-38 | `store/openbao-version` is the pin's; T63 and T64 | `TestStoreBackupRestore_AgainstTheRealStore`, `go test ./api/internal/gatereg` |
+
+The cases for geekdojo-brain#800 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-800-22 | The copy stops, copies and restarts the real store; its version member is sys/health's | `TestPreUpdateCopy_AgainstTheRealStore` |
+| TC-800-23 | After the copy is put back, the check names exactly the entry created after it, with its alert and job lines | `TestPreUpdateCopy_AgainstTheRealStore` |
+| TC-800-24 | The lost entry resolves again to its derived value | `TestPreUpdateCopy_AgainstTheRealStore` |
+| TC-800-25 | No secret value in any record or job line | `TestPreUpdateCopy_AgainstTheRealStore` |

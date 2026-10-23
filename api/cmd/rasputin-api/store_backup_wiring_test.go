@@ -308,7 +308,7 @@ func TestStoreBackupWiringKeysOnTheRequestedBackend(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			got, err := storeBackupWiring(tc.requested, r.monitor, r.store, clean, (&recordedRun{}).run, noRestartHook, log)
+			got, err := storeBackupWiring(tc.requested, storestate.QuiesceBackup, r.monitor, r.store, clean, (&recordedRun{}).run, noRestartHook, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -328,7 +328,7 @@ func TestStoreBackupWiringKeysOnTheRequestedBackend(t *testing.T) {
 			}
 		})
 	}
-	if _, err := storeBackupWiring("openbao", nil, secretstore.Disabled{}, clean, (&recordedRun{}).run, noRestartHook, log); err == nil {
+	if _, err := storeBackupWiring("openbao", storestate.QuiesceBackup, nil, secretstore.Disabled{}, clean, (&recordedRun{}).run, noRestartHook, log); err == nil {
 		t.Error("a nil monitor was accepted under openbao")
 	}
 }
@@ -347,7 +347,7 @@ func TestStoreBackupControl(t *testing.T) {
 	}
 	run := &recordedRun{}
 	var afters int
-	ss, err := storeBackupWiring(storeModeOpenBao, r.monitor, r.store,
+	ss, err := storeBackupWiring(storeModeOpenBao, storestate.QuiesceBackup, r.monitor, r.store,
 		sealAt{tree: sealrotate.Tree{Fragment: sealrotate.Fragment{Shape: sealrotate.Clean, Current: key}}},
 		run.run, func(context.Context) { afters++ }, log)
 	if err != nil {

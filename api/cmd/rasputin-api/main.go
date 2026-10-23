@@ -53,6 +53,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemarker"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -540,10 +541,19 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: seal files", "err", err.Error())
 		os.Exit(1)
 	}
-	storeBackup, err := storeBackupWiring(storeBackend, readiness.monitor, readiness.store, sealFiles,
+	storeBackup, err := storeBackupWiring(storeBackend, storestate.QuiesceBackup, readiness.monitor, readiness.store, sealFiles,
 		execrun.CombinedOutput, outcomes.AfterStoreRestart, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store backup", "err", err.Error())
+		os.Exit(1)
+	}
+	// The same control, quiescing for an OS update: the copy node.update
+	// takes of the store before it installs on the store's host
+	// (geekdojo/geekdojo-brain#800). Wired under the same rule as the backup's.
+	storeUpdateCopy, err := storeBackupWiring(storeBackend, storestate.QuiesceOSUpdate, readiness.monitor, readiness.store, sealFiles,
+		execrun.CombinedOutput, outcomes.AfterStoreRestart, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store update copy", "err", err.Error())
 		os.Exit(1)
 	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
@@ -565,7 +575,7 @@ func main() {
 	// which reads each ${secret:} value through the secrets service and
 	// creates an absent one from the seed; with none, the HKDF source alone.
 	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{
-		Secrets: secretsSvc, Apps: appTargetNodes{store: appsStore}, Seed: appSecretSeed, Log: logger,
+		Secrets: secretsSvc, Apps: appTargetNodes{store: appsStore}, Refs: appSecretRefs{store: appsStore}, Seed: appSecretSeed, Log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store secret source", "err", err.Error())
@@ -892,10 +902,8 @@ func main() {
 	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
-	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
-		PublicBaseURL: publicBaseURL,
-		SelfNodeID:    selfNodeID,
-	}))
+	// node.update is registered below, after the seal rotation: its copy of
+	// the secret store takes the rotation's capture gate (#800).
 	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
 		SelfNodeID: selfNodeID,
 	}))
@@ -1068,6 +1076,25 @@ func main() {
 		os.Exit(1)
 	}
 	runner.Register(sealRot.workflow)
+	// The store's copy before an OS update of its host, and the reference
+	// check that reports entries lost when the store's data is put back
+	// (geekdojo/geekdojo-brain#800).
+	rollback, err := storeRollbackWiring(storeRollbackDeps{
+		mode: storeW.mode, copyStore: storeUpdateCopy, lock: sealRot.updateLock(),
+		storeDataDir: storeDataDir, copyPath: filepath.Join(dataDir, "openbao-preupdate.tar"),
+		refs: appSecretRefs{store: appsStore}, secrets: secretsSvc, monitor: readiness.monitor,
+		runner: runner, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store rollback", "err", err.Error())
+		os.Exit(1)
+	}
+	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{
+		PublicBaseURL: publicBaseURL,
+		SelfNodeID:    selfNodeID,
+		StoreCopy:     rollback.copier,
+		Log:           logger,
+	}))
 	// storage.reconcile — #398: every five minutes, storage.inspect plus a
 	// write probe on each claimed target, recorded on the row beside the
 	// claim status, alerted on, and cited by backup.run's refusal. The gap
@@ -1167,6 +1194,9 @@ func main() {
 	// Ordered after ResumeSelfUpdates because it waits on the child that call
 	// drives — starting it first would just poll for longer.
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
+	// The store reference check, once per process on the first ready
+	// reading: a store's data can only be put back before boot (#800).
+	rollback.arm(ctx)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn(), logger)
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent

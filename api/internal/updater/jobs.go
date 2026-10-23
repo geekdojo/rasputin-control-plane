@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/url"
 	"time"
@@ -36,19 +37,39 @@ type Config struct {
 	// would otherwise fail opaquely on the agent as "connection refused".
 	// See control-plane #75.
 	SelfNodeID string
+	// StoreCopy copies the secret store before an OS update of its host
+	// (geekdojo/geekdojo-brain#800). Nil means this api runs no store: the
+	// copy_store step skips (storage.RunConfig.SecretStore's precedent).
+	StoreCopy StoreCopier
+	// Log takes copy_store's records. It is required with StoreCopy: a
+	// copy_store that has a copier and no logger refuses every update.
+	Log *slog.Logger
 }
 
-// UpdateWorkflow returns the seven-step node.update saga.
+// StoreCopier is the secret store's copy before an OS update, as the
+// copy_store step calls it (ARCH-ISP): storage.PreUpdateCopier. Its error is
+// the sentence the job records.
+type StoreCopier interface {
+	CopyBeforeUpdate(sc *jobs.StepCtx) (json.RawMessage, error)
+}
+
+// nodeRoles is the one inventory call copy_store makes (ARCH-ISP, F-800-10).
+type nodeRoles interface {
+	Get(ctx context.Context, id string) (*proto.Node, error)
+}
+
+// UpdateWorkflow returns the eight-step node.update saga.
 //
 //  1. validate                    — spec sanity + bundle exists in store
 //  2. precheck                    — RPC agent: which slot would we write?
 //  3. download                    — RPC agent: pull bundle from PublicBaseURL
-//  4. install                     — RPC agent: rauc install → inactive slot
-//  5. reboot                      — sub-before-RPC for the reboot event
-//  6. wait_online_and_verify_slot — wait for a NEW boot, then verify (a)(b)(c)
-//  7. health_check_and_commit     — diag.health, then mark-good (or mark-bad)
+//  4. copy_store                  — copy the secret store when the target hosts it
+//  5. install                     — RPC agent: rauc install → inactive slot
+//  6. reboot                      — sub-before-RPC for the reboot event
+//  7. wait_online_and_verify_slot — wait for a NEW boot, then verify (a)(b)(c)
+//  8. health_check_and_commit     — diag.health, then mark-good (or mark-bad)
 //
-// The store is updated in steps 1, 5, 6, 7 so the UI's Updates view can
+// The store is updated in steps 1, 6, 7, 8 so the UI's Updates view can
 // follow progress without subscribing to NATS.
 func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Config) jobs.Workflow {
 	return jobs.Workflow{
@@ -57,6 +78,10 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "validate", Timeout: 2 * time.Second, Do: updateValidate(store, inv)},
 			{Name: "precheck", Timeout: 10 * time.Second, Do: updatePrecheck()},
 			{Name: "download", Timeout: 10 * time.Minute, Do: updateDownload(store, cfg)},
+			// copy_store runs before install because install activates the new
+			// slot. Its time is backup's snapshot_store's: it may wait on the
+			// capture lock. Never retried: a refusal is a sentence for a person.
+			{Name: "copy_store", Timeout: 20 * time.Minute, Do: updateCopyStore(inv, cfg)},
 			// install is Irreversible: it dd's a bundle into the inactive slot,
 			// and the runner has no compensation to undo that. It has been safe
 			// against a repeat only because RAUC's A/B target makes a
@@ -347,7 +372,56 @@ func IsLoopbackURL(raw string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// ----- Step 4: install ----------------------------------------------------
+// ----- Step 4: copy_store ------------------------------------------------
+
+// errStoreHostUnknown refuses an update of a control plane that is not this
+// api's own node, or of any control plane when this api does not know its
+// own node: only the store host's own api can stop its store (ERR-CLOSED).
+const errStoreHostUnknown = "The secret store could not be copied before this OS update, so the update was refused and nothing was installed. This node is a control plane, and only its own api can copy its secret store; run the update from that control plane."
+
+// updateCopyStore copies the secret store before install when the target
+// hosts it (geekdojo/geekdojo-brain#800). In order (F-800-04): no store
+// skips; the api's own node copies, whatever inventory says its role is; any
+// other control plane, or any control plane when the api's own node is not
+// known, is refused; every other node skips. No store version reaches the
+// api, so every update of the store's host takes a copy.
+func updateCopyStore(roles nodeRoles, cfg Config) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		spec, err := parseSpec(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.StoreCopy == nil {
+			sc.Log("info", "no secret store on this control plane; nothing to copy")
+			return json.Marshal(map[string]any{"copied": false, "reason": "no-store"})
+		}
+		if cfg.Log == nil {
+			return nil, errors.New("updater: copy_store has a store copier and no logger")
+		}
+		if cfg.SelfNodeID != "" && spec.NodeID == cfg.SelfNodeID {
+			sc.Log("info", "copying the secret store before the update")
+			return cfg.StoreCopy.CopyBeforeUpdate(sc)
+		}
+		node, err := roles.Get(sc.Ctx, spec.NodeID)
+		if err != nil {
+			return nil, fmt.Errorf("inventory: %w", err)
+		}
+		if node == nil {
+			return nil, fmt.Errorf("node %s not registered", spec.NodeID)
+		}
+		if node.Role == proto.RoleControlPlane {
+			cfg.Log.WarnContext(sc.Ctx, "os update refused: the target control plane is not this api's own node",
+				"component", "updater", "event", "updater.copy_store_refused", "node_id", spec.NodeID,
+				"self_node_id", cfg.SelfNodeID, "job_id", sc.JobID)
+			sc.Log("warn", "refused: "+spec.NodeID+" is a control plane that is not this api's own node")
+			return nil, errors.New(errStoreHostUnknown)
+		}
+		sc.Log("info", "the secret store is not on this node; nothing to copy")
+		return json.Marshal(map[string]any{"copied": false, "reason": "not-store-host"})
+	}
+}
+
+// ----- Step 5: install ----------------------------------------------------
 
 func updateInstall(store *Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
@@ -453,7 +527,7 @@ func updateInstall(store *Store) jobs.DoFn {
 	}
 }
 
-// ----- Step 5: reboot -----------------------------------------------------
+// ----- Step 6: reboot -----------------------------------------------------
 
 func updateReboot() jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
@@ -496,7 +570,7 @@ func updateReboot() jobs.DoFn {
 	}
 }
 
-// ----- Step 6: wait_online_and_verify_slot --------------------------------
+// ----- Step 7: wait_online_and_verify_slot --------------------------------
 
 func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
@@ -592,7 +666,7 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 	}
 }
 
-// ----- Step 7: health_check_and_commit ------------------------------------
+// ----- Step 8: health_check_and_commit ------------------------------------
 
 func updateHealthCheckAndCommit(store *Store, inv *inventory.Store) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
