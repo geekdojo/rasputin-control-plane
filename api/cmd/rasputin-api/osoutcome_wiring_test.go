@@ -73,7 +73,7 @@ func openLedgerAt(t *testing.T, path string) *jobs.Store {
 func (e *outcomeEnv) reader(t *testing.T, run runFunc) *osoutcome.Reader {
 	t.Helper()
 	log, _ := logkittest.New()
-	r, err := outcomeReaderWiring(openLedgerAt(t, e.dbPath), log, e.runDir, e.bootIDPath, run)
+	r, err := outcomeReaderWiring(openLedgerAt(t, e.dbPath), log, e.runDir, e.bootIDPath, run, noObserve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func sealBody(outcome, boot string) string {
 // The declarations are at the contract's paths under /run.
 func TestOutcomeSources_Paths(t *testing.T) {
 	var paths []string
-	for _, s := range outcomeSources(outcomeRunDir) {
+	for _, s := range outcomeSources(outcomeRunDir, noObserve) {
 		paths = append(paths, s.Path)
 	}
 	want := []string{"/run/rasputin-seal-key/outcome", "/run/rasputin-store-init/outcome", "/run/rasputin-store-provision/outcome"}
@@ -328,7 +328,7 @@ func TestFunctional_JobCommittedBeforeReady(t *testing.T) {
 	r := e.reader(t, (&outcomeRun{}).run)
 	calls := 0
 	var snapshot []*jobs.Job
-	readyAfterOutcomes(t.Context(), r, func() {
+	readyAfterOutcomes(t.Context(), r, func(context.Context) {}, func() {
 		calls++
 		js, err := e.ledger.ListAllJobsByKind(context.Background(), "os.seal_key")
 		if err != nil {
@@ -349,14 +349,14 @@ func TestFunctional_JobCommittedBeforeReady(t *testing.T) {
 func TestOutcomeReaderWiring(t *testing.T) {
 	e := newOutcomeEnv(t)
 	log, _ := logkittest.New()
-	if _, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, nil); err == nil {
+	if _, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, nil, noObserve); err == nil {
 		t.Error("a nil run func was accepted")
 	}
-	if _, err := outcomeReaderWiring(nil, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run); err == nil {
+	if _, err := outcomeReaderWiring(nil, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run, noObserve); err == nil {
 		t.Error("a nil ledger was accepted")
 	}
 	wlog, rec := logkittest.New()
-	r, err := outcomeReaderWiring(e.ledger, wlog, e.runDir, e.bootIDPath, (&outcomeRun{err: errors.New("exit status 5")}).run)
+	r, err := outcomeReaderWiring(e.ledger, wlog, e.runDir, e.bootIDPath, (&outcomeRun{err: errors.New("exit status 5")}).run, noObserve)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,3 +400,6 @@ func TestFileBootID(t *testing.T) {
 		t.Error("an absent boot id file was accepted")
 	}
 }
+
+// noObserve is a store init observer that does nothing.
+func noObserve(context.Context, osoutcome.Record) {}

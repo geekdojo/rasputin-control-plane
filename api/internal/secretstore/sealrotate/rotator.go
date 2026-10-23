@@ -63,9 +63,6 @@ const (
 	// (timer-audit row K24).
 	UnsealWait = 30 * time.Second
 
-	// healthRecheck is how often a wait re-asks sys/health. It decides
-	// nothing: the wait ends on a 200, or on UnsealWait.
-	healthRecheck = 100 * time.Millisecond
 	// ioSlack bounds the non-waiting part of a step: file writes, a restart
 	// command, a login and a re-wrap.
 	ioSlack = time.Minute
@@ -565,22 +562,7 @@ func (r *Rotator) restartAndWait(ctx context.Context) error {
 
 // waitReady returns once sys/health answers 200, or UnsealWait's error.
 func (r *Rotator) waitReady(ctx context.Context) error {
-	ctx, cancel := context.WithTimeout(ctx, r.cfg.UnsealWait)
-	defer cancel()
-	t := time.NewTicker(healthRecheck)
-	defer t.Stop()
-	for {
-		h, err := r.d.Store.Health(ctx)
-		kind := secretstore.InactiveReason(h, err)
-		if kind == "" {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("the secret store did not answer 200 within %s (last: %s): %w", r.cfg.UnsealWait, kind, ctx.Err())
-		case <-t.C:
-		}
-	}
+	return secretstore.WaitReady(ctx, r.d.Store, r.cfg.UnsealWait)
 }
 
 // onTerminal releases what validate took: the gate, the quiesce and the

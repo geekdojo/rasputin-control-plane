@@ -458,7 +458,9 @@ func TestStoreSource_RefusalSentenceAndTheGate(t *testing.T) {
 
 	log, _ := logkittest.New()
 	m, err := storestate.New(storestate.Deps{Store: readyHealth{}, Now: time.Now, Log: log,
-		JobRunning: func(context.Context, string) (bool, error) { return false, nil }})
+		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Blank:      func(context.Context) (bool, error) { return false, nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

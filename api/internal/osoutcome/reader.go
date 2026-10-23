@@ -171,6 +171,9 @@ func (r *Reader) read(ctx context.Context, s Source) {
 		key = rec.RunID
 	}
 	r.record(ctx, s, rec, key, s.Outcomes[rec.Outcome] == OK, nil)
+	if s.Observe != nil {
+		s.Observe(ctx, rec)
+	}
 }
 
 // readCapped reads at most one byte past maxRecord, so an oversized record

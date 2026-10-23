@@ -72,6 +72,11 @@ func (s *Service) Read(ctx context.Context, a Actor, r Ref) (Secret, error) {
 
 // Create sets r to value only if r is not set yet (check-and-set 0), and
 // returns version 1. A secret already set is ErrExists.
+//
+// Write order (S15 part 2, geekdojo/geekdojo-brain#765): a caller creates the
+// entry before it writes the database row that references it, and refers to
+// it by path, never by a KV version. A backup snapshots the database first
+// and the store after, so every row it captured has its entry in the copy.
 func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opCreate, a, r); err != nil {
 		return 0, err
@@ -90,7 +95,9 @@ func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value
 // Replace writes value as r's next version, under check-and-set on the
 // version it read first, and returns the new version. A secret that is not
 // set is secretstore.ErrNotFound; a write that loses a race with another is
-// ErrConflict and is never retried.
+// ErrConflict and is never retried. Reads are latest-by-path, so a restore
+// of a backup taken between a Replace and its caller's next row returns the
+// replaced value (S15 part 2).
 func (s *Service) Replace(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opReplace, a, r); err != nil {
 		return 0, err
@@ -111,7 +118,9 @@ func (s *Service) Replace(ctx context.Context, a Actor, r Ref, value secret.Valu
 }
 
 // Delete removes r with every version. A secret that is already absent is
-// success: the end state holds either way.
+// success: the end state holds either way. A caller deletes the database
+// row that references r before it deletes r (S15 part 2), so no captured
+// row ever names an entry the store copy lacks.
 func (s *Service) Delete(ctx context.Context, a Actor, r Ref) error {
 	if err := s.authorize(ctx, opDelete, a, r); err != nil {
 		return err

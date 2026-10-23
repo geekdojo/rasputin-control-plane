@@ -45,6 +45,12 @@ const (
 	// Quiesced: the store is not ready while a running job holds a quiesce
 	// for a backup (F4.1) or a seal-key rotation (#830).
 	Quiesced State = "quiesced"
+	// Blank: sys/health answers 200 unsealed, but the store started empty on
+	// a cluster whose database says it was set up, or that verdict cannot be
+	// read (geekdojo/geekdojo-brain#765, S15 part 7). Its secrets are not
+	// there, so nothing may be deployed from it or backed up over a good
+	// archive.
+	Blank State = "blank"
 )
 
 // QuiesceReason is why a job holds the store quiesced. The alert's ID is the
@@ -91,6 +97,9 @@ type Deps struct {
 	Log *slog.Logger
 	// JobRunning reports whether the job holding a quiesce is still running.
 	JobRunning func(ctx context.Context, jobID string) (bool, error)
+	// Blank reports whether the store has been recorded starting empty on a
+	// set-up cluster (storemarker.Marker.Blank). An error reads as blank.
+	Blank func(ctx context.Context) (bool, error)
 }
 
 // Monitor reads and remembers the store's readiness.
@@ -99,6 +108,7 @@ type Monitor struct {
 	now        func() time.Time
 	log        *slog.Logger
 	jobRunning func(ctx context.Context, jobID string) (bool, error)
+	blank      func(ctx context.Context) (bool, error)
 
 	mu    sync.Mutex
 	last  State // "" until the first reading
@@ -109,6 +119,9 @@ type Monitor struct {
 	holds        map[*hold]struct{}
 	// reason is the reason of the hold that made the last reading Quiesced.
 	reason QuiesceReason
+	// blankUnread is set while the blank verdict cannot be read, so its WARN
+	// is logged once per outage rather than on every reading.
+	blankUnread bool
 }
 
 // hold is one Quiesce call that has not been released.
@@ -131,8 +144,10 @@ func New(d Deps) (*Monitor, error) {
 		return nil, errors.New("storestate: Deps.Log is nil")
 	case d.JobRunning == nil:
 		return nil, errors.New("storestate: Deps.JobRunning is nil")
+	case d.Blank == nil:
+		return nil, errors.New("storestate: Deps.Blank is nil")
 	}
-	return &Monitor{store: d.Store, now: d.Now, log: d.Log, jobRunning: d.JobRunning, holds: map[*hold]struct{}{}}, nil
+	return &Monitor{store: d.Store, now: d.Now, log: d.Log, jobRunning: d.JobRunning, blank: d.Blank, holds: map[*hold]struct{}{}}, nil
 }
 
 // State asks sys/health once and returns the store's state. It returns an
@@ -163,6 +178,8 @@ func (m *Monitor) read(ctx context.Context) (State, time.Time, error) {
 		}
 	} else if m.isAuditBlocked() {
 		st, kind = AuditBlocked, string(AuditBlocked)
+	} else if m.isBlank(ctx) {
+		st, kind = Blank, string(Blank)
 	}
 	since := m.record(ctx, st, kind, h, err)
 	return st, since, nil
@@ -249,6 +266,21 @@ func (m *Monitor) ObserveAudited(ctx context.Context, err error) {
 // caller deadline leaves the caller's ctx done.
 func isClientTimeout(err error) bool {
 	return errors.Is(err, secretstore.ErrUnreachable) && errors.Is(err, context.DeadlineExceeded)
+}
+
+// isBlank reads the blank verdict. A verdict that cannot be read is blank,
+// with one WARN until it reads again: fail closed (ERR-CLOSED).
+func (m *Monitor) isBlank(ctx context.Context) bool {
+	blank, err := m.blank(ctx)
+	m.mu.Lock()
+	warn := err != nil && !m.blankUnread
+	m.blankUnread = err != nil
+	m.mu.Unlock()
+	if warn {
+		m.log.LogAttrs(ctx, slog.LevelWarn, "secret store blank verdict unreadable; reading the store as blank",
+			slog.String("component", "secretstore"), slog.String("err", err.Error()))
+	}
+	return blank || err != nil
 }
 
 func (m *Monitor) isAuditBlocked() bool {
@@ -370,6 +402,11 @@ func alertFor(st State, reason QuiesceReason) (proto.Alert, bool) {
 		a.Title = "The secret store is not accepting audit records."
 		a.Detail = "The secret store answers, but requests it must audit are timing out, so it cannot serve secrets. " +
 			"Apps that use secrets cannot be deployed until it recovers." + unaffected + " The api log names the cause."
+	case Blank:
+		a.Title = "The secret store is empty, but this cluster was set up."
+		a.Detail = "The secret store started with no data on a cluster that was set up, so the secrets it held are not there. " +
+			"Apps that use secrets cannot be deployed, and backups are refused so the empty store never replaces a good backup." + unaffected +
+			" Restore this cluster from a backup to bring the secret store's data back."
 	case Quiesced:
 		a.Severity = proto.AlertWarn
 		if reason == QuiesceSealRotation {

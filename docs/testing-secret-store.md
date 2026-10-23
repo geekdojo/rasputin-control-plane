@@ -521,6 +521,55 @@ status 0, in under ten seconds: the audit-blocked step waits once for the client
 bound on the read that hangs, and once more for the refused deploy's probe read. With the binary
 absent and the switch set it fails, naming the variable, exactly as the smoke test does.
 
+## The backup's store capture's functional test
+
+`TestStoreBackupRestore_AgainstTheRealStore`, in `api/internal/storage/store_functional_test.go`,
+round-trips the secret store through a real backup and restore, under the same switch, in the
+same CI step ([geekdojo-brain#765](https://github.com/geekdojo/geekdojo-brain/issues/765)).
+
+Each store is a harness store with `Config.ExternalSeal` and the shipped `rasputin-api` and
+`rasputin-seal-rotate` roles. The backup is the real `backup.run` saga on the storage package's
+run harness, with the store's data directory, seal directory and store CA as its sources; its
+`SecretStore` stands in for main's `storeBackupControl` over the harness: readiness and the
+quiesce are a real readiness `Monitor`'s, the key id is the real seal `Files`', the stop and start
+are the store process's (`Stop`, `StartNoWait`), and the wait is `secretstore.WaitReady`. The
+restore is the real `PrepareRestore` and `ApplyPendingRestore`. A second store plays the restored
+node: `Store.Adopt` takes the staged data, seal key, seal fragment and store CA, as #766's
+store-unit step and the api's leaf re-mint will, and restarts on them.
+
+What it proves, against OpenBao v2.7.1:
+
+- **The round trip (TC-765-34).** An app secret written through the secrets service survives a
+  backup that stops and starts the real store, with the watcher reading `secret-store:quiesced`
+  during the stop, the first store closed, the archive staged and adopted by a second store, and
+  the apply. A `rasputin-api` leaf minted from the restored store CA logs in and reads it (T64).
+- **An operator value between the two capture steps (TC-765-35).** A `Replace` after
+  `VACUUM INTO` and before the stop reads back after the restore, every `${secret:}` the restored
+  database's apps name resolves, and the ledger has `snapshot_db` before `snapshot_store`.
+- **A rotation across real stores (TC-765-36).** A backup under one key, a rotation through the
+  real `Rotator`, and a backup under the next: each archive restores into its own store, unseals
+  under its own key id and reads the canary.
+- **A pre-store archive onto a running store (TC-765-37).** A version-2 archive leaves the
+  running store's data, seal files and store CA byte-identical, its secret still reads, and the
+  report says the store was kept.
+- **The version member (TC-765-38).** `store/openbao-version` is the pinned release (T63).
+
+What it does not prove:
+
+- **systemd and the store unit's apply step.** The image's `ExecStartPre=` step, its ordering
+  against `LoadCredential=`, and the store stop before the api's restart are #766's and the
+  `rasputin-secrets-store-test` skill's.
+- **Hardware.** The bench cases run after the merge, in that skill.
+
+Run it with `-run TestStoreBackupRestore_`:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestStoreBackupRestore_ ./api/internal/storage
+```
+
+Expect `--- PASS: TestStoreBackupRestore_AgainstTheRealStore` with one `PASS` line per subtest
+and exit status 0, in about 5 seconds. The unit tests in the same package need no store.
+
 ## The pin, and bumping it
 
 `pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
@@ -535,7 +584,7 @@ sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
-  release, and re-verifies T20 to T57 and T60 to T62 at it before editing their `version` column.
+  release, and re-verifies T20 to T57 and T60 to T64 at it before editing their `version` column.
 - **rasputin-os.** Its `OPENBAO_VERSION` pin is kept in step by hand. Automating that sync is
   E22-breakdown F4.6 ([geekdojo-brain#769](https://github.com/geekdojo/geekdojo-brain/issues/769));
   the package itself is E22-breakdown F2.1
@@ -704,3 +753,13 @@ The cases for geekdojo-brain#762 that this document's tests check:
 | TC-762-23 | After an operator replace, the deploy carries the stored value | `TestStoreSource_AgainstTheRealStore` |
 | TC-762-24 | Audit blocked (T42): health 200 unsealed, the `Monitor` reads audit-blocked, the deploy refuses, then recovers; the harness's `AuditStdout` and `HoldStdout` | `TestStoreSource_AgainstTheRealStore`, `TestAuditStdout_RenderAndRefusal`, `TestHoldStdout_ReleaseResumesTheReader` |
 | TC-762-25 | No value leaks across the steps; no vendor name in the copy; required mode | `TestStoreSource_AgainstTheRealStore`, and the `env -u` command above with `-run TestStoreSource_ ./api/internal/apps` |
+
+The cases for geekdojo-brain#765 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-765-34 | Write, back up through a real stop and start (quiesced sampled), restore into a second store, log in with a leaf from the restored CA, read | `TestStoreBackupRestore_AgainstTheRealStore` |
+| TC-765-35 | An operator value between `VACUUM INTO` and the stop reads back; references resolve; the ledger order | `TestStoreBackupRestore_AgainstTheRealStore` |
+| TC-765-36 | K1 and K2 across a real rotation, each restoring and unsealing under its own key id | `TestStoreBackupRestore_AgainstTheRealStore` |
+| TC-765-37 | A version-2 archive onto a running store keeps it intact | `TestStoreBackupRestore_AgainstTheRealStore` |
+| TC-765-38 | `store/openbao-version` is the pin's; T63 and T64 | `TestStoreBackupRestore_AgainstTheRealStore`, `go test ./api/internal/gatereg` |

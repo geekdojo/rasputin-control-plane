@@ -38,6 +38,7 @@ func sealDeps(t *testing.T, mode string) sealRotateDeps {
 	mon, err := storestate.New(storestate.Deps{
 		Store: secretstore.Disabled{}, Now: time.Now, Log: log,
 		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Blank:      func(context.Context) (bool, error) { return false, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

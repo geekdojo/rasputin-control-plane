@@ -175,7 +175,7 @@ func TestGate_ReadingErrorRefuses(t *testing.T) {
 // and never names the vendor.
 func TestNotReadyError_Copy(t *testing.T) {
 	seen := map[string]bool{}
-	for _, st := range []State{Sealed, Uninitialised, Unreachable, AuditBlocked, Quiesced} {
+	for _, st := range []State{Sealed, Uninitialised, Unreachable, AuditBlocked, Quiesced, Blank} {
 		msg := (&NotReadyError{State: st}).Error()
 		assertSentence(t, string(st), msg)
 		assertNoVendor(t, string(st), msg)
@@ -193,7 +193,7 @@ func TestNotReadyError_Copy(t *testing.T) {
 		if strings.Contains(strings.ToLower(msg), "nothing was sent") {
 			t.Errorf("%s: %q says nothing was sent to the node", st, msg)
 		}
-		clause := stateClause(st)
+		clause := Clause(st)
 		if seen[clause] || !strings.Contains(msg, "The secret store "+clause+",") {
 			t.Errorf("%s: clause %q is not its own, or not in %q", st, clause, msg)
 		}

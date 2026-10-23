@@ -20,7 +20,7 @@ type NotReadyError struct {
 // edit, upgrade or revert whose new compose is already saved, deploying the
 // app again is what applies it (geekdojo/geekdojo-brain#760, F-760-04).
 func (e *NotReadyError) Error() string {
-	return "The secret store " + stateClause(e.State) +
+	return "The secret store " + Clause(e.State) +
 		", so this app's secrets could not be resolved and the app was not deployed. " +
 		"Its running containers are unchanged; deploy the app again once the store is ready. " +
 		"Error code: " + Code + "."
@@ -32,8 +32,9 @@ func (e *NotReadyError) Code() string { return Code }
 // Is matches ErrNotReady.
 func (e *NotReadyError) Is(target error) bool { return target == ErrNotReady }
 
-// stateClause is how the refusal sentence says what the store is doing.
-func stateClause(s State) string {
+// Clause is how a refusal sentence says what the store is doing, after "The
+// secret store": the deploy gate's and the backup's (#765).
+func Clause(s State) string {
 	switch s {
 	case Sealed:
 		return "is sealed"
@@ -45,6 +46,8 @@ func stateClause(s State) string {
 		return "is not accepting audit records"
 	case Quiesced:
 		return "is paused for a backup or a seal-key rotation"
+	case Blank:
+		return "is empty although this cluster was set up"
 	}
 	return "is not ready"
 }

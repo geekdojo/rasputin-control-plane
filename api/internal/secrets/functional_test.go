@@ -196,6 +196,7 @@ func realSession(t *testing.T, s *secretstoretest.Store, logger *slog.Logger) *s
 	monitor, err := storestate.New(storestate.Deps{
 		Store: client, Now: time.Now, Log: logger,
 		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Blank:      func(context.Context) (bool, error) { return false, nil },
 	})
 	if err != nil {
 		t.Fatal(err)

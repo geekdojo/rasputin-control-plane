@@ -32,7 +32,8 @@
 //     1 GiB), at most one, from the source SetDiskAlerts wires
 //     (storeaudit.FreeSpace, geekdojo/geekdojo-brain#799).
 //   - secret store → secret-store:<state> (crit when sealed, uninitialised,
-//     unreachable or audit-blocked; warn when paused for a backup or a
+//     unreachable, audit-blocked or blank — empty on a set-up cluster,
+//     #765; warn when paused for a backup or a
 //     seal-key rotation), at most one, from the source SetStoreAlerts wires
 //     (storestate.Monitor.Alerts, geekdojo/geekdojo-brain#760). It reads the
 //     store's sys/health on each List, so it raises and clears on the store's

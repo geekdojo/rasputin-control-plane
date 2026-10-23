@@ -101,7 +101,9 @@ func TestStoreGate_AgainstTheRealStore(t *testing.T) {
 		JobRunning: func(ctx context.Context, id string) (bool, error) {
 			j, err := jst.GetJob(ctx, id)
 			return j != nil && j.Status == jobs.StatusRunning, err
-		}})
+		},
+		Blank: func(context.Context) (bool, error) { return false, nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

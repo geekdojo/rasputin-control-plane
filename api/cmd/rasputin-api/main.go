@@ -51,6 +51,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemarker"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -329,15 +331,6 @@ func main() {
 		log.Fatalf("rasputin-api: jobs store: %v", err)
 	}
 	defer jobStore.Close()
-	// The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): read
-	// into the job ledger just before READY, and again after each store
-	// restart the api performs; their alert joins the aggregator below.
-	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput)
-	if err != nil {
-		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: os outcomes", "err", err.Error())
-		os.Exit(1)
-	}
-
 	authStore, err := auth.OpenStore(ctx, dbPath)
 	if err != nil {
 		log.Fatalf("rasputin-api: auth store: %v", err)
@@ -391,6 +384,23 @@ func main() {
 		log.Fatalf("rasputin-api: setup store: %v", err)
 	}
 	defer setupStore.Close()
+	// The secret store's empty-store marker (geekdojo/geekdojo-brain#765,
+	// S15 part 7): two keys in this settings table, which a restore puts
+	// back with the database and the store cannot wipe with its own data.
+	storeMarker, err := storemarker.New(storemarker.Deps{Settings: setupStore, BootID: fileBootID(procBootIDPath), Log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store marker", "err", err.Error())
+		os.Exit(1)
+	}
+	// The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): read
+	// into the job ledger just before READY, and again after each store
+	// restart the api performs; their alert joins the aggregator below. The
+	// store's init record also feeds the marker (#765).
+	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput, storeMarker.ObserveInit)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: os outcomes", "err", err.Error())
+		os.Exit(1)
+	}
 
 	// The console root password (#587). Its hash is secret material: the
 	// table lives in rasputin.db, which dbutil opens 0600.
@@ -409,11 +419,17 @@ func main() {
 	// The record of a restore this start applied goes into the database it
 	// restored — the one just opened. Idempotent; nothing to do on an
 	// ordinary start.
-	if rep, err := storage.RecordAppliedRestore(ctx, backupStore, dataDir); err != nil {
+	rep, err := storage.RecordAppliedRestore(ctx, backupStore, dataDir)
+	if err != nil {
 		log.Printf("rasputin-api: record applied restore: %v", err)
 	} else if rep != nil {
 		log.Printf("rasputin-api: restore %s from generation %s recorded in the restored database", rep.ID, rep.GenerationID)
 	}
+	// A restore that carried the store re-bases the empty-store marker on
+	// this boot, before any outcome read can observe this boot's store init
+	// (the store sweep below may restart the store at once) (#765).
+	rebaseAfterRestore(ctx, storeMarker, rep)
+	storeDataDir := filepath.Join(dataDir, storeDataDirName)
 
 	// Trust material lives at <trustDir>/. Used by:
 	//   - updater.Verifier (root-ca.pem; bundle signatures)
@@ -489,7 +505,8 @@ func main() {
 	// store's server leaf and the api's client leaf at the store, wired just
 	// below; see ensureCAs for why a store CA that will not load is not fatal.
 	cpCA, storeCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
-		tlsca.Deps{Now: time.Now, Rand: cryptorand.Reader, LeafClock: clockGate.ok, Log: logger})
+		tlsca.Deps{Now: time.Now, Rand: cryptorand.Reader, LeafClock: clockGate.ok, Log: logger},
+		storeDataDir, storeDataPresent(storeDataDir))
 	// The secret store (geekdojo/geekdojo-brain#758). RASPUTIN_SECRETSTORE_BACKEND
 	// selects it; a refused setting turns it off with a configfault and the api
 	// starts anyway. Wiring reads no leaf: on first boot neither exists until
@@ -510,9 +527,23 @@ func main() {
 	// source) refuses secret-bearing deploys until the store reads ready, and
 	// whose alerts report a store that cannot serve secrets. It makes no store call, so the api starts whatever state
 	// the store is in. Every store consumer below takes readiness.store.
-	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, jobStore, time.Now, logger)
+	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, jobStore, time.Now, storeMarker.Blank, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store readiness", "err", err.Error())
+		os.Exit(1)
+	}
+	// The backup's capture of the store (#765): wired whenever a backend
+	// other than the mock is requested, so a refused one fails every backup
+	// closed rather than writing an archive without the store.
+	sealFiles, err := sealrotate.NewFiles(sealrotate.ProductionPaths())
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: seal files", "err", err.Error())
+		os.Exit(1)
+	}
+	storeBackup, err := storeBackupWiring(storeBackend, readiness.monitor, readiness.store, sealFiles,
+		execrun.CombinedOutput, outcomes.AfterStoreRestart, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store backup", "err", err.Error())
 		os.Exit(1)
 	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
@@ -1062,11 +1093,14 @@ func main() {
 		// and read by the agent beside it, and that is also what keeps the
 		// staging root the api acts on coming from this host.
 		SelfNodeID: selfNodeID,
-		Sources: storage.IdentitySources{
+		Sources: backupSources(storage.IdentitySources{
 			TrustDir:     trustDir,
 			MeshStateDir: meshStateDir,
 			BusDir:       filepath.Join(dataDir, "bus"),
-		},
+		}, storeBackup, storeDataDir),
+		// The secret store, captured straight after the database snapshot
+		// into a version-3 archive; nil without a store (#765).
+		SecretStore: storeBackup,
 		// So a node whose agent does not answer a stage request is recorded
 		// as offline, or as online with an agent that predates the verb —
 		// whichever inventory says it is.
@@ -1487,11 +1521,13 @@ func main() {
 		DataDir:    dataDir,
 		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 		Store:      backupStore,
-	}, func() {
+		// Refuses a restore while a seal-key rotation runs (#765, AC8).
+		SealGuard: sealRot.sealGuard(),
+	}, restoreRestartHook(logger, storeBackend, execrun.CombinedOutput, func() {
 		log.Printf("rasputin-api: a restore is prepared; shutting down to restart onto the restored identity")
 		requestRestoreExit()
 		cancel()
-	})
+	}))
 
 	// AA-11 DNS forwarding (ADR-0004 §10): reconcile the nameserver's off-zone
 	// forwarding stub from the persisted setting, and hand the api the hook to
@@ -1886,8 +1922,11 @@ func main() {
 	// watchdog fed for as long as the liveness probe (a trivial SQLite
 	// query) keeps passing. See internal/sdnotify for the war story. The OS
 	// outcome records are read first, so the seal-key job is in the ledger
-	// before READY=1 (#833, #853).
-	readyAfterOutcomes(ctx, outcomes, sdnotify.Ready)
+	// before READY=1 (#833, #853), and the empty-store marker is armed on
+	// existing store data after them (#765, F-765-01).
+	readyAfterOutcomes(ctx, outcomes, func(ctx context.Context) {
+		storeMarker.Arm(ctx, storeDataPresent(storeDataDir))
+	}, sdnotify.Ready)
 	sdnotify.StartWatchdog(ctx, func(pctx context.Context) error {
 		_, err := authStore.CountUsers(pctx)
 		return err

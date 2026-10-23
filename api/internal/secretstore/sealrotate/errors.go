@@ -42,3 +42,10 @@ const (
 	errBackupRotationIncomplete jobError = "A seal-key rotation has not finished, so this backup did not capture anything. Start the seal-key rotation again to finish it, then run the backup."
 	errBackupSealUnreadable     jobError = "The seal key files could not be checked, so this backup did not capture anything. The api log names the defect."
 )
+
+// The gate's refusals of a restore (geekdojo/geekdojo-brain#765).
+const (
+	errRestoreRotation           jobError = "A seal-key rotation is running, so this restore did not start. Nothing was changed; start the restore again once the rotation finishes."
+	errRestoreRotationIncomplete jobError = "A seal-key rotation has not finished, so this restore did not start. Nothing was changed; start the seal-key rotation again to finish it, then start the restore."
+	errRestoreSealUnreadable     jobError = "The seal key files could not be checked, so this restore did not start. Nothing was changed; the api log names the defect."
+)

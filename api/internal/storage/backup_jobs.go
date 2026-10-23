@@ -166,6 +166,11 @@ type RunConfig struct {
 	// it on every other path. Nil means no secret store is wired and there
 	// is nothing to wait for.
 	CaptureLock CaptureLock
+	// SecretStore is the running secret store, captured by step 3b
+	// (snapshot_store) into a version-3 archive (#765). Nil means no store
+	// is requested: there is no store step and the archive is version 2. A
+	// run with it wired never writes a version-2 archive.
+	SecretStore SecretStore
 }
 
 // CaptureLock is the one lock a backup takes around its capture (ARCH-ISP):
@@ -236,6 +241,22 @@ func (r *stagingRootRef) get() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.root
+}
+
+// storeStagingBytes is the staged store copy's size for the staging guard:
+// the live data directory, when a store is captured, else zero.
+func (c RunConfig) storeStagingBytes() uint64 {
+	if c.SecretStore == nil || strings.TrimSpace(c.Sources.StoreDataDir) == "" {
+		return 0
+	}
+	return treeBytes(c.Sources.StoreDataDir)
+}
+
+// removeIfSet removes p when it names a file.
+func removeIfSet(p string) {
+	if p != "" {
+		_ = os.Remove(p)
+	}
 }
 
 func (c RunConfig) retain() int {
@@ -346,12 +367,20 @@ func RunWorkflow(store *Store, cfg RunConfig) jobs.Workflow {
 	cfg.Store = store
 	cfg.staging = &stagingRootRef{}
 	cfg.generation = &stagingRootRef{}
+	steps := []jobs.WorkflowStep{
+		{Name: "validate", Timeout: runValidateTimeout, Do: runValidate(store, cfg)},
+		{Name: "preflight", Timeout: runPreflightTimeout, Retries: 1, Do: runPreflight(cfg)},
+		{Name: "snapshot_db", Timeout: runSnapshotTimeout, Do: runSnapshotDB(cfg)},
+	}
+	if cfg.SecretStore != nil {
+		// Step 3b, straight after the database snapshot and inside the
+		// capture lock (#765). Retries: 0 — a retry would stop the store a
+		// second time for a copy that already failed closed.
+		steps = append(steps, jobs.WorkflowStep{Name: storeCaptureStepName, Timeout: storeCaptureStepTimeout, Retries: 0, Do: runSnapshotStore(cfg)})
+	}
 	return jobs.Workflow{
 		Kind: RunJobKind,
-		Steps: []jobs.WorkflowStep{
-			{Name: "validate", Timeout: runValidateTimeout, Do: runValidate(store, cfg)},
-			{Name: "preflight", Timeout: runPreflightTimeout, Retries: 1, Do: runPreflight(cfg)},
-			{Name: "snapshot_db", Timeout: runSnapshotTimeout, Do: runSnapshotDB(cfg)},
+		Steps: append(steps, []jobs.WorkflowStep{
 			// The app-volume fan-out. It runs BEFORE assemble, not after,
 			// because the manifest is the archive's first member and cannot
 			// both go first and describe volumes nobody has staged yet.
@@ -368,7 +397,7 @@ func RunWorkflow(store *Store, cfg RunConfig) jobs.Workflow {
 			// human's decision, not a backoff's.
 			{Name: "write", Timeout: runWriteTimeout, Retries: 0, Irreversible: true, Do: runWrite(cfg)},
 			{Name: "prune", Timeout: runPruneTimeout, Retries: 1, Do: runPrune(store, cfg)},
-		},
+		}...),
 		OnTerminal: finalizeRunRow(store, cfg),
 	}
 }
@@ -846,7 +875,9 @@ func runSnapshotDB(cfg RunConfig) jobs.DoFn {
 		// Zero for the two volume terms: nothing has been staged yet, so
 		// nothing is known about their sizes. The fan-out re-runs this guard
 		// before every stage with what it has measured — see PlanStaging.
-		budget, err := PlanStaging(stagingDir, dbBytes, identityBytes, 0, 0)
+		// The staged store copy is resident beside the snapshot until
+		// assemble consumes it; sized here from the live data directory.
+		budget, err := PlanStaging(stagingDir, dbBytes, identityBytes, cfg.storeStagingBytes(), 0, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -988,13 +1019,34 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		// A store-era run carries the store or writes nothing (#765): its
+		// staged copy must be here, and the archive is version 3.
+		var capture *StoreCapture
+		var capturePath string
+		if cfg.SecretStore != nil {
+			var sres runStoreCaptureResult
+			if err := priorResult(sc, storeCaptureStepName, &sres); err != nil {
+				_ = os.Remove(snapPath)
+				return nil, errStoreCaptureMissing
+			}
+			if capturePath, err = stagedPath(sc, sres.StagingName); err != nil {
+				_ = os.Remove(snapPath)
+				return nil, err
+			}
+			if _, err := os.Stat(capturePath); err != nil {
+				_ = os.Remove(snapPath)
+				return nil, errStoreCaptureMissing
+			}
+			capture = &StoreCapture{Path: capturePath, KeyID: sres.KeyID}
+		}
 		// The api's staging root holds the identity set and nothing else —
 		// the volumes went node-to-target and never touched it — so the
-		// source-side guard is sized for the identity set alone, re-checked
-		// here before a byte of the archive is written.
+		// source-side guard is sized for the identity set, and the staged
+		// store copy beside it, re-checked here before a byte of the archive
+		// is written.
 		dbBytes := fileSize(cfg.DBPath)
 		identityBytes := MeasureIdentitySet(cfg.Sources, dbBytes)
-		if _, err := PlanStaging(filepath.Dir(snapPath), dbBytes, identityBytes, 0, 0); err != nil {
+		if _, err := PlanStaging(filepath.Dir(snapPath), dbBytes, identityBytes, fileSize(capturePath), 0, 0); err != nil {
 			return nil, err
 		}
 		name := stagingName(tgt.GenerationID, "tar")
@@ -1017,6 +1069,7 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			Now:          time.Now().UTC(),
 			AppVolumes:   fan.Report,
 			Scope:        tgt.Scope,
+			StoreCapture: capture,
 		})
 		if cerr := f.Close(); cerr != nil && aerr == nil {
 			aerr = cerr
@@ -1027,12 +1080,15 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			// leaving it on disk until the next restart.
 			_ = os.Remove(dst)
 			_ = os.Remove(snapPath)
+			removeIfSet(capturePath)
 			return nil, aerr
 		}
 		// The snapshot's job is done the moment it is inside the tar. Deleting
 		// it here rather than at the end of the saga is what keeps §4.7's peak
-		// residency down to the tar plus the sealed archive.
+		// residency down to the tar plus the sealed archive. The store copy
+		// likewise.
 		_ = os.Remove(snapPath)
+		removeIfSet(capturePath)
 
 		manifestJSON, err := manifest.JSON()
 		if err != nil {

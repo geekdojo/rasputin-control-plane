@@ -28,13 +28,15 @@ import (
 // A run materialises three things under the staging directory, in sequence:
 //
 //	1. the `VACUUM INTO` snapshot of rasputin.db          ~ db size
+//	1b. the secret store's cold copy (#765)                ~ store data
 //	2. the assembled tar (manifest + snapshot + identity)  ~ identity set
 //	3. the sealed archive                                  ~ identity set
 //
-// (1) is deleted as soon as (2) is built and (2) as soon as (3) is sealed, so
-// the true peak is lower. The guard sizes for the pessimistic case anyway,
-// because an estimate that is optimistic about a disk-full failure is not a
-// guard. So: peak ≈ dbSize + 2 × identitySize, plus the volume terms below.
+// (1) and (1b) are deleted as soon as (2) is built and (2) as soon as (3) is
+// sealed, so the true peak is lower. The guard sizes for the pessimistic case
+// anyway, because an estimate that is optimistic about a disk-full failure is
+// not a guard. So: peak ≈ dbSize + storeCopy + 2 × identitySize, plus the
+// volume terms below.
 //
 // The APP VOLUMES ARE NOT IN THIS BUDGET, and that is a fact about the design
 // rather than a gap in the arithmetic: since the per-node transport (#296) a
@@ -152,6 +154,10 @@ type StagingBudget struct {
 	// IdentityBytes is the whole §4.5 identity set: the database plus the trust
 	// directory plus Headscale state.
 	IdentityBytes uint64 `json:"identityBytes"`
+	// StoreBytes is the staged copy of the secret store's data, resident
+	// beside the snapshot from snapshot_store until assemble consumes it
+	// (#765). Zero when no store is captured.
+	StoreBytes uint64 `json:"storeBytes"`
 	// VolumeBytes and LargestVolumeBytes are the app-volume terms from the
 	// design that copied volumes through this directory. They are ZERO on
 	// every run this build makes: volumes go node → ingest → target and never
@@ -182,12 +188,12 @@ func (b StagingBudget) Sufficient() bool {
 // Explain renders the refusal an operator reads. Both numbers, always: "not
 // enough space" is not actionable and "3.1 GiB free, needs 4.4 GiB" is.
 func (b StagingBudget) Explain(dir string) string {
-	return fmt.Sprintf("%s has %s free; staging this backup needs about %s (a %s identity set plus %s of app-volume data, "+
+	return fmt.Sprintf("%s has %s free; staging this backup needs about %s (a %s identity set with a %s staged copy of the secret store, plus %s of app-volume data, "+
 		"assembled and then sealed, alongside a staged copy of the largest single volume at %s) "+
 		"while leaving the %s reserve that keeps the metrics store writable. Nothing was written, and the previous "+
 		"generations on the backup target are untouched",
 		dir, humanBytes(b.FreeBytes), humanBytes(b.PeakBytes+b.ReserveBytes),
-		humanBytes(b.IdentityBytes), humanBytes(b.VolumeBytes), humanBytes(b.LargestVolumeBytes),
+		humanBytes(b.IdentityBytes), humanBytes(b.StoreBytes), humanBytes(b.VolumeBytes), humanBytes(b.LargestVolumeBytes),
 		humanBytes(b.ReserveBytes))
 }
 
@@ -197,7 +203,7 @@ func (b StagingBudget) Explain(dir string) string {
 // database's size within it. volumeBytes and largestVolumeBytes are the terms
 // for app-volume data staged HERE, which no run does any more (volumes go
 // node → ingest → target); both call sites pass zero. See the file comment.
-func PlanStaging(dir string, dbBytes, identityBytes, volumeBytes, largestVolumeBytes uint64) (StagingBudget, error) {
+func PlanStaging(dir string, dbBytes, identityBytes, storeBytes, volumeBytes, largestVolumeBytes uint64) (StagingBudget, error) {
 	free, err := FreeBytes(dir)
 	if err != nil {
 		return StagingBudget{}, err
@@ -205,13 +211,16 @@ func PlanStaging(dir string, dbBytes, identityBytes, volumeBytes, largestVolumeB
 	b := StagingBudget{
 		DBBytes:            dbBytes,
 		IdentityBytes:      identityBytes,
+		StoreBytes:         storeBytes,
 		VolumeBytes:        volumeBytes,
 		LargestVolumeBytes: largestVolumeBytes,
 		// The payload is assembled once and sealed once, so it is resident
 		// twice; the largest single staged volume is resident alongside both
 		// for the length of one copy. See the file comment for why the deletes
 		// are not modelled.
-		PeakBytes:    dbBytes + 2*(identityBytes+volumeBytes) + largestVolumeBytes,
+		// The staged store copy is resident with the snapshot, beside
+		// the tar it goes into.
+		PeakBytes:    dbBytes + storeBytes + 2*(identityBytes+volumeBytes) + largestVolumeBytes,
 		FreeBytes:    free,
 		ReserveBytes: StagingReserveBytes,
 	}
