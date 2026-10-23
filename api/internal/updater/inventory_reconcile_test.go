@@ -206,7 +206,7 @@ func TestHealthCheckFailure_UnconfirmsInventoryVersion(t *testing.T) {
 
 	tctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if _, err := healthCheckAndCommit(tctx, nc, store, inv, nodeID, "sha", "j", nil); err == nil {
+	if _, err := healthCheckAndCommit(tctx, nc, store, inv, nil, nodeID, "sha", "j", nil); err == nil {
 		t.Fatal("failed health check must fail the step")
 	}
 	if got := invVersion(t, inv, nodeID); got != "2026.07.0-dev.104" {
