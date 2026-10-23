@@ -72,6 +72,13 @@ type generationOpts struct {
 	manifestVersion int
 	// identity, when set, edits the identity fixture before it is archived.
 	identity func(*identityFixture)
+	// store archives a secret store (#765): a data tree, the seal files and
+	// a store CA, as a version-3 generation. storeOneFile keeps the data
+	// tree to one file. storeSrc, when set, receives the sources the store
+	// files were written under.
+	store        bool
+	storeOneFile bool
+	storeSrc     *IdentitySources
 }
 
 // buildGeneration writes a marker and one generation under mount, sealed to
@@ -134,12 +141,31 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 		}
 	}
 	report := NewAppVolumeReport(AppEnumeration{AppsInstalled: len(opts.volumes), AppsResolved: len(opts.volumes), Catalog: "test"}, opts.volumes, 1)
+	sources := IdentitySources{TrustDir: trust, MeshStateDir: mesh, BusDir: busDir}
+	var capture *StoreCapture
+	if opts.store {
+		sources = storeSources(t, src, sources)
+		if opts.storeOneFile {
+			if err := os.RemoveAll(sources.StoreDataDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(sources.StoreDataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(sources.StoreDataDir, "000001.log"), "the only store file")
+		}
+		capture = stageStoreFixture(t, sources, fixtureKeyID)
+		if opts.storeSrc != nil {
+			*opts.storeSrc = sources
+		}
+	}
 	var tarBuf bytes.Buffer
 	m, err := Assemble(&tarBuf, AssembleOptions{
-		Sources:      IdentitySources{TrustDir: trust, MeshStateDir: mesh, BusDir: busDir},
+		Sources:      sources,
 		SnapshotPath: filepath.Join(src, "snapshot.db"),
 		GenerationID: opts.id, JobID: "job-1", ClusterID: "home1", KeyID: restoreKeyID,
 		Now: time.Now().UTC(), AppVolumes: report, Scope: opts.scope,
+		StoreCapture: capture,
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

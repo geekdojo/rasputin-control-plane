@@ -76,8 +76,34 @@ var (
 // parseFragment reads b as one of the three shapes, with key paths from p.
 // Each error names the defect.
 func parseFragment(p Paths, b []byte) (Fragment, error) {
+	fields, err := parseFields(b)
+	if err != nil {
+		return Fragment{}, err
+	}
+	return classify(p, fields)
+}
+
+// CurrentKeyID is the key id a fragment's bytes name as current_key_id,
+// read with the same grammar as State but without classifying its key paths:
+// the backup reads it from the very bytes it puts in the archive, which name
+// the key at the store's path on that control plane (geekdojo/geekdojo-brain#765).
+func CurrentKeyID(b []byte) (KeyID, error) {
+	fields, err := parseFields(b)
+	if err != nil {
+		return "", err
+	}
+	id, ok := fields["current_key_id"]
+	if !ok {
+		return "", errors.New("sealrotate: the seal fragment has no current_key_id")
+	}
+	return ParseKeyID(id)
+}
+
+// parseFields reads b's one static seal block into its fields, refusing any
+// text the three shapes never hold.
+func parseFields(b []byte) (map[string]string, error) {
 	if len(bytes.TrimSpace(b)) == 0 {
-		return Fragment{}, errors.New("sealrotate: the seal fragment is empty")
+		return nil, errors.New("sealrotate: the seal fragment is empty")
 	}
 	sc := bufio.NewScanner(bytes.NewReader(b))
 	fields := map[string]string{}
@@ -88,34 +114,34 @@ func parseFragment(p Paths, b []byte) (Fragment, error) {
 		case state == 0 && openRE.MatchString(line):
 			state = 1
 		case state == 0:
-			return Fragment{}, errors.New("sealrotate: the seal fragment does not open with a static seal block")
+			return nil, errors.New("sealrotate: the seal fragment does not open with a static seal block")
 		case state == 1 && line == "}":
 			state = 2
 		case state == 1:
 			m := fieldRE.FindStringSubmatch(line)
 			if m == nil {
-				return Fragment{}, errors.New("sealrotate: the seal fragment has a line that is not key = \"value\"")
+				return nil, errors.New("sealrotate: the seal fragment has a line that is not key = \"value\"")
 			}
 			switch m[1] {
 			case "current_key_id", "current_key", "previous_key_id", "previous_key":
 			default:
-				return Fragment{}, fmt.Errorf("sealrotate: the seal fragment sets %s, which a rotation never writes", m[1])
+				return nil, fmt.Errorf("sealrotate: the seal fragment sets %s, which a rotation never writes", m[1])
 			}
 			if _, dup := fields[m[1]]; dup {
-				return Fragment{}, fmt.Errorf("sealrotate: the seal fragment sets %s twice", m[1])
+				return nil, fmt.Errorf("sealrotate: the seal fragment sets %s twice", m[1])
 			}
 			fields[m[1]] = m[2]
 		case line != "":
-			return Fragment{}, errors.New("sealrotate: the seal fragment has more than one seal block, or text after it")
+			return nil, errors.New("sealrotate: the seal fragment has more than one seal block, or text after it")
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return Fragment{}, fmt.Errorf("sealrotate: read the seal fragment: %w", err)
+		return nil, fmt.Errorf("sealrotate: read the seal fragment: %w", err)
 	}
 	if state != 2 {
-		return Fragment{}, errors.New("sealrotate: the seal fragment's block is not closed")
+		return nil, errors.New("sealrotate: the seal fragment's block is not closed")
 	}
-	return classify(p, fields)
+	return fields, nil
 }
 
 // classify maps a fragment's fields to its shape, refusing any combination a

@@ -99,7 +99,9 @@ func gatedStoreSource(t *testing.T, svc *memSecrets, hs *healthStore) (SecretSou
 		t.Fatal(err)
 	}
 	m, err := storestate.New(storestate.Deps{Store: hs, Now: time.Now, Log: log,
-		JobRunning: func(context.Context, string) (bool, error) { return false, nil }})
+		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Blank:      func(context.Context) (bool, error) { return false, nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

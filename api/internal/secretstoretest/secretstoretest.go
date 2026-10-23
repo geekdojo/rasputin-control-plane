@@ -176,6 +176,14 @@ func (s *Store) AuditPath() string { return s.auditPath }
 // when Config.ExternalSeal is off. The store reads seal.hcl at every start.
 func (s *Store) SealDir() string { return s.sealDir }
 
+// DataDir is the store's PebbleDB directory, which a backup copies cold
+// (geekdojo/geekdojo-brain#765).
+func (s *Store) DataDir() string { return filepath.Join(s.root, "data") }
+
+// CADir is the directory holding the store CA pair (store-ca.key and
+// store-ca.pem), as the api's trust directory holds them.
+func (s *Store) CADir() string { return filepath.Join(s.root, "ca") }
+
 // Reload sends the store SIGHUP, which makes it reopen its audit file. It
 // returns once the signal is delivered, as systemctl kill does.
 func (s *Store) Reload(context.Context) error {

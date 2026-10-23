@@ -370,12 +370,15 @@ type runHarness struct {
 	// (stage/transfer/unstage only), present when opts.computeAgent asked for
 	// it. A case with an app on computeNodeID and no compute agent is the
 	// offline-node case.
-	agent       *fakeBackupAgent
-	compute     *fakeBackupAgent
-	key         testKeypair
-	stagingDir  string
-	trustDir    string
-	meshDir     string
+	agent      *fakeBackupAgent
+	compute    *fakeBackupAgent
+	key        testKeypair
+	stagingDir string
+	trustDir   string
+	meshDir    string
+	// sources is the run's IdentitySources, store fields included when
+	// opts.secretStore is set (#765).
+	sources     IdentitySources
 	dbPath      string
 	mountDir    string
 	ingest      *backupxfer.Ingest
@@ -505,6 +508,14 @@ type runHarnessOpts struct {
 	captureLock CaptureLock
 	// appLister, when set, replaces the fakeApps the run reads.
 	appLister AppLister
+	// secretStore is RunConfig.SecretStore (#765). Set, the harness also
+	// writes a store data tree, the seal files and a store CA and names
+	// them in the run's sources.
+	secretStore SecretStore
+	// storeSources, when set with secretStore, names a real store's data
+	// and seal directories instead of the fixtures; its TrustDir, when set,
+	// is where the store CA pair is copied from into the run's trust dir.
+	storeSources *IdentitySources
 }
 
 func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *runHarness {
@@ -650,6 +661,22 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		heldUploadCredential: opts.heldUploadCredential,
 		CaptureLock:          opts.captureLock,
 	}
+	if opts.secretStore != nil {
+		if real := opts.storeSources; real != nil {
+			cfg.Sources.StoreDataDir, cfg.Sources.SealDir = real.StoreDataDir, real.SealDir
+			for _, f := range []string{"store-ca.key", "store-ca.pem"} {
+				b, err := os.ReadFile(filepath.Join(real.TrustDir, f))
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, filepath.Join(trustDir, f), string(b))
+			}
+		} else {
+			cfg.Sources = storeSources(t, dir, cfg.Sources)
+		}
+		cfg.SecretStore = opts.secretStore
+	}
+	h.sources = cfg.Sources
 	if !opts.noIngest {
 		cfg.Ingest = ingest
 	}

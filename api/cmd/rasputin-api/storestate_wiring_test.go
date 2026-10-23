@@ -82,7 +82,7 @@ func TestStoreReadinessWiring(t *testing.T) {
 
 	t.Run("nothing requested", func(t *testing.T) {
 		store := &countingStore{secretStore: secretstore.Disabled{}}
-		w, err := storeReadinessWiring("", storeModeOff, store, js, time.Now, log)
+		w, err := storeReadinessWiring("", storeModeOff, store, js, time.Now, notBlank, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +106,7 @@ func TestStoreReadinessWiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &countingStore{secretStore: tc.store}
-			w, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, log)
+			w, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,18 +134,20 @@ func TestStoreReadinessWiring(t *testing.T) {
 			store secretStore
 			js    *jobs.Store
 			now   func() time.Time
+			blank func(context.Context) (bool, error)
 			log   *slog.Logger
 		}
-		full := args{secretstore.Disabled{}, js, time.Now, log}
+		full := args{secretstore.Disabled{}, js, time.Now, notBlank, log}
 		for name, clear := range map[string]func(*args){
 			"store":  func(a *args) { a.store = nil },
 			"jobs":   func(a *args) { a.js = nil },
 			"clock":  func(a *args) { a.now = nil },
+			"blank":  func(a *args) { a.blank = nil },
 			"logger": func(a *args) { a.log = nil },
 		} {
 			a := full
 			clear(&a)
-			if _, err := storeReadinessWiring("mock", storeModeMock, a.store, a.js, a.now, a.log); err == nil {
+			if _, err := storeReadinessWiring("mock", storeModeMock, a.store, a.js, a.now, a.blank, a.log); err == nil {
 				t.Errorf("storeReadinessWiring with a nil %s = nil error", name)
 			}
 		}
@@ -176,7 +178,7 @@ func TestDeploySourceWiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &countingStore{secretStore: tc.store}
-			r, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, log)
+			r, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -267,3 +269,6 @@ func TestJobRunning(t *testing.T) {
 		t.Fatal("a closed ledger gave no error")
 	}
 }
+
+// notBlank is a blank verdict that never reads blank.
+func notBlank(context.Context) (bool, error) { return false, nil }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/osoutcome"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 )
 
 // The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): the seal
@@ -28,8 +29,10 @@ const (
 	storeProvisionUnit = "rasputin-store-provision.service"
 )
 
-// outcomeSources are the declared records, under runDir.
-func outcomeSources(runDir string) []osoutcome.Source {
+// outcomeSources are the declared records, under runDir. observeInit is
+// given each parsed os.store_init record: the empty-store marker's
+// ObserveInit (#765).
+func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.Record)) []osoutcome.Source {
 	return []osoutcome.Source{
 		{
 			Kind:     "os.seal_key",
@@ -52,6 +55,7 @@ func outcomeSources(runDir string) []osoutcome.Source {
 			Outcomes:          map[string]osoutcome.Verdict{"initialised": osoutcome.OK, "failed": osoutcome.Alert},
 			Title:             "The secret store did not initialise",
 			AfterStoreRestart: true,
+			Observe:           observeInit,
 		},
 		{
 			Kind:     "os.store_provision",
@@ -69,10 +73,15 @@ func outcomeSources(runDir string) []osoutcome.Source {
 }
 
 // outcomeReaderWiring builds the reader over the records under runDir, with
-// the api's boot id read from bootIDPath and units started through run.
-func outcomeReaderWiring(ledger osoutcome.Ledger, logger *slog.Logger, runDir, bootIDPath string, run runFunc) (*osoutcome.Reader, error) {
+// the api's boot id read from bootIDPath, units started through run, and the
+// store's init record observed by observeInit (required).
+func outcomeReaderWiring(ledger osoutcome.Ledger, logger *slog.Logger, runDir, bootIDPath string, run runFunc,
+	observeInit func(context.Context, osoutcome.Record)) (*osoutcome.Reader, error) {
 	if run == nil {
 		return nil, errors.New("os outcomes: the run func is nil")
+	}
+	if observeInit == nil {
+		return nil, errors.New("os outcomes: the store init observer is nil")
 	}
 	r, err := osoutcome.New(osoutcome.Deps{
 		Ledger: ledger,
@@ -86,7 +95,7 @@ func outcomeReaderWiring(ledger osoutcome.Ledger, logger *slog.Logger, runDir, b
 			}
 			return nil
 		},
-	}, outcomeSources(runDir))
+	}, outcomeSources(runDir, observeInit))
 	if err != nil {
 		return nil, fmt.Errorf("os outcomes: %w", err)
 	}
@@ -114,9 +123,42 @@ func wireOutcomeAlerts(svc *alerts.Service, r *osoutcome.Reader) {
 	svc.SetOutcomeAlerts(r.Kinds(), r.Alerts)
 }
 
-// readyAfterOutcomes reads the records and only then declares the api ready,
-// so the seal-key job is committed before READY=1 (#853 orders on it).
-func readyAfterOutcomes(ctx context.Context, r interface{ ReadAtStart(context.Context) }, ready func()) {
+// readyAfterOutcomes reads the records, then arms the empty-store marker on
+// what the read recorded (#765), and only then declares the api ready, so
+// the seal-key job is committed before READY=1 (#853 orders on it).
+func readyAfterOutcomes(ctx context.Context, r interface{ ReadAtStart(context.Context) }, arm func(context.Context), ready func()) {
 	r.ReadAtStart(ctx)
+	arm(ctx)
 	ready()
+}
+
+// rebaseAfterRestore re-bases the empty-store marker on this boot when the
+// restore this start applied carried the store (#765): the restored
+// database's marker names the backed-up cluster's boot. It runs right after
+// the restore is recorded, before any outcome read.
+func rebaseAfterRestore(ctx context.Context, m interface{ Rebase(context.Context) }, rep *storage.RestoreReport) {
+	if rep != nil && rep.RestoredStore() {
+		m.Rebase(ctx)
+	}
+}
+
+// restoreRestartHook is the prepared restore's restart: under openbao the
+// store unit is stopped first, so the store's own start step applies the
+// staged store before the store runs again (S15 part 5). A stop that fails
+// is one ERROR and the exit goes ahead: the next start refuses until a
+// reboot applies the store.
+func restoreRestartHook(logger *slog.Logger, backend string, run runFunc, exit func()) func() {
+	return func() {
+		if backend == storeModeOpenBao {
+			ctx, cancel := context.WithTimeout(context.Background(), storeCallTimeout)
+			out, err := run(ctx, "systemctl", "stop", storeUnit)
+			cancel()
+			if err != nil {
+				logger.Error("restore: stopping the secret store before the restart failed",
+					"event", "storage.restore_store_stop_failed", "unit", storeUnit,
+					"err", fmt.Sprintf("%v: %s", err, strings.TrimSpace(string(out))))
+			}
+		}
+		exit()
+	}
 }

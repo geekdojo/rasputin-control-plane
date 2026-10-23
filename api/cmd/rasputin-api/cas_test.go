@@ -37,7 +37,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 		var codes []int
 		d := tlscatest.Deps()
 		d.Log = slog.New(h)
-		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", d)
+		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", d, "", false)
 		if len(codes) != 0 {
 			t.Fatalf("exit called %v", codes)
 		}
@@ -59,7 +59,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 		}
 		h := &recordsHandler{}
 		var codes []int
-		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", tlscatest.Deps())
+		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", tlscatest.Deps(), "", false)
 		if len(codes) != 1 || codes[0] == 0 {
 			t.Fatalf("exit calls %v, want one non-zero exit", codes)
 		}
@@ -73,7 +73,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 	})
 	t.Run("both load", func(t *testing.T) {
 		var codes []int
-		cp, store := ensureCAs(context.Background(), slog.New(&recordsHandler{}), func(c int) { codes = append(codes, c) }, t.TempDir(), "home1", tlscatest.Deps())
+		cp, store := ensureCAs(context.Background(), slog.New(&recordsHandler{}), func(c int) { codes = append(codes, c) }, t.TempDir(), "home1", tlscatest.Deps(), "", false)
 		if cp == nil || store == nil || len(codes) != 0 {
 			t.Fatalf("cp=%v store=%v exits=%v", cp != nil, store != nil, codes)
 		}

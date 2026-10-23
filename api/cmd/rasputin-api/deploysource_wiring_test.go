@@ -42,7 +42,7 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := storeReadinessWiring(storeModeMock, w.mode, w.store, openJobStore(t), time.Now, log)
+	r, err := storeReadinessWiring(storeModeMock, w.mode, w.store, openJobStore(t), time.Now, notBlank, log)
 	if err != nil {
 		t.Fatal(err)
 	}

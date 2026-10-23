@@ -117,6 +117,37 @@ func (g *Gate) Release(jobID string) {
 	g.holder, g.byRotation, g.free = "", false, nil
 }
 
+// CheckRestore refuses a restore with a sentence while a rotation holds the
+// gate, or while the seal files are not Clean or cannot be read, and returns
+// nil otherwise (geekdojo/geekdojo-brain#765, AC8). A restore staged in the
+// middle of a rotation could put back a key that does not open the store the
+// rotation leaves behind. It waits for nothing and changes nothing; the
+// defect behind a refusal goes to the log, never into the sentence.
+func (g *Gate) CheckRestore() error {
+	g.mu.Lock()
+	rotating := g.holder != "" && g.byRotation
+	holder := g.holder
+	g.mu.Unlock()
+	if rotating {
+		g.log.Warn("restore refused: a seal-key rotation is running",
+			"component", "secretstore", "event", "secretstore.seal_rotate.restore_refused", "job_id", holder)
+		return errRestoreRotation
+	}
+	tree, err := g.state.State()
+	if err != nil {
+		g.log.Warn("restore refused: the seal files could not be checked",
+			"component", "secretstore", "event", "secretstore.seal_rotate.restore_refused", "err", err.Error())
+		return errRestoreSealUnreadable
+	}
+	if tree.Fragment.Shape != Clean {
+		g.log.Warn("restore refused: a seal-key rotation has not finished",
+			"component", "secretstore", "event", "secretstore.seal_rotate.restore_refused",
+			"shape", tree.Fragment.Shape.String(), "key_id", tree.Fragment.Current.String())
+		return errRestoreRotationIncomplete
+	}
+	return nil
+}
+
 // RotationHolder is the rotation job holding the gate, or "".
 func (g *Gate) RotationHolder() string {
 	g.mu.Lock()

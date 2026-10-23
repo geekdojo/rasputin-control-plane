@@ -153,13 +153,16 @@ func TestMonitor_SinceAndTransitionLogging(t *testing.T) {
 func TestNew_RefusesNil(t *testing.T) {
 	full := func() Deps {
 		return Deps{Store: newFakeStore(readyHealth, nil), Now: time.Now, Log: slog.New(slog.DiscardHandler),
-			JobRunning: func(context.Context, string) (bool, error) { return false, nil }}
+			JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+			Blank:      func(context.Context) (bool, error) { return false, nil }}
 	}
 	for field, clear := range map[string]func(*Deps){
 		"Store":      func(d *Deps) { d.Store = nil },
 		"Now":        func(d *Deps) { d.Now = nil },
 		"Log":        func(d *Deps) { d.Log = nil },
 		"JobRunning": func(d *Deps) { d.JobRunning = nil },
+		// F-765-07: the blank verdict is required, never an optional seam.
+		"Blank": func(d *Deps) { d.Blank = nil },
 	} {
 		d := full()
 		clear(&d)

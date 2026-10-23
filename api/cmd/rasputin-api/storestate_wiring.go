@@ -34,7 +34,10 @@ type readinessWiring struct {
 // family's source is deploySourceWiring's, once the secrets service exists.
 //
 // It makes no store call: the api starts whatever state the store is in.
-func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.Store, now func() time.Time, logger *slog.Logger) (readinessWiring, error) {
+//
+// blank is the empty-store marker's verdict (#765); required.
+func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.Store, now func() time.Time,
+	blank func(context.Context) (bool, error), logger *slog.Logger) (readinessWiring, error) {
 	switch {
 	case store == nil:
 		return readinessWiring{}, errors.New("store readiness: the store is nil")
@@ -42,13 +45,15 @@ func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.St
 		return readinessWiring{}, errors.New("store readiness: the job store is nil")
 	case now == nil:
 		return readinessWiring{}, errors.New("store readiness: the clock is nil")
+	case blank == nil:
+		return readinessWiring{}, errors.New("store readiness: the blank verdict is nil")
 	case logger == nil:
 		return readinessWiring{}, errors.New("store readiness: the logger is nil")
 	}
 	if requested == "" {
 		return readinessWiring{store: store}, nil
 	}
-	monitor, err := storestate.New(storestate.Deps{Store: store, Now: now, Log: logger, JobRunning: jobRunning(js)})
+	monitor, err := storestate.New(storestate.Deps{Store: store, Now: now, Log: logger, JobRunning: jobRunning(js), Blank: blank})
 	if err != nil {
 		return readinessWiring{}, err
 	}

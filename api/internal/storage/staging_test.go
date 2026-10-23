@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -169,11 +170,11 @@ func TestSufficientSaturates(t *testing.T) {
 // with the numbers in it.
 func TestPlanStagingRefusesOnARealDirectory(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := PlanStaging(dir, 1<<20, 1<<20, 0, 0); err != nil {
+	if _, err := PlanStaging(dir, 1<<20, 1<<20, 0, 0, 0); err != nil {
 		t.Fatalf("a megabyte should fit in a temp dir: %v", err)
 	}
 	// An exabyte will not.
-	_, err := PlanStaging(dir, 1<<60, 1<<60, 0, 0)
+	_, err := PlanStaging(dir, 1<<60, 1<<60, 0, 0, 0)
 	if err == nil {
 		t.Fatal("PlanStaging accepted an exabyte")
 	}
@@ -192,7 +193,7 @@ func TestPlanStagingRefusesOnARealDirectory(t *testing.T) {
 // one volume that mattered.
 func TestPlanStagingSizesForTheLargestSingleVolume(t *testing.T) {
 	dir := t.TempDir()
-	b, err := PlanStaging(dir, 1<<20, 4<<20, 8<<20, 5<<20)
+	b, err := PlanStaging(dir, 1<<20, 4<<20, 0, 8<<20, 5<<20)
 	if err != nil {
 		t.Fatalf("a few megabytes should fit in a temp dir: %v", err)
 	}
@@ -205,7 +206,7 @@ func TestPlanStagingSizesForTheLargestSingleVolume(t *testing.T) {
 	}
 	// The largest single volume alone is what tips it over. Everything else is
 	// tiny; if the guard ignored LargestVolumeBytes this would be accepted.
-	if _, err := PlanStaging(dir, 0, 0, 0, 1<<60); err == nil {
+	if _, err := PlanStaging(dir, 0, 0, 0, 0, 1<<60); err == nil {
 		t.Fatal("PlanStaging accepted an exabyte-sized single volume — the peak is not being sized for it")
 	}
 }
@@ -283,3 +284,53 @@ func TestMeasureIdentitySetCountsTheWholeSet(t *testing.T) {
 // Set and TestPreflightReportsExactlyWhatTheWriteVerbWillRead), and
 // TestBackupRunStagesWhereTheAgentSaysAndNowhereElse below pins the api to the
 // root it is told about.
+
+// TC-765-23: with StoreDataDir and SealDir set, MeasureIdentitySet adds the
+// store data tree, the seal files and the store CA, and is unchanged when
+// they are unset. PlanStaging's peak counts the staged store copy beside the
+// snapshot and refuses when free space is short of it, saying so.
+func TestStoreSizingAndTheStagingGuard(t *testing.T) {
+	dir := t.TempDir()
+	trust := filepath.Join(dir, "trust")
+	if err := os.MkdirAll(trust, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(trust, "mesh-ca.key"), strings.Repeat("k", 100))
+	base := MeasureIdentitySet(IdentitySources{TrustDir: trust}, 1000)
+
+	src := IdentitySources{TrustDir: trust, SealDir: filepath.Join(dir, "seal")}
+	// SealDir alone, with no StoreDataDir, measures no store.
+	writeSealFixture(t, src.SealDir, fixtureKeyID, fixtureSealKey("K1"))
+	writeStoreCAFixture(t, trust)
+	if got := MeasureIdentitySet(src, 1000); got != base {
+		t.Errorf("with no store data dir MeasureIdentitySet = %d, want the unchanged %d", got, base)
+	}
+	src.StoreDataDir = filepath.Join(dir, "openbao")
+	var dataBytes uint64
+	for _, b := range writeStoreDataFixture(t, src.StoreDataDir) {
+		dataBytes += uint64(len(b))
+	}
+	var storeFiles uint64
+	for _, f := range storeLiveMembers(src) {
+		st, err := os.Stat(f.abs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		storeFiles += uint64(st.Size())
+	}
+	if got, want := MeasureIdentitySet(src, 1000), base+dataBytes+storeFiles; got != want {
+		t.Errorf("MeasureIdentitySet = %d, want %d (set + data tree + seal files + store CA)", got, want)
+	}
+
+	b, err := PlanStaging(dir, 1<<20, 4<<20, 3<<20, 0, 0)
+	if err != nil {
+		t.Fatalf("a few megabytes should fit in a temp dir: %v", err)
+	}
+	if want := uint64(1<<20) + 3<<20 + 2*(4<<20); b.PeakBytes != want || b.StoreBytes != 3<<20 {
+		t.Errorf("budget = %+v, want peak %d with the store copy's 3 MiB", b, want)
+	}
+	_, err = PlanStaging(dir, 0, 0, 1<<60, 0, 0)
+	if !errors.Is(err, ErrStagingFull) || !strings.Contains(err.Error(), "staged copy of the secret store") {
+		t.Fatalf("an exabyte store copy = %v, want ErrStagingFull naming the store copy", err)
+	}
+}

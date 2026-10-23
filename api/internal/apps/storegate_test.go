@@ -185,7 +185,9 @@ func TestStoreGate_Redaction(t *testing.T) {
 	log, rec := logkittest.New()
 	hs := &healthStore{err: &secretstore.Error{Op: "health", Status: 503, Kind: secretstore.ErrSealed}}
 	m, err := storestate.New(storestate.Deps{Store: hs, Now: time.Now, Log: log,
-		JobRunning: func(context.Context, string) (bool, error) { return false, nil }})
+		JobRunning: func(context.Context, string) (bool, error) { return false, nil },
+		Blank:      func(context.Context) (bool, error) { return false, nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -258,6 +260,9 @@ func TestRestoreRoundTrip(t *testing.T) {
 		nodes:            []*proto.Node{replayNode(proto.RestoreReplayMinAgentVersion)},
 		restoreRPCBudget: 2 * time.Second,
 		restoreOutcomes:  map[string]restoreOutcome{"vaultwarden-data": {dropReplies: 1}},
+		// The secret store (#765): a fake running store over a real data
+		// tree, seal files and store CA, captured by the real step.
+		secretStore: newFakeSecretStore(),
 	})
 	h.agent.registerVolume(appRow.ID, "vaultwarden-data", volDir)
 	volumeBefore := dirSnapshot(t, volDir)
@@ -412,10 +417,55 @@ func TestRestoreRoundTrip(t *testing.T) {
 	for i := range priv {
 		priv[i] = 0
 	}
+	// TC-765-05: every store member is staged under restore-pending/store/
+	// and the store CA pair under restore-pending/trust/, byte-identical to
+	// its source, and the report lists each as restored.
+	storeSources := map[string]string{
+		storeSealKeyArchivePath: filepath.Join(h.sources.SealDir, storeSealKeyFileName),
+		storeSealHCLArchivePath: filepath.Join(h.sources.SealDir, storeSealFragmentName),
+		storeCAKeyArchivePath:   filepath.Join(h.sources.TrustDir, "store-ca.key"),
+		storeCACertArchivePath:  filepath.Join(h.sources.TrustDir, "store-ca.pem"),
+	}
+	_ = filepath.WalkDir(h.sources.StoreDataDir, func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			rel, _ := filepath.Rel(h.sources.StoreDataDir, p)
+			storeSources[storeDataArchivePrefix+filepath.ToSlash(rel)] = p
+		}
+		return nil
+	})
+	restoredPaths := map[string]bool{}
+	for _, e := range report.Restored {
+		restoredPaths[e.Path] = true
+	}
+	for arc, srcPath := range storeSources {
+		want, _ := os.ReadFile(srcPath)
+		got, err := os.ReadFile(filepath.Join(fresh, restorePendingDirName, filepath.FromSlash(arc)))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Errorf("staged %s is not its source's bytes: %v", arc, err)
+		}
+		if !restoredPaths[arc] {
+			t.Errorf("the report does not list %s as restored", arc)
+		}
+	}
+	if got := readString(t, filepath.Join(fresh, restorePendingDirName, filepath.FromSlash(storeVersionArchivePath))); got != fixtureBaoVer {
+		t.Errorf("staged %s = %q, want %q", storeVersionArchivePath, got, fixtureBaoVer)
+	}
+	if len(storeSources) < 8 || !restoredPaths[storeVersionArchivePath] {
+		t.Fatalf("the round trip carried too few store members: %v", storeSources)
+	}
+	// The store unit's own start step (#766) applies store/ and says so;
+	// without it the apply below refuses (TC-765-06).
+	writeTestFile(t, filepath.Join(fresh, restorePendingDirName, "store", storeAppliedMarkerName), "")
 	layout := RestoreLayout{DataDir: fresh, TrustDir: filepath.Join(fresh, "trust"), MeshStateDir: filepath.Join(fresh, "mesh")}
 	applied, ok, err := ApplyPendingRestore(layout)
 	if err != nil || !ok {
 		t.Fatalf("ApplyPendingRestore: %v %v", err, ok)
+	}
+	for _, f := range []string{"store-ca.key", "store-ca.pem"} {
+		want, _ := os.ReadFile(filepath.Join(h.sources.TrustDir, f))
+		if got := readString(t, filepath.Join(fresh, "trust", f)); got != string(want) {
+			t.Errorf("live trust/%s after the apply is not the archived one", f)
+		}
 	}
 
 	// --- the assertions ------------------------------------------------------
@@ -513,6 +563,25 @@ func TestRestoreRoundTrip(t *testing.T) {
 	for name, text := range map[string]string{"job ledger": ledger, "log": logs.String(), "restore record": string(rj)} {
 		if strings.Contains(text, key.privateB64()) || strings.Contains(text, key.privateHex()) || strings.Contains(text, vec.RecoveryCode) {
 			t.Fatalf("custody material reached the %s", name)
+		}
+	}
+	// TC-765-22: neither the seal key, nor the store CA's private key, nor a
+	// canary in the store's data reaches the job ledger (error, step
+	// results, events), the log, the backup run row or the restore report,
+	// raw, hex or base64.
+	runJSON, _ := json.Marshal(h.run(t, jobID))
+	prepJSON, _ := json.Marshal(report)
+	appliedJSON, _ := json.Marshal(applied)
+	sealKey, _ := os.ReadFile(filepath.Join(h.sources.SealDir, storeSealKeyFileName))
+	for what, secretBytes := range map[string][]byte{"seal key": sealKey, "store CA key": []byte(fixtureStoreCAKey), "store data canary": []byte(fixtureDataCanary)} {
+		forms := []string{string(secretBytes), hex.EncodeToString(secretBytes), base64.StdEncoding.EncodeToString(secretBytes), base64.RawURLEncoding.EncodeToString(secretBytes)}
+		for name, text := range map[string]string{"job ledger": ledger, "log": logs.String(), "run row": string(runJSON),
+			"prepared report": string(prepJSON), "applied report": string(appliedJSON), "restore record": string(rj)} {
+			for _, f := range forms {
+				if strings.Contains(text, f) {
+					t.Fatalf("the %s reached the %s", what, name)
+				}
+			}
 		}
 	}
 

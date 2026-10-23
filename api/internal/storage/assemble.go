@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -33,6 +34,9 @@ import (
 //	<trustDir>/app-secret.seed   the app-secret seed — every generated app
 //	                            credential derives from it and nothing else can
 //	<dataDir>/mesh/headscale/    tailnet identity; nodes stay enrolled
+//	the secret store (#765)      store/data/ (a cold copy), store/seal-key,
+//	                            store/seal.hcl, store/openbao-version and
+//	                            trust/store-ca.{key,pem}; version 3 only
 //
 // Every one of those is a local file on the controlplane, sealed HERE by the
 // api to the target's public key.
@@ -71,7 +75,18 @@ import (
 // directory (appVolumes.volumes[].member), not `app-volumes/` entries inside
 // the identity archive. A version-1 generation holds its volumes inside the
 // archive; a version-2 one holds none there.
-const ManifestVersion = 2
+//
+// 3 (geekdojo/geekdojo-brain#765, S15 part 6): the secret store's members are
+// mandatory — store/data/, store/seal-key, store/seal.hcl,
+// store/openbao-version and trust/store-ca.{key,pem}. Versions 1 and 2 are
+// pre-store: a restore of one keeps the cluster's current store, seal key and
+// store CA. Only an archive assembled with a store capture is version 3, and
+// a run with a store wired never writes a version-2 one.
+const ManifestVersion = 3
+
+// manifestVersionPreStore is what an archive with no store capture is
+// written as: a cluster with no secret store backs up exactly as before.
+const manifestVersionPreStore = 2
 
 // IdentitySources says where on this controlplane the §4.5 identity set lives.
 //
@@ -87,6 +102,12 @@ type IdentitySources struct {
 	// BusDir is <dataDir>/bus; its bus.key is the key every node pins the bus
 	// by (geekdojo/geekdojo-brain#448).
 	BusDir string
+	// StoreDataDir is the secret store's data directory (<dataDir>/openbao)
+	// and SealDir the seal directory holding seal-key and seal.hcl. Both are
+	// set only when a store backend is requested; the store CA is read from
+	// TrustDir beside them (#765).
+	StoreDataDir string
+	SealDir      string
 }
 
 // ManifestEntry is one file captured into an archive.
@@ -370,6 +391,7 @@ var identityExclusions = []string{
 	"IDS JSONL — bounded and re-accumulates",
 	"the backup staging directory itself — an archive containing the previous archive fills disks",
 	"the secret store's audit log (`openbao-audit/`) — S11: audit does not survive a restore",
+	"the secret store's server and client leaves (`tls/openbao-server/`, `tls/openbao-client/`) — re-minted from the restored store CA at the next start",
 }
 
 // MeasureIdentitySet reports the total size of the §4.5 identity set on disk,
@@ -386,16 +408,10 @@ func MeasureIdentitySet(src IdentitySources, dbBytes uint64) uint64 {
 			total += byteCount(info.Size())
 		}
 	}
-	_ = filepath.WalkDir(headscaleDir(src), func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // an unreadable subtree contributes zero, it does not fail an estimate
-		}
-		if info, ierr := d.Info(); ierr == nil && info.Mode().IsRegular() {
-			total += byteCount(info.Size())
-		}
-		return nil
-	})
-	return total
+	if hs := headscaleDir(src); hs != "" {
+		total += treeBytes(hs)
+	}
+	return total + storeIdentityBytes(src)
 }
 
 type trustFile struct {
@@ -516,6 +532,17 @@ type AssembleOptions struct {
 	// on the platter and the scope inside the seal can never be two different
 	// decisions.
 	Scope string
+	// StoreCapture is snapshot_store's staged copy. Set, the archive is
+	// version 3 and carries the store; nil, it is version 2 (#765).
+	StoreCapture *StoreCapture
+}
+
+// StoreCapture is the staged store tar and the seal key id recorded when it
+// was taken. Assemble reads the seal files and the store CA live, and
+// refuses when the live fragment names another key id.
+type StoreCapture struct {
+	Path  string
+	KeyID string
 }
 
 // Assemble writes the identity set plus the manifest to dst as a tar, and
@@ -542,6 +569,9 @@ type AssembleOptions struct {
 //	trust/mesh-ca.{key,pem}
 //	bus/bus.key
 //	bus/revoked.json                      revocation tombstones, when any exist
+//	store/data/..., store/openbao-version the secret store's cold copy (version 3)
+//	store/seal-key, store/seal.hcl        read live, under the capture lock
+//	trust/store-ca.{key,pem}
 //	mesh/headscale/...
 //
 // The app volumes are NOT in here. Each is its own sealed member beside this
@@ -565,6 +595,11 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 		// required marks a file whose absence fails the assembly rather than
 		// being recorded as absent.
 		required bool
+		// fromCapture marks an entry of the staged store tar, hashed in pass
+		// one and streamed from the tar in pass two.
+		fromCapture bool
+		size        int64
+		sha256      string
 	}
 	members := []member{{
 		abs:      opts.SnapshotPath,
@@ -574,6 +609,38 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	}}
 	for _, f := range trustFiles(opts.Sources) {
 		members = append(members, member{abs: f.abs, arc: f.arc, note: f.note})
+	}
+	version := manifestVersionPreStore
+	if sc := opts.StoreCapture; sc != nil {
+		version = ManifestVersion
+		if strings.TrimSpace(opts.Sources.SealDir) == "" || strings.TrimSpace(opts.Sources.TrustDir) == "" {
+			return nil, errStoreCaptureNotConfigured
+		}
+		captured, err := readStoreCapture(sc.Path)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%v)", errStoreCaptureMissing, err)
+		}
+		for _, c := range captured {
+			note := storeDataNote
+			if c.arc == storeVersionArchivePath {
+				note = storeVersionNote
+			}
+			members = append(members, member{abs: sc.Path, arc: c.arc, note: note, fromCapture: true, size: c.size, sha256: c.sha256})
+		}
+		frag, err := os.ReadFile(filepath.Join(opts.Sources.SealDir, storeSealFragmentName))
+		if err != nil {
+			return nil, fmt.Errorf("%w (%v)", errStoreCaptureSealUnreadable, err)
+		}
+		live, err := sealrotate.CurrentKeyID(frag)
+		if err != nil {
+			return nil, fmt.Errorf("%w (%v)", errStoreCaptureSealUnreadable, err)
+		}
+		if string(live) != sc.KeyID {
+			return nil, errStoreCaptureKeyIDChanged
+		}
+		for _, f := range storeLiveMembers(opts.Sources) {
+			members = append(members, member{abs: f.abs, arc: f.arc, note: f.note, required: true})
+		}
 	}
 	hsDir := headscaleDir(opts.Sources)
 	if hsDir != "" {
@@ -627,7 +694,7 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	}
 
 	m := &Manifest{
-		ManifestVersion: ManifestVersion,
+		ManifestVersion: version,
 		GenerationID:    opts.GenerationID,
 		JobID:           opts.JobID,
 		ClusterID:       opts.ClusterID,
@@ -651,6 +718,11 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	// reader can trust before it has seen the payload, and the identity set is
 	// small enough for that to be the right trade.
 	for _, mem := range members {
+		if mem.fromCapture {
+			m.Entries = append(m.Entries, ManifestEntry{Path: mem.arc, SizeBytes: mem.size, SHA256: mem.sha256, Note: mem.note})
+			m.PlaintextBytes += mem.size
+			continue
+		}
 		info, err := os.Stat(mem.abs)
 		if err != nil {
 			if mem.required {
@@ -688,18 +760,31 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	if err := writeTarBytes(tw, proto.BackupManifestFile, manifestJSON, now); err != nil {
 		return nil, err
 	}
+	var capture *captureStream
+	defer func() { capture.close() }()
 	for _, e := range m.Entries {
-		abs := ""
-		for _, mem := range members {
-			if mem.arc == e.Path {
-				abs = mem.abs
+		var src *member
+		for i := range members {
+			if members[i].arc == e.Path {
+				src = &members[i]
 				break
 			}
 		}
-		if abs == "" {
+		if src == nil {
 			return nil, fmt.Errorf("internal: no source for manifest entry %s", e.Path)
 		}
-		if err := writeTarFile(tw, e.Path, abs, e.SizeBytes, now); err != nil {
+		if src.fromCapture {
+			if capture == nil {
+				if capture, err = openCaptureStream(src.abs); err != nil {
+					return nil, fmt.Errorf("%w (%v)", errStoreCaptureMissing, err)
+				}
+			}
+			if err := capture.copyNext(tw, e, now); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if err := writeTarFile(tw, e.Path, src.abs, e.SizeBytes, now); err != nil {
 			return nil, err
 		}
 	}
@@ -778,9 +863,63 @@ func fileSHA256(path string) (string, error) {
 		return "", err
 	}
 	defer func() { _ = f.Close() }()
+	sum, _, err := hashReader(f)
+	return sum, err
+}
+
+// hashReader is the lower-case hex sha256 of r and how many bytes it held.
+func hashReader(r io.Reader) (string, int64, error) {
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	n, err := io.Copy(h, r)
+	if err != nil {
+		return "", n, err
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// captureStream is assemble's second pass over the staged store tar: its
+// entries are copied into the archive in the order pass one hashed them, each
+// re-hashed on the way and refused if it changed.
+type captureStream struct {
+	f  *os.File
+	tr *tar.Reader
+}
+
+func openCaptureStream(p string) (*captureStream, error) {
+	f, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	return &captureStream{f: f, tr: tar.NewReader(f)}, nil
+}
+
+func (c *captureStream) close() {
+	if c != nil {
+		_ = c.f.Close()
+	}
+}
+
+// copyNext copies the store tar's next entry into tw as e.
+func (c *captureStream) copyNext(tw *tar.Writer, e ManifestEntry, now time.Time) error {
+	hdr, err := c.tr.Next()
+	if err != nil {
+		return fmt.Errorf("%w (%v)", errStoreCaptureMissing, err)
+	}
+	if hdr.Name != e.Path || hdr.Size != e.SizeBytes {
+		return fmt.Errorf("the staged secret store copy changed while the archive was being built (%s); refusing to write an archive whose own manifest does not verify", e.Path)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: e.Path, Mode: 0o600, Size: e.SizeBytes, ModTime: now, Typeflag: tar.TypeReg,
+	}); err != nil {
+		return err
+	}
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tw, h), io.LimitReader(c.tr, e.SizeBytes))
+	if err != nil {
+		return err
+	}
+	if n != e.SizeBytes || hex.EncodeToString(h.Sum(nil)) != e.SHA256 {
+		return fmt.Errorf("the staged secret store copy changed while the archive was being built (%s); refusing to write an archive whose own manifest does not verify", e.Path)
+	}
+	return nil
 }

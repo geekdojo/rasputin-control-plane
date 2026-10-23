@@ -132,6 +132,9 @@ func assembledMembers(t *testing.T) (IdentitySources, []string) {
 	}
 	snap := filepath.Join(dir, "snapshot.db")
 	writeTestFile(t, snap, "FIXTURE-SNAPSHOT")
+	// The secret store's members (#765): its data tree, the seal files and
+	// the store CA, captured as a backup run captures them.
+	src = storeSources(t, dir, src)
 
 	var buf bytes.Buffer
 	if _, err := Assemble(&buf, AssembleOptions{
@@ -141,6 +144,7 @@ func assembledMembers(t *testing.T) (IdentitySources, []string) {
 		ClusterID:    "home1",
 		KeyID:        "key-1",
 		Scope:        proto.BackupScopeFull,
+		StoreCapture: stageStoreFixture(t, src, fixtureKeyID),
 	}); err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
@@ -236,6 +240,36 @@ func TestRestoreCoverageFixtureIsComplete(t *testing.T) {
 	}
 	if len(members) == 0 || members[0] != proto.BackupManifestFile {
 		t.Errorf("first member is not %s: %v", proto.BackupManifestFile, members)
+	}
+}
+
+// TC-765-04: the reflection fixture fills StoreDataDir and SealDir, every
+// store member of the real archive maps through identityRestorePath and an
+// apply rule, and a store-shaped member added with no mapping or no rule
+// fails the gate with the member named.
+func TestStoreMembersHaveARestorePath(t *testing.T) {
+	src, members := assembledMembers(t)
+	if src.StoreDataDir == "" || src.SealDir == "" {
+		t.Fatalf("the coverage fixture leaves a store source empty: %+v", src)
+	}
+	want := []string{storeSealKeyArchivePath, storeSealHCLArchivePath, storeVersionArchivePath, storeCAKeyArchivePath, storeCACertArchivePath}
+	data := 0
+	for _, m := range members {
+		if strings.HasPrefix(m, storeDataArchivePrefix) {
+			data++
+		}
+	}
+	if data != 4 {
+		t.Errorf("%d store/data/ members, want the fixture's 4: %v", data, members)
+	}
+	for _, w := range want {
+		if !slices.Contains(members, w) {
+			t.Errorf("the fixture archive holds no %s: %v", w, members)
+		}
+	}
+	for _, extra := range []string{"store/unmapped-member", "trust/store-ca.srl"} {
+		problems := checkRestoreCoverage(append(slices.Clone(members), extra), identityRestorePath, identityApplyRules(), restoreAllowlist)
+		wantOneProblem(t, problems, extra)
 	}
 }
 

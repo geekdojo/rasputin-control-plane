@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -167,6 +168,10 @@ func (s *Server) handleRestore(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, storage.ErrRestoreSealBusy):
+			// The guard's sentence names no path; its cause is in the
+			// guard's own WARN record (ERR-BOUNDARY).
+			s.writeCodedError(w, r, http.StatusConflict, codeRestoreSealBusy, err.Error(), slog.String("err", err.Error()))
 		case errors.Is(err, storage.ErrRestoreKeyMismatch):
 			writeError(w, http.StatusForbidden, err.Error())
 		case errors.Is(err, storage.ErrRestorePending):

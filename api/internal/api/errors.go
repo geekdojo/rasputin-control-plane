@@ -31,6 +31,10 @@ const (
 	// codeFirewallStateUnavailable: the firewall's desired or recorded state
 	// could not be read, so whether it is pending or drifted is unknown.
 	codeFirewallStateUnavailable = "firewall_state_unavailable"
+	// codeRestoreSealBusy: a restore was refused because a seal-key rotation
+	// holds the backup capture lock, or the seal files are not settled
+	// (geekdojo/geekdojo-brain#765).
+	codeRestoreSealBusy = "restore_seal_busy"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

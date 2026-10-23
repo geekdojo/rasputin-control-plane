@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
 // The second half of the restore: becoming the restored cluster.
@@ -95,6 +96,11 @@ const (
 	// applyMerge is not moved into place: it is merged after every move has
 	// succeeded.
 	applyMerge
+	// applyStoreUnit is the secret store's data and seal files, matched by
+	// prefix. The api moves none of them: the store unit's root pre-start
+	// step does (#766), before the api starts, and leaves
+	// restore-pending/store/applied when it has (S15 part 5).
+	applyStoreUnit
 )
 
 // applyRule is one row of the restore's placement table: an archive path, or
@@ -109,7 +115,7 @@ type applyRule struct {
 // or by prefix for a tree rule. ApplyPendingRestore and the coverage gate in
 // restore_coverage_test.go both match through it.
 func (r applyRule) matches(p string) bool {
-	if r.kind == applyReplaceTree {
+	if r.kind == applyReplaceTree || r.kind == applyStoreUnit {
 		return strings.HasPrefix(p, r.archive)
 	}
 	return p == r.archive
@@ -155,8 +161,30 @@ func identityApplyRules() []applyRule {
 		// Not moved into place: merged, after every move has succeeded.
 		{archive: busTombstonesArchivePath, kind: applyMerge, live: func(d restoreDirs) string { return filepath.Join(d.bus, busauth.TombstoneFileName) }},
 		{archive: "mesh/headscale/", kind: applyReplaceTree, live: func(d restoreDirs) string { return filepath.Join(d.mesh, "headscale") }},
+		// The store CA, placed by the api with move-aside and rollback like
+		// the controlplane CA (#765). The store picks it up through the leaf
+		// sweep's re-mint, which restarts the store. #766's hook must not
+		// move it.
+		{archive: storeCAKeyArchivePath, kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.trust, tlsca.StoreKeyFile) }},
+		{archive: storeCACertArchivePath, kind: applyReplace, live: func(d restoreDirs) string { return filepath.Join(d.trust, tlsca.StoreCertFile) }},
+		// The store's data, seal key, seal fragment and version member:
+		// staged, and applied by the store unit's own start step, never
+		// moved by the api.
+		{archive: storeUnitArchivePrefix, kind: applyStoreUnit},
 	}
 }
+
+// caPairs are the identity files that are restored both or neither:
+// tlsca.Ensure refuses half a CA.
+var caPairs = []struct{ key, cert, name string }{
+	{key: "trust/mesh-ca.key", cert: "trust/mesh-ca.pem", name: "controlplane CA"},
+	{key: storeCAKeyArchivePath, cert: storeCACertArchivePath, name: "store CA"},
+}
+
+// errStoreNotApplied is the start-time refusal when a staged store restore
+// was not applied by the store unit's own start step.
+const errStoreNotApplied = "the restore staged the secret store, and the store's own start step has not applied it, so this api refuses to start on a fresh store. " +
+	"Reboot the control plane to apply it. If this message returns after a reboot, the store's apply step failed: the openbao.service journal names why; restore-pending/ is untouched"
 
 // ApplyPendingRestore looks for a prepared restore under the data dir and, if
 // one is there, swaps its files into place. It returns the report with
@@ -214,6 +242,7 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 	var targets, trees []target
 	treeSeen := map[string]bool{}
 	var merges []applyRule
+	storeStaged := false
 	rules := identityApplyRules()
 	for _, e := range report.Restored {
 		r, ok := matchRule(rules, e.Path)
@@ -235,18 +264,31 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			}
 		case applyMerge:
 			merges = append(merges, r)
+		case applyStoreUnit:
+			storeStaged = true
 		}
 	}
 	targets = append(targets, trees...)
-	// The controlplane CA is a pair; tlsca.Ensure refuses a half. Restore both or
+	// Each CA is a pair; tlsca.Ensure refuses a half. Restore both or
 	// neither.
-	hasKey, hasPem := false, false
-	for _, t := range targets {
-		hasKey = hasKey || t.staged == "trust/mesh-ca.key"
-		hasPem = hasPem || t.staged == "trust/mesh-ca.pem"
+	for _, pair := range caPairs {
+		hasKey, hasPem := false, false
+		for _, t := range targets {
+			hasKey = hasKey || t.staged == pair.key
+			hasPem = hasPem || t.staged == pair.cert
+		}
+		if hasKey != hasPem {
+			return nil, false, fmt.Errorf("%w: the restore holds one half of the %s and not the other", ErrRestoreApplyFailed, pair.name)
+		}
 	}
-	if hasKey != hasPem {
-		return nil, false, fmt.Errorf("%w: the restore holds one half of the controlplane CA and not the other", ErrRestoreApplyFailed)
+	// A staged store restore the store's own start step did not apply is
+	// fatal: coming up would put a restored database over a fresh store
+	// (S15 part 5).
+	if storeStaged {
+		marker := filepath.Join(pending, strings.TrimSuffix(storeUnitArchivePrefix, "/"), storeAppliedMarkerName)
+		if st, err := os.Lstat(marker); err != nil || !st.Mode().IsRegular() {
+			return nil, false, fmt.Errorf("%w: %s", ErrRestoreApplyFailed, errStoreNotApplied)
+		}
 	}
 
 	// Created only once every entry has a rule and the CA pair is whole, so a

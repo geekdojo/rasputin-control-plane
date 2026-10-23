@@ -90,6 +90,9 @@ type fixture struct {
 	m       *Monitor
 	running map[string]bool
 	runErr  error
+	// blank and blankErr are the blank verdict Deps.Blank reports.
+	blank    bool
+	blankErr error
 }
 
 func newFixture(t *testing.T, h secretstore.Health, err error) *fixture {
@@ -98,7 +101,7 @@ func newFixture(t *testing.T, h secretstore.Health, err error) *fixture {
 	f.log, f.rec = logkittest.New()
 	m, merr := New(Deps{Store: f.store, Now: f.clock.now, Log: f.log, JobRunning: func(_ context.Context, id string) (bool, error) {
 		return f.running[id], f.runErr
-	}})
+	}, Blank: func(context.Context) (bool, error) { return f.blank, f.blankErr }})
 	if merr != nil {
 		t.Fatal(merr)
 	}

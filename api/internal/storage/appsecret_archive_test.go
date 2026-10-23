@@ -262,7 +262,7 @@ func assertSeedRefused(t *testing.T, h *restoreHarness, want string) {
 // every member the restore saw and did not put back.
 func TestIdentityRestoreWarning(t *testing.T) {
 	const clause = "NOT put back"
-	empty := identityRestoreWarning([]NotRestoredItem{})
+	empty := identityRestoreWarning(ManifestVersion, []NotRestoredItem{})
 	t.Run("empty list", func(t *testing.T) {
 		if !strings.Contains(empty, "the app-secret seed") || !strings.Contains(empty, "APP DATA WAS NOT RESTORED") {
 			t.Errorf("standing text = %q, want it to name the app-secret seed and say APP DATA WAS NOT RESTORED", empty)
@@ -272,7 +272,7 @@ func TestIdentityRestoreWarning(t *testing.T) {
 		}
 	})
 	t.Run("two items", func(t *testing.T) {
-		got := identityRestoreWarning([]NotRestoredItem{{Path: "a/x", Reason: "r"}, {Path: "b/y", Reason: "r"}})
+		got := identityRestoreWarning(ManifestVersion, []NotRestoredItem{{Path: "a/x", Reason: "r"}, {Path: "b/y", Reason: "r"}})
 		if !strings.HasPrefix(got, empty) {
 			t.Errorf("the standing text is not kept: %q", got)
 		}
@@ -282,7 +282,7 @@ func TestIdentityRestoreWarning(t *testing.T) {
 		}
 	})
 	t.Run("nil", func(t *testing.T) {
-		if got := identityRestoreWarning(nil); got != empty {
+		if got := identityRestoreWarning(ManifestVersion, nil); got != empty {
 			t.Errorf("nil gives %q, want the empty-list text %q", got, empty)
 		}
 	})

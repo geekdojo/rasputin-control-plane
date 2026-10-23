@@ -67,6 +67,15 @@ func (w sealRotate) captureLock() storage.CaptureLock {
 	return w.gate
 }
 
+// sealGuard is the restore's seal check: the gate under openbao, nil (no
+// check) otherwise. A nil *Gate is never handed over as a non-nil interface.
+func (w sealRotate) sealGuard() storage.SealGuard {
+	if w.gate == nil {
+		return nil
+	}
+	return w.gate
+}
+
 // storeAlerts is the alert source SetStoreAlerts receives: readiness's,
 // joined with the incomplete-rotation alert under openbao. Nil when there is
 // no readiness source.

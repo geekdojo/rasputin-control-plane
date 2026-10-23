@@ -8,7 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -382,5 +385,58 @@ func TestListRestoresIsAuthenticatedAndReadsTheLedger(t *testing.T) {
 	var rows []storage.RestoreReport
 	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil || len(rows) != 1 || rows[0].ID != "rs-1" {
 		t.Fatalf("rows = %+v (%v)", rows, err)
+	}
+}
+
+// sealBusyGuard refuses every restore with a seal-rotation sentence.
+type sealBusyGuard struct{ sentence string }
+
+func (g sealBusyGuard) CheckRestore() error { return errors.New(g.sentence) }
+
+// TC-765-14 (F-765-02): while the seal guard refuses — a rotation holds the
+// gate, the seal tree is not Clean, it cannot be read — POST /api/restore
+// answers 409 with the stable code restore_seal_busy, a correlation id and
+// the guard's sentence, which names no path; the WARN under that id carries
+// the cause; and the data dir holds no staging and no restore-pending/.
+func TestRestoreRefusedWhileTheSealIsBusy(t *testing.T) {
+	for _, sentence := range []string{
+		"A seal-key rotation is running, so this restore did not start. Nothing was changed; start the restore again once the rotation finishes.",
+		"A seal-key rotation has not finished, so this restore did not start. Nothing was changed; start the seal-key rotation again to finish it, then start the restore.",
+		"The seal key files could not be checked, so this restore did not start. Nothing was changed; the api log names the defect.",
+	} {
+		rf := newRestoreFixture(t)
+		logger, rec := logkittest.New()
+		rf.srv.log = logger
+		rf.srv.SetRestore(&storage.RestoreConfig{NC: rf.nc, SelfNodeID: rtNodeID, DataDir: rf.dataDir, ClusterID: "home1",
+			SealGuard: sealBusyGuard{sentence: sentence}}, func() { rf.restarts.Add(1) })
+		w := rf.do(t, http.MethodPost, "/api/restore", map[string]string{
+			"partUuid": rtPartUUID, "generationId": rf.genID, "keyId": rtKeyID, "privateKey": rf.privB64(),
+		})
+		if w.Code != http.StatusConflict {
+			t.Fatalf("%d %s, want 409", w.Code, w.Body.String())
+		}
+		var body codedError
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Code != "restore_seal_busy" || body.CorrelationID == "" || body.Error != sentence || strings.Contains(body.Error, "/") {
+			t.Fatalf("body = %+v, want restore_seal_busy, a correlation id and the guard's sentence", body)
+		}
+		warns := rec.Matching(slog.LevelWarn, "request refused")
+		if len(warns) != 1 {
+			t.Fatalf("WARN records:\n%s", rec.Text())
+		}
+		if id, _ := logkittest.Attr(warns[0], "correlation_id"); id != body.CorrelationID {
+			t.Errorf("the WARN's correlation id %q is not the response's %q", id, body.CorrelationID)
+		}
+		if cause, _ := logkittest.Attr(warns[0], "err"); cause == "" {
+			t.Error("the WARN carries no cause")
+		}
+		if ents, _ := os.ReadDir(rf.dataDir); len(ents) != 0 {
+			t.Fatalf("data dir written: %v", ents)
+		}
+		if rf.restarts.Load() != 0 {
+			t.Fatal("a refused restore asked for a restart")
+		}
 	}
 }

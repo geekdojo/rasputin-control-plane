@@ -4,13 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -247,4 +254,128 @@ func startStoreSweep(ctx context.Context, sweeper *tlsca.LeafSweeper, logger *sl
 		})
 	}()
 	return done
+}
+
+// storeDataDirName is the secret store's data directory under the data dir,
+// where rasputin-os's openbao.service keeps its PebbleDB storage.
+const storeDataDirName = "openbao"
+
+// storeDataPresent reports whether the store's data directory holds anything.
+// A directory that cannot be read is present: the CA guard and the
+// empty-store marker both fail closed on it (#765).
+func storeDataPresent(dir string) bool {
+	ents, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	return err != nil || len(ents) > 0
+}
+
+// backupSources adds the store's data and seal directories to the backup's
+// identity sources when the store is captured (#765).
+func backupSources(src storage.IdentitySources, captured storage.SecretStore, storeDataDir string) storage.IdentitySources {
+	if captured != nil {
+		src.StoreDataDir = storeDataDir
+		src.SealDir = sealrotate.ProductionSealDir
+	}
+	return src
+}
+
+// sealTree is the one seal-files call the backup's adapter makes.
+type sealTree interface {
+	State() (sealrotate.Tree, error)
+}
+
+// storeBackupControl is storage.SecretStore over the composition root's
+// collaborators (#765): the readiness monitor's state and quiesce, the
+// store's sys/health, the seal files, and the store unit through systemctl.
+type storeBackupControl struct {
+	monitor *storestate.Monitor
+	health  secretstore.HealthReader
+	seal    sealTree
+	run     runFunc
+	start   func(context.Context, tlsca.LeafPaths) error
+	wait    time.Duration
+	log     *slog.Logger
+}
+
+// storeBackupWiring builds the backup's view of the store when a backend
+// other than the mock is requested, a refused one included: its monitor
+// reads unreachable, so every backup fails closed until it is fixed. With
+// nothing or the mock requested it returns nil: no store step, and a
+// version-2 archive.
+func storeBackupWiring(requested string, monitor *storestate.Monitor, health secretstore.HealthReader, seal sealTree,
+	run runFunc, afterStoreRestart func(context.Context), log *slog.Logger) (storage.SecretStore, error) {
+	if requested == "" || requested == storeModeMock {
+		return nil, nil
+	}
+	switch {
+	case monitor == nil:
+		return nil, errors.New("store backup: the readiness monitor is nil")
+	case health == nil || seal == nil || run == nil || afterStoreRestart == nil || log == nil:
+		return nil, errors.New("store backup: a collaborator is nil")
+	}
+	return &storeBackupControl{monitor: monitor, health: health, seal: seal, run: run,
+		start: restartStoreUnit(run, afterStoreRestart), wait: sealrotate.UnsealWait, log: log}, nil
+}
+
+// Readiness is "" when the monitor reads the store ready, else its clause.
+func (c *storeBackupControl) Readiness(ctx context.Context) (string, error) {
+	st, err := c.monitor.State(ctx)
+	if err != nil {
+		return "", err
+	}
+	if st == storestate.Ready {
+		return "", nil
+	}
+	return storestate.Clause(st), nil
+}
+
+// SealKeyID is the Clean fragment's key id; any other shape refuses.
+func (c *storeBackupControl) SealKeyID() (string, error) {
+	tree, err := c.seal.State()
+	if err != nil {
+		return "", err
+	}
+	if tree.Fragment.Shape != sealrotate.Clean {
+		return "", fmt.Errorf("the seal fragment is %s, not clean", tree.Fragment.Shape)
+	}
+	return tree.Fragment.Current.String(), nil
+}
+
+// Version is the running store's release from sys/health.
+func (c *storeBackupControl) Version(ctx context.Context) (string, error) {
+	h, err := c.health.Health(ctx)
+	if kind := secretstore.InactiveReason(h, err); kind != "" {
+		return "", fmt.Errorf("the secret store is %s", kind)
+	}
+	return h.Version, nil
+}
+
+// Stop stops the store unit for the backup's cold copy.
+func (c *storeBackupControl) Stop(ctx context.Context) error {
+	c.log.InfoContext(ctx, "secret store stopping for a backup", "component", "secretstore",
+		"event", "secretstore.backup_stop", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit)
+	if out, err := c.run(ctx, "systemctl", "stop", storeUnit); err != nil {
+		return fmt.Errorf("systemctl stop %s: %w: %s", storeUnit, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// Start starts it again through the server leaf's own restart, which runs
+// the after-restart outcome read (F-765-10).
+func (c *storeBackupControl) Start(ctx context.Context) error {
+	c.log.InfoContext(ctx, "secret store starting after a backup", "component", "secretstore",
+		"event", "secretstore.backup_start", "job_id", jobs.JobIDFromContext(ctx), "unit", storeUnit)
+	return c.start(ctx, tlsca.LeafPaths{})
+}
+
+// WaitReady waits for sys/health to answer 200 unsealed (K24).
+func (c *storeBackupControl) WaitReady(ctx context.Context) error {
+	return secretstore.WaitReady(ctx, c.health, c.wait)
+}
+
+// Quiesce holds the store quiesced for the backup.
+func (c *storeBackupControl) Quiesce(jobID string) func() {
+	return c.monitor.Quiesce(jobID, storestate.QuiesceBackup)
 }

@@ -15,6 +15,8 @@
 // outcome that does not alert. No timer is involved.
 package osoutcome
 
+import "context"
+
 // Verdict is what an outcome word means.
 type Verdict int
 
@@ -49,6 +51,12 @@ var keyFields = map[string]bool{FieldBootID: true, FieldRunID: true}
 
 // Source declares one outcome record.
 type Source struct {
+	// Observe, when set, is given each record of this source that parses,
+	// after it is recorded, at start and after each store restart. It is
+	// never called for an absent, unreadable or malformed record. The secret
+	// store's empty-store marker is the one consumer
+	// (geekdojo/geekdojo-brain#765, storemarker.Marker.ObserveInit).
+	Observe func(ctx context.Context, rec Record)
 	// Kind is the job kind, for example os.seal_key.
 	Kind string
 	// Path is the record file.

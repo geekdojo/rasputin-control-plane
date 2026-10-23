@@ -118,7 +118,27 @@ var (
 	// message names which. Nothing outside the staging directory was written,
 	// and the staging directory is gone.
 	ErrRestoreArchive = errors.New("the archive did not pass verification")
+	// ErrRestoreSealBusy — RestoreConfig.SealGuard refused: a seal-key
+	// rotation holds the capture lock, or the seal files are not Clean or
+	// cannot be read (#765, AC8). Nothing was read or written. The error's
+	// text is the guard's own sentence (RestoreSealBusyError).
+	ErrRestoreSealBusy = errors.New("the seal key is being rotated or is not settled")
 )
+
+// RestoreSealBusyError is a SealGuard refusal. Its Error() is the guard's
+// sentence, which names no path; it matches ErrRestoreSealBusy.
+type RestoreSealBusyError struct{ Reason error }
+
+func (e *RestoreSealBusyError) Error() string        { return e.Reason.Error() }
+func (e *RestoreSealBusyError) Unwrap() error        { return e.Reason }
+func (e *RestoreSealBusyError) Is(target error) bool { return target == ErrRestoreSealBusy }
+
+// SealGuard is the seal-key rotation's restore check (ARCH-ISP):
+// sealrotate.Gate implements it.
+type SealGuard interface {
+	// CheckRestore returns nil when a restore may be staged, or a sentence.
+	CheckRestore() error
+}
 
 // RestoreConfig is the environment a restore runs in.
 type RestoreConfig struct {
@@ -144,6 +164,10 @@ type RestoreConfig struct {
 	// MISSING since …" rather than showing an empty list. A fresh
 	// replacement controlplane has no ledger and no such rows.
 	Store *Store
+	// SealGuard refuses a restore while a seal-key rotation runs or the seal
+	// files are not Clean (#765). Nil means no secret store is wired and
+	// nothing is checked.
+	SealGuard SealGuard
 }
 
 // ClaimedTargetAbsent is a claimed target the candidate scan did not find
@@ -313,6 +337,17 @@ type RestoreReport struct {
 	TrustRedelivery *TrustRedeliveryRecord `json:"trustRedelivery,omitempty"`
 }
 
+// RestoredStore reports whether this restore staged the secret store's
+// members, which the empty-store marker re-bases on (#765).
+func (r *RestoreReport) RestoredStore() bool {
+	for _, e := range r.Restored {
+		if strings.HasPrefix(e.Path, storeUnitArchivePrefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // TrustRedeliveryRecord is the controlplane-CA re-delivery an identity restore
 // kicked (mesh converge_trust), as the report records it. An identity
 // restore swaps the controlplane CA under every node enrolled since the box was
@@ -344,22 +379,32 @@ type TrustRedeliveryRecord struct {
 
 // restoreWarning is the report's standing caveat.
 const restoreWarning = "This restore put back the control-plane IDENTITY SET only — the database (users and passkeys, node bus tokens, app declarations, mesh intents), " +
-	"the controlplane CA, the bus key, Headscale state and the app-secret seed. Every operator device, user and node re-authenticates with no ceremony. " +
+	"the controlplane CA, the bus key, Headscale state and the app-secret seed, and from an archive that carries it, the secret store with its seal key and store CA. " +
+	"Every operator device, user and node re-authenticates with no ceremony. " +
 	"APP DATA WAS NOT RESTORED: every app volume the generation holds is listed by name under appVolumesPresent and is still on the backup disk, sealed. " +
 	"Restoring app volumes to the nodes that host them is a later phase. Do not read this record as a full restore of the cluster."
 
-// identityRestoreWarning is the report's warning: the standing caveat, and
-// then every archive member this restore saw and did not put back, by path,
-// so a skipped member is named rather than hidden in a green report.
-func identityRestoreWarning(notRestored []NotRestoredItem) string {
+// restoreKeptStoreWarning is added for a pre-store (version 1 or 2) archive:
+// it carries no store, so the restore keeps the one the cluster has (#765).
+const restoreKeptStoreWarning = " This archive predates the secret store, so the cluster's current secret store, seal key and store CA were kept."
+
+// identityRestoreWarning is the report's warning: the standing caveat, the
+// store-kept sentence for a pre-store archive, and then every archive member
+// this restore saw and did not put back, by path, so a skipped member is
+// named rather than hidden in a green report.
+func identityRestoreWarning(manifestVersion int, notRestored []NotRestoredItem) string {
+	w := restoreWarning
+	if manifestVersion < ManifestVersion {
+		w += restoreKeptStoreWarning
+	}
 	if len(notRestored) == 0 {
-		return restoreWarning
+		return w
 	}
 	paths := make([]string, 0, len(notRestored))
 	for _, n := range notRestored {
 		paths = append(paths, n.Path)
 	}
-	return restoreWarning + " Present in the archive and NOT put back: " + strings.Join(paths, ", ") + "."
+	return w + " Present in the archive and NOT put back: " + strings.Join(paths, ", ") + "."
 }
 
 // identityRestorePath reports whether an archive member path is part of the
@@ -382,8 +427,44 @@ func identityRestorePath(p string) (note string, ok bool) {
 		return appSecretSeedNote, true
 	case strings.HasPrefix(p, "mesh/headscale/"):
 		return "Headscale state — tailnet identity; nodes stay enrolled", true
+	case strings.HasPrefix(p, storeDataArchivePrefix):
+		return storeDataNote, true
+	case p == storeSealKeyArchivePath:
+		return storeSealKeyNote, true
+	case p == storeSealHCLArchivePath:
+		return storeSealHCLNote, true
+	case p == storeVersionArchivePath:
+		return storeVersionNote, true
+	case p == storeCAKeyArchivePath:
+		return storeCAKeyNote, true
+	case p == storeCACertArchivePath:
+		return storeCACertNote, true
 	}
 	return "", false
+}
+
+// storeMembersMissing names the first store member a version-3 manifest
+// lacks, or "" when it has them all (S15 part 6). A version 1 or 2 manifest
+// is pre-store and needs none.
+func storeMembersMissing(m *Manifest) string {
+	if m.ManifestVersion < ManifestVersion {
+		return ""
+	}
+	data := false
+	have := map[string]bool{}
+	for _, e := range m.Entries {
+		have[e.Path] = true
+		data = data || strings.HasPrefix(e.Path, storeDataArchivePrefix)
+	}
+	if !data {
+		return storeDataArchivePrefix
+	}
+	for _, p := range []string{storeSealKeyArchivePath, storeSealHCLArchivePath, storeVersionArchivePath, storeCAKeyArchivePath, storeCACertArchivePath} {
+		if !have[p] {
+			return p
+		}
+	}
+	return ""
 }
 
 // safePathSegment is one component of an archive member path: the same
@@ -716,6 +797,13 @@ func readBounded(parent *os.File, name string, limit int64) ([]byte, error) {
 //
 // req.PrivateKey is borrowed. The caller zeroes it.
 func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) (*RestoreReport, error) {
+	// Before the disk is touched: a restore staged in the middle of a
+	// seal-key rotation could put back a key the store no longer opens with.
+	if cfg.SealGuard != nil {
+		if err := cfg.SealGuard.CheckRestore(); err != nil {
+			return nil, &RestoreSealBusyError{Reason: err}
+		}
+	}
 	if strings.TrimSpace(cfg.SelfNodeID) == "" {
 		return nil, errors.New("this api does not know which node it runs on (RASPUTIN_SELF_NODE_ID is unset); a restore reads the disk beside it and needs that name")
 	}
@@ -929,6 +1017,9 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	if _, ok := expected["rasputin.db"]; !ok {
 		return nil, fmt.Errorf("%w: the manifest names no rasputin.db; an archive without the database restores nothing this phase puts back", ErrRestoreArchive)
 	}
+	if missing := storeMembersMissing(&m); missing != "" {
+		return nil, fmt.Errorf("%w: the version-%d manifest names no %s; an archive of this version carries the secret store, and one without it cannot be restored", ErrRestoreArchive, m.ManifestVersion, missing)
+	}
 
 	report := &RestoreReport{
 		ID: "rs-" + randomHex(8), Phase: RestorePhase,
@@ -1022,7 +1113,7 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	}
 	report.SealedDigest = u.res.SealedDigest
 	report.SealedBytes = u.res.SealedBytes
-	report.Warning = identityRestoreWarning(report.NotRestored)
+	report.Warning = identityRestoreWarning(m.ManifestVersion, report.NotRestored)
 	sort.Slice(report.Restored, func(i, j int) bool { return report.Restored[i].Path < report.Restored[j].Path })
 	return report, nil
 }
