@@ -344,9 +344,23 @@ type TrustRedeliveryRecord struct {
 
 // restoreWarning is the report's standing caveat.
 const restoreWarning = "This restore put back the control-plane IDENTITY SET only — the database (users and passkeys, node bus tokens, app declarations, mesh intents), " +
-	"the controlplane CA, the bus key and Headscale state. Every operator device, user and node re-authenticates with no ceremony. " +
+	"the controlplane CA, the bus key, Headscale state and the app-secret seed. Every operator device, user and node re-authenticates with no ceremony. " +
 	"APP DATA WAS NOT RESTORED: every app volume the generation holds is listed by name under appVolumesPresent and is still on the backup disk, sealed. " +
 	"Restoring app volumes to the nodes that host them is a later phase. Do not read this record as a full restore of the cluster."
+
+// identityRestoreWarning is the report's warning: the standing caveat, and
+// then every archive member this restore saw and did not put back, by path,
+// so a skipped member is named rather than hidden in a green report.
+func identityRestoreWarning(notRestored []NotRestoredItem) string {
+	if len(notRestored) == 0 {
+		return restoreWarning
+	}
+	paths := make([]string, 0, len(notRestored))
+	for _, n := range notRestored {
+		paths = append(paths, n.Path)
+	}
+	return restoreWarning + " Present in the archive and NOT put back: " + strings.Join(paths, ", ") + "."
+}
 
 // identityRestorePath reports whether an archive member path is part of the
 // identity set this phase restores, and the note the report carries for it.
@@ -364,6 +378,8 @@ func identityRestorePath(p string) (note string, ok bool) {
 		return busCertNote, true
 	case p == busTombstonesArchivePath:
 		return busTombstonesNote, true
+	case p == appSecretSeedArchivePath:
+		return appSecretSeedNote, true
 	case strings.HasPrefix(p, "mesh/headscale/"):
 		return "Headscale state — tailnet identity; nodes stay enrolled", true
 	}
@@ -920,7 +936,6 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 		ClusterID: m.ClusterID, KeyID: req.KeyID, Scope: m.Scope, Complete: m.Complete,
 		ManifestVersion: m.ManifestVersion,
 		Restored:        []RestoredEntry{}, NotRestored: []NotRestoredItem{},
-		Warning:    restoreWarning,
 		PreparedAt: time.Now().UTC(),
 	}
 	report.AppVolumesPresent, report.AppVolumesAbsent = appVolumeMentions(&m)
@@ -1007,6 +1022,7 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	}
 	report.SealedDigest = u.res.SealedDigest
 	report.SealedBytes = u.res.SealedBytes
+	report.Warning = identityRestoreWarning(report.NotRestored)
 	sort.Slice(report.Restored, func(i, j int) bool { return report.Restored[i].Path < report.Restored[j].Path })
 	return report, nil
 }

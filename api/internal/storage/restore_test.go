@@ -42,6 +42,9 @@ type identityFixture struct {
 	// busTombstones, when set, is the bus-token revocation tombstone file the
 	// old controlplane held (busauth tombstones.go); nil means it had none.
 	busTombstones []byte
+	// appSecretSeed, when set, is the app-secret seed file the old
+	// controlplane held (appsecret seed.go); nil means it had none.
+	appSecretSeed []byte
 }
 
 func newIdentityFixture() identityFixture {
@@ -107,6 +110,9 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 	}
 	writeTestFile(t, filepath.Join(trust, "mesh-ca.key"), string(fx.caKey))
 	writeTestFile(t, filepath.Join(trust, "mesh-ca.pem"), string(fx.caPem))
+	if fx.appSecretSeed != nil {
+		writeTestFile(t, filepath.Join(trust, filepath.Base(appSecretSeedArchivePath)), string(fx.appSecretSeed))
+	}
 	busDir := filepath.Join(src, "bus")
 	if err := os.MkdirAll(busDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -619,6 +625,19 @@ func TestPrepareRestoreReportsAVersionOneArchivesInArchiveVolumesAsNotRestored(t
 	}
 	if len(report.NotRestored) != 1 || report.NotRestored[0].Path != "app-volumes/vaultwarden/data.tar" {
 		t.Fatalf("notRestored = %+v", report.NotRestored)
+	}
+	// TC-751-05: the warning names the skipped member by path, and the
+	// restore.json the apply reads carries the same warning.
+	if !strings.Contains(report.Warning, "app-volumes/vaultwarden/data.tar") {
+		t.Fatalf("the warning does not name the member it skipped: %q", report.Warning)
+	}
+	var onDisk RestoreReport
+	b, err := os.ReadFile(filepath.Join(h.dataDir, restorePendingDirName, restoreReportFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &onDisk); err != nil || onDisk.Warning != report.Warning {
+		t.Fatalf("restore.json warning = %q (%v), want the report's %q", onDisk.Warning, err, report.Warning)
 	}
 	if _, err := os.Stat(filepath.Join(h.dataDir, restorePendingDirName, "app-volumes")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("a non-identity member was extracted")

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,10 +44,6 @@ var restoreAllowlist = []allowEntry{
 	{
 		member: proto.BackupManifestFile,
 		reason: "PrepareRestore reads manifest.json as the archive's index and never restores it as a file",
-	},
-	{
-		member: appSecretSeedArchivePath,
-		reason: "KNOWN DEFECT geekdojo/geekdojo-brain#751: must be restored; identityRestorePath does not map it. #751's fix deletes this entry; check (e) fails until it does.",
 	},
 }
 
@@ -163,8 +160,9 @@ func assembledMembers(t *testing.T) (IdentitySources, []string) {
 }
 
 // TC-694-01: every member of a real archive is mapped and matched, or
-// allowlisted with a reason, and the allowlist is exactly the two reviewed
-// entries.
+// allowlisted with a reason, and the allowlist is exactly the one reviewed
+// entry. TC-751-06: the app-secret seed is in the fixture (assembledMembers)
+// and restored, so it needs no allowlist entry.
 func TestEveryIdentityMemberHasARestorePath(t *testing.T) {
 	_, members := assembledMembers(t)
 	problems := checkRestoreCoverage(members, identityRestorePath, identityApplyRules(), restoreAllowlist)
@@ -175,15 +173,15 @@ func TestEveryIdentityMemberHasARestorePath(t *testing.T) {
 		t.Fatalf("%d restore coverage problem(s) above; members: %v", len(problems), members)
 	}
 
-	if len(restoreAllowlist) != 2 {
-		t.Fatalf("restoreAllowlist has %d entries, want exactly 2 (manifest.json and the #751 seed): %+v", len(restoreAllowlist), restoreAllowlist)
+	if !slices.Contains(members, appSecretSeedArchivePath) {
+		t.Fatalf("the fixture archive holds no %s, so the gate is not checking it: %v", appSecretSeedArchivePath, members)
 	}
-	m, s := restoreAllowlist[0], restoreAllowlist[1]
+	if len(restoreAllowlist) != 1 {
+		t.Fatalf("restoreAllowlist has %d entries, want exactly 1 (manifest.json): %+v", len(restoreAllowlist), restoreAllowlist)
+	}
+	m := restoreAllowlist[0]
 	if m.member != proto.BackupManifestFile || !strings.Contains(m.reason, "PrepareRestore") || !strings.Contains(m.reason, "index") || !strings.Contains(m.reason, "never restores") {
 		t.Errorf("allowlist[0] = %+v, want manifest.json read by PrepareRestore as the index and never restored", m)
-	}
-	if s.member != appSecretSeedArchivePath || !strings.HasPrefix(s.reason, "KNOWN DEFECT geekdojo/geekdojo-brain#751") {
-		t.Errorf("allowlist[1] = %+v, want %s marked KNOWN DEFECT geekdojo/geekdojo-brain#751", s, appSecretSeedArchivePath)
 	}
 }
 
@@ -351,22 +349,6 @@ func TestRestoreCoverageFlagsAStaleAllowlistEntry(t *testing.T) {
 		[]allowEntry{{member: "x/now-mapped", reason: "was not restored"}},
 	)
 	wantOneProblem(t, problems, `"x/now-mapped"`, "stale", "restore now reaches it")
-}
-
-// TC-694-10: the real code fails without the seed's allowlist entry, which is
-// the gate catching #751 on main. When #751 maps the seed this case finds zero
-// problems and fails, and check (e) fails TC-694-01, until #751's PR deletes
-// both this case and the entry.
-func TestRestoreCoverageCatchesTheUnmappedSeedWithoutItsAllowlistEntry(t *testing.T) {
-	_, members := assembledMembers(t)
-	var allow []allowEntry
-	for _, a := range restoreAllowlist {
-		if a.member != appSecretSeedArchivePath {
-			allow = append(allow, a)
-		}
-	}
-	problems := checkRestoreCoverage(members, identityRestorePath, identityApplyRules(), allow)
-	wantOneProblem(t, problems, appSecretSeedArchivePath, "identityRestorePath does not map it")
 }
 
 // stagePending writes a pending restore whose report lists the given staged
