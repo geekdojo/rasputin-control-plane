@@ -232,7 +232,7 @@ func TestCopyStore_RefusesAnUnknownStoreHost(t *testing.T) {
 			r := newSagaRig(t, map[string]proto.NodeRole{sagaSelf: proto.RoleControlPlane, "cp2": proto.RoleControlPlane},
 				Config{SelfNodeID: self, StoreCopy: cp})
 			j := r.run(t, "cp2")
-			if j.Error != errStoreHostUnknown || r.installs.Load() != 0 || len(cp.calls()) != 0 {
+			if j.Error != errStoreHostUnknown.Error() || r.installs.Load() != 0 || len(cp.calls()) != 0 {
 				t.Fatalf("job %q, installs %d, copier %v", j.Error, r.installs.Load(), cp.calls())
 			}
 			if st := r.rowStatus(t, j.ID); st != NodeUpdateFailed {

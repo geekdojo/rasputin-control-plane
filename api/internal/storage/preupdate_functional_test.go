@@ -86,8 +86,7 @@ func TestPreUpdateCopy_AgainstTheRealStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	st := startRealStore(t, hs)
-	var h *runHarness
-	h = newRunHarness(t, nil, runHarnessOpts{})
+	h := newRunHarness(t, nil, runHarnessOpts{})
 	rs := apiChain(t, st, logger, harnessJobRunning(&h))
 
 	dir := t.TempDir()

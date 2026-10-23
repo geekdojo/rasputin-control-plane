@@ -374,10 +374,16 @@ func IsLoopbackURL(raw string) bool {
 
 // ----- Step 4: copy_store ------------------------------------------------
 
+// sentenceError is an error whose text is a sentence a person reads as the
+// job's error (ERR-MESSAGE); the string type follows storage's sentenceError.
+type sentenceError string
+
+func (e sentenceError) Error() string { return string(e) }
+
 // errStoreHostUnknown refuses an update of a control plane that is not this
 // api's own node, or of any control plane when this api does not know its
 // own node: only the store host's own api can stop its store (ERR-CLOSED).
-const errStoreHostUnknown = "The secret store could not be copied before this OS update, so the update was refused and nothing was installed. This node is a control plane, and only its own api can copy its secret store; run the update from that control plane."
+const errStoreHostUnknown sentenceError = "The secret store could not be copied before this OS update, so the update was refused and nothing was installed. This node is a control plane, and only its own api can copy its secret store; run the update from that control plane."
 
 // updateCopyStore copies the secret store before install when the target
 // hosts it (geekdojo/geekdojo-brain#800). In order (F-800-04): no store
@@ -414,7 +420,7 @@ func updateCopyStore(roles nodeRoles, cfg Config) jobs.DoFn {
 				"component", "updater", "event", "updater.copy_store_refused", "node_id", spec.NodeID,
 				"self_node_id", cfg.SelfNodeID, "job_id", sc.JobID)
 			sc.Log("warn", "refused: "+spec.NodeID+" is a control plane that is not this api's own node")
-			return nil, errors.New(errStoreHostUnknown)
+			return nil, errStoreHostUnknown
 		}
 		sc.Log("info", "the secret store is not on this node; nothing to copy")
 		return json.Marshal(map[string]any{"copied": false, "reason": "not-store-host"})
