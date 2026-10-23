@@ -556,6 +556,13 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store update copy", "err", err.Error())
 		os.Exit(1)
 	}
+	// The same hosts' update of themselves commits only once their own store
+	// answers ready (geekdojo/geekdojo-brain#767).
+	selfStoreCheck, err := selfStoreCheckWiring(storeUpdateCopy, readiness.store, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: self-update store check", "err", err.Error())
+		os.Exit(1)
+	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
 	// logs in on the first call that needs a token, not here. #761's
 	// repository is its first consumer.
@@ -1094,6 +1101,7 @@ func main() {
 		SelfNodeID:    selfNodeID,
 		StoreCopy:     rollback.copier,
 		Log:           logger,
+		StoreCheck:    selfStoreCheck,
 	}))
 	// storage.reconcile — #398: every five minutes, storage.inspect plus a
 	// write probe on each claimed target, recorded on the row beside the
@@ -1189,7 +1197,7 @@ func main() {
 	// Finish any self-update that rebooted us onto the new slot (no-op when
 	// there isn't one). Non-blocking — reconciles in the background once the
 	// co-located agent reconnects.
-	updater.ResumeSelfUpdates(ctx, updaterStore, invStore, jobStore, runner, busSrv.Conn(), selfNodeID)
+	updater.ResumeSelfUpdates(ctx, updaterStore, invStore, jobStore, runner, busSrv.Conn(), selfNodeID, selfStoreCheck)
 	// And the fleet run that self-update belonged to, if it was one (#56).
 	// Ordered after ResumeSelfUpdates because it waits on the child that call
 	// drives — starting it first would just poll for longer.

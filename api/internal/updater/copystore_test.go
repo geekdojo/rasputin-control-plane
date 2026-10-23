@@ -368,7 +368,7 @@ func TestResumeSelfUpdates_AcrossTheChangedStepList(t *testing.T) {
 		t.Fatalf("after Recover the job is %+v, want still running (deferred)", j)
 	}
 	fakeAgentForSelfUpdate(t, nc, sagaSelf, proto.SlotB)
-	ResumeSelfUpdates(ctx, store, nil, jobStore, runner, nc, sagaSelf)
+	ResumeSelfUpdates(ctx, store, nil, jobStore, runner, nc, sagaSelf, nil)
 	waitJobStatus(t, jobStore, jid, jobs.StatusSucceeded)
 	if row, _ := store.GetNodeUpdate(ctx, jid); row == nil || row.Status != NodeUpdateCommitted {
 		t.Errorf("row %+v, want committed", row)

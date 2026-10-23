@@ -244,37 +244,31 @@ func probeHealth(ctx context.Context, nc *nats.Conn, nodeID, jobID string) (bool
 	return true, "healthy"
 }
 
-// healthCheckAndCommit runs the post-reboot health check (diag.health, role-aware)
-// and either mark-good + records committed, or mark-bad + records rolled_back.
-// Returns the mark-good ack on success. Shared by saga step 7 and the self-update
-// reconciler.
-func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
-	if healthy, detail := probeHealth(ctx, nc, nodeID, jobID); !healthy {
-		lg.log("warn", "health check failed ("+detail+"); sending mark-bad")
-		bad, _ := json.Marshal(proto.UpdateMarkBadCmd{BundleID: bundleSHA, Reason: detail})
-		_, _ = nc.RequestWithContext(ctx, proto.UpdateMarkBadSubject(nodeID), bad)
+// selfUpdateWindow bounds a control plane's finish of its own update after
+// the reboot: the agent's reconnect, the verify, the health gate and the
+// secret store's readiness (geekdojo/geekdojo-brain#767) all share it.
+const selfUpdateWindow = 5 * time.Minute
 
-		now := time.Now().UTC()
-		// mark-bad means the node is still running the new slot but will revert
-		// on its next boot, so every version available right now is about to be
-		// wrong: the running one records a version the node is about to leave,
-		// and the old one asserts a revert that has not happened yet. So we
-		// assert neither and drop the confirmation instead — the state this
-		// column was added for. (#57 left this path untouched precisely because
-		// the schema could not yet say "unconfirmed".)
-		unconfirmInventoryVersion(ctx, inv, nodeID,
-			"health check failed; the node will revert on its next boot", lg)
-		_ = store.UpdateNodeUpdate(ctx, jobID, NodeUpdateRolledBack,
-			proto.SlotUnknown, "", "health check failed: "+detail, now)
-		publishChange(nc, proto.UpdateChangeEvt{
-			NodeID:   nodeID,
-			JobID:    jobID,
-			BundleID: bundleSHA,
-			Change:   proto.UpdateRolledBack,
-			Reason:   "post-reboot health check failed: " + detail,
-			Ts:       now,
-		})
-		return nil, fmt.Errorf("health check failed (%s), mark-bad sent", detail)
+// markBadBound bounds the mark-bad branch's own I/O (the mark-bad RPC, the
+// inventory unconfirm and the row write) on a context detached from the
+// caller's, which the health gate may have used up. The agent's own mark-bad
+// handler is bounded by the same 10s (agent/internal/updater/handler.go).
+const markBadBound = 10 * time.Second
+
+// healthCheckAndCommit runs the post-reboot health check (diag.health, role-aware)
+// and, for a control plane updating itself, the secret store's readiness (sc,
+// nil for every other node). It then either sends mark-good and records
+// committed, or takes the mark-bad branch. Returns the mark-good ack on
+// success. Shared by saga step 8 and the self-update reconciler.
+func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, sc *SelfStoreCheck, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
+	healthy, detail := probeHealth(ctx, nc, nodeID, jobID)
+	if healthy && sc != nil {
+		// Asked only once diag.health has passed: an unhealthy node is marked
+		// bad on its own detail, and the store's wait is not spent on it.
+		healthy, detail = sc.ready(ctx, nodeID, jobID)
+	}
+	if !healthy {
+		return nil, markBadAndRecord(ctx, nc, store, inv, nodeID, bundleSHA, jobID, detail, lg)
 	}
 
 	good, _ := json.Marshal(proto.UpdateMarkGoodCmd{BundleID: bundleSHA})
@@ -323,6 +317,93 @@ func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv 
 		lg.log("info", "update committed")
 	}
 	return json.Marshal(ack)
+}
+
+// markBadAndRecord is the branch every failed health verdict takes: it sends
+// mark-bad and records only what actually happened (F-767-01).
+//
+// Its I/O runs on a context detached from ctx and bounded by markBadBound
+// (the jobs.go step-7 precedent): the health gate may have used up ctx, and a
+// mark-bad sent on an expired context is never delivered, which on the N100
+// would leave the bad slot in place after its automatic mark-good.
+//
+// Only a mark-bad the agent accepted arms the rollback, so only that records
+// rolled_back and publishes the rolled_back event. A mark-bad that was not
+// delivered, could not be read or was rejected records failed, publishes
+// nothing that claims a rollback, and the error says the update was NOT
+// rolled back: an operator must not trust a rollback that never happened.
+// There is no retry; a rejected mark-bad needs a person, and the failed job
+// raises the job-failed alert that tells them.
+func markBadAndRecord(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, nodeID, bundleSHA, jobID, detail string, lg logFn) error {
+	lg.log("warn", "health check failed ("+detail+"); sending mark-bad")
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), markBadBound)
+	defer cancel()
+
+	markBadErr := sendMarkBad(fctx, nc, nodeID, bundleSHA, detail)
+	now := time.Now().UTC()
+	var err, werr error
+	if markBadErr == nil {
+		// mark-bad means the node is still running the new slot but will revert
+		// on its next boot, so every version available right now is about to be
+		// wrong: the running one records a version the node is about to leave,
+		// and the old one asserts a revert that has not happened yet. So we
+		// assert neither and drop the confirmation instead — the state this
+		// column was added for. (#57 left this path untouched precisely because
+		// the schema could not yet say "unconfirmed".)
+		unconfirmInventoryVersion(fctx, inv, nodeID,
+			"health check failed; the node will revert on its next boot", lg)
+		werr = store.UpdateNodeUpdate(fctx, jobID, NodeUpdateRolledBack,
+			proto.SlotUnknown, "", "health check failed: "+detail, now)
+		publishChange(nc, proto.UpdateChangeEvt{
+			NodeID:   nodeID,
+			JobID:    jobID,
+			BundleID: bundleSHA,
+			Change:   proto.UpdateRolledBack,
+			Reason:   "post-reboot health check failed: " + detail,
+			Ts:       now,
+		})
+		err = fmt.Errorf("health check failed (%s), mark-bad sent", detail)
+	} else {
+		// No rollback is armed, and the running version failed its health
+		// gate, so it is still unverified: drop the confirmation here too.
+		unconfirmInventoryVersion(fctx, inv, nodeID,
+			"health check failed and mark-bad did not take; the running version is unverified", lg)
+		// The target slot and version stay on the row, as finalizeNodeUpdateRow
+		// keeps them for every other failed update.
+		toSlot, toVersion := proto.SlotUnknown, ""
+		if row, rerr := store.GetNodeUpdate(fctx, jobID); rerr == nil && row != nil {
+			toSlot, toVersion = row.ToSlot, row.ToVersion
+		}
+		werr = store.UpdateNodeUpdate(fctx, jobID, NodeUpdateFailed,
+			toSlot, toVersion, "health check failed: "+detail+"; "+markBadErr.Error(), now)
+		err = fmt.Errorf("health check failed (%s); the update was NOT rolled back: %w", detail, markBadErr)
+	}
+	if werr != nil {
+		// This branch always fails the job, so returning the write error is
+		// how it is handled: the job error, and the job-failed alert, say the
+		// record could not be written (ERR-WRAP).
+		err = errors.Join(err, fmt.Errorf("record node_update: %w", werr))
+	}
+	return err
+}
+
+// sendMarkBad sends mark-bad and reads the agent's answer. It returns nil only
+// when the agent accepted it: not delivered, unreadable and rejected are each
+// an error naming which.
+func sendMarkBad(ctx context.Context, nc *nats.Conn, nodeID, bundleSHA, reason string) error {
+	msg, err := nc.RequestWithContext(ctx, proto.UpdateMarkBadSubject(nodeID),
+		mustJSON(proto.UpdateMarkBadCmd{BundleID: bundleSHA, Reason: reason}))
+	if err != nil {
+		return fmt.Errorf("mark-bad not delivered: %w", err)
+	}
+	var ack proto.UpdateMarkBadAck
+	if err := json.Unmarshal(msg.Data, &ack); err != nil {
+		return fmt.Errorf("mark-bad reply unreadable: %w", err)
+	}
+	if !ack.OK {
+		return fmt.Errorf("mark-bad rejected: %s", ack.Detail)
+	}
+	return nil
 }
 
 // SelfUpdateRecoverDecider returns the runner recover policy for the two jobs
@@ -379,7 +460,10 @@ func rebootDone(steps []*jobs.JobStep) bool {
 // reconciled in its own goroutine, which waits (bounded) for the co-located
 // agent to reconnect, then verifies the booted slot + health and commits or
 // records the rollback — closing the user-initiated job with no human step.
-func ResumeSelfUpdates(ctx context.Context, store *Store, inv *inventory.Store, jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn, selfNodeID string) {
+//
+// sc is this api's secret-store check (geekdojo/geekdojo-brain#767), nil when
+// it runs no store: the commit then rests on diag.health alone.
+func ResumeSelfUpdates(ctx context.Context, store *Store, inv *inventory.Store, jobStore *jobs.Store, runner *jobs.Runner, nc *nats.Conn, selfNodeID string, sc *SelfStoreCheck) {
 	if selfNodeID == "" {
 		return
 	}
@@ -409,7 +493,7 @@ func ResumeSelfUpdates(ctx context.Context, store *Store, inv *inventory.Store, 
 		priorBootID := priorPrecheckBootID(map[string]json.RawMessage{
 			"precheck": stepResult(steps, "precheck"),
 		})
-		go reconcileSelfUpdate(ctx, store, inv, runner, nc, spec, j.ID, priorBootID)
+		go reconcileSelfUpdate(ctx, store, inv, runner, nc, sc, spec, j.ID, priorBootID)
 	}
 }
 
@@ -424,9 +508,9 @@ func stepResult(steps []*jobs.JobStep, name string) json.RawMessage {
 	return nil
 }
 
-func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store, runner *jobs.Runner, nc *nats.Conn, spec UpdateSpec, jobID, priorBootID string) {
+func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store, runner *jobs.Runner, nc *nats.Conn, sc *SelfStoreCheck, spec UpdateSpec, jobID, priorBootID string) {
 	log.Printf("updater: resuming self-update %s after reboot", jobID)
-	wctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	wctx, cancel := context.WithTimeout(ctx, selfUpdateWindow)
 	defer cancel()
 
 	if err := waitForAgent(wctx, nc, spec.NodeID); err != nil {
@@ -452,7 +536,7 @@ func reconcileSelfUpdate(ctx context.Context, store *Store, inv *inventory.Store
 	// somehow answered on the old boot is still caught.
 	log.Printf("updater: self-update %s verified (boot=%s version=%s degraded=%v)",
 		jobID, res.Boot, res.Version, res.Degraded())
-	if _, err := healthCheckAndCommit(wctx, nc, store, inv, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
+	if _, err := healthCheckAndCommit(wctx, nc, store, inv, sc, spec.NodeID, spec.BundleSHA256, jobID, nil); err != nil {
 		runner.FinishDeferred(ctx, jobID, false, err.Error())
 		return
 	}

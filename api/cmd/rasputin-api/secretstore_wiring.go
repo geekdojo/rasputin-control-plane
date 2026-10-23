@@ -305,6 +305,19 @@ type storeBackupControl struct {
 	log     *slog.Logger
 }
 
+// selfStoreCheckWiring builds the secret-store gate a control plane's update
+// of itself passes before it commits (geekdojo/geekdojo-brain#767). It keys on
+// updateCopy, so the check runs on exactly the hosts whose update copy_store
+// copies: nil with no store requested or the mock, and a check otherwise. A
+// store whose configuration was refused still gets one; its Disabled store
+// answers ErrDisabled, so such an update goes to mark-bad (ERR-CLOSED).
+func selfStoreCheckWiring(updateCopy storage.SecretStore, store updater.StoreHealth, log *slog.Logger) (*updater.SelfStoreCheck, error) {
+	if updateCopy == nil {
+		return nil, nil
+	}
+	return updater.NewSelfStoreCheck(store, log)
+}
+
 // storeBackupWiring builds the store's cold-copy control for reason when a
 // backend other than the mock is requested, a refused one included: its
 // monitor reads unreachable, so every capture fails closed until it is

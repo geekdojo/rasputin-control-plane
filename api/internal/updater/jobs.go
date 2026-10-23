@@ -44,6 +44,11 @@ type Config struct {
 	// Log takes copy_store's records. It is required with StoreCopy: a
 	// copy_store that has a copier and no logger refuses every update.
 	Log *slog.Logger
+	// StoreCheck is this api's secret-store readiness gate for its own update
+	// (geekdojo/geekdojo-brain#767): step 8 consults it only when the target
+	// is SelfNodeID. Nil means this api runs no store (or the mock), and the
+	// commit rests on diag.health alone.
+	StoreCheck *SelfStoreCheck
 }
 
 // StoreCopier is the secret store's copy before an OS update, as the
@@ -93,7 +98,7 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 			{Name: "install", Timeout: 10 * time.Minute, Irreversible: true, Do: updateInstall(store)},
 			{Name: "reboot", Timeout: 15 * time.Second, Do: updateReboot()},
 			{Name: "wait_online_and_verify_slot", Timeout: 5 * time.Minute, Do: updateWaitOnlineAndVerifySlot(store, inv)},
-			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store, inv)},
+			{Name: "health_check_and_commit", Timeout: 30 * time.Second, Retries: 1, Do: updateHealthCheckAndCommit(store, inv, cfg)},
 		},
 		OnTerminal: finalizeNodeUpdateRow(store),
 	}
@@ -674,15 +679,20 @@ func updateWaitOnlineAndVerifySlot(store *Store, inv *inventory.Store) jobs.DoFn
 
 // ----- Step 8: health_check_and_commit ------------------------------------
 
-func updateHealthCheckAndCommit(store *Store, inv *inventory.Store) jobs.DoFn {
+func updateHealthCheckAndCommit(store *Store, inv *inventory.Store, cfg Config) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
 		// diag.health (role-aware) → mark-good (commit) or mark-bad (rollback). Shared with
-		// the self-update reconciler (selfupdate.go).
-		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, inv, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
+		// the self-update reconciler (selfupdate.go). The store is this api's
+		// own, so only its own node's update consults it.
+		var check *SelfStoreCheck
+		if cfg.SelfNodeID != "" && spec.NodeID == cfg.SelfNodeID {
+			check = cfg.StoreCheck
+		}
+		return healthCheckAndCommit(sc.Ctx, sc.NATS, store, inv, check, spec.NodeID, spec.BundleSHA256, sc.JobID, sc.Log)
 	}
 }
 
