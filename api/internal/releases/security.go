@@ -40,11 +40,12 @@ const (
 
 	securityAlertTitle = "A security update is available for Rasputin OS"
 	securityAlertNext  = "Open Updates, download and stage the latest release, and deploy it."
-
-	// unreadableFloorMessage is the full sentence the step reports for a
-	// floor that is not a version.
-	unreadableFloorMessage = "The newest release declares a security floor this control plane cannot read."
 )
+
+// unreadableFloorMessage is the full sentence the step reports for a floor
+// that is not a version, held in a value as storage and apps do for their
+// user-facing error sentences.
+var unreadableFloorMessage = "The newest release declares a security floor this control plane cannot read."
 
 // errUnreadableFloor is the step's error for a floor that is not a version.
 var errUnreadableFloor = errors.New(unreadableFloorMessage)
