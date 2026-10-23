@@ -81,6 +81,11 @@ type nodeN struct{}
 
 func (nodeN) TargetNode(context.Context, string) (string, bool, error) { return "n", true, nil }
 
+// refSink accepts every recorded reference (geekdojo/geekdojo-brain#800).
+type refSink struct{}
+
+func (refSink) RecordSecretRef(context.Context, string, string) error { return nil }
+
 // gatedStoreSource is the Gate around a StoreSource over svc, with a Monitor
 // reading hs, all logging to one recorder.
 func gatedStoreSource(t *testing.T, svc *memSecrets, hs *healthStore) (SecretSource, *storestate.Monitor, *logkittest.Recorder) {
@@ -94,7 +99,7 @@ func gatedStoreSource(t *testing.T, svc *memSecrets, hs *healthStore) (SecretSou
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +155,7 @@ func TestResolveError_PassesTheStoreRefusalThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

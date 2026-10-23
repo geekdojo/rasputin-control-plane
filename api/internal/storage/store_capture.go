@@ -168,34 +168,15 @@ func runSnapshotStore(cfg RunConfig) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		ctx := jobs.ContextWithJobID(sc.Ctx, sc.JobID)
-
-		release := st.Quiesce(sc.JobID)
-		defer release()
-		if err := st.Stop(ctx); err != nil {
-			sc.Log("error", fmt.Sprintf("stopping the secret store failed: %v", err))
-			startAfterFailure(ctx, sc, st)
+		// coldCopy has put a failure's cause in the job feed; the stage picks
+		// the sentence.
+		files, size, stage, _ := coldCopy(sc, st, dst, cfg.Sources.StoreDataDir, version)
+		switch stage {
+		case coldCopyStop:
 			return nil, errStoreStopFailed
-		}
-		sc.Log("info", "secret store stopped for its cold copy")
-		files, size, cerr := stageStoreCapture(dst, cfg.Sources.StoreDataDir, version)
-		if cerr != nil {
-			_ = os.Remove(dst)
-			sc.Log("error", fmt.Sprintf("copying the secret store's data failed: %v", cerr))
-			startAfterFailure(ctx, sc, st)
+		case coldCopyCopy:
 			return nil, errStoreCopyFailed
-		}
-		sc.Log("info", fmt.Sprintf("copied %d secret store file(s) (%s)", files, humanBytes(byteCount(size))))
-		if err := st.Start(ctx); err != nil {
-			_ = os.Remove(dst)
-			sc.Log("error", fmt.Sprintf("starting the secret store after its copy failed: %v", err))
-			return nil, errStoreStartFailed
-		}
-		// The quiesce is held until the store answers 200: the unit's
-		// READY=1 comes before unseal (T24).
-		if err := st.WaitReady(ctx); err != nil {
-			_ = os.Remove(dst)
-			sc.Log("error", fmt.Sprintf("the secret store did not answer ready after its copy: %v", err))
+		case coldCopyStart, coldCopyReady:
 			return nil, errStoreStartFailed
 		}
 		sc.Log("info", fmt.Sprintf("secret store started and ready: version %s, seal key %s", version, keyID))
@@ -203,6 +184,58 @@ func runSnapshotStore(cfg RunConfig) jobs.DoFn {
 			StagingName: name, Files: files, SizeBytes: byteCount(size), Version: version, KeyID: keyID,
 		})
 	}
+}
+
+// coldCopyStage is the stage of coldCopy that failed; "" when none did.
+type coldCopyStage string
+
+// The stages of coldCopy.
+const (
+	coldCopyStop  coldCopyStage = "stop"
+	coldCopyCopy  coldCopyStage = "copy"
+	coldCopyStart coldCopyStage = "start"
+	coldCopyReady coldCopyStage = "ready"
+)
+
+// coldCopy is the stop-copy-start sequence the backup's snapshot_store and
+// the OS update's pre-update copy share (geekdojo/geekdojo-brain#765, #800):
+// quiesce the store for sc's job, stop it, write the cold copy of dataDir to
+// dst, start it, and wait for it to answer 200 before the quiesce is
+// released. It fails closed: a failure after the stop starts the store again
+// (once, when the start itself was not what failed), and every failure
+// removes dst. It returns the data file count and bytes copied, or the stage
+// that failed with its cause; each caller maps the stage to its own sentence.
+func coldCopy(sc *jobs.StepCtx, st SecretStore, dst, dataDir, version string) (int, int64, coldCopyStage, error) {
+	ctx := jobs.ContextWithJobID(sc.Ctx, sc.JobID)
+	release := st.Quiesce(sc.JobID)
+	defer release()
+	if err := st.Stop(ctx); err != nil {
+		sc.Log("error", fmt.Sprintf("stopping the secret store failed: %v", err))
+		startAfterFailure(ctx, sc, st)
+		return 0, 0, coldCopyStop, err
+	}
+	sc.Log("info", "secret store stopped for its cold copy")
+	files, size, cerr := stageStoreCapture(dst, dataDir, version)
+	if cerr != nil {
+		_ = os.Remove(dst)
+		sc.Log("error", fmt.Sprintf("copying the secret store's data failed: %v", cerr))
+		startAfterFailure(ctx, sc, st)
+		return 0, 0, coldCopyCopy, cerr
+	}
+	sc.Log("info", fmt.Sprintf("copied %d secret store file(s) (%s)", files, humanBytes(byteCount(size))))
+	if err := st.Start(ctx); err != nil {
+		_ = os.Remove(dst)
+		sc.Log("error", fmt.Sprintf("starting the secret store after its copy failed: %v", err))
+		return 0, 0, coldCopyStart, err
+	}
+	// The quiesce is held until the store answers 200: the unit's
+	// READY=1 comes before unseal (T24).
+	if err := st.WaitReady(ctx); err != nil {
+		_ = os.Remove(dst)
+		sc.Log("error", fmt.Sprintf("the secret store did not answer ready after its copy: %v", err))
+		return 0, 0, coldCopyReady, err
+	}
+	return files, size, "", nil
 }
 
 // startAfterFailure starts the store once after a failure that followed (or

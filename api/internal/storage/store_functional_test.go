@@ -48,6 +48,9 @@ type realStore struct {
 	mon    *storestate.Monitor
 	files  *sealrotate.Files
 	svc    *secrets.Service
+	// repo is the KV repository under svc, for a test that needs its own
+	// service over other apps (geekdojo/geekdojo-brain#800).
+	repo *secrets.KVRepository
 }
 
 func startRealStore(t *testing.T, h *secretstoretest.Harness) *secretstoretest.Store {
@@ -124,7 +127,7 @@ func apiChain(t *testing.T, s *secretstoretest.Store, logger *slog.Logger, jobRu
 	if err != nil {
 		t.Fatal(err)
 	}
-	rs := &realStore{s: s, client: client, mon: mon, svc: svc}
+	rs := &realStore{s: s, client: client, mon: mon, svc: svc, repo: repo}
 	if s.SealDir() != "" {
 		rs.files = harnessSealFiles(t, s)
 	}

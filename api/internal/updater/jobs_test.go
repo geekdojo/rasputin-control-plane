@@ -93,8 +93,10 @@ func TestUpdateWorkflow_Kind(t *testing.T) {
 	if wf.Kind != "node.update" {
 		t.Errorf("kind: %q", wf.Kind)
 	}
-	if len(wf.Steps) != 7 {
-		t.Errorf("steps: want 7, got %d", len(wf.Steps))
+	// Eight steps since copy_store (geekdojo/geekdojo-brain#800); the exact
+	// list is TestUpdateWorkflow_CopyStoreBeforeInstall's.
+	if len(wf.Steps) != 8 {
+		t.Errorf("steps: want 8, got %d", len(wf.Steps))
 	}
 }
 

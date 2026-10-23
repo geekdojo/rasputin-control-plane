@@ -26,11 +26,21 @@ type AppNodes interface {
 	TargetNode(ctx context.Context, appID string) (node string, found bool, err error)
 }
 
+// RefRecorder records that the store holds app appID's secret name
+// (apps.Store.RecordSecretRef), so the reference check can tell an entry
+// created and then lost from one never created
+// (geekdojo/geekdojo-brain#800, F-800-01).
+type RefRecorder interface {
+	RecordSecretRef(ctx context.Context, appID, name string) error
+}
+
 // StoreSourceDeps is everything a StoreSource needs. NewStoreSource refuses a
 // nil one.
 type StoreSourceDeps struct {
 	Secrets Secrets
 	Apps    AppNodes
+	// Refs records each entry once it is confirmed in the store.
+	Refs RefRecorder
 	// Seed derives the value an absent entry is created with.
 	Seed *Seed
 	Log  *slog.Logger
@@ -48,6 +58,11 @@ type StoreSourceDeps struct {
 // CodeValueConflict. Because the derivation is frozen, the entry an upgraded
 // cluster creates holds the value the app already runs with.
 //
+// Each entry, once confirmed (read, or created and read back), is recorded
+// through Refs. The entry is written before the row that names it (S15 write
+// order); a record that fails refuses the resolve, because an unrecorded
+// entry would escape a later reference check (ERR-CLOSED).
+//
 // Every failure returns the zero Value. A store failure is a *Refusal with
 // CodeStoreUnavailable; any other failure (authorization, a reference that
 // does not parse, the app lookup) is a wrapped error. Neither carries a value
@@ -55,6 +70,7 @@ type StoreSourceDeps struct {
 type StoreSource struct {
 	secrets Secrets
 	apps    AppNodes
+	refs    RefRecorder
 	seed    *Seed
 	log     *slog.Logger
 }
@@ -66,12 +82,14 @@ func NewStoreSource(d StoreSourceDeps) (*StoreSource, error) {
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Secrets is nil")
 	case d.Apps == nil:
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Apps is nil")
+	case d.Refs == nil:
+		return nil, errors.New("appsecret: NewStoreSource: Deps.Refs is nil")
 	case d.Seed == nil:
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Seed is nil")
 	case d.Log == nil:
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Log is nil")
 	}
-	return &StoreSource{secrets: d.Secrets, apps: d.Apps, seed: d.Seed, log: d.Log}, nil
+	return &StoreSource{secrets: d.Secrets, apps: d.Apps, refs: d.Refs, seed: d.Seed, log: d.Log}, nil
 }
 
 // ResolveCompose returns compose with every token replaced by its stored
@@ -123,7 +141,7 @@ func (s *StoreSource) value(ctx context.Context, actor secrets.Actor, appID, nam
 	}
 	got, err := s.secrets.Read(ctx, actor, ref)
 	if err == nil {
-		return got.Value, nil
+		return s.recorded(ctx, appID, name, ref, got.Value)
 	}
 	if !errors.Is(err, secretstore.ErrNotFound) {
 		return secret.Value{}, s.refuse(ctx, appID, ref, "read", err)
@@ -148,7 +166,17 @@ func (s *StoreSource) value(ctx context.Context, actor secrets.Actor, appID, nam
 			s.attrs(ctx, appID, ref.String(), CodeValueConflict, slog.String("step", "read-back"))...)
 		return secret.Value{}, valueConflict()
 	}
-	return back.Value, nil
+	return s.recorded(ctx, appID, name, ref, back.Value)
+}
+
+// recorded records ref, an entry confirmed in the store, and returns v; a
+// record that fails destroys v and refuses with the zero Value.
+func (s *StoreSource) recorded(ctx context.Context, appID, name string, ref secrets.Ref, v secret.Value) (secret.Value, error) {
+	if err := s.refs.RecordSecretRef(ctx, appID, name); err != nil {
+		v.Destroy()
+		return secret.Value{}, s.failed(ctx, appID, ref.String(), fmt.Errorf("appsecret: resolve %s: recording %s: %w", appID, ref, err))
+	}
+	return v, nil
 }
 
 // refuse maps a failed service call at op. A store failure is the coded

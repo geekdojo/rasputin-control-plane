@@ -154,6 +154,7 @@ type harness struct {
 	src   *StoreSource
 	svc   *fakeSecrets
 	nodes *fakeNodes
+	refs  *fakeRefs
 	rec   *logkittest.Recorder
 	seed  *Seed
 }
@@ -163,11 +164,12 @@ func newHarness(t *testing.T, seed *Seed, entries map[string]string) *harness {
 	log, rec := logkittest.New()
 	svc := newFakeSecrets(entries)
 	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
-	src, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Seed: seed, Log: log})
+	refs := &fakeRefs{}
+	src, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: refs, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{src: src, svc: svc, nodes: nodes, rec: rec, seed: seed}
+	return &harness{src: src, svc: svc, nodes: nodes, refs: refs, rec: rec, seed: seed}
 }
 
 func mustRef(t *testing.T, app, name string) secrets.Ref {
@@ -593,10 +595,11 @@ func TestStoreSource_SeveralTokensRepeatsAndPartialFailure(t *testing.T) {
 // TC-762-11: the constructor refuses each nil collaborator.
 func TestNewStoreSource_RefusesNil(t *testing.T) {
 	log, _ := logkittest.New()
-	full := StoreSourceDeps{Secrets: newFakeSecrets(nil), Apps: &fakeNodes{}, Seed: testSeed(t), Log: log}
+	full := StoreSourceDeps{Secrets: newFakeSecrets(nil), Apps: &fakeNodes{}, Refs: &fakeRefs{}, Seed: testSeed(t), Log: log}
 	for name, clear := range map[string]func(*StoreSourceDeps){
 		"Secrets": func(d *StoreSourceDeps) { d.Secrets = nil },
 		"Apps":    func(d *StoreSourceDeps) { d.Apps = nil },
+		"Refs":    func(d *StoreSourceDeps) { d.Refs = nil },
 		"Seed":    func(d *StoreSourceDeps) { d.Seed = nil },
 		"Log":     func(d *StoreSourceDeps) { d.Log = nil },
 	} {
@@ -672,7 +675,7 @@ func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Seed: seed, Log: log})
+	store, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: &fakeRefs{}, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

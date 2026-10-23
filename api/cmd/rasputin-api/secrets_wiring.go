@@ -6,6 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 )
@@ -45,4 +46,27 @@ func secretsWiring(session *storesession.Session, appsStore *apps.Store, logger 
 		return nil, err
 	}
 	return secrets.NewService(secrets.Deps{Repo: repo, Apps: appTargetNodes{store: appsStore}, Log: logger})
+}
+
+// appSecretRefs is the store reference record as appsecret sees it: apps
+// records and lists them, and appsecret cannot import apps, which imports it
+// (geekdojo/geekdojo-brain#800).
+type appSecretRefs struct{ store *apps.Store }
+
+// RecordSecretRef records app appID's secret name.
+func (a appSecretRefs) RecordSecretRef(ctx context.Context, appID, name string) error {
+	return a.store.RecordSecretRef(ctx, appID, name)
+}
+
+// ListSecretRefs lists every recorded reference.
+func (a appSecretRefs) ListSecretRefs(ctx context.Context) ([]appsecret.SecretRef, error) {
+	rows, err := a.store.ListSecretRefs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]appsecret.SecretRef, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, appsecret.SecretRef{AppID: r.AppID, Name: r.Name})
+	}
+	return out, nil
 }

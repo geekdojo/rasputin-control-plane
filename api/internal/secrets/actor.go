@@ -7,6 +7,7 @@ const (
 	actorNone actorKind = iota
 	actorOperator
 	actorDeploy
+	actorCheck
 )
 
 // Actor is the identity the endpoint or job passes to the Service, which
@@ -34,6 +35,12 @@ func DeployActor(appID, node string) Actor {
 	return Actor{kind: actorDeploy, app: appID, node: node}
 }
 
+// CheckActor is the store reference check (geekdojo/geekdojo-brain#800),
+// which only asks whether an app secret exists and never reads one.
+func CheckActor() Actor {
+	return Actor{kind: actorCheck}
+}
+
 // kindName is the actor kind as its log records name it.
 func (a Actor) kindName() string {
 	switch a.kind {
@@ -41,6 +48,8 @@ func (a Actor) kindName() string {
 		return "operator"
 	case actorDeploy:
 		return "deploy"
+	case actorCheck:
+		return "check"
 	}
 	return "none"
 }

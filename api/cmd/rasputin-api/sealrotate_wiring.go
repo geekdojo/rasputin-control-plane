@@ -67,6 +67,16 @@ func (w sealRotate) captureLock() storage.CaptureLock {
 	return w.gate
 }
 
+// updateLock is the OS update copy's capture lock: the gate under openbao,
+// nil otherwise (geekdojo/geekdojo-brain#800). A nil *Gate is never handed
+// over as a non-nil interface.
+func (w sealRotate) updateLock() storage.UpdateLock {
+	if w.gate == nil {
+		return nil
+	}
+	return w.gate
+}
+
 // sealGuard is the restore's seal check: the gate under openbao, nil (no
 // check) otherwise. A nil *Gate is never handed over as a non-nil interface.
 func (w sealRotate) sealGuard() storage.SealGuard {

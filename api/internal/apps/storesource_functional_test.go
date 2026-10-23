@@ -143,7 +143,7 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appNodes{s: appStore}, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appNodes{s: appStore}, Refs: appStore, Seed: seed, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,7 +43,8 @@ const (
 	// out of time on the client's own bound at that moment (#684 guard 4).
 	AuditBlocked State = "audit-blocked"
 	// Quiesced: the store is not ready while a running job holds a quiesce
-	// for a backup (F4.1) or a seal-key rotation (#830).
+	// for a backup (F4.1), a seal-key rotation (#830) or an OS update's
+	// pre-update copy (geekdojo/geekdojo-brain#800).
 	Quiesced State = "quiesced"
 	// Blank: sys/health answers 200 unsealed, but the store started empty on
 	// a cluster whose database says it was set up, or that verdict cannot be
@@ -66,20 +67,29 @@ const (
 	// QuiesceSealRotation: the seal-key rotation restarts the store
 	// (geekdojo/geekdojo-brain#830).
 	QuiesceSealRotation
+	// QuiesceOSUpdate: an OS update of the store's host copies the store
+	// before it installs (geekdojo/geekdojo-brain#800).
+	QuiesceOSUpdate
 )
 
 // String names the reason in log fields.
 func (r QuiesceReason) String() string {
-	if r == QuiesceSealRotation {
+	switch r {
+	case QuiesceSealRotation:
 		return "seal-rotation"
+	case QuiesceOSUpdate:
+		return "os-update"
 	}
 	return "backup"
 }
 
 // phrase is the reason as the log message words it.
 func (r QuiesceReason) phrase() string {
-	if r == QuiesceSealRotation {
+	switch r {
+	case QuiesceSealRotation:
 		return "a seal-key rotation"
+	case QuiesceOSUpdate:
+		return "an OS update"
 	}
 	return "a backup"
 }
@@ -122,6 +132,16 @@ type Monitor struct {
 	// blankUnread is set while the blank verdict cannot be read, so its WARN
 	// is logged once per outage rather than on every reading.
 	blankUnread bool
+	// readySeen is set by the first Ready reading; firstReady are the
+	// callbacks it runs (OnFirstReady).
+	readySeen  bool
+	firstReady []firstReadyFn
+}
+
+// firstReadyFn is one OnFirstReady registration.
+type firstReadyFn struct {
+	ctx context.Context
+	fn  func(context.Context)
 }
 
 // hold is one Quiesce call that has not been released.
@@ -210,7 +230,15 @@ func (m *Monitor) record(ctx context.Context, st State, kind string, h secretsto
 	}
 	m.last, m.since = st, m.now()
 	since := m.since
+	var fire []firstReadyFn
+	if st == Ready && !m.readySeen {
+		m.readySeen = true
+		fire, m.firstReady = m.firstReady, nil
+	}
 	m.mu.Unlock()
+	for _, f := range fire {
+		go f.fn(f.ctx)
+	}
 
 	if st == Ready {
 		m.log.LogAttrs(ctx, slog.LevelInfo, "secret store ready",
@@ -226,6 +254,24 @@ func (m *Monitor) record(ctx context.Context, st State, kind string, h secretsto
 	}
 	m.log.LogAttrs(ctx, slog.LevelWarn, "secret store not ready", attrs...)
 	return since
+}
+
+// OnFirstReady runs fn once, in a goroutine of its own with ctx, on the
+// first reading of this process that finds the store Ready, by whichever
+// reader takes it: the deploy gate, the alerts list, the store session, or
+// main's one reading at start (geekdojo/geekdojo-brain#800, F-800-03). A
+// reading that is not Ready never runs it, and nothing runs it twice. When
+// the store has already been read Ready, fn runs now. There is no timer:
+// the reading is the fact.
+func (m *Monitor) OnFirstReady(ctx context.Context, fn func(context.Context)) {
+	m.mu.Lock()
+	if !m.readySeen {
+		m.firstReady = append(m.firstReady, firstReadyFn{ctx: ctx, fn: fn})
+		m.mu.Unlock()
+		return
+	}
+	m.mu.Unlock()
+	go fn(ctx)
 }
 
 // ObserveAudited takes the outcome of one audited store call (a read, a
@@ -328,8 +374,10 @@ func (m *Monitor) Quiesce(jobID string, reason QuiesceReason) (release func()) {
 // quiesced reports whether a hold is held by a job that is running now, and
 // that hold's reason. A hold whose job is not running, or whose status cannot
 // be read, is ignored with a WARN, so a leaked hold cannot hide an outage.
-// With two running holds, a seal rotation's reason wins: it is the one that
-// restarts the store.
+// With two running holds, the higher reason wins: a seal rotation's over a
+// backup's, as it is the one that restarts the store. The capture gate keeps
+// a backup, a rotation and an OS update's copy from holding the store at
+// once, so the OS update's place in that order decides nothing.
 func (m *Monitor) quiesced(ctx context.Context) (QuiesceReason, bool) {
 	m.mu.Lock()
 	holds := make([]*hold, 0, len(m.holds))
@@ -413,6 +461,12 @@ func alertFor(st State, reason QuiesceReason) (proto.Alert, bool) {
 			a.Title = "The secret store is paused for a seal-key rotation."
 			a.Detail = "The secret store is paused while its seal key is rotated. " +
 				"Apps that use secrets cannot be deployed until the rotation finishes." + unaffected
+			break
+		}
+		if reason == QuiesceOSUpdate {
+			a.Title = "The secret store is paused for an OS update."
+			a.Detail = "The secret store is paused while a copy of its data is taken before an OS update. " +
+				"Apps that use secrets cannot be deployed until the copy finishes." + unaffected
 			break
 		}
 		a.Title = "The secret store is paused for a backup."

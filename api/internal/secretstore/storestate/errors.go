@@ -45,7 +45,7 @@ func Clause(s State) string {
 	case AuditBlocked:
 		return "is not accepting audit records"
 	case Quiesced:
-		return "is paused for a backup or a seal-key rotation"
+		return "is paused for a backup, a seal-key rotation or an OS update"
 	case Blank:
 		return "is empty although this cluster was set up"
 	}
