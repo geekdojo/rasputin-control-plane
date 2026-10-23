@@ -1479,6 +1479,30 @@ func main() {
 	leafSweepEvery := parseDurationOr(
 		envOr("RASPUTIN_LEAF_SWEEP_INTERVAL", os.Getenv("RASPUTIN_APPS_LEAF_ROTATE_INTERVAL")),
 		tlsca.DefaultLeafSweepInterval)
+	// Update discovery: the control plane reads signed releases directly from
+	// each component's PUBLIC source repo over anonymous HTTPS — no token on the
+	// appliance (ADR-0002; the rasputin-releases mirror is retired). Authenticity
+	// is gated by the bundle signature, not repo privacy. RASPUTIN_RELEASE_API_BASE
+	// is overridable for a proxy/CDN or tests.
+	releaseChannel := envOr("RASPUTIN_RELEASE_CHANNEL", "stable")
+	releaseAPIBase := envOr("RASPUTIN_RELEASE_API_BASE", "https://api.github.com")
+	// The SAME verifier that gates an OTA install also gates the release
+	// manifest the update decision is made from (geekdojo/geekdojo-brain#527) —
+	// one verifier, bound to the release purpose, not a second one for
+	// metadata. A control plane with no trust root passes a verifier that
+	// refuses everything, so components at or above their signing floor fail to
+	// resolve instead of resolving unverified. One instance serves the update
+	// check and the security-floor watch.
+	releaseSource := releases.NewGithubPublicSource(releaseAPIBase, verifier)
+	// The OS security floor (geekdojo/geekdojo-brain#772): a daily read of the
+	// newest OS manifest through the job system, and a crit alert while an OS
+	// node runs below the floor it declares.
+	secWatch, err := securityWatchWiring(releaseSource, invStore, releaseChannel, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: security watch", "err", err.Error())
+		os.Exit(1)
+	}
+	runner.Register(secWatch.workflow)
 	sched := scheduler.New(runner, append(append(reconcileEntries(fwReconcileEvery, appsReconcileEvery, meshReconcileEvery, leafSweepEvery), []scheduler.Entry{
 		// storage.reconcile (#398): the claimed backup target's health, with
 		// a write probe. Fires only while a target is claimed (Due).
@@ -1492,6 +1516,7 @@ func main() {
 			parseDurationOr(os.Getenv("RASPUTIN_BACKUP_CHECK_INTERVAL"), time.Hour),
 			storage.DueFunc(backupStore, setupStore, true),
 		),
+		secWatch.entry,
 	}...), append(obsCollectorEntries, storeAud.entries()...)...))
 	sched.Start(ctx)
 	defer sched.Stop()
@@ -1696,6 +1721,9 @@ func main() {
 	// The OS outcome records' crit alert (#833), which replaces the generic
 	// job-failed warn for their kinds.
 	wireOutcomeAlerts(alertsSvc, outcomes)
+	// The OS security-update alert (#772), computed on each read from the
+	// floor the daily job last read and the inventory.
+	alertsSvc.SetSecurityUpdateAlerts(secWatch.alerts)
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps
@@ -1760,20 +1788,9 @@ func main() {
 		}
 		return out, nil
 	}, obs.VMAlertEvaluationInterval)
-	// Update discovery: the control plane reads signed releases directly from
-	// each component's PUBLIC source repo over anonymous HTTPS — no token on the
-	// appliance (ADR-0002; the rasputin-releases mirror is retired). Authenticity
-	// is gated by the bundle signature, not repo privacy. RASPUTIN_RELEASE_API_BASE
-	// is overridable for a proxy/CDN or tests.
-	releaseChannel := envOr("RASPUTIN_RELEASE_CHANNEL", "stable")
-	releaseAPIBase := envOr("RASPUTIN_RELEASE_API_BASE", "https://api.github.com")
-	// The SAME verifier that gates an OTA install also gates the release
-	// manifest the update decision is made from (geekdojo/geekdojo-brain#527) —
-	// one verifier, bound to the release purpose, not a second one for
-	// metadata. A control plane with no trust root passes a verifier that
-	// refuses everything, so components at or above their signing floor fail to
-	// resolve instead of resolving unverified.
-	srv.SetReleaseSource(releases.NewGithubPublicSource(releaseAPIBase, verifier), releaseChannel)
+	// The release source and channel are built above, before the scheduler,
+	// because the security-floor watch reads through the same source.
+	srv.SetReleaseSource(releaseSource, releaseChannel)
 	srv.SetReleaseDownloadBase(envOr("RASPUTIN_RELEASE_DOWNLOAD_BASE", "https://github.com"))
 	log.Printf("rasputin-api: update channel = %s (direct from source repos)", releaseChannel)
 

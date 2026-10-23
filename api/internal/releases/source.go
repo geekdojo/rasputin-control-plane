@@ -32,6 +32,12 @@ type Manifest struct {
 	Version   string             `json:"version"`
 	Channel   string             `json:"channel"` // "stable" | "dev"
 	Artifacts []ManifestArtifact `json:"artifacts"`
+	// SecurityFloor is the oldest Rasputin OS version that carries every fix
+	// for a reachable critical or high advisory, or empty when the release
+	// declares none (geekdojo/geekdojo-brain#772). An older api ignores it:
+	// manifests are parsed leniently. It is only ever read off a manifest
+	// LatestFor returned, so at or above SignedManifestFrom it was verified.
+	SecurityFloor string `json:"securityFloor,omitempty"`
 }
 
 // ManifestArtifact is one buildable artifact within a release. The OS uses
