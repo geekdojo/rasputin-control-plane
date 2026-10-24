@@ -16,9 +16,10 @@ import (
 )
 
 // The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): the seal
-// key (#803), the store's first init (#804) and the store provisioner (#805)
-// each write a record under /run that the api turns into a job and, when it
-// failed or cannot be read, a crit alert.
+// key (#803), the store's first init (#804), the store provisioner (#805)
+// and the store's version gate (#801) each write a record under /run that
+// the api turns into a job and, when it failed or cannot be read, a crit
+// alert.
 
 const (
 	// outcomeRunDir is where rasputin-os writes the records.
@@ -68,6 +69,23 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 			Title:             "The secret store's provisioning failed",
 			AfterStoreRestart: true,
 			StartUnit:         storeProvisionUnit,
+		},
+		{
+			// The store's version gate (#801), run in every start of the
+			// store before bao: current when the data is not newer than the
+			// binary; restored when the pre-update copy was put back; refused
+			// or failed when the store was held stopped. restored alerts too:
+			// secrets written since the update are gone.
+			Kind:     "os.store_rollback",
+			Path:     filepath.Join(runDir, "rasputin-store-rollback", "outcome"),
+			Fields:   []string{osoutcome.FieldBootID, osoutcome.FieldReason},
+			KeyField: osoutcome.FieldBootID,
+			Outcomes: map[string]osoutcome.Verdict{
+				"current": osoutcome.OK, "restored": osoutcome.Alert,
+				"refused": osoutcome.Alert, "failed": osoutcome.Alert,
+			},
+			Title:             "The secret store's data was rolled back, or the store was held stopped",
+			AfterStoreRestart: true,
 		},
 	}
 }

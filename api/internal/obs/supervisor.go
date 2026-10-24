@@ -971,9 +971,9 @@ func (s *DockerComposeSupervisor) prepareHostDirs() error {
 
 // outcomeJournalIdentifiers is the allowlist of journal SYSLOG_IDENTIFIERs
 // the control plane's Alloy ships to Loki: the first-boot outcome lines of
-// the three rasputin-os scripts rasputin-seal-key.sh, rasputin-store-init.sh
-// and rasputin-store-provision.sh (each logs through outcome.sh's
-// outcome_log). A stdout line's identifier is the basename of the script
+// the four rasputin-os scripts rasputin-seal-key.sh, rasputin-store-init.sh,
+// rasputin-store-provision.sh and rasputin-store-rollback.sh (each logs
+// through outcome.sh's outcome_log). A stdout line's identifier is the basename of the script
 // systemd runs, so renaming one of those scripts silently stops it shipping.
 //
 // Nothing else in the host journal reaches Loki. That is a security
@@ -984,6 +984,7 @@ var outcomeJournalIdentifiers = []string{
 	"rasputin-seal-key.sh",
 	"rasputin-store-init.sh",
 	"rasputin-store-provision.sh",
+	"rasputin-store-rollback.sh",
 }
 
 // outcomeJournalMatches renders ids as loki.source.journal's matches string.

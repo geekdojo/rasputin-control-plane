@@ -1264,7 +1264,8 @@ func checkJournalSource(cfg string, wantIDs []string) error {
 // allowlist is the literal cross-repo contract with rasputin-os. A mutated
 // allowlist (one extra term, one missing) makes the same assertion fail.
 func TestRenderAlloyConfig_JournalSourceIsExactlyTheAllowlist(t *testing.T) {
-	contract := []string{"rasputin-seal-key.sh", "rasputin-store-init.sh", "rasputin-store-provision.sh"}
+	// TC-801-30: rasputin-store-rollback.sh, the store's version gate (#801).
+	contract := []string{"rasputin-seal-key.sh", "rasputin-store-init.sh", "rasputin-store-provision.sh", "rasputin-store-rollback.sh"}
 	if got := slices.Sorted(slices.Values(outcomeJournalIdentifiers)); !slices.Equal(got, contract) {
 		t.Fatalf("outcomeJournalIdentifiers = %v, want the rasputin-os script names %v", got, contract)
 	}
