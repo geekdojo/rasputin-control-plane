@@ -95,13 +95,23 @@ func (r *rig) transport() backupxfer.Transport {
 // put streams a fresh seal of plaintext for member on cred, the way the agent
 // does — through a pipe, digest in the trailer.
 func (r *rig) put(ctx context.Context, cred, member string, plaintext []byte) (*backupxfer.Receipt, error) {
+	rc, _, err := r.putDeclaring(ctx, cred, member, plaintext, uint64(len(plaintext)))
+	return rc, err
+}
+
+// putDeclaring is put with the plaintext length the node declares up front
+// chosen by the test, and it also reports how many sealed bytes the
+// transport read from the body to send.
+func (r *rig) putDeclaring(ctx context.Context, cred, member string, plaintext []byte, declared uint64) (*backupxfer.Receipt, int64, error) {
 	stream := backupxfer.NewSealedStream(bytes.NewReader(plaintext), r.key.publicB64, "key-1", proto.BackupScopeFull)
+	body := &countingReader{r: stream}
 	sum := sha256.Sum256(plaintext)
-	return r.transport().Put(ctx, backupxfer.PutRequest{
+	rc, err := r.transport().Put(ctx, backupxfer.PutRequest{
 		Destination: r.dest, Generation: genID, Member: member, Credential: cred,
-		PlaintextDigest: hex.EncodeToString(sum[:]), PlaintextBytes: uint64(len(plaintext)),
-		Body: stream, Sealed: stream.Sealed,
+		PlaintextDigest: hex.EncodeToString(sum[:]), PlaintextBytes: declared,
+		Body: body, Sealed: stream.Sealed,
 	})
+	return rc, body.n.Load(), err
 }
 
 func (r *rig) memberPath(member string) string {
@@ -382,15 +392,28 @@ func TestIngestLeavesNoPartialMemberWhenTheUploadDies(t *testing.T) {
 	}
 }
 
-// countingReader records whether the body was ever read.
+// countingReader records whether the body was ever read, and how much of it.
 type countingReader struct {
 	r     io.Reader
 	reads atomic.Int64
+	n     atomic.Int64
 }
 
 func (c *countingReader) Read(p []byte) (int, error) {
 	c.reads.Add(1)
-	return c.r.Read(p)
+	n, err := c.r.Read(p)
+	c.n.Add(int64(n))
+	return n, err
+}
+
+// Close passes through, so a body the transport never sends is still closed
+// (a sealed stream left open keeps its sealing goroutine, and the plaintext,
+// alive).
+func (c *countingReader) Close() error {
+	if cl, ok := c.r.(io.Closer); ok {
+		return cl.Close()
+	}
+	return nil
 }
 
 func TestIngestRefusesBeforeABodyByteIsSent(t *testing.T) {
@@ -540,11 +563,17 @@ func TestIngestRefusesMoreBytesThanTheCredentialAuthorises(t *testing.T) {
 		t.Fatalf("the member the credential was minted for was refused: %v", err)
 	}
 	// A seal of something far larger, on a credential for the small one,
-	// is cut off at the bound and discarded.
+	// is refused before its body: the node declared its length, so the
+	// endpoint answers instead of 100 Continue and the client sends none of
+	// it. Refusing it mid-body instead raced the client's writes and could
+	// reach the client as a connection reset rather than the code.
 	big := bytes.Repeat([]byte("x"), 2<<20)
 	cred2, _ := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memPL, NodeID: nodeID, JobID: jobID, MaxBytes: bound}, time.Minute)
-	_, err = r.put(context.Background(), cred2, memPL, big)
+	_, sent, err := r.putDeclaring(context.Background(), cred2, memPL, big, uint64(len(big)))
 	refusedWith(t, err, backupxfer.CodeOverBound)
+	if sent != 0 {
+		t.Errorf("the client read %d bytes of the refused body to send; want none", sent)
+	}
 	if _, err := os.Stat(r.memberPath(memPL)); err == nil {
 		t.Fatal("an over-bound upload landed")
 	}
@@ -553,6 +582,34 @@ func TestIngestRefusesMoreBytesThanTheCredentialAuthorises(t *testing.T) {
 	if _, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memPL, NodeID: nodeID, JobID: jobID}, time.Minute); err == nil {
 		t.Error("a credential with no byte bound was minted")
 	}
+}
+
+// A node that declares less than it sends is cut off at the bound part-way
+// through the body, and still gets the coded refusal, never a connection
+// reset: the endpoint answers first and reads the rest until the client hangs
+// up, so it never closes on bytes the client sent and it did not read.
+func TestIngestCutsOffAnUnderDeclaredUploadWithTheCodedRefusal(t *testing.T) {
+	r := newRig(t, 1)
+	small := []byte("a small volume")
+	bound := backupxfer.SealedSizeBound(uint64(len(small)))
+	cred, err := r.ingest.Mint(backupxfer.Grant{Generation: genID, Member: memPL, NodeID: nodeID, JobID: jobID, MaxBytes: bound}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	big := bytes.Repeat([]byte("x"), 2<<20)
+	_, sent, err := r.putDeclaring(context.Background(), cred, memPL, big, uint64(len(small)))
+	refusedWith(t, err, backupxfer.CodeOverBound)
+	if sent <= int64(bound) {
+		t.Fatalf("the client sent %d bytes, within the %d-byte bound; the cut-off was not exercised", sent, bound)
+	}
+	if _, err := os.Stat(r.memberPath(memPL)); err == nil {
+		t.Fatal("an over-bound upload landed")
+	}
+	if _, ok := r.ingest.Landed(genID, memPL); ok {
+		t.Fatal("an over-bound upload was recorded")
+	}
+	r.waitForNoPartials(2 * time.Second)
+	r.noPartials()
 }
 
 // A restore credential — valid, signed by the same authority, naming this very

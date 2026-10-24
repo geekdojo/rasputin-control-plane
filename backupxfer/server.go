@@ -56,6 +56,21 @@ import (
 // the client dies mid-body. Connection lifetime is the lease. No grant, no
 // TTL, no renewal.
 //
+// # Refusing an upload that is too large
+//
+// A refusal has to reach the client as its code, not as a reset. Closing a
+// connection that still holds unread request bytes makes the kernel send RST,
+// and on Linux an RST discards whatever the client had not yet read — the
+// coded response included. So an over-bound upload is refused before its body
+// whenever it can be: the node declares the plaintext length up front, and a
+// member whose seal cannot fit the credential's MaxBytes is refused while the
+// client is still waiting for 100 Continue, so it never sends the body. A
+// refusal that can only be made part-way through the body (a client that
+// declares less than it sends, a body that is not an archive, a target that
+// fills up) is answered at once, and the rest of the body is then read and
+// discarded until the client hangs up, up to refusalDrainBytes: RFC 9112
+// §9.6's advice for a server that closes while the client is still sending.
+//
 // # One entry
 //
 // ServeNode is the only entry, mounted on the api's node listener: the api
@@ -68,6 +83,9 @@ type Ingest struct {
 	now  func() time.Time
 	log  *slog.Logger
 	idle time.Duration
+	// drain is how much of a refused body is read after the refusal:
+	// refusalDrainBytes, shortened by tests.
+	drain uint64
 
 	mu  sync.Mutex
 	gen *openGeneration
@@ -115,11 +133,12 @@ func New(auth *Authority, concurrency int, logger *slog.Logger) *Ingest {
 		concurrency = DefaultConcurrency
 	}
 	return &Ingest{
-		auth: auth,
-		sem:  make(chan struct{}, concurrency),
-		now:  time.Now,
-		log:  logger,
-		idle: IdleTimeout,
+		auth:  auth,
+		sem:   make(chan struct{}, concurrency),
+		now:   time.Now,
+		log:   logger,
+		idle:  IdleTimeout,
+		drain: refusalDrainBytes,
 	}
 }
 
@@ -354,6 +373,17 @@ func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) 
 		refuse(w, http.StatusForbidden, CodeCredentialScope, "the credential is scoped to a different member")
 		return
 	}
+	// The declared length, before a byte of the body (see "Refusing an upload
+	// that is too large"). A missing or unreadable declaration is not refused
+	// here: the body is still counted against MaxBytes as it arrives.
+	if declared, err := strconv.ParseUint(strings.TrimSpace(r.Header.Get(HeaderPlaintextBytes)), 10, 64); err == nil &&
+		(declared > grant.MaxBytes || SealedSizeBound(declared) > grant.MaxBytes) {
+		i.warn(r, "backup ingest: the declared member is larger than the credential authorises; refused before the body", grant, keyOwner, CodeOverBound,
+			"declared_plaintext_bytes", declared, "max_bytes", grant.MaxBytes)
+		refuse(w, http.StatusRequestEntityTooLarge, CodeOverBound,
+			fmt.Sprintf("A %d-byte member seals to more than the %d bytes its credential authorises, so it was refused before any of it was sent.", declared, grant.MaxBytes))
+		return
+	}
 
 	i.mu.Lock()
 	gen := i.gen
@@ -385,7 +415,8 @@ func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) 
 	}
 	defer func() { <-i.sem }()
 
-	rc, status, code, detail := i.land(w, r, gen, grant, member)
+	body := &bodyState{r: r.Body}
+	rc, status, code, detail := i.land(w, r, body, gen, grant, member)
 	if rc == nil {
 		// The target failing to take a member is an operation that did not
 		// complete; a body that is not what the credential and its trailer
@@ -395,6 +426,13 @@ func (i *Ingest) serve(w http.ResponseWriter, r *http.Request, keyOwner string) 
 			level, msg = slog.LevelError, "backup ingest: the target could not take the member"
 		}
 		LogGrant(r.Context(), i.log, level, msg, grant, keyOwner, "code", code, "detail", detail)
+		if body.started && !body.ended {
+			// Refused part-way through the body — over the bound, not an
+			// archive, the target filling up — while the client is still
+			// sending it.
+			i.refuseMidBody(w, body, status, code, detail)
+			return
+		}
 		refuse(w, status, code, detail)
 		return
 	}
@@ -415,7 +453,7 @@ func (i *Ingest) warn(r *http.Request, msg string, g Grant, keyOwner, code strin
 }
 
 // land streams the body onto the target beneath the open generation.
-func (i *Ingest) land(w http.ResponseWriter, r *http.Request, gen *openGeneration, grant Grant, member string) (rc *Receipt, status int, code, detail string) {
+func (i *Ingest) land(w http.ResponseWriter, r *http.Request, src io.Reader, gen *openGeneration, grant Grant, member string) (rc *Receipt, status int, code, detail string) {
 	parts := strings.Split(member, "/") // validated: volumes/<app>/<file>
 	root, err := openRootDir(gen.gensDir)
 	if err != nil {
@@ -467,7 +505,7 @@ func (i *Ingest) land(w http.ResponseWriter, r *http.Request, gen *openGeneratio
 	// body from here: the credential's MaxBytes (a leaked credential cannot
 	// fill the disk) and an idle deadline (a stalled upload cannot hold the
 	// slot).
-	body := &boundedBody{r: r.Body, rc: http.NewResponseController(w), max: grant.MaxBytes, idle: i.idle}
+	body := &boundedBody{r: src, rc: http.NewResponseController(w), max: grant.MaxBytes, idle: i.idle}
 	header, prefix, err := ReadHeader(body)
 	if err != nil {
 		return nil, http.StatusUnsupportedMediaType, CodeNotAnArchive, err.Error()
@@ -571,6 +609,53 @@ func (b *boundedBody) Read(p []byte) (int, error) {
 		return n, io.EOF
 	}
 	return n, err
+}
+
+// refusalDrainBytes bounds how much of a refused body is read after the
+// refusal is sent. An honest client hangs up as soon as it has read the
+// refusal; what it can still have in flight by then is its socket buffers
+// (Linux autotunes each to at most a few MiB). A client still sending past
+// this is not listening, and is cut off so it cannot hold the upload slot.
+const refusalDrainBytes = 16 << 20
+
+// bodyState is the request body as the handler reads it, recording whether
+// reading has started and whether it reached the end: between the two, the
+// client may still be sending, and a refusal has to be sent the way
+// refuseMidBody sends it.
+type bodyState struct {
+	r       io.Reader
+	started bool
+	ended   bool
+}
+
+func (b *bodyState) Read(p []byte) (int, error) {
+	b.started = true
+	n, err := b.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		b.ended = true
+	}
+	return n, err
+}
+
+// refuseMidBody answers a refusal while the client is still sending its body:
+// it sends the refusal first, then reads and discards the rest until the
+// client hangs up, so the connection is never closed on unread bytes while
+// the client may not yet have read the answer.
+func (i *Ingest) refuseMidBody(w http.ResponseWriter, body io.Reader, status int, code, detail string) {
+	rc := http.NewResponseController(w)
+	// Without full duplex an HTTP/1 handler may not read the body once it has
+	// started the response. An error means a writer that cannot interleave
+	// (HTTP/2, which is full duplex anyway, or a recorder in a test); the
+	// refusal is still written, so it is not a reason to stop.
+	_ = rc.EnableFullDuplex()
+	refuse(w, status, code, detail)
+	if err := rc.Flush(); err != nil {
+		return // the client is gone; there is no one left to answer
+	}
+	// The drain ends at the client's EOF or hang-up, at i.drain bytes, or
+	// after IdleTimeout of silence. None of those changes the answer already
+	// sent, so which one it was is deliberately dropped.
+	_, _ = io.Copy(io.Discard, &boundedBody{r: body, rc: rc, max: i.drain, idle: i.idle})
 }
 
 func refuse(w http.ResponseWriter, status int, code, detail string) {
