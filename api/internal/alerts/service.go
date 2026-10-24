@@ -46,6 +46,12 @@
 //     (osoutcome.Reader.Alerts, geekdojo/geekdojo-brain#833). Those kinds
 //     raise no job-failed warn. It clears on a newer record that does not
 //     alert.
+//   - security   → security-update:os (crit), at most one, from the source
+//     SetSecurityUpdateAlerts wires (releases.SecurityWatch.Alerts,
+//     geekdojo/geekdojo-brain#772): raised while the newest OS release
+//     declares a security floor and an OS node runs below it or runs an
+//     unconfirmed version. Computed on read from inventory, so it clears
+//     the moment the last node reports a version at or above the floor.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -134,6 +140,10 @@ type Service struct {
 	// the job kinds it covers, which jobAlerts leaves to it.
 	outcomeAlerts func(ctx context.Context, now time.Time) ([]proto.Alert, error)
 	outcomeKinds  map[string]bool
+	// securityUpdateAlerts, when set, reports an OS security update the
+	// cluster has not installed (releases.SecurityWatch.Alerts). Nil means
+	// no such alert.
+	securityUpdateAlerts func(ctx context.Context, now time.Time) ([]proto.Alert, error)
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -168,6 +178,13 @@ func (s *Service) SetOutcomeAlerts(kinds []string, fn func(ctx context.Context, 
 		s.outcomeKinds[k] = true
 	}
 	s.outcomeAlerts = fn
+}
+
+// SetSecurityUpdateAlerts wires the OS security-update alert
+// (releases.SecurityWatch.Alerts). Set before List. fn's error fails List, as
+// a failed inventory read does.
+func (s *Service) SetSecurityUpdateAlerts(fn func(ctx context.Context, now time.Time) ([]proto.Alert, error)) {
+	s.securityUpdateAlerts = fn
 }
 
 // New constructs an alerts Service. The store + nats.Conn are optional;
@@ -234,6 +251,13 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 		alerts, err := s.outcomeAlerts(ctx, now)
 		if err != nil {
 			return nil, fmt.Errorf("alerts: os outcomes: %w", err)
+		}
+		out = append(out, alerts...)
+	}
+	if s.securityUpdateAlerts != nil {
+		alerts, err := s.securityUpdateAlerts(ctx, now)
+		if err != nil {
+			return nil, fmt.Errorf("alerts: security updates: %w", err)
 		}
 		out = append(out, alerts...)
 	}
