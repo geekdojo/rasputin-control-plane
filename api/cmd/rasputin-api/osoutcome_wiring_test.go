@@ -20,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // The functional tests for the OS outcome records (#833) run the composition
@@ -47,7 +48,7 @@ func newOutcomeEnv(t *testing.T) *outcomeEnv {
 	t.Helper()
 	dir := t.TempDir()
 	e := &outcomeEnv{runDir: filepath.Join(dir, "run"), dbPath: filepath.Join(dir, "jobs.db"), bootIDPath: filepath.Join(dir, "boot_id")}
-	for _, d := range []string{"rasputin-seal-key", "rasputin-store-init", "rasputin-store-provision"} {
+	for _, d := range []string{"rasputin-seal-key", "rasputin-store-init", "rasputin-store-provision", "rasputin-store-rollback"} {
 		if err := os.MkdirAll(filepath.Join(e.runDir, d), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -173,9 +174,149 @@ func TestOutcomeSources_Paths(t *testing.T) {
 	for _, s := range outcomeSources(outcomeRunDir, noObserve) {
 		paths = append(paths, s.Path)
 	}
-	want := []string{"/run/rasputin-seal-key/outcome", "/run/rasputin-store-init/outcome", "/run/rasputin-store-provision/outcome"}
+	want := []string{"/run/rasputin-seal-key/outcome", "/run/rasputin-store-init/outcome", "/run/rasputin-store-provision/outcome",
+		"/run/rasputin-store-rollback/outcome"}
 	if !slices.Equal(paths, want) {
 		t.Errorf("paths = %v, want %v", paths, want)
+	}
+}
+
+// TC-801-28: the store's version gate (#801) is declared at its record's
+// path, keyed on boot_id, current as OK and the other three as Alert, read
+// again after a store restart; and osoutcome.New accepts the declarations.
+func TestOutcomeSources_StoreRollback(t *testing.T) {
+	var got *osoutcome.Source
+	srcs := outcomeSources(outcomeRunDir, noObserve)
+	for i := range srcs {
+		if srcs[i].Kind == "os.store_rollback" {
+			got = &srcs[i]
+		}
+	}
+	if got == nil {
+		t.Fatal("no os.store_rollback source is declared")
+	}
+	if got.Path != "/run/rasputin-store-rollback/outcome" {
+		t.Errorf("Path = %q, want /run/rasputin-store-rollback/outcome", got.Path)
+	}
+	if want := []string{osoutcome.FieldBootID, osoutcome.FieldReason}; !slices.Equal(got.Fields, want) {
+		t.Errorf("Fields = %v, want %v", got.Fields, want)
+	}
+	if got.KeyField != osoutcome.FieldBootID {
+		t.Errorf("KeyField = %q, want %q", got.KeyField, osoutcome.FieldBootID)
+	}
+	want := map[string]osoutcome.Verdict{
+		"current": osoutcome.OK, "restored": osoutcome.Alert, "refused": osoutcome.Alert, "failed": osoutcome.Alert,
+	}
+	if len(got.Outcomes) != len(want) {
+		t.Errorf("Outcomes = %v, want %v", got.Outcomes, want)
+	}
+	for w, v := range want {
+		if got.Outcomes[w] != v {
+			t.Errorf("Outcomes[%q] = %v, want %v", w, got.Outcomes[w], v)
+		}
+	}
+	if !got.AfterStoreRestart {
+		t.Error("AfterStoreRestart is false, want true: the store's restart re-runs the gate")
+	}
+	if got.StartUnit != "" || got.Observe != nil {
+		t.Errorf("StartUnit = %q, Observe set = %v; want neither", got.StartUnit, got.Observe != nil)
+	}
+	// outcomeReaderWiring hands these declarations to osoutcome.New.
+	log, _ := logkittest.New()
+	if _, err := outcomeReaderWiring(openLedgerAt(t, filepath.Join(t.TempDir(), "jobs.db")), log, outcomeRunDir,
+		procBootIDPath, (&outcomeRun{}).run, noObserve); err != nil {
+		t.Errorf("osoutcome.New refused the declarations: %v", err)
+	}
+}
+
+func rollbackBody(outcome, boot string) string {
+	return "outcome=" + outcome + "\nboot_id=" + boot + "\nreason=The gate said " + outcome + ".\n"
+}
+
+// TC-801-29: the gate's record end to end, at start and after a store
+// restart. current is one succeeded job and no alert; restored, refused and
+// failed are one failed job carrying the reason and a crit
+// os-outcome:os.store_rollback alert. The same boot_id adds no job, a new one
+// adds one, and a later current clears the alert.
+func TestFunctional_StoreRollbackOutcome(t *testing.T) {
+	const kind = "os.store_rollback"
+	for _, tc := range []struct {
+		outcome string
+		failed  bool
+	}{
+		{"current", false},
+		{"restored", true},
+		{"refused", true},
+		{"failed", true},
+	} {
+		for _, at := range []string{"start", "store restart"} {
+			t.Run(tc.outcome+" at "+at, func(t *testing.T) {
+				e := newOutcomeEnv(t)
+				read := func(r *osoutcome.Reader) {
+					if at == "start" {
+						r.ReadAtStart(t.Context())
+					} else {
+						r.AfterStoreRestart(t.Context())
+					}
+				}
+				e.write(t, "rasputin-store-rollback", rollbackBody(tc.outcome, fxBoot))
+				r := e.reader(t, (&outcomeRun{}).run)
+				read(r)
+				js, err := e.ledger.ListAllJobsByKind(t.Context(), kind)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(js) != 1 {
+					t.Fatalf("%d jobs, want 1", len(js))
+				}
+				wantStatus, wantErr := jobs.StatusSucceeded, ""
+				if tc.failed {
+					wantStatus, wantErr = jobs.StatusFailed, "The gate said "+tc.outcome+"."
+				}
+				if js[0].Status != wantStatus || js[0].Error != wantErr {
+					t.Errorf("job status %q error %q, want %q %q", js[0].Status, js[0].Error, wantStatus, wantErr)
+				}
+				svc := e.alertsService(t, r)
+				var wantAlerts []string
+				if tc.failed {
+					wantAlerts = []string{"os-outcome:" + kind}
+				}
+				if got := jobAlertIDs(t, svc); !slices.Equal(got, wantAlerts) {
+					t.Errorf("alerts = %v, want %v", got, wantAlerts)
+				}
+				if tc.failed {
+					all, err := svc.List(t.Context())
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, a := range all {
+						if a.ID == "os-outcome:"+kind && (a.Severity != proto.AlertCrit || a.Detail != wantErr) {
+							t.Errorf("alert severity %q detail %q, want crit %q", a.Severity, a.Detail, wantErr)
+						}
+					}
+				}
+				read(e.reader(t, (&outcomeRun{}).run))
+				if n := e.count(t, kind); n != 1 {
+					t.Errorf("same boot_id: %d jobs, want 1", n)
+				}
+				e.write(t, "rasputin-store-rollback", rollbackBody(tc.outcome, fxBoot2))
+				read(e.reader(t, (&outcomeRun{}).run))
+				if n := e.count(t, kind); n != 2 {
+					t.Errorf("new boot_id: %d jobs, want 2", n)
+				}
+				if !tc.failed {
+					return
+				}
+				e.write(t, "rasputin-store-rollback", rollbackBody("current", fxBoot2))
+				read(e.reader(t, (&outcomeRun{}).run))
+				if n := e.count(t, kind); n != 3 {
+					t.Errorf("a later current: %d jobs, want 3", n)
+				}
+				if got := jobAlertIDs(t, svc); len(got) != 0 {
+					t.Errorf("after a later current: alerts = %v, want none", got)
+				}
+			})
+		}
 	}
 }
 

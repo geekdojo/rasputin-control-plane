@@ -3,8 +3,8 @@
 // from the newest job of each record's kind (geekdojo/geekdojo-brain#833).
 //
 // A record is a small KEY=VALUE file under /run that a oneshot unit writes on
-// every run: the seal key (#803), the store's first init (#804) and the
-// store provisioner (#805). Each is declared once, as a Source; the reader
+// every run: the seal key (#803), the store's first init (#804), the store
+// provisioner (#805) and the store's version gate (#801). Each is declared once, as a Source; the reader
 // has no per-source code, so a new record is one more declaration.
 //
 // The ledger is the one source of truth. A record becomes exactly one job per
