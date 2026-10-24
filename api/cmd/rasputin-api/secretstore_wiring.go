@@ -306,16 +306,18 @@ type storeBackupControl struct {
 }
 
 // selfStoreCheckWiring builds the secret-store gate a control plane's update
-// of itself passes before it commits (geekdojo/geekdojo-brain#767). It keys on
-// updateCopy, so the check runs on exactly the hosts whose update copy_store
-// copies: nil with no store requested or the mock, and a check otherwise. A
-// store whose configuration was refused still gets one; its Disabled store
-// answers ErrDisabled, so such an update goes to mark-bad (ERR-CLOSED).
-func selfStoreCheckWiring(updateCopy storage.SecretStore, store updater.StoreHealth, log *slog.Logger) (*updater.SelfStoreCheck, error) {
-	if updateCopy == nil {
+// of itself passes before it commits (geekdojo/geekdojo-brain#767), which
+// also retires the store's pre-update copy once that update commits (#873).
+// It keys on retirer, the pre-update copier, so the check runs on exactly
+// the hosts whose update copy_store copies: nil with no store requested or
+// the mock, and a check otherwise. A store whose configuration was refused
+// still gets one; its Disabled store answers ErrDisabled, so such an update
+// goes to mark-bad (ERR-CLOSED).
+func selfStoreCheckWiring(retirer updater.CopyRetirer, store updater.StoreHealth, log *slog.Logger) (*updater.SelfStoreCheck, error) {
+	if retirer == nil {
 		return nil, nil
 	}
-	return updater.NewSelfStoreCheck(store, log)
+	return updater.NewSelfStoreCheck(store, retirer, log)
 }
 
 // storeBackupWiring builds the store's cold-copy control for reason when a
@@ -440,6 +442,9 @@ type storeRollbackDeps struct {
 type storeRollback struct {
 	// copier is updater.Config.StoreCopy: nil when there is no store.
 	copier updater.StoreCopier
+	// retirer is the same copier, as the self-update store check retires
+	// its copy at the commit (#873): nil with copier.
+	retirer updater.CopyRetirer
 	// arm, run once after runner.Recover, submits the reference check on
 	// the first reading that finds the store ready; it does nothing when the
 	// check is not wired.
@@ -476,7 +481,7 @@ func storeRollbackWiring(d storeRollbackDeps) (storeRollback, error) {
 		if err != nil {
 			return off, fmt.Errorf("store rollback: %w", err)
 		}
-		out.copier = c
+		out.copier, out.retirer = c, c
 	}
 	if d.mode != storeModeOpenBao {
 		return out, nil

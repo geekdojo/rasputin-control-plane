@@ -342,10 +342,11 @@ func ApplyPendingRestore(layout RestoreLayout) (*RestoreReport, bool, error) {
 			return nil, false, fmt.Errorf("%w: place %s: %v", ErrRestoreApplyFailed, t.staged, err)
 		}
 	}
-	syncDir(dirs.data)
-	syncDir(dirs.trust)
-	syncDir(dirs.mesh)
-	syncDir(dirs.bus)
+	// Best effort, as before: the files are in place either way.
+	_ = syncDir(dirs.data)
+	_ = syncDir(dirs.trust)
+	_ = syncDir(dirs.mesh)
+	_ = syncDir(dirs.bus)
 
 	// Revocation tombstones are the one identity file a restore never
 	// replaces: the archive's are UNIONED into the live file, which may hold
@@ -384,13 +385,18 @@ func kindWord(dir bool) string {
 	return "regular file"
 }
 
-func syncDir(path string) {
+// syncDir syncs the directory at path, so a rename or a removal in it
+// survives a power cut. It returns the open, sync or close error.
+func syncDir(path string) error {
 	d, err := os.Open(path)
 	if err != nil {
-		return
+		return err
 	}
-	_ = d.Sync()
-	_ = d.Close()
+	serr := d.Sync()
+	if cerr := d.Close(); serr == nil {
+		serr = cerr
+	}
+	return serr
 }
 
 // readReport reads a restore.json, bounded.

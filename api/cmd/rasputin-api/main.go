@@ -556,13 +556,6 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store update copy", "err", err.Error())
 		os.Exit(1)
 	}
-	// The same hosts' update of themselves commits only once their own store
-	// answers ready (geekdojo/geekdojo-brain#767).
-	selfStoreCheck, err := selfStoreCheckWiring(storeUpdateCopy, readiness.store, logger)
-	if err != nil {
-		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: self-update store check", "err", err.Error())
-		os.Exit(1)
-	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
 	// logs in on the first call that needs a token, not here. #761's
 	// repository is its first consumer.
@@ -1094,6 +1087,14 @@ func main() {
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store rollback", "err", err.Error())
+		os.Exit(1)
+	}
+	// The same hosts' update of themselves commits only once their own store
+	// answers ready (geekdojo/geekdojo-brain#767), and the commit retires the
+	// copy the update took (#873).
+	selfStoreCheck, err := selfStoreCheckWiring(rollback.retirer, readiness.store, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: self-update store check", "err", err.Error())
 		os.Exit(1)
 	}
 	runner.Register(updater.UpdateWorkflow(updaterStore, invStore, busSrv.Conn(), updater.Config{

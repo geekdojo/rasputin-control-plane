@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +16,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/deadlinetest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
@@ -61,12 +64,44 @@ func (f *fakeStore) Health(context.Context) (secretstore.Health, error) {
 
 func newStoreCheck(t *testing.T, store StoreHealth, log *slog.Logger) *SelfStoreCheck {
 	t.Helper()
-	sc, err := NewSelfStoreCheck(store, log)
+	return newStoreCheckRetiring(t, store, &recordingRetirer{}, log)
+}
+
+// newStoreCheckRetiring is newStoreCheck with the copy retirer given.
+func newStoreCheckRetiring(t *testing.T, store StoreHealth, retirer CopyRetirer, log *slog.Logger) *SelfStoreCheck {
+	t.Helper()
+	sc, err := NewSelfStoreCheck(store, retirer, log)
 	if err != nil {
 		t.Fatalf("NewSelfStoreCheck: %v", err)
 	}
 	sc.window = testWindow
 	return sc
+}
+
+// recordingRetirer is a CopyRetirer recording each call's job id and the
+// mark-goods the agent had counted when it came; err is its answer.
+type recordingRetirer struct {
+	agent *selfAgent
+	err   error
+	mu    sync.Mutex
+	jobs  []string
+	goods []int32
+}
+
+func (r *recordingRetirer) RetireCopy(_ context.Context, jobID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.jobs = append(r.jobs, jobID)
+	if r.agent != nil {
+		r.goods = append(r.goods, r.agent.markGood.Load())
+	}
+	return r.err
+}
+
+func (r *recordingRetirer) calls() ([]string, []int32) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.jobs...), append([]int32(nil), r.goods...)
 }
 
 // markBadMode is how the fake agent answers update.mark-bad.
@@ -79,6 +114,26 @@ const (
 )
 
 const raucMarkBadFailure = "rauc mark-bad: exit status 1"
+
+// markGoodMode is how the fake agent answers update.mark-good.
+type markGoodMode int
+
+const (
+	markGoodAccepts     markGoodMode = iota // {"ok":true}
+	markGoodRejects                         // {"ok":false,"detail":...}
+	markGoodNoResponder                     // nobody subscribed
+)
+
+// selfAgentOpts are the fake agent's answers beyond startSelfAgent's.
+type selfAgentOpts struct {
+	healthy        bool
+	markBad        markBadMode
+	slotStartsGood bool
+	markGood       markGoodMode
+	// bootedOld makes precheck report the slot the update left as booted,
+	// as after a fallback before the commit.
+	bootedOld bool
+}
 
 // selfAgent is a fake agent for the node a test updates. It answers precheck
 // on the target slot, diag.health, mark-good and mark-bad, counts what it
@@ -98,8 +153,14 @@ func (a *selfAgent) markBadArrival() time.Time {
 
 func startSelfAgent(t *testing.T, nc *nats.Conn, nodeID string, healthy bool, mode markBadMode, slotStartsGood bool) *selfAgent {
 	t.Helper()
+	return startSelfAgentOpts(t, nc, nodeID, selfAgentOpts{healthy: healthy, markBad: mode, slotStartsGood: slotStartsGood})
+}
+
+func startSelfAgentOpts(t *testing.T, nc *nats.Conn, nodeID string, o selfAgentOpts) *selfAgent {
+	t.Helper()
+	healthy, mode := o.healthy, o.markBad
 	a := &selfAgent{}
-	a.slotGood.Store(slotStartsGood)
+	a.slotGood.Store(o.slotStartsGood)
 	sub := func(subj string, h nats.MsgHandler) {
 		s, err := nc.Subscribe(subj, h)
 		if err != nil {
@@ -107,8 +168,12 @@ func startSelfAgent(t *testing.T, nc *nats.Conn, nodeID string, healthy bool, mo
 		}
 		t.Cleanup(func() { _ = s.Unsubscribe() })
 	}
+	active, inactive := proto.SlotB, proto.SlotA
+	if o.bootedOld {
+		active, inactive = proto.SlotA, proto.SlotB
+	}
 	sub(proto.UpdatePrecheckSubject(nodeID), func(m *nats.Msg) {
-		_ = m.Respond(mustJSON(proto.UpdatePrecheckAck{OK: true, ActiveSlot: proto.SlotB, InactiveSlot: proto.SlotA,
+		_ = m.Respond(mustJSON(proto.UpdatePrecheckAck{OK: true, ActiveSlot: active, InactiveSlot: inactive,
 			CurrentVersion: "v1", BootID: "boot-after"}))
 	})
 	sub(proto.NodeCmdSubject(nodeID, "diag.health"), func(m *nats.Msg) {
@@ -119,11 +184,17 @@ func startSelfAgent(t *testing.T, nc *nats.Conn, nodeID string, healthy bool, mo
 		}
 		_ = m.Respond(mustJSON(ack))
 	})
-	sub(proto.UpdateMarkGoodSubject(nodeID), func(m *nats.Msg) {
-		a.markGood.Add(1)
-		a.slotGood.Store(true)
-		_ = m.Respond(mustJSON(proto.UpdateMarkGoodAck{OK: true}))
-	})
+	if o.markGood != markGoodNoResponder {
+		sub(proto.UpdateMarkGoodSubject(nodeID), func(m *nats.Msg) {
+			a.markGood.Add(1)
+			if o.markGood == markGoodRejects {
+				_ = m.Respond(mustJSON(proto.UpdateMarkGoodAck{OK: false, Detail: "rauc mark-good: exit status 1"}))
+				return
+			}
+			a.slotGood.Store(true)
+			_ = m.Respond(mustJSON(proto.UpdateMarkGoodAck{OK: true}))
+		})
+	}
 	if mode != markBadNoResponder {
 		sub(proto.UpdateMarkBadSubject(nodeID), func(m *nats.Msg) {
 			a.mu.Lock()
@@ -680,10 +751,10 @@ func TestSelfStoreCheck_UnhealthyNodeNeverAsksTheStore(t *testing.T) {
 // answers not ready.
 func TestNewSelfStoreCheck(t *testing.T) {
 	log, _ := logkittest.New()
-	if _, err := NewSelfStoreCheck(nil, log); err == nil {
+	if _, err := NewSelfStoreCheck(nil, &recordingRetirer{}, log); err == nil {
 		t.Error("nil store: want an error")
 	}
-	if _, err := NewSelfStoreCheck(secretstore.Disabled{}, nil); err == nil {
+	if _, err := NewSelfStoreCheck(secretstore.Disabled{}, &recordingRetirer{}, nil); err == nil {
 		t.Error("nil logger: want an error")
 	}
 	sc := newStoreCheck(t, secretstore.Disabled{}, log)
@@ -763,4 +834,258 @@ func TestSelfStoreCheck_RecordsAndBoundaryText(t *testing.T) {
 			}
 		}
 	})
+}
+
+// Tests for geekdojo/geekdojo-brain#873: the api retires the secret store's
+// pre-update copy at its own update's commit, after mark-good is accepted,
+// and on no other path.
+
+// assertRetired checks the retirer was called once, for jobID, after the
+// agent had counted exactly one mark-good.
+func assertRetired(t *testing.T, r *recordingRetirer, jobID string) {
+	t.Helper()
+	jobIDs, goods := r.calls()
+	if len(jobIDs) != 1 || jobIDs[0] != jobID {
+		t.Fatalf("retirer called for %v, want once for %s", jobIDs, jobID)
+	}
+	if len(goods) != 1 || goods[0] != 1 {
+		t.Errorf("mark-goods counted at the retirement %v, want [1]: retire only after mark-good", goods)
+	}
+}
+
+func assertNotRetired(t *testing.T, r *recordingRetirer) {
+	t.Helper()
+	if jobIDs, _ := r.calls(); len(jobIDs) != 0 {
+		t.Errorf("retirer called for %v, want never", jobIDs)
+	}
+}
+
+// resumeSelfUpdate drives ResumeSelfUpdates for a self-update the previous
+// release left across its reboot, against an agent answering o and a store
+// answering script, with retirer as the check's copy retirer. It returns
+// once the job reaches want.
+func resumeSelfUpdate(t *testing.T, o selfAgentOpts, script []storeAnswer, retirer CopyRetirer, want jobs.Status) (*selfAgent, *jobs.Job, *Store) {
+	t.Helper()
+	const self, jid = "cp", "j-retire"
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	jobStore := newJobStore(t)
+	runner := jobs.NewRunner(jobStore, nc)
+	seedPreviousReleaseSelfJob(t, jobStore, store, jid, self)
+	agent := startSelfAgentOpts(t, nc, self, o)
+	if r, ok := retirer.(*recordingRetirer); ok {
+		r.agent = agent
+	}
+	log, _ := logkittest.New()
+	sc := newStoreCheckRetiring(t, &fakeStore{t: t, script: script}, retirer, log)
+
+	ResumeSelfUpdates(context.Background(), store, nil, jobStore, runner, nc, self, sc)
+
+	waitJobStatus(t, jobStore, jid, want)
+	j, err := jobStore.GetJob(context.Background(), jid)
+	if err != nil || j == nil {
+		t.Fatalf("GetJob: %v, %v", j, err)
+	}
+	return agent, j, store
+}
+
+// TC-873-05: step 8 of the api's own update, in process, retires the copy
+// once, for its job, after mark-good; the row is committed and the step
+// succeeds.
+func TestUpdateHealthCheckAndCommit_SelfCommitRetiresTheCopy(t *testing.T) {
+	const node, jid = "cp", "j-step8"
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	seedInProgressRow(t, store, jid, node)
+	agent := startSelfAgent(t, nc, node, true, markBadAccepts, false)
+	r := &recordingRetirer{agent: agent}
+	log, _ := logkittest.New()
+	cfg := Config{SelfNodeID: node, StoreCheck: newStoreCheckRetiring(t, &fakeStore{t: t, script: []storeAnswer{answerReady}}, r, log)}
+
+	if _, err := updateHealthCheckAndCommit(store, nil, cfg)(newUpdaterCtx(jid, specJSON(node, "sha"), nc)); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	assertRetired(t, r, jid)
+	if row := rowStatus(t, store, jid); row.Status != NodeUpdateCommitted {
+		t.Errorf("row status %q, want committed", row.Status)
+	}
+}
+
+// TC-873-06: the production path, the api finishing its own update after
+// the reboot, retires the copy once, after mark-good; the job succeeds and
+// the row is committed.
+func TestResumeSelfUpdates_CommitRetiresTheCopy(t *testing.T) {
+	r := &recordingRetirer{}
+	agent, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true}, []storeAnswer{answerReady}, r, jobs.StatusSucceeded)
+	assertRetired(t, r, j.ID)
+	if g, b := agent.markGood.Load(), agent.markBad.Load(); g != 1 || b != 0 {
+		t.Errorf("mark-good %d, mark-bad %d; want 1 and 0", g, b)
+	}
+	if row := rowStatus(t, store, j.ID); row.Status != NodeUpdateCommitted {
+		t.Errorf("row status %q, want committed", row.Status)
+	}
+}
+
+// TC-873-07: an unhealthy node is marked bad and keeps its copy, which the
+// trial-boot fallback restores.
+func TestSelfStoreCheck_UnhealthyNodeKeepsTheCopy(t *testing.T) {
+	const node, jid = "cp", "j-unhealthy-copy"
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	seedInProgressRow(t, store, jid, node)
+	agent := startSelfAgent(t, nc, node, false, markBadAccepts, false)
+	r := &recordingRetirer{agent: agent}
+	log, _ := logkittest.New()
+	sc := newStoreCheckRetiring(t, &fakeStore{t: t, script: []storeAnswer{answerReady}}, r, log)
+
+	if _, err := healthCheckAndCommit(windowCtx(t), nc, store, nil, sc, node, "sha", jid, nil); err == nil {
+		t.Fatal("want the mark-bad branch's error")
+	}
+	if g, b := agent.markGood.Load(), agent.markBad.Load(); g != 0 || b != 1 {
+		t.Errorf("mark-good %d, mark-bad %d; want 0 and 1", g, b)
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, jid); row.Status != NodeUpdateRolledBack {
+		t.Errorf("row status %q, want rolled_back", row.Status)
+	}
+}
+
+// TC-873-08: a store that stays sealed through the window marks the resumed
+// update bad and keeps the copy.
+func TestResumeSelfUpdates_StoreNotReadyKeepsTheCopy(t *testing.T) {
+	r := &recordingRetirer{}
+	agent, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true}, []storeAnswer{answerSealed}, r, jobs.StatusFailed)
+	if g, b := agent.markGood.Load(), agent.markBad.Load(); g != 0 || b != 1 {
+		t.Errorf("mark-good %d, mark-bad %d; want 0 and 1", g, b)
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, j.ID); row.Status != NodeUpdateRolledBack {
+		t.Errorf("row status %q, want rolled_back", row.Status)
+	}
+}
+
+// TC-873-09: a mark-good the agent rejects fails the job, leaves the row
+// uncommitted, and keeps the copy.
+func TestResumeSelfUpdates_RejectedMarkGoodKeepsTheCopy(t *testing.T) {
+	r := &recordingRetirer{}
+	agent, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true, markGood: markGoodRejects}, []storeAnswer{answerReady}, r, jobs.StatusFailed)
+	if !strings.Contains(j.Error, "mark-good rejected") {
+		t.Errorf("job error %q, want it to carry %q", j.Error, "mark-good rejected")
+	}
+	if agent.markGood.Load() != 1 {
+		t.Errorf("mark-good received %d times, want 1", agent.markGood.Load())
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, j.ID); row.Status == NodeUpdateCommitted {
+		t.Error("row committed after a rejected mark-good")
+	}
+}
+
+// TC-873-10: a mark-good nobody answers fails the job and keeps the copy.
+func TestResumeSelfUpdates_UndeliveredMarkGoodKeepsTheCopy(t *testing.T) {
+	r := &recordingRetirer{}
+	_, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true, markGood: markGoodNoResponder}, []storeAnswer{answerReady}, r, jobs.StatusFailed)
+	if !strings.Contains(j.Error, "mark-good rpc") {
+		t.Errorf("job error %q, want it to carry %q", j.Error, "mark-good rpc")
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, j.ID); row.Status == NodeUpdateCommitted {
+		t.Error("row committed after an undelivered mark-good")
+	}
+}
+
+// TC-873-11: a node that came up on the slot the update left (a fallback
+// before the commit) has its rollback recorded by verify; no mark-good is
+// sent and the copy, which the gate restores, is kept.
+func TestResumeSelfUpdates_FallbackBeforeTheCommitKeepsTheCopy(t *testing.T) {
+	r := &recordingRetirer{}
+	agent, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true, bootedOld: true}, []storeAnswer{answerReady}, r, jobs.StatusFailed)
+	if agent.markGood.Load() != 0 {
+		t.Errorf("mark-good received %d times, want 0", agent.markGood.Load())
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, j.ID); row.Status != NodeUpdateRolledBack {
+		t.Errorf("row status %q, want rolled_back", row.Status)
+	}
+}
+
+// idleSecretStore and idleUpdateLock satisfy the copier's constructor;
+// RetireCopy never calls them.
+type idleSecretStore struct{ storage.SecretStore }
+
+type idleUpdateLock struct{ storage.UpdateLock }
+
+// TC-873-12: a retirement that fails does not undo the commit. Mark-good
+// went once and mark-bad never; the row is committed and the job succeeds;
+// the real copier's ERROR record, with the job's id, is the signal.
+func TestResumeSelfUpdates_RetirementFailureKeepsTheCommit(t *testing.T) {
+	log, rec := logkittest.New()
+	// A non-empty directory at the copy's path: its removal fails.
+	copyPath := filepath.Join(t.TempDir(), "openbao-preupdate.tar")
+	if err := os.MkdirAll(filepath.Join(copyPath, "member"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	copier, err := storage.NewPreUpdateCopier(storage.PreUpdateCopierDeps{Store: idleSecretStore{}, Lock: idleUpdateLock{},
+		DataDir: t.TempDir(), CopyPath: copyPath, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent, j, store := resumeSelfUpdate(t, selfAgentOpts{healthy: true}, []storeAnswer{answerReady}, copier, jobs.StatusSucceeded)
+	if g, b := agent.markGood.Load(), agent.markBad.Load(); g != 1 || b != 0 {
+		t.Errorf("mark-good %d, mark-bad %d; want 1 and 0", g, b)
+	}
+	if row := rowStatus(t, store, j.ID); row.Status != NodeUpdateCommitted {
+		t.Errorf("row status %q, want committed", row.Status)
+	}
+	recs := rec.AtLevel(slog.LevelError)
+	if len(recs) != 1 {
+		t.Fatalf("%d ERROR record(s), want 1: %s", len(recs), rec.Text())
+	}
+	for k, w := range map[string]string{"event": "secretstore.preupdate_copy", "outcome": "retire_failed", "job_id": j.ID} {
+		if v, _ := logkittest.Attr(recs[0], k); v != w {
+			t.Errorf("%s = %q, want %q", k, v, w)
+		}
+	}
+}
+
+// TC-873-13: another node's healthy commit, with the store check
+// configured, never retires the copy.
+func TestUpdateHealthCheckAndCommit_OtherNodeNeverRetires(t *testing.T) {
+	const node, jid = "compute1", "j-other"
+	nc := startNATS(t)
+	store := newStoreFixture(t).store
+	seedInProgressRow(t, store, jid, node)
+	startSelfAgent(t, nc, node, true, markBadAccepts, false)
+	r := &recordingRetirer{}
+	log, _ := logkittest.New()
+	cfg := Config{SelfNodeID: "cp", StoreCheck: newStoreCheckRetiring(t, &fakeStore{t: t, script: []storeAnswer{answerReady}, forbidden: true}, r, log)}
+
+	if _, err := updateHealthCheckAndCommit(store, nil, cfg)(newUpdaterCtx(jid, specJSON(node, "sha"), nc)); err != nil {
+		t.Fatalf("step: %v", err)
+	}
+	assertNotRetired(t, r)
+	if row := rowStatus(t, store, jid); row.Status != NodeUpdateCommitted {
+		t.Errorf("row status %q, want committed", row.Status)
+	}
+}
+
+// TC-873-14: the constructor refuses a nil retirer with an error naming it;
+// nil store and nil logger keep their own errors.
+func TestNewSelfStoreCheck_RefusesANilRetirer(t *testing.T) {
+	log, _ := logkittest.New()
+	for name, tc := range map[string]struct {
+		store   StoreHealth
+		retirer CopyRetirer
+		log     *slog.Logger
+		want    string
+	}{
+		"retirer": {secretstore.Disabled{}, nil, log, "the copy retirer is nil"},
+		"store":   {nil, &recordingRetirer{}, log, "the store is nil"},
+		"logger":  {secretstore.Disabled{}, &recordingRetirer{}, nil, "the logger is nil"},
+	} {
+		sc, err := NewSelfStoreCheck(tc.store, tc.retirer, tc.log)
+		if sc != nil || err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("nil %s: (%v, %v), want no check and an error naming it", name, sc, err)
+		}
+	}
 }

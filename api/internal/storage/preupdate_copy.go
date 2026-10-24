@@ -24,7 +24,10 @@ import (
 // store/openbao-version), and publishes it at one path. A fallback to the
 // slot the update left puts that copy back (#801). The previous copy is only
 // ever replaced by a complete new one: the new copy is staged beside it and
-// renamed over it once the store has started again and answered ready.
+// renamed over it once the store has started again and answered ready. The
+// copy lives until the api commits the update that took it: RetireCopy
+// deletes it then, so a fallback after the commit finds no copy and the
+// rollback gate refuses rather than putting old data back (#873).
 
 // UpdateLock is the capture lock as the pre-update copy takes it (ARCH-ISP):
 // sealrotate.Gate, whose refusals name the OS update.
@@ -179,13 +182,42 @@ func publishCopy(partial, published string) error {
 	if err := os.Rename(partial, published); err != nil {
 		return err
 	}
-	d, err := os.Open(filepath.Dir(published))
-	if err != nil {
-		return err
+	return syncDir(filepath.Dir(published))
+}
+
+// RetireCopy deletes the published copy once the api has committed the
+// update that took it (#873), and syncs the directory so the deletion
+// survives a power cut. A copy that is already gone is retired: a repeat
+// call, or an update whose copy_store had no store to copy. A failure is
+// logged at ERROR and returned; it leaves the copy where it was, as every
+// node was before #873, until the next update replaces and retires it.
+func (c *PreUpdateCopier) RetireCopy(ctx context.Context, jobID string) error {
+	ctx = jobs.ContextWithJobID(ctx, jobID)
+	err := os.Remove(c.copyPath)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		c.log.LogAttrs(ctx, slog.LevelInfo, "no secret store pre-update copy to retire; the update committed",
+			slog.String("component", "secretstore"), slog.String("event", "secretstore.preupdate_copy"),
+			slog.String("outcome", "absent"), slog.String("job_id", jobID))
+		return nil
+	case err != nil:
+		return c.retireFailed(ctx, jobID, "remove", err)
 	}
-	serr := d.Sync()
-	if cerr := d.Close(); serr == nil {
-		serr = cerr
+	if err := syncDir(filepath.Dir(c.copyPath)); err != nil {
+		return c.retireFailed(ctx, jobID, "sync", err)
 	}
-	return serr
+	c.log.LogAttrs(ctx, slog.LevelInfo, "secret store's pre-update copy retired; the update committed",
+		slog.String("component", "secretstore"), slog.String("event", "secretstore.preupdate_copy"),
+		slog.String("outcome", "retired"), slog.String("job_id", jobID))
+	return nil
+}
+
+// retireFailed logs a retirement that failed at stage at ERROR, with its
+// cause, and returns the cause.
+func (c *PreUpdateCopier) retireFailed(ctx context.Context, jobID, stage string, cause error) error {
+	c.log.LogAttrs(ctx, slog.LevelError, "secret store's pre-update copy not retired after the update committed",
+		slog.String("component", "secretstore"), slog.String("event", "secretstore.preupdate_copy"),
+		slog.String("outcome", "retire_failed"), slog.String("stage", stage), slog.String("job_id", jobID),
+		slog.String("err", cause.Error()))
+	return fmt.Errorf("storage: retire the pre-update copy (%s): %w", stage, cause)
 }
