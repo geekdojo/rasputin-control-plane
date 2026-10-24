@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -336,5 +337,140 @@ func tarMembers(t *testing.T, p string) map[string]string {
 			t.Fatal(err)
 		}
 		out[hdr.Name] = string(v)
+	}
+}
+
+// retireRecords returns the copier's records for outcome.
+func retireRecords(r *copierRig, outcome string) []slog.Record {
+	var out []slog.Record
+	for _, rc := range r.rec.Records() {
+		if o, _ := logkittest.Attr(rc, "outcome"); o == outcome {
+			out = append(out, rc)
+		}
+	}
+	return out
+}
+
+// assertRetireRecord checks a retirement record's level and its fields.
+func assertRetireRecord(t *testing.T, rc slog.Record, level slog.Level, want map[string]string) {
+	t.Helper()
+	if rc.Level != level {
+		t.Errorf("record level %v, want %v", rc.Level, level)
+	}
+	want["component"] = "secretstore"
+	want["event"] = "secretstore.preupdate_copy"
+	for k, w := range want {
+		if v, _ := logkittest.Attr(rc, k); v != w {
+			t.Errorf("%s = %q, want %q", k, v, w)
+		}
+	}
+}
+
+// TC-873-01: RetireCopy removes a published copy and writes one INFO record
+// saying so, with the job's id.
+func TestPreUpdateCopier_RetireCopyRemovesTheCopy(t *testing.T) {
+	r := newCopierRig(t)
+	if err := r.c.RetireCopy(context.Background(), "job-1"); err != nil {
+		t.Fatalf("RetireCopy: %v", err)
+	}
+	if _, err := os.Stat(r.copyPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the copy is still there: %v", err)
+	}
+	recs := retireRecords(r, "retired")
+	if len(recs) != 1 || len(r.rec.Records()) != 1 {
+		t.Fatalf("%d retired record(s) of %d, want exactly one: %s", len(recs), len(r.rec.Records()), r.rec.Text())
+	}
+	assertRetireRecord(t, recs[0], slog.LevelInfo, map[string]string{"outcome": "retired", "job_id": "job-1"})
+}
+
+// TC-873-02: with no copy, RetireCopy succeeds and says the copy was absent,
+// and a repeat call does the same; neither writes an ERROR record.
+func TestPreUpdateCopier_RetireCopyAbsent(t *testing.T) {
+	r := newCopierRig(t)
+	if err := os.Remove(r.copyPath); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 {
+		if err := r.c.RetireCopy(context.Background(), "job-1"); err != nil {
+			t.Fatalf("call %d: RetireCopy = %v, want nil", i+1, err)
+		}
+	}
+	recs := retireRecords(r, "absent")
+	if len(recs) != 2 {
+		t.Fatalf("%d absent record(s), want 2: %s", len(recs), r.rec.Text())
+	}
+	for _, rc := range recs {
+		assertRetireRecord(t, rc, slog.LevelInfo, map[string]string{"outcome": "absent", "job_id": "job-1"})
+	}
+	if n := len(r.rec.AtLevel(slog.LevelError)); n != 0 {
+		t.Errorf("%d ERROR record(s), want none: %s", n, r.rec.Text())
+	}
+}
+
+// TC-873-03: a removal that fails (a non-empty directory at the copy's path)
+// returns an error, leaves the path and its contents in place, and writes one
+// ERROR record naming the stage and cause, with no file contents.
+func TestPreUpdateCopier_RetireCopyRemoveFails(t *testing.T) {
+	r := newCopierRig(t)
+	if err := os.Remove(r.copyPath); err != nil {
+		t.Fatal(err)
+	}
+	const contents = "store-bytes-retire-7c1d"
+	mustMkdirAll(t, r.copyPath)
+	inner := filepath.Join(r.copyPath, "member")
+	if err := os.WriteFile(inner, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.c.RetireCopy(context.Background(), "job-1"); err == nil {
+		t.Fatal("RetireCopy = nil, want the removal's error")
+	}
+	if b, err := os.ReadFile(inner); err != nil || string(b) != contents {
+		t.Fatalf("the copy's path lost its contents: %q, %v", b, err)
+	}
+	recs := r.rec.AtLevel(slog.LevelError)
+	if len(recs) != 1 {
+		t.Fatalf("%d ERROR record(s), want 1: %s", len(recs), r.rec.Text())
+	}
+	assertRetireRecord(t, recs[0], slog.LevelError, map[string]string{"outcome": "retire_failed", "stage": "remove", "job_id": "job-1"})
+	if e, _ := logkittest.Attr(recs[0], "err"); e == "" {
+		t.Error("the ERROR record has no err")
+	}
+	if strings.Contains(r.rec.Text(), contents) {
+		t.Error("file contents reached a log record")
+	}
+}
+
+// TC-873-04: retiring the copy leaves every sibling in its directory (the
+// version marker, the rolled-back copy, a staged part) byte-identical.
+func TestPreUpdateCopier_RetireCopyTouchesOnlyTheCopy(t *testing.T) {
+	r := newCopierRig(t)
+	dir := filepath.Dir(r.copyPath)
+	siblings := map[string][]byte{
+		"openbao-version":               []byte("2.4.1\n"),
+		"openbao-rolled-back.tar":       []byte("the rolled-back copy"),
+		"openbao-preupdate.tar.partial": []byte("a staged part"),
+	}
+	before := map[string][32]byte{}
+	for name, b := range siblings {
+		if err := os.WriteFile(filepath.Join(dir, name), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		before[name] = sha256.Sum256(b)
+	}
+	if err := r.c.RetireCopy(context.Background(), "job-1"); err != nil {
+		t.Fatalf("RetireCopy: %v", err)
+	}
+	if _, err := os.Stat(r.copyPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the copy is still there: %v", err)
+	}
+	for name, sum := range before {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if sha256.Sum256(b) != sum {
+			t.Errorf("%s changed", name)
+		}
 	}
 }

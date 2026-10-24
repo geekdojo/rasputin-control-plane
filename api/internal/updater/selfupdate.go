@@ -258,7 +258,8 @@ const markBadBound = 10 * time.Second
 // healthCheckAndCommit runs the post-reboot health check (diag.health, role-aware)
 // and, for a control plane updating itself, the secret store's readiness (sc,
 // nil for every other node). It then either sends mark-good and records
-// committed, or takes the mark-bad branch. Returns the mark-good ack on
+// committed, retiring the store's pre-update copy once mark-good is accepted
+// (sc again), or takes the mark-bad branch. Returns the mark-good ack on
 // success. Shared by saga step 8 and the self-update reconciler.
 func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv *inventory.Store, sc *SelfStoreCheck, nodeID, bundleSHA, jobID string, lg logFn) (json.RawMessage, error) {
 	healthy, detail := probeHealth(ctx, nc, nodeID, jobID)
@@ -280,6 +281,12 @@ func healthCheckAndCommit(ctx context.Context, nc *nats.Conn, store *Store, inv 
 	_ = json.Unmarshal(gm.Data, &ack)
 	if !ack.OK {
 		return nil, fmt.Errorf("mark-good rejected: %s", ack.Detail)
+	}
+	if sc != nil {
+		// The update is committed: retire the store's pre-update copy
+		// (geekdojo/geekdojo-brain#873). Never before the ack, so a slot
+		// that is not committed keeps the copy its fallback restores.
+		sc.committed(ctx, jobID)
 	}
 
 	row, _ := store.GetNodeUpdate(ctx, jobID)

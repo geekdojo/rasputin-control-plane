@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
@@ -119,6 +120,10 @@ func TestStoreRollbackWiring(t *testing.T) {
 		if w.copier == nil {
 			t.Fatal("no copier under openbao")
 		}
+		// TC-873-15 (rollback half): the retirer is the copier itself.
+		if pc, ok := w.copier.(*storage.PreUpdateCopier); !ok || w.retirer != updater.CopyRetirer(pc) {
+			t.Fatalf("retirer %v is not the copier %v", w.retirer, w.copier)
+		}
 		if reg, sub := run.counts(); reg != 1 || sub != 0 || run.registered[0] != appsecret.ReferenceCheckKind {
 			t.Fatalf("registered %v, submitted %d before arm", run.registered, sub)
 		}
@@ -165,8 +170,8 @@ func TestStoreRollbackWiring(t *testing.T) {
 			}
 			w, _ := rollbackFor(t, requested, mode, store, run, log)
 			w.arm(context.Background())
-			if reg, sub := run.counts(); w.copier != nil || reg != 0 || sub != 0 {
-				t.Fatalf("copier %v, registered %d, submitted %d; want none", w.copier, reg, sub)
+			if reg, sub := run.counts(); w.copier != nil || w.retirer != nil || reg != 0 || sub != 0 {
+				t.Fatalf("copier %v, retirer %v, registered %d, submitted %d; want none", w.copier, w.retirer, reg, sub)
 			}
 		})
 	}
