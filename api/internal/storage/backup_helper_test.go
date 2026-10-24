@@ -73,6 +73,9 @@ func (k testKeypair) privateHex() string { return hex.EncodeToString(k.priv.Byte
 const (
 	runNodeID   = "n-backup"
 	runPartUUID = "part-uuid-target"
+	// runCPVersion is the control-plane version the run harness is stamped
+	// with, in a dev build's shape (#872).
+	runCPVersion = "2026.10.2-dev.197"
 	// Stand-ins for the two §4.6 wrappings. Opaque ciphertext to the api, and
 	// the scan asserts neither reaches a step result or an event.
 	testWrappedPass     = "WRAPPED-BY-PASSPHRASE-BLOB-AAAA"
@@ -444,6 +447,9 @@ type runHarnessOpts struct {
 	// selfNodeID overrides what the api believes its own node is. Only set to
 	// "" deliberately, to cover the api that does not know.
 	selfNodeID *string
+	// cpVersion overrides RunConfig.ControlPlaneVersion (runCPVersion). Only
+	// set to "" deliberately, to cover the unstamped build (#872).
+	cpVersion *string
 	// apps and tiles are the fan-out's two inputs. Nil `tiles` still supplies
 	// an empty catalog, because a nil one is a DIFFERENT case — step 1 refuses
 	// an api that cannot enumerate at all — and only the test for that refusal
@@ -646,12 +652,13 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 		self = *opts.selfNodeID
 	}
 	cfg := RunConfig{
-		ClusterID:  "home1",
-		SelfNodeID: self,
-		Sources:    IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
-		DB:         st.DB(),
-		DBPath:     dbPath,
-		Retain:     opts.retain,
+		ClusterID:           "home1",
+		ControlPlaneVersion: runCPVersion,
+		SelfNodeID:          self,
+		Sources:             IdentitySources{TrustDir: trustDir, MeshStateDir: meshDir},
+		DB:                  st.DB(),
+		DBPath:              dbPath,
+		Retain:              opts.retain,
 		// The schedule setting and the job ledger, wired the way main wires
 		// them: a run reads its retention depth from the one and the sizes
 		// of earlier captures from the other.
@@ -660,6 +667,9 @@ func newRunHarness(t *testing.T, agent *fakeBackupAgent, opts runHarnessOpts) *r
 
 		heldUploadCredential: opts.heldUploadCredential,
 		CaptureLock:          opts.captureLock,
+	}
+	if opts.cpVersion != nil {
+		cfg.ControlPlaneVersion = *opts.cpVersion
 	}
 	if opts.secretStore != nil {
 		if real := opts.storeSources; real != nil {

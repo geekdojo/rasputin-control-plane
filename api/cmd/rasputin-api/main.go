@@ -1109,8 +1109,9 @@ func main() {
 	// between weekly runs is where a target leaves the bus unnoticed.
 	runner.Register(storage.TargetHealthWorkflow(backupStore, invStore))
 	runner.Register(storage.RunWorkflow(backupStore, storage.RunConfig{
-		Restores:  restoreSessions,
-		ClusterID: strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		Restores:            restoreSessions,
+		ClusterID:           strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		ControlPlaneVersion: ControlPlaneVersion,
 		// The operator's schedule — cadence and retention depth — read live
 		// at the start of every run, the way the Due gate reads the cadence
 		// on every tick; and the job ledger, read at pre-flight for the
@@ -1579,11 +1580,12 @@ func main() {
 	// exit: cancel the signal context so the ordinary shutdown runs, and mark
 	// the exit non-zero so the unit restarts it onto the restored identity.
 	srv.SetRestore(&storage.RestoreConfig{
-		NC:         busSrv.Conn(),
-		SelfNodeID: selfNodeID,
-		DataDir:    dataDir,
-		ClusterID:  strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
-		Store:      backupStore,
+		NC:                  busSrv.Conn(),
+		SelfNodeID:          selfNodeID,
+		DataDir:             dataDir,
+		ClusterID:           strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		ControlPlaneVersion: ControlPlaneVersion,
+		Store:               backupStore,
 		// Refuses a restore while a seal-key rotation runs (#765, AC8).
 		SealGuard: sealRot.sealGuard(),
 	}, restoreRestartHook(logger, storeBackend, execrun.CombinedOutput, func() {
@@ -2025,6 +2027,14 @@ func main() {
 // ~90s Type=notify start timeout headroom — but it runs in the HTTPS
 // goroutine, off the readiness path, so it never trips that timeout anyway.
 const clockGateTimeout = 90 * time.Second
+
+// ControlPlaneVersion is this api build's release version, stamped at link
+// time by scripts/build-release.sh (-X main.ControlPlaneVersion=$VERSION).
+// Every backup records it and a restore refuses an archive taken on any other
+// version (geekdojo/geekdojo-brain#872). Empty unless stamped, on purpose: an
+// unstamped build refuses to back up or restore rather than accepting every
+// other build's archives under a shared placeholder.
+var ControlPlaneVersion string
 
 // clockSyncDir / clockSyncMarker locate systemd-timesyncd's synchronization
 // signal. timesyncd touches the marker on its first successful sync; this is
