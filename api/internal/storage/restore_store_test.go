@@ -226,30 +226,24 @@ func sealGeneration(t *testing.T, mount string, key testKeypair, tarBytes []byte
 	return &m
 }
 
-// TC-765-09: version-1 and version-2 archives — the latter written by the
-// previous release's own Assemble (testdata/identity-archive-v2026.10.2.tar)
-// — prepare and apply on a node with a store. The node's store data, seal
+// TC-765-09: version-1 and version-2 archives prepare and apply on a node
+// with a store. Both are harness-built with this build's control-plane
+// version: since #872 the previous release's own archive
+// (testdata/identity-archive-v2026.10.2.tar) records no version and is
+// refused (TC-872-06), so the pre-store path is reached only this way. The node's store data, seal
 // files and store CA are byte-identical afterwards, no applied marker is
 // demanded, and the warning says the current store was kept.
 func TestPreStoreArchivesKeepTheCurrentStore(t *testing.T) {
-	v2, err := os.ReadFile(filepath.Join("testdata", "identity-archive-v2026.10.2.tar"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct {
 		name    string
 		opts    generationOpts
-		fixture []byte
 		version int
 	}{
 		{name: "version 1", opts: generationOpts{complete: true, manifestVersion: 1}, version: 1},
-		{name: "version 2 from v2026.10.2", opts: generationOpts{complete: true}, fixture: v2, version: 2},
+		{name: "version 2", opts: generationOpts{complete: true, manifestVersion: 2}, version: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newRestoreHarness(t, tc.opts)
-			if tc.fixture != nil {
-				h.manifest = sealGeneration(t, h.mount, h.key, tc.fixture)
-			}
 			if h.manifest.ManifestVersion != tc.version {
 				t.Fatalf("fixture is version %d, want %d", h.manifest.ManifestVersion, tc.version)
 			}

@@ -31,6 +31,9 @@ const (
 	restoreNodeID   = "n-restore"
 	restorePartUUID = "0f3c9a52-01"
 	restoreKeyID    = "ak-restore-1"
+	// restoreCPVersion is the control-plane version every harness generation
+	// is taken on and every harness restore runs (#872).
+	restoreCPVersion = "2026.10.2"
 )
 
 // identityFixture is the identity set the generation captures, kept so a test
@@ -79,6 +82,9 @@ type generationOpts struct {
 	store        bool
 	storeOneFile bool
 	storeSrc     *IdentitySources
+	// cpVersion is the control-plane version the generation is taken on;
+	// empty means restoreCPVersion.
+	cpVersion string
 }
 
 // buildGeneration writes a marker and one generation under mount, sealed to
@@ -90,6 +96,9 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 	}
 	if opts.scope == "" {
 		opts.scope = proto.BackupScopeFull
+	}
+	if opts.cpVersion == "" {
+		opts.cpVersion = restoreCPVersion
 	}
 	// The marker: what a claim wrote onto the disk.
 	marker := proto.StorageBackupSet{
@@ -165,7 +174,7 @@ func buildGeneration(t *testing.T, mount string, key testKeypair, fx identityFix
 		SnapshotPath: filepath.Join(src, "snapshot.db"),
 		GenerationID: opts.id, JobID: "job-1", ClusterID: "home1", KeyID: restoreKeyID,
 		Now: time.Now().UTC(), AppVolumes: report, Scope: opts.scope,
-		StoreCapture: capture,
+		StoreCapture: capture, ControlPlaneVersion: opts.cpVersion,
 	})
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -368,7 +377,7 @@ func newRestoreHarness(t *testing.T, opts generationOpts) *restoreHarness {
 	agent.start(t, nc)
 	return &restoreHarness{
 		nc: nc, key: key, fx: fx, mount: mount, dataDir: dataDir, manifest: m,
-		cfg: RestoreConfig{NC: nc, SelfNodeID: restoreNodeID, DataDir: dataDir, ClusterID: "home1"},
+		cfg: RestoreConfig{NC: nc, SelfNodeID: restoreNodeID, DataDir: dataDir, ClusterID: "home1", ControlPlaneVersion: restoreCPVersion},
 	}
 }
 

@@ -37,6 +37,9 @@ const (
 	rtNodeID   = "self-node"
 	rtPartUUID = "abcd-0001"
 	rtKeyID    = "ak-test"
+	// rtCPVersion is the control-plane version the fixture's generation is
+	// taken on and its restore config runs (#872).
+	rtCPVersion = "2026.10.2"
 )
 
 type restoreFixture struct {
@@ -51,6 +54,13 @@ type restoreFixture struct {
 
 func newRestoreFixture(t *testing.T) *restoreFixture {
 	t.Helper()
+	return newRestoreFixtureTakenOn(t, rtCPVersion)
+}
+
+// newRestoreFixtureTakenOn builds the fixture's generation on control-plane
+// version taken; the restore config still runs rtCPVersion.
+func newRestoreFixtureTakenOn(t *testing.T, taken string) *restoreFixture {
+	t.Helper()
 	f := newAPIFixture(t)
 	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -62,10 +72,10 @@ func newRestoreFixture(t *testing.T) *restoreFixture {
 	if err := os.MkdirAll(rf.dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rf.genID = buildRestoreGeneration(t, rf.mount, rf.pubB64)
+	rf.genID = buildRestoreGeneration(t, rf.mount, rf.pubB64, taken)
 	marker := readTestMarker(t, rf.mount)
 	startFakeRestoreAgent(t, f.nc, rf.mount, marker)
-	f.srv.SetRestore(&storage.RestoreConfig{NC: f.nc, SelfNodeID: rtNodeID, DataDir: rf.dataDir, ClusterID: "home1"}, func() {
+	f.srv.SetRestore(&storage.RestoreConfig{NC: f.nc, SelfNodeID: rtNodeID, DataDir: rf.dataDir, ClusterID: "home1", ControlPlaneVersion: rtCPVersion}, func() {
 		rf.restarts.Add(1)
 	})
 	f.srv.SetBackupStore(newTestBackupStore(t, f.dir))
@@ -84,7 +94,7 @@ func newTestBackupStore(t *testing.T, dir string) *storage.Store {
 
 // buildRestoreGeneration writes a marker and one sealed generation under
 // mount and returns the generation id.
-func buildRestoreGeneration(t *testing.T, mount, pubB64 string) string {
+func buildRestoreGeneration(t *testing.T, mount, pubB64, cpVersion string) string {
 	t.Helper()
 	marker := proto.StorageBackupSet{
 		MarkerVersion: proto.StorageMarkerVersion, ClusterID: "home1", PartUUID: rtPartUUID,
@@ -111,7 +121,7 @@ func buildRestoreGeneration(t *testing.T, mount, pubB64 string) string {
 	m, err := storage.Assemble(&tarBuf, storage.AssembleOptions{
 		Sources: storage.IdentitySources{}, SnapshotPath: filepath.Join(src, "snapshot.db"),
 		GenerationID: genID, JobID: "job-1", ClusterID: "home1", KeyID: rtKeyID,
-		AppVolumes: report, Scope: proto.BackupScopeFull,
+		AppVolumes: report, Scope: proto.BackupScopeFull, ControlPlaneVersion: cpVersion,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -439,4 +449,66 @@ func TestRestoreRefusedWhileTheSealIsBusy(t *testing.T) {
 			t.Fatal("a refused restore asked for a restart")
 		}
 	}
+}
+
+// postVersionRefusal posts a restore of rf's generation and asserts the
+// coded 409, that the response carries want, that the one WARN record
+// carries its fields, and that nothing was staged or restarted (#872).
+func (rf *restoreFixture) postVersionRefusal(t *testing.T, want string) {
+	t.Helper()
+	logger, rec := logkittest.New()
+	rf.srv.log = logger
+	w := rf.do(t, http.MethodPost, "/api/restore", map[string]string{
+		"partUuid": rtPartUUID, "generationId": rf.genID, "keyId": rtKeyID, "privateKey": rf.privB64(),
+	})
+	if w.Code != http.StatusConflict {
+		t.Fatalf("%d %s, want 409", w.Code, w.Body.String())
+	}
+	var body codedError
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Code != "restore_version_mismatch" || body.CorrelationID == "" || body.Error != want {
+		t.Fatalf("body = %+v\nwant error %q", body, want)
+	}
+	warns := rec.Matching(slog.LevelWarn, "request refused")
+	if len(warns) != 1 {
+		t.Fatalf("WARN records:\n%s", rec.Text())
+	}
+	for _, k := range []string{"correlation_id", "route", "code", "err"} {
+		if v, _ := logkittest.Attr(warns[0], k); v == "" {
+			t.Errorf("the WARN carries no %s", k)
+		}
+	}
+	if id, _ := logkittest.Attr(warns[0], "correlation_id"); id != body.CorrelationID {
+		t.Errorf("the WARN's correlation id %q is not the response's %q", id, body.CorrelationID)
+	}
+	if ents, _ := os.ReadDir(rf.dataDir); len(ents) != 0 {
+		t.Fatalf("data dir written: %v", ents)
+	}
+	if rf.restarts.Load() != 0 {
+		t.Fatal("a refused restore asked for a restart, which is what stops the store")
+	}
+}
+
+// TC-872-14 (F-872-01): a backup taken on another version answers 409
+// restore_version_mismatch with the operator's sentence, and nothing is
+// stopped.
+func TestRestoreRefusedOnAnotherControlPlaneVersion(t *testing.T) {
+	rf := newRestoreFixtureTakenOn(t, "2026.10.1")
+	rf.postVersionRefusal(t, "This backup was taken on control plane version 2026.10.1, and this control plane runs version 2026.10.2. Flash release 2026.10.1 onto this board and restore again.")
+}
+
+// TC-872-15: the no-version and unstamped-build refusals use the same code,
+// each with its own sentence.
+func TestRestoreRefusedWithNoVersionOrAnUnstampedBuild(t *testing.T) {
+	t.Run("backup records no version", func(t *testing.T) {
+		rf := newRestoreFixtureTakenOn(t, "")
+		rf.postVersionRefusal(t, "This backup records no control plane version, so this control plane cannot tell which release took it. Restore it on the release it was taken on.")
+	})
+	t.Run("unstamped build", func(t *testing.T) {
+		rf := newRestoreFixture(t)
+		rf.srv.SetRestore(&storage.RestoreConfig{NC: rf.nc, SelfNodeID: rtNodeID, DataDir: rf.dataDir, ClusterID: "home1"}, func() { rf.restarts.Add(1) })
+		rf.postVersionRefusal(t, "This control plane build carries no version stamp, so it cannot tell whether a backup belongs to it. Restore from a released image.")
+	})
 }

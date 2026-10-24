@@ -108,7 +108,7 @@ func prepareInto(t *testing.T, h *runHarness, genID, fresh string) *RestoreRepor
 		t.Fatal(err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	cfg := RestoreConfig{NC: h.nc, SelfNodeID: runNodeID, DataDir: fresh, ClusterID: "home1"}
+	cfg := RestoreConfig{NC: h.nc, SelfNodeID: runNodeID, DataDir: fresh, ClusterID: "home1", ControlPlaneVersion: runCPVersion}
 	report, err := PrepareRestore(context.Background(), cfg, RestoreRequest{
 		PartUUID: runPartUUID, GenerationID: genID, KeyID: "key-1", PrivateKey: h.key.priv.Bytes(),
 	})

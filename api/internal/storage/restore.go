@@ -125,6 +125,46 @@ var (
 	ErrRestoreSealBusy = errors.New("the seal key is being rotated or is not settled")
 )
 
+// ErrRestoreVersion — the archive was not taken on this control-plane
+// version, records no version, or this build carries no version stamp
+// (geekdojo/geekdojo-brain#872). Refused before anything is staged or
+// stopped. RestoreVersionError carries the operator's sentence.
+var ErrRestoreVersion = errors.New("the backup was not taken on this control-plane version")
+
+// RestoreVersionError is a version-lock refusal. Taken is the version the
+// archive's inner (AEAD-protected) manifest records, empty when it records
+// none; Running is this build's stamp, empty when it has none. Error() is the
+// Go-style value for wrapping and logs; Sentence() is what the operator
+// reads. It matches ErrRestoreVersion.
+type RestoreVersionError struct{ Taken, Running string }
+
+func (e *RestoreVersionError) Error() string {
+	switch {
+	case e.Running == "":
+		return "restore version: this build carries no control-plane version stamp"
+	case e.Taken == "":
+		return fmt.Sprintf("restore version: the backup records no control-plane version; this build runs %s", e.Running)
+	default:
+		return fmt.Sprintf("restore version: the backup was taken on control-plane version %s; this build runs %s", e.Taken, e.Running)
+	}
+}
+
+// Sentence is the refusal in the operator's words: one sentence or two, each
+// with a capital and a full stop (ERR-MESSAGE). It names version strings
+// only, never a path.
+func (e *RestoreVersionError) Sentence() string {
+	switch {
+	case e.Running == "":
+		return "This control plane build carries no version stamp, so it cannot tell whether a backup belongs to it. Restore from a released image."
+	case e.Taken == "":
+		return "This backup records no control plane version, so this control plane cannot tell which release took it. Restore it on the release it was taken on."
+	default:
+		return fmt.Sprintf("This backup was taken on control plane version %s, and this control plane runs version %s. Flash release %s onto this board and restore again.", e.Taken, e.Running, e.Taken)
+	}
+}
+
+func (e *RestoreVersionError) Is(target error) bool { return target == ErrRestoreVersion }
+
 // RestoreSealBusyError is a SealGuard refusal. Its Error() is the guard's
 // sentence, which names no path; it matches ErrRestoreSealBusy.
 type RestoreSealBusyError struct{ Reason error }
@@ -168,6 +208,16 @@ type RestoreConfig struct {
 	// files are not Clean (#765). Nil means no secret store is wired and
 	// nothing is checked.
 	SealGuard SealGuard
+	// ControlPlaneVersion is this api build's release version, stamped at
+	// link time and wired by main. A restore accepts only an archive whose
+	// inner manifest records this exact string (#872). Empty refuses every
+	// restore.
+	ControlPlaneVersion string
+
+	// unsealStarted, when set, is handed the unseal goroutine's finished
+	// channel as soon as it starts. Unexported: only this package's tests set
+	// it, to prove the goroutine ends on every refusal path.
+	unsealStarted func(finished <-chan struct{})
 }
 
 // ClaimedTargetAbsent is a claimed target the candidate scan did not find
@@ -715,6 +765,12 @@ func describeGeneration(dir *os.File, id, markerKeyID string) RestoreGeneration 
 	switch {
 	case m.ManifestVersion < 1 || m.ManifestVersion > ManifestVersion:
 		g.Problem = fmt.Sprintf("the manifest is version %d; this build reads versions 1 to %d", m.ManifestVersion, ManifestVersion)
+		if v := strings.TrimSpace(m.ControlPlaneVersion); v != "" {
+			// Advice on a path that already refuses: the release the restore's
+			// own refusal would name (#872). Read from the clear sidecar, so
+			// it is a hint; the inner manifest decides at prepare.
+			g.Problem = fmt.Sprintf("The manifest is version %d, and this build reads versions 1 to %d. This backup was taken on control plane version %s: flash release %s onto this board and restore again.", m.ManifestVersion, ManifestVersion, v, v)
+		}
 	case markerKeyID != "" && m.KeyID != "" && m.KeyID != markerKeyID:
 		g.Problem = fmt.Sprintf("the generation is sealed to key %s but the disk's marker names key %s; the disk has been re-keyed since this generation was written", m.KeyID, markerKeyID)
 	case !hasIdentityEntry(m.Entries, "rasputin.db"):
@@ -810,6 +866,9 @@ func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) 
 	if strings.TrimSpace(cfg.DataDir) == "" {
 		return nil, errors.New("no data directory configured")
 	}
+	if strings.TrimSpace(cfg.ControlPlaneVersion) == "" {
+		return nil, &RestoreVersionError{}
+	}
 	if !safePartUUID.MatchString(req.PartUUID) {
 		return nil, fmt.Errorf("%w: %q is not a partition UUID", ErrRestoreArchive, req.PartUUID)
 	}
@@ -904,6 +963,15 @@ func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) 
 	}
 	defer func() { _ = archive.Close() }()
 
+	// The inner manifest — the AEAD-protected copy — is read and checked
+	// before the staging directory exists, so no refusal it decides creates
+	// one. Closing the stream ends the unseal goroutine on every path below.
+	stream, err := openIdentity(archive, req, cfg)
+	if err != nil {
+		return nil, err
+	}
+	defer stream.Close()
+
 	// Staging: a fresh directory under the data dir, created exclusively,
 	// removed on every failure path below.
 	stagingName := restoreStagingPrefix + randomHex(8)
@@ -922,7 +990,7 @@ func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) 
 		}
 	}()
 
-	report, err := extractIdentity(archive, staging, req)
+	report, err := stream.extract(staging)
 	if err != nil {
 		return nil, err
 	}
@@ -946,14 +1014,33 @@ func PrepareRestore(ctx context.Context, cfg RestoreConfig, req RestoreRequest) 
 	return report, nil
 }
 
-// extractIdentity unseals the archive into the staging directory, verifying
-// every member against the manifest INSIDE the archive, and returns the
-// report. On error the caller removes the staging directory.
-func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*RestoreReport, error) {
-	// Unseal runs into a pipe; the tar reader consumes it. Chunks are
-	// authenticated before they are written, so what the tar reader sees is
-	// authentic — completeness is decided by Unseal's return, which is
-	// checked after the tar is exhausted.
+// identityStream is an archive being unsealed into a tar reader, with its
+// inner manifest already read and checked. extract consumes the rest; Close
+// ends the unseal goroutine whether or not extract ran.
+type identityStream struct {
+	pr *io.PipeReader
+	u  *unsealer
+	tr *tar.Reader
+	m  Manifest
+	// expected is the manifest's entries by path, already validated.
+	expected map[string]ManifestEntry
+	req      RestoreRequest
+}
+
+// Close closes the pipe, so a blocked unseal write fails and the goroutine
+// returns, and waits for it. Safe to call more than once and after extract.
+func (s *identityStream) Close() {
+	_ = s.pr.Close()
+	s.u.wait()
+}
+
+// openIdentity starts the unseal and reads the first tar member, the inner
+// manifest, and runs every check that manifest decides, the version lock
+// first. Chunks are authenticated before they reach the pipe, so what the tar
+// reader sees is authentic — completeness is decided by Unseal's return,
+// which extract checks after the tar is exhausted. On error the stream is
+// already closed.
+func openIdentity(archive io.Reader, req RestoreRequest, cfg RestoreConfig) (_ *identityStream, err error) {
 	pr, pw := io.Pipe()
 	u := &unsealer{finished: make(chan struct{})}
 	go func() {
@@ -961,10 +1048,17 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 		u.res, u.err = Unseal(pw, bufio.NewReaderSize(archive, 256<<10), req.PrivateKey)
 		_ = pw.CloseWithError(u.err)
 	}()
-	// Whatever happens below, the pipe is closed so the goroutine ends.
-	defer func() { _ = pr.Close() }()
+	if cfg.unsealStarted != nil {
+		cfg.unsealStarted(u.finished)
+	}
+	s := &identityStream{pr: pr, u: u, tr: tar.NewReader(pr), req: req}
+	defer func() {
+		if err != nil {
+			s.Close()
+		}
+	}()
 
-	tr := tar.NewReader(pr)
+	tr := s.tr
 	hdr, err := tr.Next()
 	if err != nil {
 		return nil, fmt.Errorf("%w: the archive did not open as a tar: %v", ErrRestoreArchive, u.explain(err))
@@ -979,9 +1073,15 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	if err != nil {
 		return nil, fmt.Errorf("%w: reading the inner manifest: %v", ErrRestoreArchive, u.explain(err))
 	}
-	var m Manifest
-	if err := json.Unmarshal(rawManifest, &m); err != nil {
+	m := &s.m
+	if err := json.Unmarshal(rawManifest, m); err != nil {
 		return nil, fmt.Errorf("%w: the inner manifest is not readable JSON", ErrRestoreArchive)
+	}
+	// The version lock comes before the format range, so a backup from a
+	// newer build that also bumped the format still names the release to
+	// flash.
+	if m.ControlPlaneVersion != cfg.ControlPlaneVersion || m.ControlPlaneVersion == "" {
+		return nil, &RestoreVersionError{Taken: m.ControlPlaneVersion, Running: cfg.ControlPlaneVersion}
 	}
 	if m.ManifestVersion < 1 || m.ManifestVersion > ManifestVersion {
 		return nil, fmt.Errorf("%w: the manifest is version %d; this build reads versions 1 to %d", ErrRestoreArchive, m.ManifestVersion, ManifestVersion)
@@ -995,9 +1095,16 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	if len(m.Entries) > maxRestoreEntries {
 		return nil, fmt.Errorf("%w: the manifest lists %d entries; refusing more than %d", ErrRestoreArchive, len(m.Entries), maxRestoreEntries)
 	}
+	if s.expected, err = expectedEntries(m); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
 
-	// The manifest decides what may be extracted: every identity entry it
-	// names, at the size and digest it names, and nothing it does not name.
+// expectedEntries is what the manifest decides may be extracted: every
+// identity entry it names, at the size and digest it names, and nothing it
+// does not name.
+func expectedEntries(m *Manifest) (map[string]ManifestEntry, error) {
 	expected := map[string]ManifestEntry{}
 	for _, e := range m.Entries {
 		if err := validateRestorePath(e.Path); err != nil {
@@ -1017,9 +1124,17 @@ func extractIdentity(archive io.Reader, staging *os.File, req RestoreRequest) (*
 	if _, ok := expected["rasputin.db"]; !ok {
 		return nil, fmt.Errorf("%w: the manifest names no rasputin.db; an archive without the database restores nothing this phase puts back", ErrRestoreArchive)
 	}
-	if missing := storeMembersMissing(&m); missing != "" {
+	if missing := storeMembersMissing(m); missing != "" {
 		return nil, fmt.Errorf("%w: the version-%d manifest names no %s; an archive of this version carries the secret store, and one without it cannot be restored", ErrRestoreArchive, m.ManifestVersion, missing)
 	}
+	return expected, nil
+}
+
+// extract writes the rest of the archive into the staging directory,
+// verifying every member against the inner manifest, and returns the report.
+// On error the caller removes the staging directory.
+func (s *identityStream) extract(staging *os.File) (*RestoreReport, error) {
+	m, req, tr, u, pr, expected := s.m, s.req, s.tr, s.u, s.pr, s.expected
 
 	report := &RestoreReport{
 		ID: "rs-" + randomHex(8), Phase: RestorePhase,

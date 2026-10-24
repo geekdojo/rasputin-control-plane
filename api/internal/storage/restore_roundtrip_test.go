@@ -391,7 +391,7 @@ func TestRestoreRoundTrip(t *testing.T) {
 	// --- the restore ---------------------------------------------------------
 	// What the first-run picker would show: this disk, restorable, with the
 	// generation the run just wrote and the app-volume gap named on it.
-	cfg := RestoreConfig{NC: h.nc, SelfNodeID: runNodeID, DataDir: fresh, ClusterID: "home1"}
+	cfg := RestoreConfig{NC: h.nc, SelfNodeID: runNodeID, DataDir: fresh, ClusterID: "home1", ControlPlaneVersion: runCPVersion}
 	cands, err := ListRestoreCandidates(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)

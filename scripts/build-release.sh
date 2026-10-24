@@ -79,8 +79,10 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 # -X stamps the version into the agent binary (reported as the node's
 # control-plane software version). main.AgentVersion must be a var, not a const,
 # for this to take — the api has no such symbol, so the flag is a harmless no-op
-# there.
-LDFLAGS="-s -w -X main.AgentVersion=$VERSION"
+# there. main.ControlPlaneVersion is the api's twin: every backup records it and
+# a restore refuses an archive taken on any other version
+# (geekdojo/geekdojo-brain#872); the agent has no such symbol.
+LDFLAGS="-s -w -X main.AgentVersion=$VERSION -X main.ControlPlaneVersion=$VERSION"
 
 sha256_of() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';

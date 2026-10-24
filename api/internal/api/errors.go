@@ -35,6 +35,10 @@ const (
 	// holds the backup capture lock, or the seal files are not settled
 	// (geekdojo/geekdojo-brain#765).
 	codeRestoreSealBusy = "restore_seal_busy"
+	// codeRestoreVersionMismatch: a restore was refused because the backup
+	// was not taken on this control-plane version, records no version, or
+	// this build carries no version stamp (geekdojo/geekdojo-brain#872).
+	codeRestoreVersionMismatch = "restore_version_mismatch"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

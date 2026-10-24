@@ -68,6 +68,11 @@ const (
 type RunConfig struct {
 	// ClusterID is stamped into the manifest.
 	ClusterID string
+	// ControlPlaneVersion is this api build's release version, stamped at link
+	// time and wired by main. It is recorded in the manifest so a restore
+	// can refuse the archive on any other version (#872). Empty refuses every
+	// run at step 1: a backup no build could restore is not a backup.
+	ControlPlaneVersion string
 	// SelfNodeID is the node this api runs on, and step 1 refuses any target
 	// that is not on it.
 	//
@@ -536,6 +541,10 @@ type runWriteResult struct {
 
 // ----- Step 1: validate ---------------------------------------------------
 
+// errNoVersionStampBackup is step 1's refusal on a build with no
+// control-plane version stamp. The Tasks page shows it as the job's error.
+const errNoVersionStampBackup = sentenceError("This control plane build carries no version stamp, so a backup it took could never be restored. Back up from a released image, which carries the stamp.")
+
 // runValidate is the whole of the api's own policy check, and it is where four
 // separate refusals live. Each of them costs a re-run; none of them touches a
 // disk.
@@ -544,6 +553,9 @@ func runValidate(store *Store, cfg RunConfig) jobs.DoFn {
 		spec, err := ParseRunSpec(sc.Spec)
 		if err != nil {
 			return nil, err
+		}
+		if strings.TrimSpace(cfg.ControlPlaneVersion) == "" {
+			return nil, errNoVersionStampBackup
 		}
 
 		// A second run while one is in flight is refused BEFORE the row is
@@ -1060,16 +1072,17 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			return nil, fmt.Errorf("stage archive: %w", err)
 		}
 		manifest, aerr := Assemble(f, AssembleOptions{
-			Sources:      cfg.Sources,
-			SnapshotPath: snapPath,
-			GenerationID: tgt.GenerationID,
-			JobID:        sc.JobID,
-			ClusterID:    cfg.ClusterID,
-			KeyID:        tgt.KeyID,
-			Now:          time.Now().UTC(),
-			AppVolumes:   fan.Report,
-			Scope:        tgt.Scope,
-			StoreCapture: capture,
+			Sources:             cfg.Sources,
+			SnapshotPath:        snapPath,
+			GenerationID:        tgt.GenerationID,
+			JobID:               sc.JobID,
+			ClusterID:           cfg.ClusterID,
+			ControlPlaneVersion: cfg.ControlPlaneVersion,
+			KeyID:               tgt.KeyID,
+			Now:                 time.Now().UTC(),
+			AppVolumes:          fan.Report,
+			Scope:               tgt.Scope,
+			StoreCapture:        capture,
 		})
 		if cerr := f.Close(); cerr != nil && aerr == nil {
 			aerr = cerr

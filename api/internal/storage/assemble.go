@@ -138,6 +138,12 @@ type Manifest struct {
 	JobID           string    `json:"jobId,omitempty"`
 	ClusterID       string    `json:"clusterId,omitempty"`
 	CreatedAt       time.Time `json:"createdAt"`
+	// ControlPlaneVersion is the release of the api build that took this
+	// generation (main.ControlPlaneVersion). A restore accepts the generation
+	// only on that same version, compared as exact strings, and refuses one
+	// that records none (geekdojo/geekdojo-brain#872). No omitempty: the
+	// sidecar always shows the key.
+	ControlPlaneVersion string `json:"controlPlaneVersion"`
 	// Scope is the run's REACH — proto.BackupScopeFull for everything this
 	// build writes: every node. The same string that is in the generation's
 	// directory name and bound into every sealed header's AEAD additional
@@ -521,6 +527,9 @@ type AssembleOptions struct {
 	ClusterID    string
 	KeyID        string
 	Now          time.Time
+	// ControlPlaneVersion is RunConfig.ControlPlaneVersion, recorded in the
+	// manifest (Manifest.ControlPlaneVersion).
+	ControlPlaneVersion string
 	// AppVolumes is the fan-out step's finished record: every classified volume
 	// in the cluster, captured or not, with its reason. Assemble does not run
 	// the fan-out — it happened before this call, one volume at a time, because
@@ -694,12 +703,13 @@ func Assemble(dst io.Writer, opts AssembleOptions) (*Manifest, error) {
 	}
 
 	m := &Manifest{
-		ManifestVersion: version,
-		GenerationID:    opts.GenerationID,
-		JobID:           opts.JobID,
-		ClusterID:       opts.ClusterID,
-		CreatedAt:       now,
-		Scope:           scope,
+		ManifestVersion:     version,
+		GenerationID:        opts.GenerationID,
+		JobID:               opts.JobID,
+		ClusterID:           opts.ClusterID,
+		CreatedAt:           now,
+		ControlPlaneVersion: opts.ControlPlaneVersion,
+		Scope:               scope,
 		// Complete is the OUTCOME, and the scope is the REACH. They are
 		// separate on purpose: the scope is minted at step 1, before a volume
 		// has been staged, so it cannot depend on what the run found. Complete
