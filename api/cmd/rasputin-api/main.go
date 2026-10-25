@@ -1076,6 +1076,18 @@ func main() {
 		os.Exit(1)
 	}
 	runner.Register(sealRot.workflow)
+	// The store's restart after a sustained full disk failed it and the data
+	// partition has room again (geekdojo/geekdojo-brain#874): registered in
+	// every mode, scheduled and armed at start only under openbao.
+	storeRecov, err := storeRecoverWiring(storeRecoverDeps{
+		mode: storeW.mode, dataDir: dataDir, monitor: readiness.monitor, restores: restoreSessions,
+		run: execrun.CombinedOutput, afterStoreRestart: outcomes.AfterStoreRestart, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store recovery", "err", err.Error())
+		os.Exit(1)
+	}
+	runner.Register(storeRecov.workflow)
 	// The store's copy before an OS update of its host, and the reference
 	// check that reports entries lost when the store's data is put back
 	// (geekdojo/geekdojo-brain#800).
@@ -1527,8 +1539,10 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(obsCollectorEntries, storeAud.entries()...)...))
+	}...), append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...)...))
 	sched.Start(ctx)
+	// The recovery's reading on the fact of this start (F-874-02).
+	storeRecov.start(ctx)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
