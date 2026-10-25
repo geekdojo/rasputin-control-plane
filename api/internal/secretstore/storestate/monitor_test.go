@@ -483,3 +483,53 @@ func TestMonitor_QuiesceReasonCopy(t *testing.T) {
 		})
 	}
 }
+
+// TC-874-13: Held fails closed. A running hold is held, no hold is not, a hold
+// whose job is confirmed not running is not held with one WARN, and a hold
+// whose job status cannot be read is held, with a WARN naming the job and the
+// error (F-874-01).
+func TestMonitor_Held(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		hold    bool
+		running bool
+		runErr  error
+		want    bool
+		warnErr string
+	}{
+		{name: "running hold", hold: true, running: true, want: true},
+		{name: "no hold", want: false},
+		{name: "not running", hold: true, want: false, warnErr: "not running"},
+		{name: "status unreadable", hold: true, runErr: errors.New("ledger closed"), want: true, warnErr: "ledger closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
+			f.running["job-h"] = tc.running
+			f.runErr = tc.runErr
+			if tc.hold {
+				f.m.Quiesce("job-h", QuiesceSealRotation)
+			}
+			for range 2 {
+				if got := f.m.Held(context.Background()); got != tc.want {
+					t.Fatalf("Held = %v, want %v", got, tc.want)
+				}
+			}
+			w := f.rec.Matching(slog.LevelWarn, "secret store quiesce hold ignored")
+			if tc.warnErr == "" {
+				if len(w) != 0 {
+					t.Errorf("%d WARN records, want 0", len(w))
+				}
+				return
+			}
+			if len(w) != 1 {
+				t.Fatalf("%d WARN records over two calls, want 1", len(w))
+			}
+			if got, _ := logkittest.Attr(w[0], "job_id"); got != "job-h" {
+				t.Errorf("job_id = %q", got)
+			}
+			if got, _ := logkittest.Attr(w[0], "err"); !strings.Contains(got, tc.warnErr) {
+				t.Errorf("err = %q, want it to contain %q", got, tc.warnErr)
+			}
+		})
+	}
+}

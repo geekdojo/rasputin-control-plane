@@ -190,7 +190,7 @@ func (m *Monitor) read(ctx context.Context) (State, time.Time, error) {
 		// A store that went down dropped the request its audit sink held,
 		// and a restarted one opens a new sink.
 		m.clearAuditBlocked(ctx, "the store is not ready")
-		if reason, ok := m.quiesced(ctx); ok {
+		if reason, ok, _ := m.quiesced(ctx); ok {
 			st = Quiesced
 			m.mu.Lock()
 			m.reason = reason
@@ -371,22 +371,23 @@ func (m *Monitor) Quiesce(jobID string, reason QuiesceReason) (release func()) {
 	}
 }
 
-// quiesced reports whether a hold is held by a job that is running now, and
-// that hold's reason. A hold whose job is not running, or whose status cannot
-// be read, is ignored with a WARN, so a leaked hold cannot hide an outage.
-// With two running holds, the higher reason wins: a seal rotation's over a
-// backup's, as it is the one that restarts the store. The capture gate keeps
-// a backup, a rotation and an OS update's copy from holding the store at
-// once, so the OS update's place in that order decides nothing.
-func (m *Monitor) quiesced(ctx context.Context) (QuiesceReason, bool) {
+// quiesced reports whether a hold is held by a job that is running now, that
+// hold's reason, and whether any hold's job status could not be read. A hold
+// whose job is not running, or whose status cannot be read, is ignored here
+// with a WARN, so a leaked hold cannot hide an outage; Held counts the
+// unreadable one as held instead. With two running holds, the higher reason
+// wins: a seal rotation's over a backup's, as it is the one that restarts the
+// store. The capture gate keeps a backup, a rotation and an OS update's copy
+// from holding the store at once, so the OS update's place in that order
+// decides nothing.
+func (m *Monitor) quiesced(ctx context.Context) (reason QuiesceReason, running, unreadable bool) {
 	m.mu.Lock()
 	holds := make([]*hold, 0, len(m.holds))
 	for h := range m.holds {
 		holds = append(holds, h)
 	}
 	m.mu.Unlock()
-	running := false
-	reason := QuiesceBackup
+	reason = QuiesceBackup
 	for _, h := range holds {
 		ok, err := m.jobRunning(ctx, h.jobID)
 		if err == nil && ok {
@@ -394,7 +395,9 @@ func (m *Monitor) quiesced(ctx context.Context) (QuiesceReason, bool) {
 			reason = max(reason, h.reason)
 			continue
 		}
-		if err == nil {
+		if err != nil {
+			unreadable = true
+		} else {
 			err = errors.New("the job is not running")
 		}
 		m.mu.Lock()
@@ -406,7 +409,18 @@ func (m *Monitor) quiesced(ctx context.Context) (QuiesceReason, bool) {
 				slog.String("component", "secretstore"), slog.String("job_id", h.jobID), slog.String("err", err.Error()))
 		}
 	}
-	return reason, running
+	return reason, running, unreadable
+}
+
+// Held reports whether a job holds the store quiesced now: a hold whose job
+// is running, or whose job status cannot be read. Not knowing is held, so a
+// caller that would restart the store never does so under a seal rotation or
+// an OS update's copy it could not see (ERR-CLOSED,
+// geekdojo/geekdojo-brain#874). A hold whose job is confirmed not running is
+// not held, with quiesced's one WARN.
+func (m *Monitor) Held(ctx context.Context) bool {
+	_, running, unreadable := m.quiesced(ctx)
+	return running || unreadable
 }
 
 // Alerts reads the state now and returns its alert, or none when the store

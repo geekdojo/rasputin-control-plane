@@ -224,22 +224,10 @@ func (r *Rotator) rotateRetryAllowed(fi fs.FileInfo) bool {
 	return fi.Size() >= f.size+r.cfg.RotateAt
 }
 
-// stepLog writes one event to both pipelines: the job's step log, which a
-// person reads on the Tasks page and so carries only safe text, and the
-// injected logger, which carries the fields an operator acts on.
+// stepLog writes one event to the job's step log and the injected logger
+// (jobs.LogStep).
 func (r *Rotator) stepLog(sc *jobs.StepCtx, level slog.Level, msg string, attrs ...any) {
-	r.log.Log(sc.Ctx, level, msg, append([]any{"job_id", sc.JobID}, attrs...)...)
-	if sc.Log == nil {
-		return
-	}
-	lvl := "info"
-	switch {
-	case level >= slog.LevelError:
-		lvl = "error"
-	case level >= slog.LevelWarn:
-		lvl = "warn"
-	}
-	sc.Log(lvl, msg)
+	jobs.LogStep(r.log, sc, level, msg, attrs...)
 }
 
 // fail logs an ERROR carrying the internal detail and returns the sentence
