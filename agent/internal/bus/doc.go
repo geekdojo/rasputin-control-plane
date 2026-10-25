@@ -26,9 +26,10 @@
 //
 // Every connection is TLS, and the server is trusted by the SHA-256 of its key
 // alone — no chain, no hostname, no dates. The pin comes from
-// RASPUTIN_BUS_PIN, the node's saved pin file, or (controlplane only) the
-// file the api writes; a Client cannot be built without one, because the bus
-// accepts nothing else (geekdojo/geekdojo-brain#448, #517). See pin.go and
+// RASPUTIN_BUS_PIN or the node's saved pin file; on the controlplane's own
+// agent a valid file the api writes comes first (geekdojo/geekdojo-brain#875).
+// A Client cannot be built without one, because the bus accepts nothing else
+// (geekdojo/geekdojo-brain#448, #517). See pin.go and
 // docs/bus-tls-contract.md.
 //
 // Subject dispatch does NOT live here. Each subsystem (docker, storage,

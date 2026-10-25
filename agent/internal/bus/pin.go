@@ -27,7 +27,13 @@ import (
 //     handshake (PinSourceFor) so a restored bus key reaches a running agent.
 //     A self-initialised controlplane has no seed. See proto/busagenttoken.go.
 //
-// The env pin wins when several exist: it is what the operator seeded.
+// On every node but the controlplane, the env pin wins over the saved file:
+// it is what the operator seeded. On the CONTROLPLANE's own agent a valid
+// api-written file (3) wins over both, because it is the api's own statement
+// of the key it serves: after an identity restore onto another key the seeded
+// env pin names the discarded key, and only this file names the restored one
+// (geekdojo/geekdojo-brain#875). An absent or unusable file falls back to the
+// env pin, then the saved file.
 //
 // A node with no usable pin from any source does not dial at all. The bus
 // accepts only TLS, and the pin is the only check on the server's key.
@@ -63,7 +69,9 @@ type Resolution struct {
 	EnvErr, FileErr, CPErr error
 }
 
-// Faults lists every source error, in resolution order.
+// Faults lists every source error, env first, then the saved file, then the
+// controlplane file. That is a fixed listing order, not the order ResolvePin
+// tries them in, which on the controlplane puts its own file first.
 func (r Resolution) Faults() []error {
 	var out []error
 	for _, e := range []error{r.EnvErr, r.FileErr, r.CPErr} {
@@ -74,32 +82,44 @@ func (r Resolution) Faults() []error {
 	return out
 }
 
-// ResolvePin decides the pin a node starts with: the env value when it is a
-// valid pin, else the saved pin file's, else — on the controlplane's own agent
-// — the file the api writes beside its bus key (cpPinFile; "" on every other
-// node, which has no such file).
+// ResolvePin decides the pin a node starts with.
 //
-// A value that does not parse is recorded on the Resolution and otherwise
-// skipped, so the caller can report it as a configuration fault: a bad env pin
-// still falls through to a saved pin, which is the right one to use while the
-// typo is fixed. Resolution.Pin empty means no source produced a pin, and the
-// caller refuses to dial.
+// On the controlplane's own agent (cpPinFile non-empty), the file the api
+// writes beside its bus key wins when it holds a valid pin: the api rewrites
+// it at every start, so it names the key the bus serves even after an identity
+// restore, when the seeded env pin names a key that restore moved aside
+// (geekdojo/geekdojo-brain#875). When it is absent or unusable, the order is
+// the one every other node uses.
+//
+// On every other node (cpPinFile ""; no such file exists there) it is the env
+// value when it is a valid pin, else the saved pin file's.
+//
+// The env value is parsed every time, even when the controlplane file wins, so
+// an invalid env pin is always recorded. A value that does not parse is
+// recorded on the Resolution and otherwise skipped, so the caller can report
+// it as a configuration fault: a bad env pin still falls through to a saved
+// pin, which is the right one to use while the typo is fixed. Resolution.Pin
+// empty means no source produced a pin, and the caller refuses to dial.
 func ResolvePin(env, pinFile, cpPinFile string) Resolution {
 	var r Resolution
+	envPin := ""
 	if v := strings.TrimSpace(env); v != "" {
-		_, perr := proto.ParseBusPin(v)
-		if perr == nil {
-			r.Pin, r.Source = v, "env"
-			return r
+		if _, perr := proto.ParseBusPin(v); perr != nil {
+			r.EnvErr = perr
+		} else {
+			envPin = v
 		}
-		r.EnvErr = perr
-	}
-	if v, ok := readSource(pinFile, &r.FileErr); ok {
-		r.Pin, r.Source = v, "file"
-		return r
 	}
 	if v, ok := readSource(cpPinFile, &r.CPErr); ok {
 		r.Pin, r.Source = v, "controlplane"
+		return r
+	}
+	if envPin != "" {
+		r.Pin, r.Source = envPin, "env"
+		return r
+	}
+	if v, ok := readSource(pinFile, &r.FileErr); ok {
+		r.Pin, r.Source = v, "file"
 		return r
 	}
 	return r
@@ -153,7 +173,8 @@ type PinSource func() (string, error)
 // StaticPin is a PinSource that always answers pin. The env pin and the saved
 // pin file cannot change while the agent runs — the environment is fixed and
 // nothing writes the saved file — so a pin from either is fixed for the life
-// of the process.
+// of the process. On the controlplane's own agent a fixed pin is used only
+// when the api's file was absent or unusable at start (ResolvePin).
 func StaticPin(pin string) PinSource {
 	return func() (string, error) { return pin, nil }
 }

@@ -38,8 +38,9 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 	return k
 }
 
-// TC-517-07: the order is env, then the saved file, then the controlplane
-// file — each alone, and in combination.
+// TC-517-07: on a node that is not the controlplane (cpPinFile "") the order
+// is env, then the saved file — each alone, and in combination. The
+// controlplane's own file is TestResolvePin_ControlplaneFile.
 func TestResolvePin(t *testing.T) {
 	envPin := mustPin(t, newKey(t))
 	filePin := mustPin(t, newKey(t))
@@ -122,9 +123,12 @@ func TestResolvePin_NoPinWithNoUsableSource(t *testing.T) {
 	}
 }
 
-// TC-517-07: the controlplane's own agent falls back to the file the api
-// writes beside its bus key — last, after the seed and after a saved pin, and
-// only when a path is given at all (every other role passes "").
+// TC-517-07, TC-875-01: on the controlplane's own agent a valid file the api
+// writes beside its bus key wins over the seeded env pin and over a saved pin
+// (geekdojo/geekdojo-brain#875: after a restore onto another key the env pin
+// names the discarded key). With that file gone the order is env, then the
+// saved file. Only a non-empty path makes it a source (every other role
+// passes "").
 func TestResolvePin_ControlplaneFile(t *testing.T) {
 	envPin := mustPin(t, newKey(t))
 	filePin := mustPin(t, newKey(t))
@@ -138,11 +142,23 @@ func TestResolvePin_ControlplaneFile(t *testing.T) {
 		t.Fatalf("controlplane only: got %+v", r)
 	}
 	writePin(t, file, filePin)
-	if r := ResolvePin("", file, cpFile); r.Pin != filePin || r.Source != "file" {
-		t.Fatalf("a saved pin wins over the controlplane file: got %+v", r)
+	// TC-875-01: three distinct valid pins; the controlplane file wins.
+	if r := ResolvePin(envPin, file, cpFile); r.Pin != cpPin || r.Source != "controlplane" || len(r.Faults()) != 0 {
+		t.Fatalf("the controlplane file wins over the seed and a saved pin: got %+v", r)
 	}
-	if r := ResolvePin(envPin, file, cpFile); r.Pin != envPin || r.Source != "env" {
-		t.Fatalf("the seed wins over both: got %+v", r)
+	if r := ResolvePin("", file, cpFile); r.Pin != cpPin || r.Source != "controlplane" {
+		t.Fatalf("the controlplane file wins over a saved pin: got %+v", r)
+	}
+	if err := os.Remove(cpFile); err != nil {
+		t.Fatal(err)
+	}
+	// TC-875-01: with the controlplane file gone, the seed wins over a saved pin.
+	if r := ResolvePin(envPin, file, cpFile); r.Pin != envPin || r.Source != "env" || len(r.Faults()) != 0 {
+		t.Fatalf("no controlplane file: got %+v, want the env pin", r)
+	}
+	// TC-875-01: and with no seed either, the saved pin.
+	if r := ResolvePin("", file, cpFile); r.Pin != filePin || r.Source != "file" || len(r.Faults()) != 0 {
+		t.Fatalf("no controlplane file, no seed: got %+v, want the saved pin", r)
 	}
 	if err := os.WriteFile(cpFile, []byte("garbage\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -204,6 +220,8 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		noCPPath     bool // a node that is not the controlplane passes ""
 		wantSource   string
 		wantFaults   int
+		wantEnvErr   bool
+		wantCPErr    bool
 	}{
 		{name: "never pinned anywhere", env: absent, pin: absent, cp: absent},
 		{name: "never pinned, not the controlplane", env: absent, pin: absent, noCPPath: true},
@@ -226,9 +244,38 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		{name: "blank env does not mask an empty pin file", env: blank, pin: empty, cp: absent, wantFaults: 1},
 
 		{name: "malformed env falls through to a good pin file", env: malformed, pin: valid, cp: absent, wantSource: "file", wantFaults: 1},
-		{name: "empty pin file falls through to a good controlplane file", env: absent, pin: empty, cp: valid, wantSource: "controlplane", wantFaults: 1},
+		// A good controlplane file is read first, so a saved pin file behind
+		// it is never read and contributes no fault — as a saved file behind
+		// a good env pin never has.
+		{name: "a good controlplane file wins before an empty pin file is read", env: absent, pin: empty, cp: valid, wantSource: "controlplane"},
 		{name: "unreadable pin file behind a good env", env: valid, pin: unreadable, cp: absent, wantSource: "env"},
 		{name: "blank env, good pin file", env: blank, pin: valid, cp: absent, wantSource: "file"},
+
+		// geekdojo/geekdojo-brain#875: on the controlplane a valid file the
+		// api writes outranks the env pin and the saved file.
+		{name: "TC-875-01: good env and good controlplane file", env: valid, pin: absent, cp: valid, wantSource: "controlplane"},
+		{name: "TC-875-04: good saved file and good controlplane file", env: absent, pin: valid, cp: valid, wantSource: "controlplane"},
+		{name: "TC-875-04: every source good", env: valid, pin: valid, cp: valid, wantSource: "controlplane"},
+		// TC-875-03: the env fault is still reported when the file wins.
+		{name: "TC-875-03: malformed env behind a good controlplane file", env: malformed, pin: absent, cp: valid, wantSource: "controlplane", wantFaults: 1, wantEnvErr: true},
+		// TC-875-04: an unusable controlplane file falls back to the env pin
+		// and is reported.
+		{name: "TC-875-04: empty controlplane file, good env", env: valid, pin: absent, cp: empty, wantSource: "env", wantFaults: 1, wantCPErr: true},
+		{name: "TC-875-04: blank controlplane file, good env", env: valid, pin: absent, cp: blank, wantSource: "env", wantFaults: 1, wantCPErr: true},
+		{name: "TC-875-04: malformed controlplane file, good env", env: valid, pin: absent, cp: malformed, wantSource: "env", wantFaults: 1, wantCPErr: true},
+		{name: "TC-875-04: unreadable controlplane file, good env", env: valid, pin: absent, cp: unreadable, wantSource: "env", wantFaults: 1, wantCPErr: true},
+		{name: "TC-875-04: malformed controlplane file, good saved file", env: absent, pin: valid, cp: malformed, wantSource: "file", wantFaults: 1, wantCPErr: true},
+		// TC-875-05: every source unusable is still no pin. The existing rows
+		// "every source present and unusable" and "never pinned anywhere"
+		// above cover it under the new order.
+
+		// TC-875-02: a node that is not the controlplane resolves as before,
+		// whatever a file at the controlplane path would say (the table puts
+		// none there; the path is not passed at all).
+		{name: "TC-875-02: good env, not the controlplane", env: valid, pin: absent, noCPPath: true, wantSource: "env"},
+		{name: "TC-875-02: good env and good saved file, not the controlplane", env: valid, pin: valid, noCPPath: true, wantSource: "env"},
+		{name: "TC-875-02: good saved file, not the controlplane", env: absent, pin: valid, noCPPath: true, wantSource: "file"},
+		{name: "TC-875-02: malformed env, unreadable saved file, not the controlplane", env: malformed, pin: unreadable, noCPPath: true, wantFaults: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -236,6 +283,11 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			cpPath := ""
 			if !tc.noCPPath {
 				cpPath = file(t, dir, "agent.pin", tc.cp)
+			} else {
+				// TC-875-02: a valid pin of ANOTHER key where the controlplane
+				// file would be. A node that is not the controlplane never
+				// reads it, so the pin check below fails if it ever did.
+				writePin(t, filepath.Join(dir, "agent.pin"), mustPin(t, newKey(t)))
 			}
 			r := ResolvePin(envOf[tc.env], pinPath, cpPath)
 
@@ -250,6 +302,12 @@ func TestResolvePin_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			}
 			if got := len(r.Faults()); got != tc.wantFaults {
 				t.Fatalf("%d faults %v, want %d", got, r.Faults(), tc.wantFaults)
+			}
+			if tc.wantEnvErr && r.EnvErr == nil {
+				t.Fatalf("no EnvErr, want the env pin reported: %+v", r)
+			}
+			if tc.wantCPErr && r.CPErr == nil {
+				t.Fatalf("no CPErr, want the controlplane file reported: %+v", r)
 			}
 		})
 	}
