@@ -91,8 +91,10 @@ func TestPinFile_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 
 // TC-669-04: only a pin that came from the controlplane's own file is read
 // again; every other source answers the pin resolved at start, whatever the
-// controlplane file says later. The env case is a controlplane seeded with
-// RASPUTIN_BUS_PIN.
+// controlplane file says later. The env case is a node whose pin came from
+// RASPUTIN_BUS_PIN: any role but the controlplane, or a controlplane whose own
+// file was absent or unusable at start (TC-875-06 covers a seeded controlplane
+// whose file is valid).
 func TestPinSourceFor_OnlyTheControlplaneFileIsReadAgain(t *testing.T) {
 	k2, k1 := mustPin(t, newKey(t)), mustPin(t, newKey(t))
 	for _, tc := range []struct {
@@ -114,6 +116,46 @@ func TestPinSourceFor_OnlyTheControlplaneFileIsReadAgain(t *testing.T) {
 				t.Fatalf("PinSourceFor(%+v) after the rewrite = (%q, %v), want (%q, nil)", tc.r, got, err, tc.want)
 			}
 		})
+	}
+}
+
+// TC-875-06: a controlplane seeded with RASPUTIN_BUS_PIN whose own file is
+// valid follows that file on every handshake. After the api rewrites it to a
+// restored key the source answers the restored key, never the stale env pin;
+// after the file is deleted it fails closed with an error naming the path, and
+// does not fall back to the env pin.
+func TestPinSourceFor_SeededControlplaneFollowsItsFileNotTheEnvPin(t *testing.T) {
+	k2, k1 := mustPin(t, newKey(t)), mustPin(t, newKey(t))
+	dir := t.TempDir()
+	cp := filepath.Join(dir, "agent.pin")
+	replacePin(t, cp, k2+"\n")
+
+	r := ResolvePin(k2, PinFilePath(dir), cp)
+	if r.Source != "controlplane" {
+		t.Fatalf("ResolvePin(env K2, agent.pin K2) source = %q, want controlplane: %+v", r.Source, r)
+	}
+	src := PinSourceFor(r, cp)
+
+	replacePin(t, cp, k1+"\n")
+	for i := range 2 {
+		got, err := src()
+		if err != nil || got != k1 {
+			t.Fatalf("handshake %d after the rewrite = (%q, %v), want (%q, nil): never the env pin", i, got, err, k1)
+		}
+	}
+
+	if err := os.Remove(cp); err != nil {
+		t.Fatal(err)
+	}
+	got, err := src()
+	if err == nil {
+		t.Fatalf("after the delete = (%q, nil), want an error", got)
+	}
+	if got != "" {
+		t.Fatalf("after the delete answered %q, want no pin (the env pin is %q)", got, k2)
+	}
+	if !strings.Contains(err.Error(), cp) {
+		t.Fatalf("error %q does not name the path %s", err, cp)
 	}
 }
 

@@ -203,18 +203,20 @@ func main() {
 	// RASPUTIN_BUS_PIN from the seed, else the pin file saved under this
 	// agent's state dir (written by an agent of 2026.09.5 or older when the
 	// controlplane delivered the pin to a node enrolled before pins existed).
-	// On the controlplane's own agent there is a third source: the file the
-	// api writes beside its bus key on every start. A self-initialised
-	// controlplane has no seed, so nothing put a pin in its environment
-	// (geekdojo/geekdojo-brain#510). Every other role has no such file, and
-	// passes "".
+	// On the controlplane's own agent there is a third source, and a valid one
+	// comes FIRST: the file the api writes beside its bus key on every start.
+	// A self-initialised controlplane has no seed, so nothing put a pin in its
+	// environment (geekdojo/geekdojo-brain#510); and after an identity restore
+	// onto another key the seeded env pin names the discarded key, while the
+	// file names the restored one (geekdojo/geekdojo-brain#875). Every other
+	// role has no such file, and passes "".
 	busPinFile := bus.PinFilePath(stateDir)
 	cpPinFile := controlplanePinFile(role)
 	busPinRes := bus.ResolvePin(os.Getenv(bus.EnvPin), busPinFile, cpPinFile)
 	busPin, busPinSource := busPinRes.Pin, busPinRes.Source
 	if busPinRes.EnvErr != nil {
 		faults.Reject(bus.EnvPin, os.Getenv(bus.EnvPin), []string{"sha256/<44-character base64>"},
-			"this node does not verify the bus server by that value; it uses the saved pin file, if any, and otherwise refuses to dial the bus at all")
+			"this node does not verify the bus server by that value; it uses another pin source, if any (on the control plane its own pin file, otherwise the saved pin file), and otherwise refuses to dial the bus at all")
 	}
 	if busPinRes.FileErr != nil {
 		faults.Reject(busPinFile, "", []string{"sha256/<44-character base64>"},
@@ -222,7 +224,7 @@ func main() {
 	}
 	if busPinRes.CPErr != nil {
 		faults.Reject(cpPinFile, "", []string{"sha256/<44-character base64>"},
-			"the control plane's own pin file is unusable; this agent refuses to dial the bus rather than send its join token without one")
+			"the control plane's own pin file is unusable; this agent uses RASPUTIN_BUS_PIN or the saved pin file instead, if either is usable, and otherwise refuses to dial the bus rather than send its join token without one")
 	}
 	// FAIL CLOSED. The bus accepts only TLS, and the pin is the only check on
 	// the server's key (geekdojo/geekdojo-brain#517), so a node with no usable
@@ -1426,9 +1428,10 @@ func updaterStateDir(stateDir string) string { return filepath.Join(stateDir, "u
 // that is not /var/lib/rasputin.
 const EnvControlplanePinFile = "RASPUTIN_BUS_PIN_FILE"
 
-// controlplanePinFile resolves the third and last pin source: the file the api
-// writes beside the join token it mints for its own agent
-// (proto.BusAgentPinPath). See bus.ResolvePin.
+// controlplanePinFile resolves the controlplane's own pin source: the file the
+// api writes beside the join token it mints for its own agent
+// (proto.BusAgentPinPath). When it holds a valid pin it wins over
+// RASPUTIN_BUS_PIN and the saved pin file. See bus.ResolvePin.
 //
 // It is a resolver, not an inline read, because it decides whether a pin
 // source exists at all (.github/security-resolvers.tsv). Two rules, and both

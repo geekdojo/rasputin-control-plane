@@ -172,7 +172,8 @@ type agentOpts struct {
 	pin       string // RASPUTIN_BUS_PIN; "" leaves it unset
 	// pinFile is RASPUTIN_BUS_PIN_FILE: where the controlplane's own agent
 	// reads the pin its api writes (cp.agentPinFile). Read by the
-	// controlplane role only, and last.
+	// controlplane role only, and first when it holds a valid pin
+	// (geekdojo/geekdojo-brain#875).
 	pinFile string
 	// stateDir reuses a previous agent's state (a restart); "" is fresh.
 	stateDir string
@@ -856,6 +857,102 @@ func TestFunctional_RestoreOntoAnotherKey(t *testing.T) {
 	}
 	if strings.Contains(a.log(), "refusing to dial") {
 		t.Fatal("the agent logged the no-pin FATAL")
+	}
+}
+
+// TC-875-07, TC-875-08 (geekdojo/geekdojo-brain#875): the same restore as
+// TC-669-09, on a controlplane flashed from a provisioned set, whose agent's
+// environment carries RASPUTIN_BUS_PIN (firstboot copies it into node.env).
+//
+// TC-875-07: a valid agent.pin wins over that env pin at start, so the
+// running agent follows agent.pin through the restore. While agent.pin and
+// the env pin both still name K2 and the bus serves K1 — a key matching
+// neither — the agent refuses it and does not register. Once agent.pin says
+// K1, as the api writes it at start, the same process logs the change of pin
+// and registers: no exit, no restart, no FATAL, no edit to the env pin.
+//
+// TC-875-08: the unit's restart after that restore, with the stale env pin
+// K2 still in the environment, starts on agent.pin and registers on K1.
+//
+// What this runs: the startCP harness, which writes agent.pin itself the way
+// cmd/rasputin-api does at start, and the REAL rasputin-agent binary. It does
+// NOT run cmd/rasputin-api, so the api's exit-75 restore path and its
+// pin-before-listen order are not proven here; the bench proves those.
+func TestFunctional_RestoreOntoAnotherKeyWithSeededPin(t *testing.T) {
+	skipShort(t)
+	c := startCP(t, cpOpts{selfNode: "cp1"})
+	k2 := c.key.Pin()
+	stateDir := t.TempDir()
+	opts := agentOpts{
+		id: "cp1", role: proto.RoleControlPlane, url: c.url(),
+		tokenFile: c.agentTokenFile(), pinFile: c.agentPinFile(), stateDir: stateDir,
+		pin: k2, // RASPUTIN_BUS_PIN, as firstboot writes it from the seed
+	}
+	a := startAgent(t, opts)
+	a.waitLog(t, "the pin taken from the controlplane's own file over the env pin", "bus pin", "source=controlplane", "pin_file="+c.agentPinFile())
+	c.waitRegistered(t, "cp1")
+
+	// The restore: another key, K1, into bus.key. The restarted bus serves K1
+	// while agent.pin is left saying K2 (noPinFile), so the agent sees a key
+	// that matches neither its env pin nor agent.pin.
+	c.stop()
+	k1Dir := t.TempDir()
+	k1, _, err := bustls.EnsureKey(k1Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k1Bytes, err := os.ReadFile(filepath.Join(k1Dir, bustls.KeyFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	busDir := filepath.Join(c.dataDir, "bus")
+	if err := os.WriteFile(filepath.Join(busDir, bustls.KeyFileName), k1Bytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	since := a.lineCount()
+	c2 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1", noPinFile: true})
+	if c2.key.Pin() != k1.Pin() || k1.Pin() == k2 {
+		t.Fatalf("the restarted controlplane serves %s, want the restored %s", c2.key.Pin(), k1.Pin())
+	}
+	if got, _ := os.ReadFile(c2.agentPinFile()); strings.TrimSpace(string(got)) != k2 {
+		t.Fatalf("agent.pin = %q, want the stale %q until the api writes it", got, k2)
+	}
+	a.waitLogSince(t, since, "the refusal of a key matching neither pin", "refused the bus server's key", "pin="+strconv.Quote(k2))
+	if c2.registeredAtAll("cp1") {
+		t.Fatal("the agent registered on a key matching neither its env pin nor agent.pin")
+	}
+
+	// The api's start writes agent.pin with the restored key.
+	since = a.lineCount()
+	if _, err := bustls.WriteAgentPinFile(busDir, c2.key); err != nil {
+		t.Fatal(err)
+	}
+	a.waitLogSince(t, since, "the change of pin", "the bus pin changed", "old_pin="+strconv.Quote(k2), "new_pin="+strconv.Quote(k1.Pin()))
+	c2.waitRegistered(t, "cp1")
+	if a.exited() {
+		t.Fatal("the agent exited; the restored key must reach the running process")
+	}
+	if strings.Contains(a.log(), "refusing to dial") {
+		t.Fatal("the agent logged the no-pin FATAL")
+	}
+
+	// TC-875-08: the unit's restart. The env still says K2; agent.pin and the
+	// bus say K1. A fresh controlplane instance on the same state, so the
+	// registration waited on below is this agent process's.
+	a.stop(t)
+	c2.stop()
+	c3 := startCP(t, cpOpts{dataDir: c.dataDir, port: c.port, selfNode: "cp1"})
+	if c3.key.Pin() != k1.Pin() {
+		t.Fatalf("the controlplane serves %s after its restart, want the restored %s", c3.key.Pin(), k1.Pin())
+	}
+	b := startAgent(t, opts)
+	b.waitLog(t, "the restarted agent's pin taken from agent.pin", "bus pin", "source=controlplane", "pin_file="+c.agentPinFile())
+	c3.waitRegistered(t, "cp1")
+	if strings.Contains(b.log(), "refused the bus server's key") {
+		t.Fatal("the restarted agent refused the restored key")
+	}
+	if strings.Contains(b.log(), "refusing to dial") {
+		t.Fatal("the restarted agent logged the no-pin FATAL")
 	}
 }
 
