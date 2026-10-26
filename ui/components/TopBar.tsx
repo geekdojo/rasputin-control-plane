@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertTriangle, CheckCircle, Clock, Heart, LogOut, Network, Server } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Clock, LogOut, Network, Server } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ElementType } from 'react';
@@ -234,9 +234,6 @@ export function TopBar({
             rel="noopener noreferrer"
             title="Sponsor Rasputin on GitHub"
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 5,
               color: 'var(--rasp-dim)',
               fontSize: 9,
               letterSpacing: '0.08em',
@@ -244,7 +241,6 @@ export function TopBar({
               whiteSpace: 'nowrap',
             }}
           >
-            <Heart size={11} color="#f472b6" />
             SPONSOR
           </a>
           <span
