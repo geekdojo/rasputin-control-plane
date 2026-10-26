@@ -131,10 +131,14 @@ func TestRedaction_HealthAndTransport(t *testing.T) {
 	})
 
 	// stall reads the request whole, so the server notices the client hang
-	// up, and then answers nothing.
+	// up, and then answers nothing. Returning once the client left would
+	// make net/http write an implicit empty 200 that can beat the cancel to
+	// the client (F-805-21, fixed the same way in classify_test.go); aborting
+	// closes the stream with no response written.
 	stall := func(r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
 		<-r.Context().Done()
+		panic(http.ErrAbortHandler)
 	}
 	t.Run("call bound runs out", func(t *testing.T) {
 		f := newFixture(t, func(_ http.ResponseWriter, r *http.Request) { stall(r) })
