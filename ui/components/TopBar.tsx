@@ -1,10 +1,12 @@
 'use client';
 
-import { AlertTriangle, CheckCircle, Clock, LogOut, Network, Server } from 'lucide-react';
+import { AlertTriangle, CheckCircle, Clock, Heart, LogOut, Network, Server } from 'lucide-react';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import type { ElementType } from 'react';
 import { accentA, MONO } from './ui-theme';
+
+const SPONSOR_URL = 'https://github.com/sponsors/geekdojo';
 
 interface TopBarProps {
   clusterName: string;
@@ -226,6 +228,25 @@ export function TopBar({
             height: '100%',
           }}
         >
+          <a
+            href={SPONSOR_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Sponsor Rasputin on GitHub"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 5,
+              color: 'var(--rasp-dim)',
+              fontSize: 9,
+              letterSpacing: '0.08em',
+              textDecoration: 'none',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            <Heart size={11} color="#f472b6" />
+            SPONSOR
+          </a>
           <span
             style={{
               color: 'var(--rasp-dim)',
