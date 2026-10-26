@@ -49,6 +49,10 @@ This repo follows the [Geekdojo development principles](https://github.com/geekd
 - **It applies to all new code.** Legacy code is refactored toward it when a change can reasonably do so.
 - **A departure needs an approved exception.** The process is in [Standard exceptions](https://github.com/geekdojo/geekdojo-brain/blob/main/engineering/standard-exceptions.md). Approved exceptions for this repo are listed in `EXCEPTIONS.md` at the repo root. The file is created when the first one is approved.
 
+## Scoring a defect
+
+Score every bug or defect you report with [docs/defect-severity.md](docs/defect-severity.md): Critical, High, Medium or Low, then adjusted for likelihood. **Defect severity is not the product's event severity.** The alert and event levels the running control plane raises (`crit`, `warn`) say what an operator should look at now, not how bad a bug is. Never report an alert's level as a defect's severity.
+
 ## Go dependencies (Go gotcha)
 
 The Go workspace pins to **`go 1.26`** in every `go.mod` and `go.work`; CI runs

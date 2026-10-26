@@ -4,6 +4,10 @@ Repo-local engineering notes — design decisions specific to *this* codebase, n
 
 For the system-level overview, see [ARCHITECTURE.md](../ARCHITECTURE.md) at the repo root.
 
+## Engineering
+
+- [defect-severity.md](defect-severity.md): how to score a bug or defect (Critical, High, Medium, Low). It is not the product's alert or event severity.
+
 ## Testing procedures
 
 - [testing-updates.md](testing-updates.md): one node's OS update, on a laptop, with the mock backend.
