@@ -2,7 +2,21 @@ import coreWebVitals from 'eslint-config-next/core-web-vitals';
 import typescript from 'eslint-config-next/typescript';
 import jsxA11y from 'eslint-plugin-jsx-a11y';
 
-// eslint flat config (eslint 9).
+// eslint flat config (eslint 10).
+//
+// package.json carries an `overrides` block that lets three plugins accept
+// eslint 10: eslint-plugin-react 7.37.5, eslint-plugin-jsx-a11y 6.10.2 and
+// eslint-plugin-import 2.32.0. Each is the latest release of its line, and each
+// still declares a peer range that stops at eslint 9; eslint-config-next pulls
+// in all three (and this file uses jsx-a11y directly), so without the override
+// `npm ci` refuses the tree with ERESOLVE. The override changes only which
+// eslint the peer check accepts. Checked on 2026-10-27 at eslint 10.13.0: a
+// probe file breaking a rule from every plugin reported the same findings under
+// eslint 9.39.5 and 10.13.0, and so did the whole tree. One known gap: React
+// components marked only by a JSDoc `@extends React.Component` comment are no
+// longer detected, because eslint 10 removed SourceCode#getJSDocComment and
+// eslint-plugin-react catches the error. Nothing here uses that marker. Drop an
+// override once its plugin ships a release whose peer range includes eslint 10.
 //
 // eslint-config-next 16 exports native flat-config arrays, so these are spread
 // directly. The 15.x version did not, and needed FlatCompat from
