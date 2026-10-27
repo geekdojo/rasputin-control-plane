@@ -400,10 +400,21 @@ func DerivePrivilege(f SafetyFacts) Privilege {
 		b.add(TierElevated, GrantHostNetwork)
 	}
 	if f.HostPIDOrIPC {
-		// Namespace visibility, not authority: seeing host processes is not
-		// signalling them without a capability. Pairing it with SYS_PTRACE is
-		// what makes it root, and that pairing raises the tier on its own.
-		b.add(TierElevated, GrantHostPIDOrIPC)
+		// Measured, not argued: any process in the host PID namespace with
+		// Docker's default capabilities, root or not, passes the kernel's
+		// ptrace read check against a process in ANOTHER container that runs
+		// as the same uid and whose permitted capabilities are a subset of its
+		// own. It reads that process's environment (where S19 puts an app's
+		// resolved secrets) and, through /proc/<pid>/root, its files. A
+		// different uid is refused without CAP_SYS_PTRACE, which the default
+		// set lacks. Root reads every root app on the node, so this is
+		// host-trusting. Bench evidence: geekdojo-brain
+		// projects/rasputin/research/openbao-evidence/884/.
+		//
+		// ipc: host is rated with it on purpose: the signed fact
+		// (hostPidOrIpc) covers both keys, and splitting it is a bundle
+		// schema change. Over-declaring an ipc-only tile is the safe side.
+		b.add(TierHostTrusting, GrantHostPIDOrIPC)
 	}
 
 	for _, c := range f.CapAdd {
