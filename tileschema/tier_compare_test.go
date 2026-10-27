@@ -1,6 +1,9 @@
 package tileschema
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Dec 12 (auth-methodology §9 item 12, geekdojo/geekdojo-brain#522): a catalog
 // upgrade that RAISES an app's tier needs the owner's consent. "Raises" is the
@@ -86,5 +89,56 @@ func TestKnownTier(t *testing.T) {
 		if KnownTier(tier) {
 			t.Errorf("KnownTier(%q) = true", tier)
 		}
+	}
+}
+
+// geekdojo/geekdojo-brain#884: a host-PID container reads the environment of
+// any co-located container running as the same uid, so the host-PID fact now
+// forces a host-trusting declaration — and that declaration is what puts an
+// upgrade from an app accepted at elevated through the consent gate. The gate
+// itself (apps.CheckUpgradeConsent, the compose handler) reads tiers only and
+// is proven by its own tests; this proves the link from the fact to the tier
+// those tests start from.
+func TestHostPIDTile_UpgradeFromElevatedNeedsHostTrustingConsent(t *testing.T) {
+	facts := okFacts()
+	facts.HostPIDOrIPC = true
+
+	tileAt := func(tier string) Tile {
+		tile := okTile()
+		tile.Requires = []string{CapabilityPrivilegeTiers}
+		tile.Privilege = &Privilege{
+			Tier:   tier,
+			Grants: []string{GrantHostPIDOrIPC},
+			Why:    "Watches every process on the node",
+		}
+		return tile
+	}
+
+	// TC-884-03: declaring elevated is refused by the tier rule, not by a
+	// missing requires or grant — the message proves which check fired.
+	err := ValidateTileSafety(tileAt(TierElevated), facts)
+	const want = `declares privilege tier "elevated" but its compose takes "host-trusting" (host-pid-ipc)`
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("elevated host-pid tile: got %v, want an error containing %q", err, want)
+	}
+
+	// TC-884-04: declaring host-trusting loads.
+	ok := tileAt(TierHostTrusting)
+	if err := ValidateTileSafety(ok, facts); err != nil {
+		t.Fatalf("host-trusting host-pid tile: got %v, want nil", err)
+	}
+
+	// TC-884-05: the calls the upgrade saga and the HTTP gate make. An app
+	// accepted at elevated is raised, elevated consent does not cover it,
+	// host-trusting consent does.
+	tier := ok.DeclaredPrivilege().EffectiveTier()
+	if !TierRaised(TierElevated, tier) {
+		t.Errorf("TierRaised(elevated, %q) = false, want true", tier)
+	}
+	if TierCovers(TierElevated, tier) {
+		t.Errorf("TierCovers(elevated, %q) = true, want false", tier)
+	}
+	if !TierCovers(TierHostTrusting, tier) {
+		t.Errorf("TierCovers(host-trusting, %q) = false, want true", tier)
 	}
 }

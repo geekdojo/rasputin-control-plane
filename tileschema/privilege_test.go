@@ -54,10 +54,14 @@ func TestDerivePrivilege_ScoresEveryDimension(t *testing.T) {
 		// for it — scored here only so DerivePrivilege cannot be quoted saying
 		// that reaching the trust store is merely elevated.
 		{"trust store", func(f *SafetyFacts) { f.BindMounts = []string{"/var/lib/rasputin/trust"} }, TierHostTrusting, []string{GrantPrefixBind + "/var/lib/rasputin/trust"}},
+		// TC-884-01: host PID reads the environment and files of any other
+		// container running as the same uid (geekdojo/geekdojo-brain#884), so
+		// it is host-trusting; the grant string the catalog lint keys on is
+		// unchanged.
+		{"host pid or ipc", func(f *SafetyFacts) { f.HostPIDOrIPC = true }, TierHostTrusting, []string{GrantHostPIDOrIPC}},
 
 		// --- elevated: reaches past itself, not root-equivalent ---
 		{"host network", func(f *SafetyFacts) { f.HostNetwork = true }, TierElevated, []string{GrantHostNetwork}},
-		{"host pid or ipc", func(f *SafetyFacts) { f.HostPIDOrIPC = true }, TierElevated, []string{GrantHostPIDOrIPC}},
 		{"ordinary capability", func(f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }, TierElevated, []string{GrantPrefixCap + "NET_ADMIN"}},
 		{"usb dongle", func(f *SafetyFacts) { f.Devices = []string{"/dev/bus/usb/001/004"} }, TierElevated, []string{GrantPrefixDevice + "/dev/bus/usb/001/004"}},
 		{"gpu reservation", func(f *SafetyFacts) { f.ReservedDevices = []string{"gpu x1"} }, TierElevated, []string{GrantPrefixReservedDev + "gpu x1"}},

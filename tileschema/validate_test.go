@@ -113,7 +113,8 @@ func TestValidateTileSafety_Rejects(t *testing.T) {
 		{"digest with no name", "", func(_ *Tile, f *SafetyFacts) { f.Images = []string{"@" + goodDigest} }},
 		{"undeclared privileged", `takes "host-trusting" (privileged)`, func(_ *Tile, f *SafetyFacts) { f.Privileged = true }},
 		{"undeclared host network", `takes "elevated" (host-network)`, func(_ *Tile, f *SafetyFacts) { f.HostNetwork = true }},
-		{"undeclared host pid or ipc", `takes "elevated" (host-pid-ipc)`, func(_ *Tile, f *SafetyFacts) { f.HostPIDOrIPC = true }},
+		// TC-884-02
+		{"undeclared host pid or ipc", `takes "host-trusting" (host-pid-ipc)`, func(_ *Tile, f *SafetyFacts) { f.HostPIDOrIPC = true }},
 		{"undeclared cap add", `takes "elevated" (cap:NET_ADMIN)`, func(_ *Tile, f *SafetyFacts) { f.CapAdd = []string{"NET_ADMIN"} }},
 		{"undeclared bind outside roots", `takes "host-trusting" (bind:/etc/shadow)`, func(_ *Tile, f *SafetyFacts) { f.BindMounts = []string{"/etc/shadow"} }},
 		// Cleaned before classification, so the traversal is scored on where
