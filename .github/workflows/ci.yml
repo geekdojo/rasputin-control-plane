@@ -29,7 +29,8 @@ name: ci
 #              branch-protection (configured outside this file). The api test
 #              step sets RASPUTIN_APPSECRET_FUNCTIONAL=required, so the
 #              appsecret Compose functional test must run against the runner's
-#              real Compose and pass rather than skip (geekdojo-brain#695).
+#              real Compose and pass rather than skip (geekdojo-brain#695); the
+#              remaining-modules step sets it too, for the agent's (#776).
 #              It also installs the pinned secret store with
 #              scripts/install-openbao.sh and sets
 #              RASPUTIN_SECRETSTORE_FUNCTIONAL=required, so the secret store
@@ -279,6 +280,12 @@ jobs:
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
       - name: test (remaining modules)
+        env:
+          # The agent's Compose test for secret values carried beside the
+          # compose (geekdojo-brain#776) must run against the runner's real
+          # Compose and pass rather than skip, as the api's does above
+          # (docs/testing-appsecret-compose.md).
+          RASPUTIN_APPSECRET_FUNCTIONAL: required
         run: |
           modules="$(./scripts/workspace-modules.sh)"
           # `if ... then continue; fi`, not `[ ... ] && continue`: the latter

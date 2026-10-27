@@ -146,7 +146,7 @@ func TestMockVolumeDirIsResolvable(t *testing.T) {
 func TestMockStopAndStartFlipRunning(t *testing.T) {
 	mb := newDockerMock(t)
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	if r, _ := mb.AppRunning(ctx, "a1"); !r {
@@ -180,7 +180,7 @@ func TestMockSnapshotRefusesWhenTheAppIsStopped(t *testing.T) {
 	if _, err := mb.SnapshotSQLite(ctx, "a1", "data", "a.db", ".rasputin-quiesce/a.db"); !errors.Is(err, ErrNoRunningContainer) {
 		t.Errorf("snapshot with no running container: %v", err)
 	}
-	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	tool, err := mb.SnapshotSQLite(ctx, "a1", "data", "a.db", ".rasputin-quiesce/a.db")
@@ -196,7 +196,7 @@ func TestMockSnapshotRefusesWhenTheAppIsStopped(t *testing.T) {
 func TestMockFailModes(t *testing.T) {
 	mb := newDockerMock(t)
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv(mockFailModeEnv, "stop")

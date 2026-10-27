@@ -15,11 +15,30 @@ func str(v secret.Value, err error) (string, error) {
 	return string(v.Reveal()), err
 }
 
-// TC-825-01: Derive and Resolve hand back a secret.Value whose bytes are the
-// frozen vector and the previous release's resolved compose, byte for byte.
-// The previous release spliced Derive's string into the compose, so its output
-// for a vector's tuple is the compose with each token replaced by that
-// vector's Want — pinned here as a literal, not recomputed through Resolve.
+// resolved reads a Resolve or ResolveCompose result as the compose string and
+// the values by variable name (geekdojo/geekdojo-brain#776). A nil map stays
+// nil, so a test can tell "no map" from "an empty one".
+func resolved(v secret.Value, env map[string]secret.Value, err error) (string, map[string]string, error) {
+	var out map[string]string
+	if env != nil {
+		out = make(map[string]string, len(env))
+		for k, e := range env {
+			out[k] = string(e.Reveal())
+		}
+	}
+	return string(v.Reveal()), out, err
+}
+
+// firstTwo drops a resolve result's map, for a test about the compose or the
+// error only.
+func firstTwo(v secret.Value, _ map[string]secret.Value, err error) (secret.Value, error) {
+	return v, err
+}
+
+// TC-825-01: Derive and Resolve hand back secret.Values whose bytes are the
+// frozen vector. Since geekdojo/geekdojo-brain#776 the vector is in Resolve's
+// map under the token's variable, and the compose holds the reference —
+// pinned here as literals, not recomputed through Resolve.
 func TestDeriveAndResolveReturnTheVectorBytesAsAValue(t *testing.T) {
 	c := loadVectors(t).Cases[0]
 	seedBytes, err := hex.DecodeString(c.SeedHex)
@@ -39,24 +58,28 @@ func TestDeriveAndResolveReturnTheVectorBytesAsAValue(t *testing.T) {
 		t.Errorf("Derive(...).Reveal() = %q, want the vector %q", got, c.Want)
 	}
 
+	key := "RASPUTIN_SECRET_" + strings.ToUpper(strings.ReplaceAll(c.Name, "-", "_"))
 	compose := "services:\n  db:\n    environment:\n      P: ${secret:" + c.Name + "}\n      Q: ${secret:" + c.Name + "}\n"
-	want := "services:\n  db:\n    environment:\n      P: " + c.Want + "\n      Q: " + c.Want + "\n"
-	r, err := Resolve(compose, c.AppID, seed, c.Version)
+	want := "services:\n  db:\n    environment:\n      P: ${" + key + "}\n      Q: ${" + key + "}\n"
+	got, env, err := resolved(Resolve(compose, c.AppID, seed, c.Version))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got := string(r.Reveal()); got != want {
-		t.Errorf("Resolve(...).Reveal() differs from the previous release's output:\n got %q\nwant %q", got, want)
+	if got != want {
+		t.Errorf("Resolve(...) compose:\n got %q\nwant %q", got, want)
+	}
+	if len(env) != 1 || env[key] != c.Want {
+		t.Errorf("Resolve(...) map = %d entries, %s=%q; want one, the vector %q", len(env), key, env[key], c.Want)
 	}
 
 	plain := "services:\n  web:\n    image: x\n    environment:\n      A: ${OTHER}\n      B: $$LITERAL\n"
 	for _, s := range []*Seed{seed, nil} {
-		r, err := Resolve(plain, c.AppID, s, c.Version)
+		got, env, err := resolved(Resolve(plain, c.AppID, s, c.Version))
 		if err != nil {
 			t.Fatalf("Resolve of a compose with no token (seed=%v): %v", s != nil, err)
 		}
-		if got := string(r.Reveal()); got != plain {
-			t.Errorf("a compose with no token came back changed (seed=%v):\n got %q\nwant %q", s != nil, got, plain)
+		if got != plain || env != nil {
+			t.Errorf("a compose with no token came back changed (seed=%v):\n got %q, %v\nwant %q, nil map", s != nil, got, env, plain)
 		}
 	}
 }
@@ -72,20 +95,20 @@ func TestDeriveAndResolveFailuresReturnAZeroValue(t *testing.T) {
 		run func() (secret.Value, error)
 	}{
 		{"a nil seed with a tokenised compose", func() (secret.Value, error) {
-			return Resolve(tokenised, appID, nil, InitialVersion)
+			return firstTwo(Resolve(tokenised, appID, nil, InitialVersion))
 		}},
 		{"a nil seed, derived directly", func() (secret.Value, error) {
 			var none *Seed
 			return none.Derive(appID, "db-password", InitialVersion)
 		}},
 		{"an empty appID", func() (secret.Value, error) {
-			return Resolve(tokenised, "", seed, InitialVersion)
+			return firstTwo(Resolve(tokenised, "", seed, InitialVersion))
 		}},
 		{"an empty appID, derived directly", func() (secret.Value, error) {
 			return seed.Derive("", "db-password", InitialVersion)
 		}},
 		{"an over-long appID", func() (secret.Value, error) {
-			return Resolve(tokenised, strings.Repeat("a", maxAppIDLen+1), seed, InitialVersion)
+			return firstTwo(Resolve(tokenised, strings.Repeat("a", maxAppIDLen+1), seed, InitialVersion))
 		}},
 		{"an over-long appID, derived directly", func() (secret.Value, error) {
 			return seed.Derive(strings.Repeat("a", maxAppIDLen+1), "db-password", InitialVersion)
@@ -94,7 +117,7 @@ func TestDeriveAndResolveFailuresReturnAZeroValue(t *testing.T) {
 			return seed.Derive(appID, "DB", InitialVersion)
 		}},
 		{"a malformed token", func() (secret.Value, error) {
-			return Resolve("environment:\n  P: ${secret:db-password\n", appID, seed, InitialVersion)
+			return firstTwo(Resolve("environment:\n  P: ${secret:db-password\n", appID, seed, InitialVersion))
 		}},
 	} {
 		v, err := c.run()

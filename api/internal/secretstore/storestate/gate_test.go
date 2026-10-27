@@ -66,9 +66,10 @@ func TestNewGate_RefusesNil(t *testing.T) {
 func TestGate_TokenFreeIsNeverGated(t *testing.T) {
 	f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrSealed))
 	inner := &innerSource{value: "inner-result"}
-	v, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", tokenFree)
-	if err != nil || string(v.Reveal()) != "inner-result" {
-		t.Fatalf("ResolveCompose = (%q, %v), want the inner result", v.Reveal(), err)
+	v, env, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", tokenFree)
+	// TC-776-09: and no map.
+	if err != nil || string(v.Reveal()) != "inner-result" || len(env) != 0 {
+		t.Fatalf("ResolveCompose = (%q, %d entries, %v), want the inner result and no map", v.Reveal(), len(env), err)
 	}
 	if n := f.store.count(); n != 0 {
 		t.Fatalf("Health called %d time(s), want 0", n)
@@ -84,7 +85,7 @@ func TestGate_MalformedTokenRefusedWithoutTheStore(t *testing.T) {
 	if scanErr == nil {
 		t.Fatal("the fixture compose is not malformed")
 	}
-	v, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", escaped)
+	v, _, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", escaped)
 	if err == nil || errors.Unwrap(err) == nil || errors.Unwrap(err).Error() != scanErr.Error() {
 		t.Fatalf("error = %v, want one wrapping the scan error %v", err, scanErr)
 	}
@@ -98,7 +99,7 @@ func TestGate_MalformedTokenRefusedWithoutTheStore(t *testing.T) {
 func TestGate_ReadyDelegates(t *testing.T) {
 	f := newFixture(t, readyHealth, nil)
 	inner := &innerSource{value: "resolved"}
-	v, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", tokened)
+	v, _, err := newGate(t, f, inner).ResolveCompose(context.Background(), "a", tokened)
 	if err != nil || string(v.Reveal()) != "resolved" || inner.count() != 1 {
 		t.Fatalf("ResolveCompose = (%q, %v) after %d inner call(s), want the inner value after 1", v.Reveal(), err, inner.count())
 	}
@@ -126,7 +127,7 @@ func TestGate_NotReadyRefuses(t *testing.T) {
 			tc.setup(f)
 			inner := &innerSource{value: "x"}
 			ctx := jobs.ContextWithJobID(context.Background(), "job-7")
-			v, err := newGate(t, f, inner).ResolveCompose(ctx, "app-1", tokened)
+			v, _, err := newGate(t, f, inner).ResolveCompose(ctx, "app-1", tokened)
 			assertRefusal(t, f.rec, v, err, tc.state, "job-7")
 			if n := inner.count(); n != 0 {
 				t.Fatalf("the inner source was called %d time(s), want 0", n)
@@ -163,7 +164,7 @@ func TestGate_ReadingErrorRefuses(t *testing.T) {
 	inner := &innerSource{value: "x"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	v, err := newGate(t, f, inner).ResolveCompose(ctx, "a", tokened)
+	v, _, err := newGate(t, f, inner).ResolveCompose(ctx, "a", tokened)
 	if err == nil || v.Len() != 0 || inner.count() != 0 {
 		t.Fatalf("ResolveCompose = (%d bytes, %v) after %d inner call(s), want an error, 0 bytes, 0 calls", v.Len(), err, inner.count())
 	}
@@ -227,7 +228,7 @@ func TestGate_AuditBlockedProbe(t *testing.T) {
 
 	t.Run("answered", func(t *testing.T) {
 		f, inner, g := setup(t, nil)
-		v, err := g.ResolveCompose(ctx, "app-1", tokened)
+		v, _, err := g.ResolveCompose(ctx, "app-1", tokened)
 		if err != nil || string(v.Reveal()) != "from-store" || inner.count() != 1 {
 			t.Fatalf("ResolveCompose = (%q, %v) after %d inner call(s), want the value after 1", v.Reveal(), err, inner.count())
 		}
@@ -237,7 +238,7 @@ func TestGate_AuditBlockedProbe(t *testing.T) {
 	})
 	t.Run("times out again", func(t *testing.T) {
 		f, inner, g := setup(t, clientTimeout("read"))
-		v, err := g.ResolveCompose(ctx, "app-1", tokened)
+		v, _, err := g.ResolveCompose(ctx, "app-1", tokened)
 		if inner.count() != 1 {
 			t.Fatalf("the inner source was called %d time(s), want 1", inner.count())
 		}
@@ -250,7 +251,7 @@ func TestGate_AuditBlockedProbe(t *testing.T) {
 		other := errors.New("inner: no such secret")
 		f, inner, g := setup(t, nil)
 		inner.do = func(context.Context) error { return other }
-		v, err := g.ResolveCompose(ctx, "app-1", tokened)
+		v, _, err := g.ResolveCompose(ctx, "app-1", tokened)
 		if !errors.Is(err, other) || v.Len() != 0 || inner.count() != 1 {
 			t.Fatalf("ResolveCompose = (%d bytes, %v), want the inner error as is", v.Len(), err)
 		}
@@ -277,7 +278,7 @@ func TestGate_AuditBlockedClearsWithoutRestart(t *testing.T) {
 	}}
 	g := newGate(t, f, inner)
 	// The first deploy's read times out with health 200: raised.
-	if _, err := g.ResolveCompose(context.Background(), "a", tokened); err == nil {
+	if _, _, err := g.ResolveCompose(context.Background(), "a", tokened); err == nil {
 		t.Fatal("a read that timed out resolved")
 	}
 	if a := f.m.Alerts(context.Background(), f.clock.now()); len(a) != 1 || a[0].ID != "secret-store:audit-blocked" {
@@ -285,7 +286,7 @@ func TestGate_AuditBlockedClearsWithoutRestart(t *testing.T) {
 	}
 	kv.err = nil // the sink drains
 	for i := range 2 {
-		if _, err := g.ResolveCompose(context.Background(), "a", tokened); err != nil {
+		if _, _, err := g.ResolveCompose(context.Background(), "a", tokened); err != nil {
 			t.Fatalf("deploy %d after the drain: %v", i+1, err)
 		}
 		if a := f.m.Alerts(context.Background(), f.clock.now()); len(a) != 0 {
@@ -365,5 +366,30 @@ func check(t *testing.T, spy *spyObserver, ctx context.Context, op string, gotAr
 	last := len(spy.errs) - 1
 	if last < 0 || spy.ctxs[last] != ctx || spy.errs[last] != wantErr {
 		t.Errorf("%s: the observer did not see the caller's ctx and the call's error", op)
+	}
+}
+
+// TC-776-11: the Gate passes the new signature through. Not ready: the coded
+// refusal and a nil map, with the inner source never asked. Ready: the inner
+// source's compose and value map come back unchanged.
+func TestGate_PassesTheValueMapThrough(t *testing.T) {
+	canary := secret.New([]byte("S-776-gate-canary"))
+	innerEnv := map[string]secret.Value{"RASPUTIN_SECRET_DB_PASSWORD": canary}
+
+	sealed := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrSealed))
+	inner := &innerSource{value: "refs-only", env: innerEnv}
+	v, env, err := newGate(t, sealed, inner).ResolveCompose(context.Background(), "a", tokened)
+	var nre *NotReadyError
+	if !errors.As(err, &nre) || v.Len() != 0 || env != nil || inner.count() != 0 {
+		t.Fatalf("not ready = (%d bytes, map %v, %v) after %d inner call(s); want a NotReadyError, nothing, 0 calls", v.Len(), env != nil, err, inner.count())
+	}
+
+	ready := newFixture(t, readyHealth, nil)
+	v, env, err = newGate(t, ready, inner).ResolveCompose(context.Background(), "a", tokened)
+	if err != nil || string(v.Reveal()) != "refs-only" {
+		t.Fatalf("ready = (%q, %v), want the inner compose", v.Reveal(), err)
+	}
+	if len(env) != 1 || env["RASPUTIN_SECRET_DB_PASSWORD"] != canary {
+		t.Fatalf("ready map = %d entries, want the inner source's map unchanged", len(env))
 	}
 }

@@ -675,7 +675,7 @@ func TestSnapshotStoreWatcherSeesBackupInProgress(t *testing.T) {
 	ctx := context.Background()
 	fs.onStop = func() {
 		samples = append(samples, ms.mon.Alerts(ctx, time.Now()))
-		_, deployErr = gate.ResolveCompose(ctx, "app-1", "services:\n  web:\n    environment:\n      P: ${secret:db}\n")
+		_, _, deployErr = gate.ResolveCompose(ctx, "app-1", "services:\n  web:\n    environment:\n      P: ${secret:db}\n")
 	}
 	var sealedSample []proto.Alert
 	ms.beforeWait = func() {
@@ -713,8 +713,8 @@ func TestSnapshotStoreWatcherSeesBackupInProgress(t *testing.T) {
 // denySource is a deploy source a gated compose never reaches.
 type denySource struct{}
 
-func (denySource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
-	return secret.Value{}, errors.New("the inner source was reached")
+func (denySource) ResolveCompose(context.Context, string, string) (secret.Value, map[string]secret.Value, error) {
+	return secret.Value{}, nil, errors.New("the inner source was reached")
 }
 
 // stagingProbe is an AppLister that records whether a staged store copy is

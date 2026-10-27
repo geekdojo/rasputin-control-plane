@@ -123,7 +123,7 @@ func busTap(t *testing.T, nc *nats.Conn) func() []string {
 	var mu sync.Mutex
 	var seen []string
 	sub, err := nc.Subscribe(">", func(m *nats.Msg) {
-		if m.Subject == proto.AppDeploySubject("n") {
+		if m.Subject == proto.AppDeploySubject("n") || m.Subject == proto.AppDeploySecretsSubject("n") {
 			return
 		}
 		mu.Lock()
@@ -159,7 +159,7 @@ func TestResolveError_PassesTheStoreRefusalThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, refusal := src.ResolveCompose(ctx, testAppID, secretCompose)
+	_, _, refusal := src.ResolveCompose(ctx, testAppID, secretCompose)
 	var r *appsecret.Refusal
 	if !errors.As(refusal, &r) {
 		t.Fatalf("source error %v is not a refusal", refusal)
@@ -202,8 +202,10 @@ func TestDeployFamily_StoredSecretReachesOnlyTheBus(t *testing.T) {
 				t.Fatalf("job ended %+v", got)
 			}
 			cmd := receiveWithin(t, deploys, "the agent never received the deploy command")
-			if !strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: "+storedSentinel) {
-				t.Fatalf("the deploy command does not carry the stored value:\n%s", cmd.ComposeYAML)
+			// #776: the stored value travels in SecretEnv, beside a compose
+			// that holds only the reference.
+			if cmd.SecretEnv["RASPUTIN_SECRET_DB_PASSWORD"] != storedSentinel || strings.Contains(cmd.ComposeYAML, storedSentinel) {
+				t.Fatalf("the deploy command does not carry the stored value beside a reference compose:\n%s", cmd.ComposeYAML)
 			}
 			row, err := store.Get(ctx, id)
 			if err != nil {

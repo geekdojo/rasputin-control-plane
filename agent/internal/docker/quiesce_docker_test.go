@@ -81,7 +81,7 @@ func TestQuiesceLiveVolumeStopStart(t *testing.T) {
 	c, appID := newLiveBackend(t, "QV011")
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if status, detail, err := c.Deploy(ctx, appID, appID, volumeCompose); err != nil || status != "running" {
+	if status, detail, err := c.Deploy(ctx, appID, appID, volumeCompose, nil); err != nil || status != "running" {
 		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
 
@@ -129,7 +129,7 @@ func TestQuiesceLiveSQLiteSnapshot(t *testing.T) {
 	c, appID := newLiveBackend(t, "QSQ11")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if status, detail, err := c.Deploy(ctx, appID, appID, sqliteCompose(image)); err != nil || status != "running" {
+	if status, detail, err := c.Deploy(ctx, appID, appID, sqliteCompose(image), nil); err != nil || status != "running" {
 		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
 	name, err := c.volumeName(ctx, appID, "data")

@@ -66,7 +66,7 @@ func registered(t *testing.T) (*nats.Conn, *docker.MockBackend, *Stager) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := mb.Deploy(context.Background(), "ha", "Home Assistant", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(context.Background(), "ha", "Home Assistant", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := mb.VolumeDir("ha", "homeassistant-config")
@@ -171,7 +171,7 @@ func TestHandlers_RestoreVolumeOverTheBus(t *testing.T) {
 	nc, mb, s := registered(t)
 	s.SetRestoreRecordDir(t.TempDir())
 	s.SetRestoreOutcomeDir(t.TempDir())
-	if _, _, err := mb.Deploy(context.Background(), "vw", "vaultwarden", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(context.Background(), "vw", "vaultwarden", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	vol, err := mb.VolumeDir("vw", "vaultwarden-data")

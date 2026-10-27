@@ -220,7 +220,7 @@ func TestReferenceCheck_NoFalseDanglingReport(t *testing.T) {
 	h := newHarness(t, testSeed(t), nil)
 	h.nodes.nodes[neverDeployed] = node
 	h.nodes.nodes[preStore] = node
-	if _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
+	if _, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
 		t.Fatal(err)
 	}
 	c := newCheckRig(t, h.refs, h.svc)
@@ -273,7 +273,7 @@ func TestStoreSource_RecordsConfirmedEntries(t *testing.T) {
 	want := []SecretRef{{AppID: appID, Name: "db-password"}}
 	t.Run("read hit", func(t *testing.T) {
 		h := newHarness(t, seed, map[string]string{ref: sentinelStored})
-		if _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
+		if _, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
 			t.Fatal(err)
 		}
 		if got := h.refs.list(); !reflect.DeepEqual(got, want) {
@@ -282,7 +282,7 @@ func TestStoreSource_RecordsConfirmedEntries(t *testing.T) {
 	})
 	t.Run("created", func(t *testing.T) {
 		h := newHarness(t, seed, nil)
-		if _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
+		if _, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err != nil {
 			t.Fatal(err)
 		}
 		if got := h.refs.list(); !reflect.DeepEqual(got, want) {
@@ -297,7 +297,7 @@ func TestStoreSource_RecordsConfirmedEntries(t *testing.T) {
 		h.svc.hook = func(_ int, c fakeCall) ([]byte, error, bool) {
 			return nil, storeErr(c.op, c.ref, 0, secretstore.ErrUnreachable, nil), true
 		}
-		if _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err == nil {
+		if _, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened); err == nil {
 			t.Fatal("a store failure resolved")
 		}
 		if got := h.refs.list(); len(got) != 0 {
@@ -307,7 +307,7 @@ func TestStoreSource_RecordsConfirmedEntries(t *testing.T) {
 	t.Run("the record fails", func(t *testing.T) {
 		h := newHarness(t, seed, map[string]string{ref: sentinelStored})
 		h.refs.err = errors.New("database is locked")
-		got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+		got, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
 		if err == nil || len(got.Reveal()) != 0 {
 			t.Fatalf("= (%d bytes, %v), want the zero value and an error", len(got.Reveal()), err)
 		}

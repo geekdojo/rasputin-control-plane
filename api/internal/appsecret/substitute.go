@@ -4,83 +4,91 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
-// Resolve returns compose with every ${secret:<name>} token replaced by its
-// derived value for appID at this rotation version.
+// Resolve returns compose with every ${secret:<name>} token replaced by the
+// Compose interpolation reference ${RASPUTIN_SECRET_<NAME>}
+// (proto.SecretEnvName), and the map from each reference's variable to the
+// value derived for appID at this rotation version
+// (geekdojo/geekdojo-brain#776).
 //
-// PURE, and takes the compose as a STRING. ADR-0006 Decision 4 holds unchanged:
-// the substitution is a textual scan against a token and no YAML parser enters
-// the control plane. gopkg.in/yaml.v3 is in api/go.mod and is imported by test
-// files only; this path keeps it that way.
+// PURE, and takes the compose as a STRING. The substitution is a textual scan
+// against a token and no YAML parser enters the control plane
+// (ADR-0006:219, :404). gopkg.in/yaml.v3 is in api/go.mod and is imported by
+// test files only; this path keeps it that way.
 //
 // A compose with no token is returned unchanged — the same bytes, not a
-// re-rendered copy — because the install path's contract is that what the
-// database holds is what a node gets, byte for byte, and every app in the field
-// today has no tokens. A rewriter that normalised whitespace on the way past
-// would change every one of their composes for no reason and break the compose
-// hash that the revert path matches on.
+// re-rendered copy — with a nil map, because the install path's contract is
+// that what the database holds is what a node gets, byte for byte, and a
+// rewriter that normalised whitespace on the way past would change every
+// app's compose for no reason and break the compose hash that the revert path
+// matches on.
 //
-// The caller is the point where the compose is marshalled into
+// The caller is the point where the compose and the map are marshalled into
 // proto.AppDeployCmd, and nowhere else. Resolving anywhere upstream of that —
 // in the install handler, in the store — writes plaintext credentials into a
-// database with no encryption at rest, permanently, and shows them in the UI's
-// compose preview.
+// database with no encryption at rest, permanently.
 //
-// The result is a secret.Value whether or not the compose had a token: the
-// caller cannot tell which, so it handles every resolved compose as the
-// credential it may be (ADR-0009). A failure returns the zero Value.
-func Resolve(compose, appID string, seed *Seed, version uint32) (secret.Value, error) {
+// The compose is a secret.Value whether or not it had a token: a compose can
+// carry credentials of its own (ADR-0009), so the caller handles every
+// resolved compose as the credential it may be. A failure returns the zero
+// Value and a nil map.
+func Resolve(compose, appID string, seed *Seed, version uint32) (secret.Value, map[string]secret.Value, error) {
 	tokens, err := tileschema.ScanSecretTokens(compose)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("appsecret: resolve %s: %w", appID, err)
+		return secret.Value{}, nil, fmt.Errorf("appsecret: resolve %s: %w", appID, err)
 	}
 	if len(tokens) == 0 {
-		return secret.New([]byte(compose)), nil
+		return secret.New([]byte(compose)), nil, nil
 	}
 	if seed == nil {
 		// Refused, not skipped. Passing the token through would deploy the
 		// literal string `${secret:db-password}` as a credential, which is
 		// precisely the failure this channel exists to remove — and it would do
 		// it silently, with a container that came up and a job that succeeded.
-		return secret.Value{}, fmt.Errorf("appsecret: %s declares %d ${secret:} token(s) but no app-secret seed is loaded, so the deploy is refused rather than sending the literal placeholder as a credential", appID, len(tokens))
+		return secret.Value{}, nil, fmt.Errorf("appsecret: %s declares %d ${secret:} token(s) but no app-secret seed is loaded, so the deploy is refused rather than sending the literal placeholder as a credential", appID, len(tokens))
 	}
 
-	return splice(compose, tokens, func(name string) ([]byte, error) {
-		value, err := seed.derive(appID, name, version)
-		return []byte(value), err
+	return splice(compose, tokens, func(name string) (secret.Value, error) {
+		return seed.Derive(appID, name, version)
 	})
 }
 
-// splice returns compose with each token replaced by valueFor(token.Name),
-// as a secret.Value, or the zero Value and valueFor's first error. Resolve
-// and StoreSource both build their result here, so the two cannot disagree on
-// what a resolved compose is. The values are gathered first so the buffer is
-// sized once, and it is zeroed once the Value holds its own copy.
-func splice(compose string, tokens []tileschema.SecretToken, valueFor func(name string) ([]byte, error)) (secret.Value, error) {
-	values := make([][]byte, len(tokens))
-	size := len(compose)
-	for i, tok := range tokens {
-		value, err := valueFor(tok.Name)
-		if err != nil {
-			return secret.Value{}, err
-		}
-		values[i] = value
-		size += len(value) - (tok.End - tok.Start)
-	}
-	buf := make([]byte, 0, size)
+// splice returns compose with each token replaced by the interpolation
+// reference ${SecretEnvName(token.Name)}, and the map from each variable to
+// valueFor(token.Name). valueFor is called once per distinct name, in token
+// order, and the map takes ownership of what it returns: the values outlive
+// the call, for the caller to reveal into the deploy command and destroy.
+// Resolve and StoreSource both build their result here, so the two cannot
+// disagree on what a resolved compose is. On valueFor's first error every
+// value already gathered is destroyed and the zero Value, a nil map and that
+// error return.
+func splice(compose string, tokens []tileschema.SecretToken, valueFor func(name string) (secret.Value, error)) (secret.Value, map[string]secret.Value, error) {
+	env := make(map[string]secret.Value, len(tokens))
+	var buf strings.Builder
+	buf.Grow(len(compose))
 	at := 0
-	for i, tok := range tokens {
-		buf = append(buf, compose[at:tok.Start]...)
-		buf = append(buf, values[i]...)
+	for _, tok := range tokens {
+		key := proto.SecretEnvName(tok.Name)
+		if _, ok := env[key]; !ok {
+			value, err := valueFor(tok.Name)
+			if err != nil {
+				for _, v := range env {
+					v.Destroy()
+				}
+				return secret.Value{}, nil, err
+			}
+			env[key] = value
+		}
+		buf.WriteString(compose[at:tok.Start])
+		buf.WriteString("${" + key + "}")
 		at = tok.End
 	}
-	buf = append(buf, compose[at:]...)
-	out := secret.New(buf)
-	clear(buf)
-	return out, nil
+	buf.WriteString(compose[at:])
+	return secret.New([]byte(buf.String())), env, nil
 }
 
 // Escape rewrites every ${secret:<name>} token to $${secret:<name>} so Docker

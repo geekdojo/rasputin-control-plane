@@ -172,8 +172,8 @@ func (s *Seed) Derive(appID, name string, version uint32) (secret.Value, error) 
 	return secret.New([]byte(v)), nil
 }
 
-// derive is Derive as a string, for Resolve, which splices the value into a
-// compose it then wraps whole. No Reveal is needed on that path.
+// derive is Derive as a string; Derive wraps it, so no Reveal is needed to
+// build the Value.
 func (s *Seed) derive(appID, name string, version uint32) (string, error) {
 	if s == nil {
 		return "", errors.New("appsecret: no app-secret seed is loaded, so ${secret:} cannot be resolved")

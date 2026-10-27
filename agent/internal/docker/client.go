@@ -22,7 +22,12 @@ import (
 type Backend interface {
 	// Deploy writes the compose yaml to the backend's working area and
 	// brings the app up. Returns the post-deploy status.
-	Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error)
+	//
+	// env is the secret values the compose's ${RASPUTIN_SECRET_<NAME>}
+	// references name (geekdojo/geekdojo-brain#776). A backend never writes
+	// them to disk and never logs them; the real one hands them to Compose
+	// only as the process environment of the calls that need them.
+	Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv) (proto.AppStatus, string, error)
 
 	// Pull fetches the images composeYAML names for appID's compose project
 	// WITHOUT writing the app's compose file and without creating, stopping or

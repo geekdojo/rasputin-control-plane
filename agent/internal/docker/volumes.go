@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
@@ -73,7 +74,17 @@ type dockerExec func(ctx context.Context, args ...string) ([]byte, error)
 // after `--`. The container ids appvolumes.go inspects come from docker's own
 // `ps --quiet` output and also sit after `--`.
 func runDocker(ctx context.Context, args ...string) ([]byte, error) {
+	return runDockerEnv(ctx, nil, args...)
+}
+
+// runDockerEnv is runDocker with env appended to the agent's own environment
+// (secretenv.go): the child inherits the agent's environment as an exec with
+// no cmd.Env would, and env is added. nil env is runDocker exactly.
+func runDockerEnv(ctx context.Context, env []string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
+	if env != nil {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf

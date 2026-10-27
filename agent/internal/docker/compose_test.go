@@ -599,7 +599,7 @@ func TestDeployNonRunningReturnsDetailNamingTheService(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewComposeBackend: %v", err)
 	}
-	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "test", "services: {}\n")
+	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "test", "services: {}\n", nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -626,7 +626,7 @@ func TestDeployOneShotStackReportsRunningWithNoDetail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewComposeBackend: %v", err)
 	}
-	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "home-assistant", "services: {}\n")
+	status, detail, err := c.Deploy(context.Background(), "01TESTAPP", "home-assistant", "services: {}\n", nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}

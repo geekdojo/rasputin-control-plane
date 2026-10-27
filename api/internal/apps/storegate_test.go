@@ -47,11 +47,11 @@ type jobIDSource struct {
 	err error
 }
 
-func (s *jobIDSource) ResolveCompose(ctx context.Context, _, _ string) (secret.Value, error) {
+func (s *jobIDSource) ResolveCompose(ctx context.Context, _, _ string) (secret.Value, map[string]secret.Value, error) {
 	s.mu.Lock()
 	s.ids = append(s.ids, jobs.JobIDFromContext(ctx))
 	s.mu.Unlock()
-	return secret.Value{}, s.err
+	return secret.Value{}, nil, s.err
 }
 
 // TC-760-11: app.deploy and app.upgrade, on the real Runner, fail with the
@@ -230,7 +230,7 @@ func TestStoreGate_Redaction(t *testing.T) {
 	}
 	hs.set(nil)
 	run(jobs.StatusSucceeded)
-	if cmd := receiveWithin(t, deploys, "the ready deploy never reached the agent"); !strings.Contains(cmd.ComposeYAML, value) {
+	if cmd := receiveWithin(t, deploys, "the ready deploy never reached the agent"); cmd.SecretEnv[proto.SecretEnvName(name)] != value || strings.Contains(cmd.ComposeYAML, value) {
 		t.Fatal("the ready deploy did not carry the derived value")
 	}
 	seen = append(seen, rec.Text())

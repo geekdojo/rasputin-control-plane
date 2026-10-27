@@ -90,7 +90,9 @@ func (m *MockBackend) saveState(s *mockState) error {
 	return atrest.WriteSecretFile(m.statePath(s.AppID), b)
 }
 
-func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error) {
+// Deploy pretends to bring the app up. env is accepted and never persisted:
+// the mock runs nothing that could read it.
+func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML string, _ proto.AppSecretEnv) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := atrest.EnsureSecretDir(m.appDir(appID)); err != nil {

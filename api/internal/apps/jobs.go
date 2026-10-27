@@ -839,14 +839,25 @@ func deployLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 }
 
 // deployCommand builds the AppDeployCmd bytes for app with its resolved
-// compose. It is where the resolved compose leaves its secret.Value, into the
-// bus command to the target agent and nothing else (ADR-0006 D11a, ADR-0009).
-func deployCommand(app *App, compose secret.Value) ([]byte, error) {
+// compose and the values its references name. It is where the compose and
+// each value leave their secret.Value, into the bus command to the target
+// agent and nothing else (ADR-0006 D11a, ADR-0009): the compose as text
+// holding references only, the values in the typed SecretEnv map beside it
+// (geekdojo/geekdojo-brain#776). An empty env sends no map.
+func deployCommand(app *App, compose secret.Value, env map[string]secret.Value) ([]byte, error) {
+	var secretEnv proto.AppSecretEnv
+	if len(env) > 0 {
+		secretEnv = make(proto.AppSecretEnv, len(env))
+		for k, v := range env {
+			secretEnv[k] = string(v.Reveal())
+		}
+	}
 	cmd, err := json.Marshal(proto.AppDeployCmd{
 		AppID:             app.ID,
 		Name:              app.Name,
 		ComposeYAML:       string(compose.Reveal()),
 		WorkBudgetSeconds: app.DeployBudgetSeconds,
+		SecretEnv:         secretEnv,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode deploy command: %w", err)
@@ -880,12 +891,30 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		//
 		// The ctx carries the job's id, so a source that refuses can log the
 		// refusal under the id of the job it failed (geekdojo/geekdojo-brain#760).
-		compose, err := secrets.ResolveCompose(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app.ID, app.ComposeYAML)
+		compose, env, err := secrets.ResolveCompose(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app.ID, app.ComposeYAML)
 		if err != nil {
 			return nil, resolveError(app.ID, err)
 		}
 		defer compose.Destroy()
-		cmd, err := deployCommand(app, compose)
+		defer func() {
+			for _, v := range env {
+				v.Destroy()
+			}
+		}()
+
+		// A compose with secrets goes out on its own verb, with the values
+		// beside it (#776), and only to an agent that answers it. Refused here,
+		// before DEPLOYING, so nothing is announced or published. This is the
+		// only check on a plain deploy; a compose change was checked by its
+		// pull step already, before the change was persisted.
+		subject := proto.AppDeploySubject(app.TargetNode)
+		if len(env) > 0 {
+			if err := refuseAgentWithoutSecrets(sc.Ctx, inv, app); err != nil {
+				return nil, err
+			}
+			subject = proto.AppDeploySecretsSubject(app.TargetNode)
+		}
+		cmd, err := deployCommand(app, compose, env)
 		if err != nil {
 			return nil, err
 		}
@@ -905,7 +934,7 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		ctx, cancel := context.WithTimeout(sc.Ctx, proto.AppDeployRPCFor(app.DeployBudgetSeconds))
 		defer cancel()
 
-		msg, err := nc.RequestWithContext(ctx, proto.AppDeploySubject(app.TargetNode), cmd)
+		msg, err := nc.RequestWithContext(ctx, subject, cmd)
 		if err != nil {
 			fctx, cancel := detachCtx(sc.Ctx)
 			now := time.Now().UTC()

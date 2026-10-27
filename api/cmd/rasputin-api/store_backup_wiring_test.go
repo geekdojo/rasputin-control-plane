@@ -200,7 +200,7 @@ func TestEnsureCAs_StoreCAGuard(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := src.ResolveCompose(ctx, "a", "services:\n  web:\n    environment:\n      P: ${secret:db-password}\n"); !errors.Is(err, storestate.ErrNotReady) {
+			if _, _, err := src.ResolveCompose(ctx, "a", "services:\n  web:\n    environment:\n      P: ${secret:db-password}\n"); !errors.Is(err, storestate.ErrNotReady) {
 				t.Fatalf("a secret-bearing deploy = %v, want refused", err)
 			}
 		})

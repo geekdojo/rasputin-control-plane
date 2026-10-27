@@ -1,8 +1,13 @@
 package appsecret
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/secret"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 func testSeed(t *testing.T) *Seed {
@@ -20,19 +25,19 @@ func testSeed(t *testing.T) *Seed {
 
 const appID = "01K5R6P8Q9ZJ7V2XW4YB3D5EFG"
 
-func TestResolveReplacesEveryTokenWithItsDerivedValue(t *testing.T) {
+// TC-776-07: the one substitution site, HKDF path. Every token becomes its
+// Compose interpolation reference, the compose holds no derived value, a name
+// used twice gives one map entry, and the entry is the derived value.
+func TestResolveReplacesEveryTokenWithItsReference(t *testing.T) {
 	seed := testSeed(t)
 	compose := "services:\n  db:\n    environment:\n" +
 		"      POSTGRES_PASSWORD: ${secret:db-password}\n" +
 		"      SESSION_KEY: ${secret:session-key}\n" +
 		"      ALSO_DB: ${secret:db-password}\n"
 
-	got, err := str(Resolve(compose, appID, seed, InitialVersion))
+	got, env, err := resolved(Resolve(compose, appID, seed, InitialVersion))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
-	}
-	if strings.Contains(got, "${secret:") {
-		t.Fatalf("a token survived resolution:\n%s", got)
 	}
 	dbValue, err := str(seed.Derive(appID, "db-password", InitialVersion))
 	if err != nil {
@@ -42,23 +47,109 @@ func TestResolveReplacesEveryTokenWithItsDerivedValue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Two occurrences of ONE name resolve to the SAME value — the app has one
-	// database password, not two, and a tile that names it twice (an app and its
-	// sidecar) must get a working pair.
-	if strings.Count(got, dbValue) != 2 {
-		t.Errorf("the db password appears %d time(s), want 2:\n%s", strings.Count(got, dbValue), got)
+	// Everything that is not a token is untouched, byte for byte.
+	want := "services:\n  db:\n    environment:\n" +
+		"      POSTGRES_PASSWORD: ${RASPUTIN_SECRET_DB_PASSWORD}\n" +
+		"      SESSION_KEY: ${RASPUTIN_SECRET_SESSION_KEY}\n" +
+		"      ALSO_DB: ${RASPUTIN_SECRET_DB_PASSWORD}\n"
+	if got != want {
+		t.Errorf("resolved compose:\n got %q\nwant %q", got, want)
 	}
-	if !strings.Contains(got, sessionValue) {
-		t.Errorf("the session key is not in the resolved compose:\n%s", got)
+	if strings.Contains(got, dbValue) || strings.Contains(got, sessionValue) {
+		t.Errorf("the compose holds a derived value:\n%s", got)
+	}
+	// Two occurrences of ONE name resolve to ONE entry — the app has one
+	// database password, not two.
+	if len(env) != 2 {
+		t.Errorf("the map has %d entries, want 2 (one per distinct name)", len(env))
+	}
+	if env["RASPUTIN_SECRET_DB_PASSWORD"] != dbValue {
+		t.Error("the db password entry is not the derived value")
+	}
+	if env["RASPUTIN_SECRET_SESSION_KEY"] != sessionValue {
+		t.Error("the session key entry is not the derived value")
 	}
 	if dbValue == sessionValue {
 		t.Error("two different names derived the same value")
 	}
-	// Everything that is not a token is untouched, byte for byte.
-	want := strings.ReplaceAll(strings.ReplaceAll(compose, "${secret:db-password}", dbValue), "${secret:session-key}", sessionValue)
-	if got != want {
-		t.Errorf("resolution changed bytes outside the tokens:\n got %q\nwant %q", got, want)
+}
+
+// TC-776-07: HKDFSource.ResolveCompose returns the same compose and map.
+func TestHKDFSourceResolvesToReferencesAndAMap(t *testing.T) {
+	seed := testSeed(t)
+	src, err := NewHKDFSource(seed)
+	if err != nil {
+		t.Fatal(err)
 	}
+	got, env, err := resolved(src.ResolveCompose(context.Background(), appID, "services:\n  db:\n    environment:\n      P: ${secret:db-password}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := str(seed.Derive(appID, "db-password", InitialVersion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "services:\n  db:\n    environment:\n      P: ${RASPUTIN_SECRET_DB_PASSWORD}\n" || strings.Contains(got, want) {
+		t.Errorf("compose = %q, want the reference and no value", got)
+	}
+	if len(env) != 1 || env["RASPUTIN_SECRET_DB_PASSWORD"] != want {
+		t.Errorf("map has %d entries; want the one derived value", len(env))
+	}
+}
+
+// TC-776-10: every resolve failure returns the zero compose, a nil map and an
+// error that quotes no value.
+func TestResolveFailuresReturnZeroComposeAndNilMap(t *testing.T) {
+	seed := testSeed(t)
+	dbValue, err := str(seed.Derive(appID, "db-password", InitialVersion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ why, compose string }{
+		{"a malformed token", "environment:\n  P: ${secret:db-password}\n  Q: ${secret:Bad}\n"},
+		{"an unterminated token after a good one", "environment:\n  P: ${secret:db-password}\n  Q: ${secret:x\n"},
+	} {
+		v, env, err := Resolve(c.compose, appID, seed, InitialVersion)
+		if err == nil {
+			t.Fatalf("%s: no error", c.why)
+		}
+		if v.Len() != 0 || env != nil {
+			t.Errorf("%s: compose %d bytes, map %v; want the zero Value and a nil map", c.why, v.Len(), env != nil)
+		}
+		if strings.Contains(err.Error(), dbValue) {
+			t.Errorf("%s: the error quotes a value", c.why)
+		}
+	}
+	// A derivation that fails after an earlier one succeeded: splice destroys
+	// what it gathered and returns nothing.
+	var gathered secretValueList
+	_, env, err := splice("P: ${secret:a}\nQ: ${secret:b}\n", mustScan(t, "P: ${secret:a}\nQ: ${secret:b}\n"), func(name string) (secret.Value, error) {
+		if name == "b" {
+			return secret.Value{}, errors.New("refused")
+		}
+		v := secret.New([]byte(dbValue))
+		gathered = append(gathered, v)
+		return v, nil
+	})
+	if err == nil || env != nil {
+		t.Fatalf("splice = (map %v, %v), want a nil map and the error", env != nil, err)
+	}
+	for _, v := range gathered {
+		if v.Len() != 0 {
+			t.Error("a value gathered before the failure was not destroyed")
+		}
+	}
+}
+
+type secretValueList []secret.Value
+
+func mustScan(t *testing.T, compose string) []tileschema.SecretToken {
+	t.Helper()
+	toks, err := tileschema.ScanSecretTokens(compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toks
 }
 
 // The install path's contract: what the database holds is what the node gets. A
@@ -67,18 +158,19 @@ func TestResolveReplacesEveryTokenWithItsDerivedValue(t *testing.T) {
 // compose hash.
 func TestResolveLeavesAComposeWithNoTokensVerbatim(t *testing.T) {
 	compose := "services:\n  web:\n    image: x@sha256:" + strings.Repeat("a", 64) + "\n    environment:\n      A: ${OTHER}\n      B: $$LITERAL\n"
-	got, err := str(Resolve(compose, appID, testSeed(t), InitialVersion))
+	// TC-776-09: the same bytes and no map.
+	got, env, err := resolved(Resolve(compose, appID, testSeed(t), InitialVersion))
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
-	if got != compose {
-		t.Errorf("a compose with no secret token was rewritten:\n got %q\nwant %q", got, compose)
+	if got != compose || len(env) != 0 {
+		t.Errorf("a compose with no secret token was rewritten:\n got %q (map %d)\nwant %q", got, len(env), compose)
 	}
 	// And with no seed either: a cluster with no seed loaded must still be able
 	// to deploy every app that does not ask for a secret.
-	got, err = str(Resolve(compose, appID, nil, InitialVersion))
-	if err != nil || got != compose {
-		t.Errorf("no-token, no-seed: got %q, %v", got, err)
+	got, env, err = resolved(Resolve(compose, appID, nil, InitialVersion))
+	if err != nil || got != compose || len(env) != 0 {
+		t.Errorf("no-token, no-seed: got %q, %d entries, %v", got, len(env), err)
 	}
 }
 
@@ -86,7 +178,7 @@ func TestResolveLeavesAComposeWithNoTokensVerbatim(t *testing.T) {
 // password — the exact failure this channel closes, and silently, with a
 // container that came up and a job that succeeded.
 func TestResolveRefusesATokenWithNoSeed(t *testing.T) {
-	_, err := str(Resolve("environment:\n  P: ${secret:db-password}\n", appID, nil, InitialVersion))
+	_, _, err := Resolve("environment:\n  P: ${secret:db-password}\n", appID, nil, InitialVersion)
 	if err == nil {
 		t.Fatal("resolved a token with no seed loaded")
 	}
@@ -105,7 +197,7 @@ func TestResolveRefusesAMalformedToken(t *testing.T) {
 		{"a name over 63 characters", "environment:\n  P: ${secret:" + strings.Repeat("a", 64) + "}\n"},
 		{"already escaped — the form the control plane emits for the paths that must NOT resolve", "environment:\n  P: $${secret:db-password}\n"},
 	} {
-		if _, err := Resolve(c.compose, appID, seed, InitialVersion); err == nil {
+		if _, _, err := Resolve(c.compose, appID, seed, InitialVersion); err == nil {
 			t.Errorf("resolved a compose with %s", c.why)
 		}
 	}
@@ -114,22 +206,23 @@ func TestResolveRefusesAMalformedToken(t *testing.T) {
 func TestResolveIsBoundToTheAppAndTheVersion(t *testing.T) {
 	seed := testSeed(t)
 	compose := "P: ${secret:db-password}\n"
-	one, err := str(Resolve(compose, appID, seed, InitialVersion))
+	const key = "RASPUTIN_SECRET_DB_PASSWORD"
+	_, one, err := resolved(Resolve(compose, appID, seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	other, err := str(Resolve(compose, "01OTHERAPP0000000000000000", seed, InitialVersion))
+	_, other, err := resolved(Resolve(compose, "01OTHERAPP0000000000000000", seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
-	rotated, err := str(Resolve(compose, appID, seed, InitialVersion+1))
+	_, rotated, err := resolved(Resolve(compose, appID, seed, InitialVersion+1))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if one == other {
+	if one[key] == other[key] {
 		t.Error("two apps with the same tile got the same secret")
 	}
-	if one == rotated {
+	if one[key] == rotated[key] {
 		t.Error("the rotation version did not reach the derivation")
 	}
 }

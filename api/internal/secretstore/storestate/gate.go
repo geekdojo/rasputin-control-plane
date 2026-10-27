@@ -14,7 +14,7 @@ import (
 // Source is the deploy family's secret source (apps.SecretSource), declared
 // here with the one method the Gate calls.
 type Source interface {
-	ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error)
+	ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, map[string]secret.Value, error)
 }
 
 // Gate is the secret source a requested store puts in front of the inner
@@ -40,43 +40,44 @@ func NewGate(inner Source, m *Monitor, log *slog.Logger) (*Gate, error) {
 }
 
 // ResolveCompose resolves compose through the inner source when it carries no
-// ${secret:} token, or when the store reads ready. A malformed token is
-// refused without asking the store. Any other state refuses with a
-// *NotReadyError and the zero Value, except AuditBlocked, where the inner
-// source is called once as the probe that can clear it: an answered read
-// returns its result, and a read that times out again refuses.
-func (g *Gate) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error) {
+// ${secret:} token, or when the store reads ready, and returns the inner
+// source's compose and value map unchanged. A malformed token is refused
+// without asking the store. Any other state refuses with a *NotReadyError,
+// the zero Value and a nil map, except AuditBlocked, where the inner source is
+// called once as the probe that can clear it: an answered read returns its
+// result, and a read that times out again refuses.
+func (g *Gate) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, map[string]secret.Value, error) {
 	tokens, err := tileschema.ScanSecretTokens(compose)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("storestate: scanning the compose for secret tokens: %w", err)
+		return secret.Value{}, nil, fmt.Errorf("storestate: scanning the compose for secret tokens: %w", err)
 	}
 	if len(tokens) == 0 {
 		return g.inner.ResolveCompose(ctx, appID, compose)
 	}
 	st, err := g.m.State(ctx)
 	if err != nil {
-		return secret.Value{}, err
+		return secret.Value{}, nil, err
 	}
 	switch st {
 	case Ready:
 		return g.inner.ResolveCompose(ctx, appID, compose)
 	case AuditBlocked:
-		v, err := g.inner.ResolveCompose(ctx, appID, compose)
+		v, env, err := g.inner.ResolveCompose(ctx, appID, compose)
 		if err == nil {
-			return v, nil
+			return v, env, nil
 		}
 		if ctx.Err() == nil && isClientTimeout(err) {
 			return g.refuse(ctx, appID, st)
 		}
-		return secret.Value{}, err
+		return secret.Value{}, nil, err
 	}
 	return g.refuse(ctx, appID, st)
 }
 
 // refuse logs the refusal under the job's id and returns it.
-func (g *Gate) refuse(ctx context.Context, appID string, st State) (secret.Value, error) {
+func (g *Gate) refuse(ctx context.Context, appID string, st State) (secret.Value, map[string]secret.Value, error) {
 	g.log.LogAttrs(ctx, slog.LevelWarn, "secret-bearing deploy refused",
 		slog.String("component", "secretstore"), slog.String("app_id", appID),
 		slog.String("state", string(st)), slog.String("job_id", jobs.JobIDFromContext(ctx)))
-	return secret.Value{}, &NotReadyError{State: st}
+	return secret.Value{}, nil, &NotReadyError{State: st}
 }

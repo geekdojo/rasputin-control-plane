@@ -18,7 +18,7 @@ import (
 // Only register on compute (or controlplane) role agents. Firewall and
 // storage nodes don't host user apps.
 func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscription, error) {
-	subs := make([]*nats.Subscription, 0, 7)
+	subs := make([]*nats.Subscription, 0, 8)
 
 	deploySubj := proto.AppDeploySubject(nodeID)
 	sub, err := nc.Subscribe(deploySubj, func(m *nats.Msg) {
@@ -29,6 +29,20 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 	}
 	subs = append(subs, sub)
 	log.Printf("rasputin-agent: subscribed to %s (backend=%s)", deploySubj, b.Name())
+
+	// A secret-bearing deploy arrives on its own verb, so an agent that
+	// predates it has no subscription and can never receive a compose whose
+	// references it would leave blank (geekdojo/geekdojo-brain#776). Same
+	// handler: the command carries its values in SecretEnv.
+	deploySecretsSubj := proto.AppDeploySecretsSubject(nodeID)
+	sub, err = nc.Subscribe(deploySecretsSubj, func(m *nats.Msg) {
+		handleDeploy(b, m)
+	})
+	if err != nil {
+		return subs, err
+	}
+	subs = append(subs, sub)
+	log.Printf("rasputin-agent: subscribed to %s", deploySecretsSubj)
 
 	pullSubj := proto.AppPullSubject(nodeID)
 	sub, err = nc.Subscribe(pullSubj, func(m *nats.Msg) {
@@ -207,10 +221,18 @@ func handleDeploy(b Backend, m *nats.Msg) {
 	// proto.AppDeployWorkFor, which also clamps whatever the api sent. The api
 	// takes the budget from the app's catalog tile; an api older than the field
 	// sends nothing, which is zero, which is the default.
+	//
+	// A key outside RASPUTIN_SECRET_<NAME> could change how the docker CLI
+	// runs (PATH, DOCKER_HOST, LD_PRELOAD), so the command is refused before
+	// anything runs. The detail names the keys and never a value.
+	if err := cmd.SecretEnv.Validate(); err != nil {
+		bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: err.Error()})
+		return
+	}
 	budget := proto.AppDeployWorkFor(cmd.WorkBudgetSeconds)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML)
+	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML, cmd.SecretEnv)
 	if err != nil {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: status, Detail: detail})
 		log.Printf("rasputin-agent: docker.deploy %s: %v", cmd.AppID, err)

@@ -32,7 +32,7 @@ func TestHKDFSourceWithNoSeedRefusesEveryCompose(t *testing.T) {
 	for sname, src := range sources {
 		for cname, compose := range composes {
 			t.Run(sname+"/"+cname, func(t *testing.T) {
-				v, err := src.ResolveCompose(context.Background(), "01APPID", compose)
+				v, _, err := src.ResolveCompose(context.Background(), "01APPID", compose)
 				if err == nil || err.Error() != "appsecret: HKDF source has no seed" {
 					t.Fatalf("err = %v, want %q", err, "appsecret: HKDF source has no seed")
 				}
@@ -58,16 +58,21 @@ func TestHKDFSourceEqualsResolveAtInitialVersion(t *testing.T) {
 		"token-free": "services:\n  web:\n    image: nginx\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := src.ResolveCompose(context.Background(), id, compose)
+			got, gotEnv, err := src.ResolveCompose(context.Background(), id, compose)
 			if err != nil {
 				t.Fatalf("ResolveCompose: %v", err)
 			}
-			want, err := Resolve(compose, id, seed, InitialVersion)
+			want, wantEnv, err := Resolve(compose, id, seed, InitialVersion)
 			if err != nil {
 				t.Fatalf("Resolve: %v", err)
 			}
-			if !bytes.Equal(got.Reveal(), want.Reveal()) {
+			if !bytes.Equal(got.Reveal(), want.Reveal()) || len(gotEnv) != len(wantEnv) {
 				t.Fatal("ResolveCompose differs from Resolve at InitialVersion")
+			}
+			for k, v := range wantEnv {
+				if !bytes.Equal(gotEnv[k].Reveal(), v.Reveal()) {
+					t.Fatalf("ResolveCompose's %s differs from Resolve's", k)
+				}
 			}
 			if name == "token-free" && !bytes.Equal(got.Reveal(), []byte(compose)) {
 				t.Fatal("a token-free compose was not returned verbatim")
@@ -89,11 +94,11 @@ func TestHKDFSourcePassesResolvesRefusalThrough(t *testing.T) {
 	}
 	const id = "01APPID"
 	compose := "services:\n  db:\n    environment:\n      PW: ${secret:db-password\n"
-	got, err := src.ResolveCompose(context.Background(), id, compose)
+	got, _, err := src.ResolveCompose(context.Background(), id, compose)
 	if err == nil {
 		t.Fatal("a malformed token was not refused")
 	}
-	_, want := Resolve(compose, id, seed, InitialVersion)
+	_, _, want := Resolve(compose, id, seed, InitialVersion)
 	if want == nil || err.Error() != want.Error() {
 		t.Fatalf("err = %v, want Resolve's %v", err, want)
 	}

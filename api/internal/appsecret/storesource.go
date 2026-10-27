@@ -92,48 +92,36 @@ func NewStoreSource(d StoreSourceDeps) (*StoreSource, error) {
 	return &StoreSource{secrets: d.Secrets, apps: d.Apps, refs: d.Refs, seed: d.Seed, log: d.Log}, nil
 }
 
-// ResolveCompose returns compose with every token replaced by its stored
-// value. A compose with no token is returned as the same bytes, with no store
-// call and no app lookup.
-func (s *StoreSource) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error) {
+// ResolveCompose returns compose with every token replaced by its Compose
+// interpolation reference, and the map from each reference's variable to the
+// stored value (geekdojo/geekdojo-brain#776). The map owns the values; the
+// caller destroys them. A compose with no token is returned as the same
+// bytes, with a nil map, no store call and no app lookup.
+func (s *StoreSource) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, map[string]secret.Value, error) {
 	tokens, err := tileschema.ScanSecretTokens(compose)
 	if err != nil {
-		return secret.Value{}, fmt.Errorf("appsecret: resolve %s: %w", appID, err)
+		return secret.Value{}, nil, fmt.Errorf("appsecret: resolve %s: %w", appID, err)
 	}
 	if len(tokens) == 0 {
-		return secret.New([]byte(compose)), nil
+		return secret.New([]byte(compose)), nil, nil
 	}
 	node, found, err := s.apps.TargetNode(ctx, appID)
 	if err != nil {
-		return secret.Value{}, s.failed(ctx, appID, "", fmt.Errorf("appsecret: resolve %s: looking up the app's target node: %w", appID, err))
+		return secret.Value{}, nil, s.failed(ctx, appID, "", fmt.Errorf("appsecret: resolve %s: looking up the app's target node: %w", appID, err))
 	}
 	if !found {
-		return secret.Value{}, s.failed(ctx, appID, "", fmt.Errorf("appsecret: resolve %s: the app does not exist", appID))
+		return secret.Value{}, nil, s.failed(ctx, appID, "", fmt.Errorf("appsecret: resolve %s: the app does not exist", appID))
 	}
 	actor := secrets.DeployActor(appID, node)
-	values := map[string]secret.Value{}
-	defer func() {
-		for _, v := range values {
-			v.Destroy()
-		}
-	}()
-	for _, tok := range tokens {
-		if _, ok := values[tok.Name]; ok {
-			continue
-		}
-		v, err := s.value(ctx, actor, appID, tok.Name)
-		if err != nil {
-			return secret.Value{}, err
-		}
-		values[tok.Name] = v
-	}
-	return splice(compose, tokens, func(name string) ([]byte, error) {
-		return values[name].Reveal(), nil
+	// splice reads each distinct name once, in token order, and destroys
+	// what it gathered if a later read refuses.
+	return splice(compose, tokens, func(name string) (secret.Value, error) {
+		return s.value(ctx, actor, appID, name)
 	})
 }
 
 // value is the stored value of appID's secret name, creating it from the
-// derived value when it is absent. The caller destroys it.
+// derived value when it is absent. The caller owns it and destroys it.
 func (s *StoreSource) value(ctx context.Context, actor secrets.Actor, appID, name string) (secret.Value, error) {
 	ref, err := secrets.AppSecret(appID, name)
 	if err != nil {
