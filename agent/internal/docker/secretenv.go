@@ -226,14 +226,14 @@ func decodeGuardModel(out []byte) (any, error) {
 }
 
 // walkGuardModel calls visit with the path and text of every string in v,
-// object keys included at their own path. An extension field (a key that opens
-// with "x-") is not walked: Compose reads it only where a merge copies it into
-// a service, and the copy is walked there.
+// object keys included at their own path. An extension field is not walked:
+// Compose reads it only where a merge copies it into a service, and the copy
+// is walked there.
 func walkGuardModel(v any, path []string, visit func(path []string, s string)) {
 	switch t := v.(type) {
 	case map[string]any:
 		for k, child := range t {
-			if strings.HasPrefix(k, "x-") {
+			if isExtensionField(path, k) {
 				continue
 			}
 			p := append(path[:len(path):len(path)], k)
@@ -247,6 +247,15 @@ func walkGuardModel(v any, path []string, visit func(path []string, s string)) {
 	case string:
 		visit(path, t)
 	}
+}
+
+// isExtensionField reports whether key k at path is a Compose extension
+// field: an "x-" key at the top level, or directly on a definition
+// (`<section>.<name>.x-*`). Anywhere else an "x-" key is data Compose keeps
+// and uses — a service or config named `x-web`, a label, a build arg — so it
+// is walked like any other key.
+func isExtensionField(path []string, k string) bool {
+	return strings.HasPrefix(k, "x-") && (len(path) == 0 || len(path) == 2)
 }
 
 // isServiceEnv reports whether path is services.<service>.environment.<key>:

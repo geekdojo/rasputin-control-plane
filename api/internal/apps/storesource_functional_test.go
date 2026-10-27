@@ -200,8 +200,9 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 			t.Fatalf("the deploy ended %s: %s", j.Status, j.Error)
 		}
 		cmd := apps.ReceiveDeployWithin(t, deploys, "the agent never received the deploy command")
-		if !strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: "+want+"\n") {
-			t.Fatal("the deploy command does not carry the expected value")
+		if cmd.SecretEnv[proto.SecretEnvName("db-password")] != want || strings.Contains(cmd.ComposeYAML, want) ||
+			!strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: ${RASPUTIN_SECRET_DB_PASSWORD}\n") {
+			t.Fatal("the deploy command does not carry the expected value beside a reference compose")
 		}
 		return j
 	}

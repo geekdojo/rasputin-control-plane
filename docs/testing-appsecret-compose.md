@@ -58,8 +58,9 @@ value per run and `busybox:1.36.1`:
   `up` stamped (TC-776-26).
 - A `stop` then `start` without the values leaves it running, with the value, not outdated
   (TC-776-27).
-- A reference in `user:` is refused before any container exists, and a deploy that fails at the
-  daemon with the value in its environment does not quote the value in its detail (TC-776-28).
+- A reference in `user:` is refused before any container exists, on a service named `web` and on
+  one named `x-web` (an `x-` name is a service, not an extension field), and a deploy that fails
+  at the daemon with the value in its environment does not quote the value in its detail (TC-776-28).
 - Deleting the app removes its state directory, the record included (TC-776-29).
 - An app deployed with its value inline, as an older api or agent leaves it, reads current, and
   moving it to the reference shape keeps its container and its value (TC-776-30).

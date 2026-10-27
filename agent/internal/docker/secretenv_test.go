@@ -283,6 +283,11 @@ func TestDeploySecrets_GuardRefusals(t *testing.T) {
 		{"labels", `{"services":{"web":{"labels":{"k":` + ref + `}}}}`, "services.web.labels.k"},
 		{"inline config content", `{"configs":{"c":{"content":` + ref + `}},"services":{"web":{}}}`, "configs.c.content"},
 		{"a config sourced from the variable", `{"configs":{"c":{"environment":"RASPUTIN_SECRET_DB_PASSWORD"}},"services":{"web":{}}}`, "configs.c.environment"},
+		// F-776-12: an "x-" key is data, not an extension, below a definition.
+		{"user on a service named x-", `{"services":{"x-web":{"user":` + ref + `}}}`, "services.x-web.user"},
+		{"label key x-", `{"services":{"web":{"labels":{"x-leak":` + ref + `}}}}`, "services.web.labels.x-leak"},
+		{"config named x-", `{"configs":{"x-cfg":{"content":` + ref + `}},"services":{"web":{}}}`, "configs.x-cfg.content"},
+		{"build arg x-", `{"services":{"web":{"build":{"args":{"x-arg":` + ref + `}}}}}`, "services.web.build.args.x-arg"},
 		{"a missing key", `{"services":{"web":{"environment":{"X":"${RASPUTIN_SECRET_OTHER}"}}}}`, "RASPUTIN_SECRET_OTHER"},
 		{"no JSON", "level=warning msg=\"something\"\nnot json at all\n", "no JSON model"},
 		{"broken JSON", "{\"services\": \n", "JSON model"},
@@ -327,12 +332,13 @@ func TestDeploySecrets_GuardSkipsLeadingWarnings(t *testing.T) {
 	}
 }
 
-// The guard accepts list-form environment and ignores extension fields: what
-// `config --no-interpolate` prints for a compose that puts its environment in
-// an anchor (measured on Compose 5.3.1).
+// The guard accepts list-form environment and ignores extension fields, at the
+// top level and directly on a service: what `config --no-interpolate` prints
+// for a compose that puts its environment in an anchor (measured on Compose
+// 5.3.1).
 func TestDeploySecrets_GuardAcceptsListFormAndExtensions(t *testing.T) {
 	f := newFakeCompose(t)
-	f.guard = `{"services":{"web":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"]}},"x-common":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"]}}`
+	f.guard = `{"services":{"web":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"],"x-note":"${RASPUTIN_SECRET_DB_PASSWORD}"}},"x-common":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"]}}`
 	if status, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: "v"}); err != nil {
 		t.Fatalf("Deploy = %s, %q, %v", status, detail, err)
 	}

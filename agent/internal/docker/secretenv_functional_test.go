@@ -204,6 +204,7 @@ func TestSecretEnvFunctional_DeployQuiesceDelete(t *testing.T) {
 }
 
 // TC-776-28: a reference in `user:` is refused before any container exists,
+// on a service named `web` and on one named `x-web`,
 // and a deploy that fails at the daemon (a literal user that does not exist)
 // with the value in its environment does not quote the value back.
 func TestSecretEnvFunctional_PlacementRefusalAndFailedDetail(t *testing.T) {
@@ -214,12 +215,19 @@ func TestSecretEnvFunctional_PlacementRefusalAndFailedDetail(t *testing.T) {
 	canary := canaryValue(t)
 	env := proto.AppSecretEnv{"RASPUTIN_SECRET_CANARY": canary}
 
-	_, detail, err := c.Deploy(ctx, refused, "fn", secretCompose("${RASPUTIN_SECRET_CANARY}"), env)
-	if err == nil || !strings.Contains(detail, "services.web.user") || strings.Contains(detail, canary) {
-		t.Fatalf("Deploy = %q, %v; want the placement refusal naming services.web.user", detail, err)
-	}
-	if ids := projectContainers(t, refused); len(ids) != 0 {
-		t.Fatalf("a refused deploy created %d container(s)", len(ids))
+	// F-776-12: a service named "x-…" is a service, not an extension field.
+	xWeb := strings.Replace(secretCompose("${RASPUTIN_SECRET_CANARY}"), "  web:\n", "  x-web:\n", 1)
+	for compose, path := range map[string]string{
+		secretCompose("${RASPUTIN_SECRET_CANARY}"): "services.web.user",
+		xWeb: "services.x-web.user",
+	} {
+		_, detail, err := c.Deploy(ctx, refused, "fn", compose, env)
+		if err == nil || !strings.Contains(detail, path) || strings.Contains(detail, canary) {
+			t.Fatalf("Deploy = %q, %v; want the placement refusal naming %s", detail, err, path)
+		}
+		if ids := projectContainers(t, refused); len(ids) != 0 {
+			t.Fatalf("a refused deploy created %d container(s)", len(ids))
+		}
 	}
 
 	status, detail, err := c.Deploy(ctx, failed, "fn", secretCompose("no-such-user-776"), env)
