@@ -57,6 +57,20 @@ export const TIER_COPY: Record<PrivilegeTier, TierCopy> = {
   },
 };
 
+/**
+ * The one secrets fact an owner needs at the moment of accepting a tier
+ * (geekdojo/geekdojo-brain#730): a host-trusting app is effectively root on its
+ * node, so it can read what the node holds for every other app there. Shown at
+ * install and at a tier-raising upgrade, before consent; null below
+ * host-trusting. Mirrors the api's coLocatedSecretsClause in
+ * api/internal/apps/privilege_consent.go. Vendor-neutral by design.
+ */
+export function coLocatedSecretsWarning(tier: PrivilegeTier): string | null {
+  return tier === 'host-trusting'
+    ? 'This app can also read the secrets of every other app on this node: their passwords, keys and tokens.'
+    : null;
+}
+
 /** The tier a tile declares. Absent means routine — every tile published before Decision 12. */
 export function tierOf(p: TilePrivilege | undefined): PrivilegeTier {
   return p?.tier ?? 'routine';
