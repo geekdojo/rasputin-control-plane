@@ -398,3 +398,101 @@ func TestUpgradeSaga_AnUnreadableConsentRecordRefusesUntilReplaced(t *testing.T)
 	}
 	receiveWithin(t, got, "the re-consented upgrade never deployed")
 }
+
+// geekdojo/geekdojo-brain#730: a raise to host-trusting tells the owner the app
+// can read every co-located app's secrets; a raise to anything lower does not.
+func TestRefusal_CoLocatedSecretsClause(t *testing.T) {
+	const consentTail = ", and it needs your consent"
+	socketTile := func() tileschema.Tile {
+		t := upgradeTile(composeV2)
+		t.Privilege = &tileschema.Privilege{
+			Tier:         tileschema.TierHostTrusting,
+			DockerSocket: true,
+			Grants:       []string{tileschema.GrantDockerSocket},
+			Why:          "drives the container runtime",
+		}
+		return t
+	}
+	cases := []struct {
+		id, name  string
+		installed string
+		target    tileschema.Tile
+		clause    bool
+		mustSay   []string
+	}{
+		// TC-730-01: routine and unrecorded, both raised to host-trusting.
+		{"TC-730-01", "routine to host-trusting", tileschema.TierRoutine, hostTrustingTile(composeV2), true,
+			[]string{"ROUTINE", "HOST-TRUSTING", `"acceptPrivilegeTier": "host-trusting"`}},
+		{"TC-730-01", "unrecorded to host-trusting", "", hostTrustingTile(composeV2), true,
+			[]string{"ROUTINE (no tier was recorded", "HOST-TRUSTING", `"acceptPrivilegeTier": "host-trusting"`}},
+		// TC-730-02: elevated to host-trusting with the runtime socket.
+		{"TC-730-02", "elevated to host-trusting with the socket", tileschema.TierElevated, socketTile(), true,
+			[]string{", including control of the container runtime socket", "ELEVATED", "HOST-TRUSTING"}},
+		// TC-730-03: routine to elevated (host-network, the Home Assistant shape).
+		{"TC-730-03", "routine to elevated", tileschema.TierRoutine, elevatedTile(composeV2), false,
+			[]string{"ROUTINE", "ELEVATED", `"acceptPrivilegeTier": "elevated"`}},
+	}
+	for _, c := range cases {
+		app := installedApp("a")
+		app.PrivilegeTier = c.installed
+		got := UpgradePrivilege(app, c.target).Refusal()
+		at := strings.Index(got, coLocatedSecretsClause)
+		if c.clause {
+			tail := strings.Index(got, consentTail)
+			if at < 0 {
+				t.Errorf("%s %s: refusal %q lacks the co-located-secrets clause", c.id, c.name, got)
+			} else if tail < 0 || at > tail {
+				t.Errorf("%s %s: clause must come before %q in %q", c.id, c.name, consentTail, got)
+			}
+		} else if at >= 0 {
+			t.Errorf("%s %s: refusal %q carries the clause below host-trusting", c.id, c.name, got)
+		}
+		for _, s := range c.mustSay {
+			if !strings.Contains(got, s) {
+				t.Errorf("%s %s: refusal %q no longer says %q", c.id, c.name, got, s)
+			}
+		}
+	}
+}
+
+// TC-730-04: the clause itself names no backend. Refusal() as a whole also
+// lists raw grant ids (docker-socket), which this change does not alter, so the
+// clause is checked alone.
+func TestCoLocatedSecretsClause_IsVendorNeutral(t *testing.T) {
+	if !strings.Contains(coLocatedSecretsClause, "secrets of every other app on the same node") {
+		t.Fatalf("clause %q does not say what the app can read", coLocatedSecretsClause)
+	}
+	lower := strings.ToLower(coLocatedSecretsClause)
+	for _, backend := range []string{"docker", "compose", "openbao", "containerd", "headscale"} {
+		if strings.Contains(lower, backend) {
+			t.Errorf("TC-730-04: clause %q names the backend %q", coLocatedSecretsClause, backend)
+		}
+	}
+}
+
+// TC-730-05: the saga's job error carries the clause, with no consent record
+// and with an unreadable one; in the unreadable case it comes before the note.
+func TestCheckUpgradeConsent_CarriesTheCoLocatedSecretsClause(t *testing.T) {
+	target := UpgradeTarget{Tile: hostTrustingTile(composeV2), CatalogVersion: 2}
+
+	app := installedApp("a")
+	app.PrivilegeTier = tileschema.TierRoutine
+	err := CheckUpgradeConsent(app, target)
+	if !errors.Is(err, ErrPrivilegeConsentRequired) {
+		t.Fatalf("TC-730-05 no record: err = %v, want ErrPrivilegeConsentRequired", err)
+	}
+	if !strings.Contains(err.Error(), coLocatedSecretsClause) {
+		t.Errorf("TC-730-05 no record: job error %q lacks the clause", err)
+	}
+
+	app.PrivilegeAck = &PrivilegeAck{By: "bryce", Unreadable: true}
+	err = CheckUpgradeConsent(app, target)
+	if !errors.Is(err, ErrPrivilegeConsentRequired) {
+		t.Fatalf("TC-730-05 unreadable: err = %v, want ErrPrivilegeConsentRequired", err)
+	}
+	msg := err.Error()
+	at, note := strings.Index(msg, coLocatedSecretsClause), strings.Index(msg, UnreadableConsentNote)
+	if at < 0 || note < 0 || at > note {
+		t.Errorf("TC-730-05 unreadable: want the clause (at %d) before the unreadable note (at %d) in %q", at, note, msg)
+	}
+}

@@ -70,6 +70,13 @@ func (c PrivilegeChange) Consent(target UpgradeTarget) PrivilegeConsent {
 	}
 }
 
+// coLocatedSecretsClause is added to a raise to host-trusting (or above):
+// such an app is effectively root on its node, so it can read what the node
+// holds for every other app there, their secrets included
+// (geekdojo/geekdojo-brain#730). Vendor-neutral by design: it names the node
+// and the apps, never the mechanism.
+const coLocatedSecretsClause = "; at that tier it can read the secrets of every other app on the same node"
+
 // Refusal is the owner-facing reason a raise without consent is refused:
 // what is being raised, and what consent the request needs to carry.
 func (c PrivilegeChange) Refusal() string {
@@ -85,6 +92,9 @@ func (c PrivilegeChange) Refusal() string {
 	}
 	if len(c.Privilege.Grants) > 0 {
 		fmt.Fprintf(&b, " (it takes: %s)", strings.Join(c.Privilege.Grants, ", "))
+	}
+	if c.Privilege.AtLeast(tileschema.TierHostTrusting) {
+		b.WriteString(coLocatedSecretsClause)
 	}
 	fmt.Fprintf(&b, `, and it needs your consent: send the upgrade again with "acceptPrivilegeTier": %q`, c.Privilege.Tier)
 	return b.String()

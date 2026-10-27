@@ -25,7 +25,7 @@ import {
   type ComposeOutcome,
   type PrivilegeRaise,
 } from '../lib/compose-change';
-import { TIER_COPY, grantLabel } from '../lib/privilege';
+import { TIER_COPY, coLocatedSecretsWarning, grantLabel } from '../lib/privilege';
 import type { App, AppVolumesResponse, DroppedVolume } from '../lib/types';
 import { deleteWarning } from '../lib/volumes';
 import { Btn, DIM, FG, HAIR_SOFT, Textarea } from './kit';
@@ -371,6 +371,7 @@ function PrivilegeRaisePanel({
   onConsent: (v: boolean) => void;
 }) {
   const copy = TIER_COPY[raise.tier];
+  const secretsWarning = coLocatedSecretsWarning(raise.tier);
   return (
     <div style={{ border: `1px solid ${copy.color}55`, background: `${copy.color}0d`, padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -394,6 +395,7 @@ function PrivilegeRaisePanel({
         </div>
       )}
       <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{copy.explainer}</p>
+      {secretsWarning && <p style={{ color: copy.color, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 }}>{secretsWarning}</p>}
       <label
         htmlFor={consentId}
         style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer', color: FG, fontSize: 10, fontFamily: MONO, lineHeight: 1.6 }}

@@ -17,7 +17,7 @@ import {
   refreshCatalog,
 } from '../../../lib/api';
 import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
-import { grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
+import { coLocatedSecretsWarning, grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
 import { defaultDeployTarget, deployTargetLabel, offMeshTargetWarning } from '../../../lib/deploy-target';
 import {
@@ -596,10 +596,16 @@ function ConsentGate({
   const tier = tierOf(tile.privilege);
   if (tier === 'routine') return null;
   const copy = TIER_COPY[tier];
+  const secretsWarning = coLocatedSecretsWarning(tier);
 
   return (
     <div>
       <SectionLabel>CONSENT</SectionLabel>
+      {secretsWarning && (
+        <Hint warn style={{ marginBottom: 8 }}>
+          {secretsWarning}
+        </Hint>
+      )}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <EnabledToggle
           enabled={consented}
