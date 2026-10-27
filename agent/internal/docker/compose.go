@@ -38,6 +38,10 @@ type ComposeBackend struct {
 	// the refusal rules can be exercised without a daemon.
 	exec   dockerExec
 	sizeOf func(mountpoint string) (uint64, error)
+	// execEnv is the docker CLI for the two calls that carry an app's secret
+	// values in their process environment (secretenv.go). nil means the real
+	// one; tests inject a fake to see which calls get the values.
+	execEnv dockerEnvExec
 }
 
 // NewComposeBackend constructs the real backend. dir is the per-agent state
@@ -89,7 +93,7 @@ const composeFileName = "docker-compose.yml"
 // in the directory arrived through a tile's own bind mount.
 // The mock backend's state.json is here too: TightenAppState serves both
 // backends, and a dev box that switches between them keeps one state tree.
-var agentWrittenFiles = []string{composeFileName, volumeRecordFile, mockStateFileName}
+var agentWrittenFiles = []string{composeFileName, volumeRecordFile, mockStateFileName, configHashRecordFile}
 
 // projectName is what `docker compose -p` sees. Prefixed so we can identify
 // (and clean up) Rasputin-managed projects. App IDs are ULIDs so they're
@@ -98,7 +102,20 @@ func projectName(appID string) string {
 	return "rasp_" + strings.ToLower(appID)
 }
 
-func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML string) (proto.AppStatus, string, error) {
+// Deploy writes appID's compose and brings it up.
+//
+// With env empty it is the deploy every release before #776 ran, except that a
+// config-hash record a previous secret-bearing deploy left is removed first, so
+// Status computes the hash live again.
+//
+// With env set, the compose carries ${RASPUTIN_SECRET_<NAME>} references and
+// env their values (geekdojo/geekdojo-brain#776). Before the live file is
+// touched, the guard asks Compose where the references sit and refuses any
+// outside a service's environment, or one env does not cover. The values then
+// reach exactly two calls, as their process environment: the `config --hash`
+// whose output is recorded for Status (secretenv.go), and `up`. Every other
+// call runs without them, and no file this agent writes holds one.
+func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !safeAppID(appID) {
@@ -108,16 +125,36 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
 		return proto.AppStatusFailed, "mkdir: " + err.Error(), err
 	}
+	if len(env) > 0 {
+		if err := c.guardSecretRefs(ctx, appID, composeYAML, env); err != nil {
+			return proto.AppStatusFailed, err.Error(), err
+		}
+	}
 	// Record the anonymous volumes of the containers `up` may be about to
 	// replace or remove (#413; see appvolumes.go). An `up --remove-orphans`
 	// that drops a service takes the only container that named its anonymous
 	// volume with it, and an app an older agent deployed has no record yet.
 	c.recordVolumesOrLog(ctx, appID, "docker.deploy")
+	// The record describes the compose being replaced, so it goes before the
+	// file moves: a failure from here on never leaves an old record beside a
+	// new compose.
+	if err := c.removeConfigHashRecord(appID); err != nil {
+		return proto.AppStatusFailed, "remove config-hash record: " + err.Error(), err
+	}
 	if err := c.writeCompose(appID, composeYAML); err != nil {
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
 	}
 
-	out, err := c.run(ctx, appID, composeUpArgs()...)
+	var out []byte
+	var err error
+	if len(env) > 0 {
+		if err := c.recordConfigHash(ctx, appID, env); err != nil {
+			return proto.AppStatusFailed, err.Error(), err
+		}
+		out, err = c.runEnv(ctx, appID, env, composeUpArgs()...)
+	} else {
+		out, err = c.run(ctx, appID, composeUpArgs()...)
+	}
 	// And the ones the containers `up` left mount now — whether or not `up`
 	// succeeded, since a failed `up` can still have created some of them.
 	c.recordVolumesOrLog(ctx, appID, "docker.deploy")
@@ -374,6 +411,10 @@ func (c *ComposeBackend) statusLocked(ctx context.Context, appID string) (proto.
 // exactly when `up` has converged the service onto this file, which is also
 // the test compose itself uses to decide whether `up` must recreate it.
 //
+// For a secret-bearing app the hashes come from the record its deploy wrote
+// (wantConfigHashes): `config --hash` without the values interpolates blanks
+// and never matches the label (#776).
+//
 // Anything that stops the comparison being made leaves the flag false:
 // no running service, a container without the label, or a hash listing that
 // could not be run or read. Unknown must read as the status did before this
@@ -390,12 +431,11 @@ func (c *ComposeBackend) markOutdated(ctx context.Context, appID string, lines [
 	if !anyRunning {
 		return
 	}
-	out, err := c.run(ctx, appID, composeConfigHashArgs()...)
+	want, err := c.wantConfigHashes(ctx, appID)
 	if err != nil {
-		log.Printf("rasputin-agent: docker.status %s: %s", appID, formatCmdErr("docker compose config --hash", out, err))
+		log.Printf("rasputin-agent: docker.status %s: %v", appID, err)
 		return
 	}
-	want := parseConfigHashes(out)
 	if len(want) == 0 {
 		return
 	}
@@ -607,7 +647,13 @@ func parsePsLines(out []byte) ([]composePsLine, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
+		// The run merges stderr into stdout, so a warning Compose prints on
+		// the way — `level=warning msg="The \"RASPUTIN_SECRET_X\" variable is
+		// not set"` for every secret-bearing app, since ps runs without the
+		// values (#776) — shares the buffer. A JSON line opens with { or [;
+		// anything else is not one. A line that opens with { and does not
+		// parse is still an error.
+		if len(line) == 0 || (line[0] != '{' && line[0] != '[') {
 			continue
 		}
 		// Older docker CLI versions emit a JSON array instead of NDJSON.

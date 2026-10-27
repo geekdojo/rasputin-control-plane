@@ -327,6 +327,7 @@ func seedUpgradeApp(t *testing.T, id string) (*Store, *inventory.Store) {
 	store, inv := newStore(t), newInventory(t)
 	if err := inv.Insert(context.Background(), &proto.Node{
 		ID: "n", Role: proto.RoleCompute, Hostname: "n.test", FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC(),
+		AgentVersion: secretsFloor(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -336,22 +337,25 @@ func seedUpgradeApp(t *testing.T, id string) (*Store, *inventory.Store) {
 	return store, inv
 }
 
-// fakeDeployAgent answers docker.deploy on node n with ack, and hands every
-// command it received to the test.
+// fakeDeployAgent answers docker.deploy and docker.deploy_secrets on node n
+// with ack, as an agent at the secrets floor does, and hands every command it
+// received to the test.
 func fakeDeployAgent(t *testing.T, nc *nats.Conn, ack proto.AppDeployAck) <-chan proto.AppDeployCmd {
 	t.Helper()
 	got := make(chan proto.AppDeployCmd, 4)
-	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
-		var cmd proto.AppDeployCmd
-		_ = json.Unmarshal(m.Data, &cmd)
-		got <- cmd
-		b, _ := json.Marshal(ack)
-		_ = m.Respond(b)
-	})
-	if err != nil {
-		t.Fatal(err)
+	for _, subject := range []string{proto.AppDeploySubject("n"), proto.AppDeploySecretsSubject("n")} {
+		sub, err := nc.Subscribe(subject, func(m *nats.Msg) {
+			var cmd proto.AppDeployCmd
+			_ = json.Unmarshal(m.Data, &cmd)
+			got <- cmd
+			b, _ := json.Marshal(ack)
+			_ = m.Respond(b)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = sub.Unsubscribe() })
 	}
-	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	return got
 }
 

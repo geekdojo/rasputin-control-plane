@@ -436,7 +436,7 @@ func TestDeploy_RecordIsAUnionAcrossComposeVersions(t *testing.T) {
 		}
 		return n.run(ctx, args...)
 	}}
-	if _, _, err := b.Deploy(context.Background(), delULID, "app", "services: {}\n"); err != nil {
+	if _, _, err := b.Deploy(context.Background(), delULID, "app", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	rec, err := b.loadRecord(delULID)

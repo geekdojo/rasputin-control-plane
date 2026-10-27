@@ -13,6 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
 
@@ -115,6 +116,16 @@ func pullStep(store *Store, inv *inventory.Store, nc *nats.Conn, change string, 
 		target, err := source(sc, app)
 		if err != nil {
 			return nil, err
+		}
+		// A compose with secrets can only be deployed by an agent that answers
+		// docker.deploy_secrets (#776). Refused here, before DEPLOYING, the
+		// volume check and the pull, so the step after this one never persists
+		// a compose the node cannot run and the app row keeps its compose and
+		// status. The same prefix test Escape makes.
+		if strings.Contains(target.ComposeYAML, tileschema.SecretTokenPrefix) {
+			if err := refuseAgentWithoutSecrets(sc.Ctx, inv, app); err != nil {
+				return nil, fmt.Errorf("%s not applied, and nothing was changed: %w", change, err)
+			}
 		}
 
 		markedAt := time.Now().UTC()

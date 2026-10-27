@@ -31,15 +31,17 @@ func NewHKDFSource(seed *Seed) (*HKDFSource, error) {
 	return &HKDFSource{seed: seed}, nil
 }
 
-// ResolveCompose returns Resolve(compose, appID, seed, InitialVersion).
+// ResolveCompose returns Resolve(compose, appID, seed, InitialVersion): the
+// compose with interpolation references in place of its tokens, and the map of
+// their values.
 //
 // A nil receiver, or one with no seed (the zero HKDFSource), refuses every
-// compose, token-free included, with the zero Value: a source with no seed is
+// compose, token-free included, with the zero Value and a nil map: a source with no seed is
 // broken wiring, and it says so on the first deploy rather than only on the
 // first one that carries a token.
-func (s *HKDFSource) ResolveCompose(_ context.Context, appID, compose string) (secret.Value, error) {
+func (s *HKDFSource) ResolveCompose(_ context.Context, appID, compose string) (secret.Value, map[string]secret.Value, error) {
 	if s == nil || s.seed == nil {
-		return secret.Value{}, errNoSeed
+		return secret.Value{}, nil, errNoSeed
 	}
 	return Resolve(compose, appID, s.seed, InitialVersion)
 }

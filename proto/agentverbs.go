@@ -101,6 +101,20 @@ var verbMinAgentVersion = map[string]string{
 	// mesh.enroll (MeshEnrollCmd.LegacyTrustBundlePEM) instead, and
 	// trust.converge leaves the node to the mesh reconcile.
 	TrustInstallVerb: "2026.10.0-dev.191",
+	// docker.deploy_secrets (geekdojo/geekdojo-brain#776): entered when the
+	// verb was authored, before its release existed, as the NEXT release run
+	// after v2026.10.3 (run 203, the newest published control-plane release at
+	// the time, and a STABLE one). Its base is 2026.10.4, not 2026.10.3: a
+	// stable release outranks every -dev of its own base, so a floor of
+	// 2026.10.3-dev.204 would sort BELOW v2026.10.3 and let an agent that has
+	// no subscription for the verb through the api's gate. If a release was
+	// cut between this entry and the one that ships the verb, confirm with
+	// `git tag --contains` once the release exists and correct the floor.
+	//
+	// Load-bearing: the api refuses a secret-bearing deploy to a node below
+	// this floor, or one whose version is unreported or unparseable, before
+	// it marks the app DEPLOYING (api/internal/apps).
+	AppDeploySecretsVerb: "2026.10.4-dev.204",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose

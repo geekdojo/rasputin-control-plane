@@ -242,3 +242,19 @@ func AgentPredates(agentVersion, floor string) bool {
 	c, err := releases.Compare(releases.SchemeCalVer, v, f)
 	return err == nil && c < 0
 }
+
+// AgentAtLeast reports whether agentVersion is at or above floor, both bare
+// or v-prefixed CalVer. It is AgentPredates' fail-closed counterpart, for a
+// gate rather than an explanation: an empty or unparseable version is NOT at
+// the floor, and nothing is at an empty or unparseable floor, so an agent
+// whose version the api cannot read is refused rather than trusted
+// (geekdojo/geekdojo-brain#776).
+func AgentAtLeast(agentVersion, floor string) bool {
+	v := strings.TrimPrefix(strings.TrimSpace(agentVersion), "v")
+	f := strings.TrimPrefix(strings.TrimSpace(floor), "v")
+	if v == "" || f == "" {
+		return false
+	}
+	c, err := releases.Compare(releases.SchemeCalVer, v, f)
+	return err == nil && c >= 0
+}

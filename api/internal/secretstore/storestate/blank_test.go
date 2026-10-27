@@ -39,12 +39,12 @@ func TestMonitor_BlankVerdictRefusesStoreDependentWork(t *testing.T) {
 
 	inner := &innerSource{value: "resolved"}
 	g := newGate(t, f, inner)
-	_, err := g.ResolveCompose(context.Background(), "a", tokened)
+	_, _, err := g.ResolveCompose(context.Background(), "a", tokened)
 	var nre *NotReadyError
 	if !errors.As(err, &nre) || nre.State != Blank || nre.Code() != Code {
 		t.Fatalf("secret-bearing deploy = %v, want a NotReadyError for blank with %s", err, Code)
 	}
-	if v, err := g.ResolveCompose(context.Background(), "a", tokenFree); err != nil || string(v.Reveal()) != "resolved" {
+	if v, _, err := g.ResolveCompose(context.Background(), "a", tokenFree); err != nil || string(v.Reveal()) != "resolved" {
 		t.Fatalf("token-free deploy = (%q, %v), want it to go through", v.Reveal(), err)
 	}
 

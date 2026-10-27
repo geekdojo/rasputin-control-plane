@@ -32,7 +32,7 @@ func TestMockBackend_DeployWritesComposeAndState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
-	status, detail, err := mb.Deploy(context.Background(), "a1", "minecraft", "services:\n  m: {}\n")
+	status, detail, err := mb.Deploy(context.Background(), "a1", "minecraft", "services:\n  m: {}\n", nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestMockBackend_DeployWritesComposeAndState(t *testing.T) {
 func TestMockBackend_StopAfterDeploy(t *testing.T) {
 	mb := newDockerMock(t)
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "minecraft", "services: {}"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "minecraft", "services: {}", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	status, detail, err := mb.Stop(ctx, "a1", false)
@@ -105,7 +105,7 @@ func TestMockBackend_StopUnknownAppIsClean(t *testing.T) {
 func TestMockBackend_StatusReturnsLastWrittenStatus(t *testing.T) {
 	mb := newDockerMock(t)
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	st, svcs, err := mb.Status(ctx, "a1")
@@ -146,7 +146,7 @@ func TestMockBackend_LoadStateCorruptFile(t *testing.T) {
 	mb := newDockerMock(t)
 	// Deploy once to make appDir exist, then corrupt state.json directly.
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "x", "services: {}", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(mb.dir, "a1", "state.json"), []byte("not-json"), 0o644); err != nil {

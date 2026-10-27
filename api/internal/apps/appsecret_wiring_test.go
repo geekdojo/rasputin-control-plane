@@ -91,7 +91,7 @@ func seedAppWithSecret(t *testing.T, nodeID, appID string) (*Store, *inventory.S
 	now := time.Now().UTC()
 	if err := inv.Insert(ctx, &proto.Node{
 		ID: nodeID, Role: proto.RoleCompute, Hostname: nodeID + ".test",
-		FirstSeen: now, LastSeen: now,
+		FirstSeen: now, LastSeen: now, AgentVersion: secretsFloor(t),
 	}); err != nil {
 		t.Fatalf("inv insert: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	want := derived(testAppID, "db-password")
 
 	got := make(chan proto.AppDeployCmd, 1)
-	sub, err := nc.Subscribe(proto.AppDeploySubject("n"), func(m *nats.Msg) {
+	sub, err := nc.Subscribe(proto.AppDeploySecretsSubject("n"), func(m *nats.Msg) {
 		var cmd proto.AppDeployCmd
 		_ = json.Unmarshal(m.Data, &cmd)
 		got <- cmd
@@ -136,8 +136,8 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	if strings.Contains(cmd.ComposeYAML, "${secret:") {
 		t.Fatalf("the deploy carried an unresolved token — the container would get the literal as its password:\n%s", cmd.ComposeYAML)
 	}
-	if !strings.Contains(cmd.ComposeYAML, want) {
-		t.Fatalf("the deploy does not carry the derived value:\n%s", cmd.ComposeYAML)
+	if cmd.SecretEnv["RASPUTIN_SECRET_DB_PASSWORD"] != want {
+		t.Fatal("the deploy does not carry the derived value in its SecretEnv")
 	}
 
 	// THE point of resolving on the way out: the row still holds the

@@ -93,7 +93,7 @@ func rows() []row {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, _, err := b.Deploy(context.Background(), "app1", "app one", "services: {}\n"); err != nil {
+				if _, _, err := b.Deploy(context.Background(), "app1", "app one", "services: {}\n", nil); err != nil {
 					t.Fatal(err)
 				}
 			},

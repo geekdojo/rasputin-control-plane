@@ -79,6 +79,7 @@ func seedComposeApp(t *testing.T, id, compose string) (*Store, *inventory.Store)
 	now := time.Now().UTC()
 	if err := inv.Insert(context.Background(), &proto.Node{
 		ID: "n", Role: proto.RoleCompute, Hostname: "n.test", FirstSeen: now, LastSeen: now,
+		AgentVersion: secretsFloor(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +107,7 @@ type recordingSource struct {
 	calls []sourceCall
 }
 
-func (r *recordingSource) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, error) {
+func (r *recordingSource) ResolveCompose(ctx context.Context, appID, compose string) (secret.Value, map[string]secret.Value, error) {
 	step, _ := r.step.Load().(string)
 	r.mu.Lock()
 	r.calls = append(r.calls, sourceCall{step: step, appID: appID, compose: compose})
@@ -222,8 +223,14 @@ func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 
 			want := derived(id, "db-password")
 			cmd := receiveWithin(t, deploys, "the agent never received the deploy command")
-			if strings.Contains(cmd.ComposeYAML, "${secret:") || !strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: "+want) {
-				t.Fatalf("the deploy command does not carry the derived value in place of the token:\n%s", cmd.ComposeYAML)
+			// #776: the compose carries the reference, and the value travels
+			// beside it in the typed map.
+			if strings.Contains(cmd.ComposeYAML, "${secret:") || strings.Contains(cmd.ComposeYAML, want) ||
+				!strings.Contains(cmd.ComposeYAML, "DB_PASSWORD: ${RASPUTIN_SECRET_DB_PASSWORD}") {
+				t.Fatalf("the deploy command's compose does not carry the reference in place of the token:\n%s", cmd.ComposeYAML)
+			}
+			if len(cmd.SecretEnv) != 1 || cmd.SecretEnv["RASPUTIN_SECRET_DB_PASSWORD"] != want {
+				t.Fatal("the deploy command does not carry the derived value in its SecretEnv")
 			}
 			row, err := store.Get(ctx, id)
 			if err != nil {
@@ -240,8 +247,8 @@ func TestDeployFamily_DerivedSecretReachesOnlyTheBus(t *testing.T) {
 // failingSource refuses every compose with err and the zero Value.
 type failingSource struct{ err error }
 
-func (f failingSource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
-	return secret.Value{}, f.err
+func (f failingSource) ResolveCompose(context.Context, string, string) (secret.Value, map[string]secret.Value, error) {
+	return secret.Value{}, nil, f.err
 }
 
 // TC-825-04, TC-692-06: a source that refuses fails the push step, with an
@@ -257,8 +264,9 @@ func TestPushStep_RefusedResolvePublishesNothing(t *testing.T) {
 	}
 	var deploys, changes atomic.Int32
 	for subject, n := range map[string]*atomic.Int32{
-		proto.AppDeploySubject("n"): &deploys,
-		proto.AllAppsFilter:         &changes,
+		proto.AppDeploySubject("n"):        &deploys,
+		proto.AppDeploySecretsSubject("n"): &deploys,
+		proto.AllAppsFilter:                &changes,
 	} {
 		sub, err := nc.Subscribe(subject, func(*nats.Msg) { n.Add(1) })
 		if err != nil {

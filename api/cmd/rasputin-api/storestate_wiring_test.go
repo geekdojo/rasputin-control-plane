@@ -54,9 +54,9 @@ type countingSource struct {
 	calls atomic.Int32
 }
 
-func (c *countingSource) ResolveCompose(context.Context, string, string) (secret.Value, error) {
+func (c *countingSource) ResolveCompose(context.Context, string, string) (secret.Value, map[string]secret.Value, error) {
 	c.calls.Add(1)
-	return secret.New([]byte("resolved")), nil
+	return secret.New([]byte("resolved")), nil, nil
 }
 
 func openJobStore(t *testing.T) *jobs.Store {
@@ -200,7 +200,7 @@ func TestDeploySourceWiring(t *testing.T) {
 				t.Fatal("nothing requested, yet a monitor or an alert source")
 			}
 
-			_, err = src.ResolveCompose(context.Background(), "a", tokened)
+			_, _, err = src.ResolveCompose(context.Background(), "a", tokened)
 			var nr *storestate.NotReadyError
 			switch {
 			case tc.refused:
@@ -214,7 +214,7 @@ func TestDeploySourceWiring(t *testing.T) {
 			case err != nil:
 				t.Fatalf("a tokened resolve = %v", err)
 			}
-			if _, err := src.ResolveCompose(context.Background(), "a", plain); err != nil {
+			if _, _, err := src.ResolveCompose(context.Background(), "a", plain); err != nil {
 				t.Fatalf("a token-free resolve = %v", err)
 			}
 			if tc.gate && hkdf.calls.Load() != 0 {

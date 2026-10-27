@@ -63,16 +63,21 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := src.ResolveCompose(ctx, wiringAppID, compose)
+	got, gotEnv, err := src.ResolveCompose(ctx, wiringAppID, compose)
 	if err != nil {
 		t.Fatalf("the first deploy after the restore = %v", err)
 	}
-	want, err := hkdf.ResolveCompose(ctx, wiringAppID, compose)
+	want, wantEnv, err := hkdf.ResolveCompose(ctx, wiringAppID, compose)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got.Reveal(), want.Reveal()) {
+	if !bytes.Equal(got.Reveal(), want.Reveal()) || len(gotEnv) != len(wantEnv) {
 		t.Fatal("the restored cluster resolved a different compose from the previous release's")
+	}
+	for k, v := range wantEnv {
+		if !bytes.Equal(gotEnv[k].Reveal(), v.Reveal()) {
+			t.Fatalf("the restored cluster resolved a different %s from the previous release's", k)
+		}
 	}
 	for _, name := range []string{"db-password", "session-key"} {
 		ref, err := secrets.AppSecret(wiringAppID, name)

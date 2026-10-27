@@ -264,7 +264,7 @@ func deployLive(t *testing.T, tag, yaml string) (proto.AppStatus, string, []prot
 	// Generous: the first run pulls busybox.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	status, detail, err := c.Deploy(ctx, appID, appID, yaml)
+	status, detail, err := c.Deploy(ctx, appID, appID, yaml, nil)
 	if err != nil {
 		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
@@ -342,7 +342,7 @@ func TestComposeBackendLiveCrashStillFails(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if _, detail, err := c.Deploy(ctx, appID, appID, crasherCompose); err != nil {
+	if _, detail, err := c.Deploy(ctx, appID, appID, crasherCompose, nil); err != nil {
 		t.Fatalf("Deploy: %v (detail: %s)", err, detail)
 	}
 
@@ -445,7 +445,7 @@ func TestComposeBackendLiveBadDigestPullChangesNothing(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose, nil); err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
 	idBefore, startedBefore := containerIdentity(t, appID)
@@ -530,12 +530,12 @@ func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose, nil); err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
 	idBefore, startedBefore := containerIdentity(t, appID)
 
-	if _, detail, err := c.Deploy(ctx, appID, appID, networkConflictCompose); err == nil {
+	if _, detail, err := c.Deploy(ctx, appID, appID, networkConflictCompose, nil); err == nil {
 		t.Fatalf("up with two networks on one subnet succeeded (detail: %s) — the fixture no longer fails before the service", detail)
 	} else {
 		t.Logf("up detail: %s", detail)
@@ -552,7 +552,7 @@ func TestComposeBackendLiveFailedUpLeavesAnOutdatedContainer(t *testing.T) {
 		t.Fatalf("status = %s %+v, want running with the surviving container outdated", status, services)
 	}
 
-	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := c.Deploy(ctx, appID, appID, runningCompose, nil); err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("re-apply: %v (status=%s detail=%s)", err, status, detail)
 	}
 	if _, services, err := c.Status(ctx, appID); err != nil || len(services) != 1 || services[0].Outdated {
@@ -655,7 +655,7 @@ func (a *liveVolumeApp) deploy(yaml string) {
 	a.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	if status, detail, err := a.c.Deploy(ctx, a.appID, a.appID, yaml); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := a.c.Deploy(ctx, a.appID, a.appID, yaml, nil); err != nil || status != proto.AppStatusRunning {
 		a.t.Fatalf("Deploy: %v (status=%s detail=%s)", err, status, detail)
 	}
 	a.observe()
@@ -939,7 +939,7 @@ func TestComposeBackendLiveVolumeGate(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	status, detail, err := c.Deploy(ctx, appID, appID, gateLiveV1)
+	status, detail, err := c.Deploy(ctx, appID, appID, gateLiveV1, nil)
 	owned.record()
 	if err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy v1: %v (status=%s detail=%s)", err, status, detail)
@@ -993,7 +993,7 @@ func TestComposeBackendLiveVolumeGate(t *testing.T) {
 	}
 
 	// The owner applies the rename, naming data for deletion.
-	status, detail, err = c.Deploy(ctx, appID, appID, gateLiveRenamed)
+	status, detail, err = c.Deploy(ctx, appID, appID, gateLiveRenamed, nil)
 	owned.record()
 	if err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy renamed: %v (status=%s detail=%s)", err, status, detail)

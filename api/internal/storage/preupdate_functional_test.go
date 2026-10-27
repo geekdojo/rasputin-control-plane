@@ -123,12 +123,20 @@ func TestPreUpdateCopy_AgainstTheRealStore(t *testing.T) {
 	}
 	resolve := func(app string) string {
 		t.Helper()
-		v, err := src.ResolveCompose(jobs.ContextWithJobID(ctx, "deploy-"+app), app, fnCompose)
+		// The values travel beside the compose since #776; what this test
+		// checks is which value the app resolved to, so that is returned.
+		v, env, err := src.ResolveCompose(jobs.ContextWithJobID(ctx, "deploy-"+app), app, fnCompose)
 		if err != nil {
 			t.Fatalf("resolve %s: %v", app, err)
 		}
 		defer v.Destroy()
-		return string(v.Reveal())
+		var out strings.Builder
+		for _, e := range env {
+			out.Write(e.Reveal())
+			out.WriteByte('\n')
+			e.Destroy()
+		}
+		return out.String()
 	}
 	valueX, valueY := derived(fnAppX), derived(fnAppY)
 

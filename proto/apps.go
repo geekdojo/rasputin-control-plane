@@ -2,6 +2,9 @@ package proto
 
 import (
 	"fmt"
+	"io"
+	"log/slog"
+	"sort"
 	"strings"
 	"time"
 )
@@ -109,6 +112,100 @@ type AppDeployCmd struct {
 	// the behaviour it expects rather than an instant timeout. Read it through
 	// AppDeployWorkFor, never directly.
 	WorkBudgetSeconds int `json:"workBudgetSeconds,omitempty"`
+
+	// SecretEnv carries the resolved value of every ${secret:<name>} token in
+	// the app's compose, keyed by SecretEnvName(name)
+	// (geekdojo/geekdojo-brain#776). ComposeYAML then holds the Compose
+	// interpolation reference ${RASPUTIN_SECRET_<NAME>} in each token's place,
+	// never the value, so the compose file the agent writes holds no
+	// credential. The agent hands the map to exactly two Compose calls as
+	// their process environment: the `config --hash` it records, and `up`.
+	//
+	// Sent only on AppDeploySecretsSubject. A compose with no token sends no
+	// map, and omitempty keeps that command byte-identical to the one an older
+	// api sent on AppDeploySubject.
+	SecretEnv AppSecretEnv `json:"secretEnv,omitempty"`
+}
+
+// LogValue renders the command for log/slog without its compose or its
+// secret values: the JSON handler would otherwise marshal SecretEnv, whose
+// JSON encoding is the wire and so carries the values.
+func (c AppDeployCmd) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("appId", c.AppID),
+		slog.String("name", c.Name),
+		slog.Int("workBudgetSeconds", c.WorkBudgetSeconds),
+		slog.Any("secretEnv", c.SecretEnv),
+	)
+}
+
+// SecretEnvPrefix opens every environment variable that carries an app
+// secret's value to Compose (geekdojo/geekdojo-brain#776).
+const SecretEnvPrefix = "RASPUTIN_SECRET_"
+
+// maxSecretEnvKeyLen bounds a SecretEnv key: the prefix and the longest
+// secret name, a 63-character DNS label.
+const maxSecretEnvKeyLen = len(SecretEnvPrefix) + 63
+
+// SecretEnvName is the environment variable that carries secret name's value:
+// the prefix, then the name upper-cased with each '-' as '_'. Secret names are
+// DNS labels ([a-z0-9-], tileschema.ValidSecretName), which hold no '_', so
+// the mapping is one-to-one.
+func SecretEnvName(secretName string) string {
+	return SecretEnvPrefix + strings.ToUpper(strings.ReplaceAll(secretName, "-", "_"))
+}
+
+// ValidSecretEnvKey reports whether k is a key SecretEnvName can produce:
+// SecretEnvPrefix, then one or more of [A-Z0-9_], no longer than
+// maxSecretEnvKeyLen. Anything else — PATH, DOCKER_HOST, LD_PRELOAD — would
+// change how the agent's docker CLI runs, so a command carrying one is refused.
+func ValidSecretEnvKey(k string) bool {
+	rest, ok := strings.CutPrefix(k, SecretEnvPrefix)
+	if !ok || rest == "" || len(k) > maxSecretEnvKeyLen {
+		return false
+	}
+	for i := 0; i < len(rest); i++ {
+		c := rest[i]
+		if (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// secretEnvRedacted is what every rendering of an AppSecretEnv prints.
+const secretEnvRedacted = "[redacted]"
+
+// AppSecretEnv is the typed map of secret values a deploy carries beside its
+// compose (AppDeployCmd.SecretEnv). It renders "[redacted]" through String,
+// every fmt verb and log/slog. It deliberately has no MarshalJSON: its JSON
+// encoding IS the wire to the agent, which needs the values.
+type AppSecretEnv map[string]string
+
+// String renders the redaction marker.
+func (e AppSecretEnv) String() string { return secretEnvRedacted }
+
+// Format renders the redaction marker for every verb, %#v included.
+func (e AppSecretEnv) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, secretEnvRedacted) }
+
+// LogValue renders the redaction marker in log/slog.
+func (e AppSecretEnv) LogValue() slog.Value { return slog.StringValue(secretEnvRedacted) }
+
+// Validate refuses a map holding any key ValidSecretEnvKey rejects. The error
+// names the keys, sorted, and never a value.
+func (e AppSecretEnv) Validate() error {
+	var bad []string
+	for k := range e {
+		if !ValidSecretEnvKey(k) {
+			bad = append(bad, fmt.Sprintf("%q", k))
+		}
+	}
+	if len(bad) == 0 {
+		return nil
+	}
+	sort.Strings(bad)
+	return fmt.Errorf("secret environment key(s) %s refused: each must be %s followed by [A-Z0-9_], at most %d characters",
+		strings.Join(bad, ", "), SecretEnvPrefix, maxSecretEnvKeyLen)
 }
 
 // AppDeployAck is the synchronous reply.
@@ -302,6 +399,20 @@ type AppChangeEvt struct {
 // AppDeploySubject is the cmd subject for deploying an app to nodeID.
 func AppDeploySubject(nodeID string) string {
 	return NodeCmdSubject(nodeID, "docker.deploy")
+}
+
+// AppDeploySecretsVerb is the verb a deploy whose compose carries
+// ${secret:} tokens goes out on, with AppDeployCmd.SecretEnv set
+// (geekdojo/geekdojo-brain#776). An agent that predates it has no
+// subscription, so it can never receive a compose holding references it
+// would not resolve; the api also refuses to send it below the verb's floor
+// (VerbMinAgentVersion).
+const AppDeploySecretsVerb = "docker.deploy_secrets"
+
+// AppDeploySecretsSubject is the cmd subject for deploying a secret-bearing
+// app to nodeID.
+func AppDeploySecretsSubject(nodeID string) string {
+	return NodeCmdSubject(nodeID, AppDeploySecretsVerb)
 }
 
 // AppStopSubject is the cmd subject for stopping an app on nodeID.

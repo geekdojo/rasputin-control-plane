@@ -219,7 +219,7 @@ func TestRegisterHandlers_StatusBadCmd(t *testing.T) {
 type errBackend struct{}
 
 func (errBackend) Name() string { return "err" }
-func (errBackend) Deploy(_ context.Context, _, _, _ string) (proto.AppStatus, string, error) {
+func (errBackend) Deploy(_ context.Context, _, _, _ string, _ proto.AppSecretEnv) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
 func (errBackend) Pull(_ context.Context, _, _ string) (string, error) {

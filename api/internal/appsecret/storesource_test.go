@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -220,8 +223,9 @@ func assertNoLeak(t *testing.T, rec *logkittest.Recorder, errs []error, needles 
 	}
 }
 
-// TC-762-01: a compose with no token comes back as the same bytes, with no
-// app lookup and no service call, however a re-renderer would normalise it.
+// TC-762-01, TC-776-09: a compose with no token comes back as the same bytes,
+// with no map, no app lookup and no service call, however a re-renderer would
+// normalise it.
 func TestStoreSource_TokenFreeComposeIsUntouched(t *testing.T) {
 	h := newHarness(t, testSeed(t), nil)
 	for name, compose := range map[string]string{
@@ -230,12 +234,12 @@ func TestStoreSource_TokenFreeComposeIsUntouched(t *testing.T) {
 		"crlf":            "services:\r\n  web:\r\n    image: nginx\r\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := h.src.ResolveCompose(jobCtx(), appID, compose)
+			got, env, err := h.src.ResolveCompose(jobCtx(), appID, compose)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Equal(got.Reveal(), []byte(compose)) {
-				t.Fatalf("got %q, want the input bytes", got.Reveal())
+			if !bytes.Equal(got.Reveal(), []byte(compose)) || len(env) != 0 {
+				t.Fatalf("got %q with %d entries, want the input bytes and no map", got.Reveal(), len(env))
 			}
 		})
 	}
@@ -249,18 +253,17 @@ func TestStoreSource_TokenFreeComposeIsUntouched(t *testing.T) {
 func TestStoreSource_StoredValueIsUsedAsStored(t *testing.T) {
 	ref := mustRef(t, appID, "db-password")
 	h := newHarness(t, testSeed(t), map[string]string{ref.String(): sentinelStored})
-	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	got, env, err := resolved(h.src.ResolveCompose(jobCtx(), appID, tokened))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(tokened, "${secret:db-password}", sentinelStored, 1)
-	if string(got.Reveal()) != want {
-		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	if want := strings.Replace(tokened, "${secret:db-password}", "${RASPUTIN_SECRET_DB_PASSWORD}", 1); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if env["RASPUTIN_SECRET_DB_PASSWORD"] != sentinelStored {
+		t.Fatal("the stored value is not the map's entry")
 	}
 	derived := derivedValue(t, h.seed, appID, "db-password")
-	if strings.Contains(string(got.Reveal()), derived) {
-		t.Fatal("the HKDF value was spliced instead of the stored one")
-	}
 	calls := h.svc.callLog()
 	if len(calls) != 1 || calls[0].op != "read" || calls[0].ref != ref || calls[0].actor != secrets.DeployActor(appID, node) {
 		t.Fatalf("calls %+v, want one read of %s as DeployActor(%s, %s)", calls, ref, appID, node)
@@ -268,11 +271,34 @@ func TestStoreSource_StoredValueIsUsedAsStored(t *testing.T) {
 	assertNoLeak(t, h.rec, nil, sentinelStored, derived)
 }
 
+// TC-776-08: the one substitution site, store path. A stored value used
+// twice is read once, the compose holds only references, the map has one
+// entry, and that entry is still readable after ResolveCompose returns (its
+// ownership moved to the caller; it was not destroyed).
+func TestStoreSource_ReferencesAndOneLiveEntryPerName(t *testing.T) {
+	ref := mustRef(t, appID, "db-password")
+	h := newHarness(t, testSeed(t), map[string]string{ref.String(): sentinelStored})
+	const twice = "services:\n  db:\n    environment:\n      PW: ${secret:db-password}\n      AGAIN: ${secret:db-password}\n"
+	got, env, err := h.src.ResolveCompose(jobCtx(), appID, twice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "services:\n  db:\n    environment:\n      PW: ${RASPUTIN_SECRET_DB_PASSWORD}\n      AGAIN: ${RASPUTIN_SECRET_DB_PASSWORD}\n"; string(got.Reveal()) != want {
+		t.Fatalf("compose %q, want %q", got.Reveal(), want)
+	}
+	if len(env) != 1 || string(env["RASPUTIN_SECRET_DB_PASSWORD"].Reveal()) != sentinelStored {
+		t.Fatalf("map has %d entries; want one holding the stored value after return", len(env))
+	}
+	if ops := h.svc.ops(); len(ops) != 1 || ops[0] != "read "+ref.String() {
+		t.Fatalf("calls %v, want one read for the one distinct name", ops)
+	}
+}
+
 // TC-762-03: an absent entry is derived at InitialVersion, created, read back
 // and used: read, create (with the value an independent Derive gives), read.
 func TestStoreSource_AbsentEntryIsDerivedCreatedAndReadBack(t *testing.T) {
 	h := newHarness(t, testSeed(t), nil)
-	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	_, env, err := resolved(h.src.ResolveCompose(jobCtx(), appID, tokened))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,8 +311,8 @@ func TestStoreSource_AbsentEntryIsDerivedCreatedAndReadBack(t *testing.T) {
 	if calls[1].value != derived {
 		t.Fatal("the value created is not Seed.Derive at InitialVersion")
 	}
-	if want := strings.Replace(tokened, "${secret:db-password}", derived, 1); string(got.Reveal()) != want {
-		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	if env["RASPUTIN_SECRET_DB_PASSWORD"] != derived {
+		t.Fatal("the map's entry is not the derived value")
 	}
 	assertNoLeak(t, h.rec, nil, derived)
 }
@@ -307,12 +333,12 @@ func TestStoreSource_CreateRaceWithTheSameValueDeploys(t *testing.T) {
 		}
 		return nil, nil, false
 	}
-	got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+	_, env, err := resolved(h.src.ResolveCompose(jobCtx(), appID, tokened))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := strings.Replace(tokened, "${secret:db-password}", derived, 1); string(got.Reveal()) != want {
-		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	if env["RASPUTIN_SECRET_DB_PASSWORD"] != derived {
+		t.Fatal("the map's entry is not the derived value")
 	}
 	if n := len(h.svc.callLog()); n != 3 {
 		t.Fatalf("%d calls, want 3", n)
@@ -345,7 +371,7 @@ func TestStoreSource_ReadBackMismatchRefuses(t *testing.T) {
 				}
 				return nil, nil, false
 			}
-			got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+			got, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
 			if got.Len() != 0 {
 				t.Fatal("a refusal returned a value")
 			}
@@ -399,7 +425,7 @@ func TestStoreSource_StoreFailuresRefuse(t *testing.T) {
 					}
 					return nil, nil, false
 				}
-				got, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
+				got, _, err := h.src.ResolveCompose(jobCtx(), appID, tokened)
 				if got.Len() != 0 {
 					t.Fatal("a refusal returned a value")
 				}
@@ -477,7 +503,7 @@ func TestStoreSource_RefusalSentenceAndTheGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = gate.ResolveCompose(jobCtx(), appID, tokened)
+	_, _, err = gate.ResolveCompose(jobCtx(), appID, tokened)
 	var nr *storestate.NotReadyError
 	if !errors.As(err, &nr) || nr.Code() != storestate.Code {
 		t.Fatalf("gate err = %v, want the not-ready refusal", err)
@@ -531,7 +557,7 @@ func TestStoreSource_OtherFailuresFailClosed(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(h)
 			}
-			got, err := h.src.ResolveCompose(jobCtx(), tc.appID, tokened)
+			got, _, err := h.src.ResolveCompose(jobCtx(), tc.appID, tokened)
 			if err == nil || got.Len() != 0 {
 				t.Fatalf("got %d bytes, %v; want the zero Value and an error", got.Len(), err)
 			}
@@ -561,10 +587,10 @@ func TestStoreSource_SeveralTokensRepeatsAndPartialFailure(t *testing.T) {
 		}
 		return nil, nil, false
 	}
-	got, err := h.src.ResolveCompose(jobCtx(), appID, compose)
+	got, gotEnv, err := h.src.ResolveCompose(jobCtx(), appID, compose)
 	var r *Refusal
-	if got.Len() != 0 || !errors.As(err, &r) || r.Code() != CodeStoreUnavailable {
-		t.Fatalf("got %d bytes, %v; want the zero Value and the unavailable refusal", got.Len(), err)
+	if got.Len() != 0 || gotEnv != nil || !errors.As(err, &r) || r.Code() != CodeStoreUnavailable {
+		t.Fatalf("got %d bytes, map %v, %v; want the zero Value, no map and the unavailable refusal", got.Len(), gotEnv != nil, err)
 	}
 	if strings.Join(h.svc.ops(), ",") != strings.Join([]string{"read " + refA.String(), "create " + refA.String(), "read " + refA.String(),
 		"read " + refB.String(), "create " + refB.String()}, ",") {
@@ -576,14 +602,14 @@ func TestStoreSource_SeveralTokensRepeatsAndPartialFailure(t *testing.T) {
 
 	failB = false
 	before := len(h.svc.callLog())
-	got, err = h.src.ResolveCompose(jobCtx(), appID, compose)
+	resolvedCompose, env, err := resolved(h.src.ResolveCompose(jobCtx(), appID, compose))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a, b := derivedValue(t, h.seed, appID, "a"), derivedValue(t, h.seed, appID, "b")
-	want := "services:\n  a:\n    environment:\n      A1: " + a + "\n      B: " + b + "\n      A2: " + a + "\n"
-	if string(got.Reveal()) != want {
-		t.Fatalf("got %q, want %q", got.Reveal(), want)
+	want := "services:\n  a:\n    environment:\n      A1: ${RASPUTIN_SECRET_A}\n      B: ${RASPUTIN_SECRET_B}\n      A2: ${RASPUTIN_SECRET_A}\n"
+	if resolvedCompose != want || len(env) != 2 || env["RASPUTIN_SECRET_A"] != a || env["RASPUTIN_SECRET_B"] != b {
+		t.Fatalf("got %q with %d entries, want %q and the two derived values", resolvedCompose, len(env), want)
 	}
 	retry := h.svc.ops()[before:]
 	if strings.Join(retry, ",") != strings.Join([]string{"read " + refA.String(), "read " + refB.String(), "create " + refB.String(), "read " + refB.String()}, ",") {
@@ -631,12 +657,12 @@ func TestStoreSource_CreatedValuesEqualTheFrozenVectors(t *testing.T) {
 			}
 			h := newHarness(t, seed, nil)
 			h.nodes.nodes[c.AppID] = node
-			got, err := h.src.ResolveCompose(jobCtx(), c.AppID, "x: ${secret:"+c.Name+"}\n")
+			_, env, err := resolved(h.src.ResolveCompose(jobCtx(), c.AppID, "x: ${secret:"+c.Name+"}\n"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(got.Reveal()) != "x: "+c.Want+"\n" {
-				t.Fatalf("spliced %q, want the vector %q", got.Reveal(), c.Want)
+			if len(env) != 1 || env[proto.SecretEnvName(c.Name)] != c.Want {
+				t.Fatalf("the map does not hold the vector %q", c.Want)
 			}
 			calls := h.svc.callLog()
 			if len(calls) != 3 || calls[1].op != "create" || calls[1].value != c.Want {
@@ -685,13 +711,17 @@ func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
 	}
 	var results [][]byte
 	for _, src := range []interface {
-		ResolveCompose(context.Context, string, string) (secret.Value, error)
+		ResolveCompose(context.Context, string, string) (secret.Value, map[string]secret.Value, error)
 	}{hkdf, store, store, hkdf} {
-		v, err := src.ResolveCompose(ctx, appID, compose)
+		v, env, err := resolved(src.ResolveCompose(ctx, appID, compose))
 		if err != nil {
 			t.Fatal(err)
 		}
-		results = append(results, bytes.Clone(v.Reveal()))
+		r := []byte(v)
+		for _, k := range slices.Sorted(maps.Keys(env)) {
+			r = append(r, "\x00"+k+"="+env[k]...)
+		}
+		results = append(results, r)
 	}
 	for i, r := range results[1:] {
 		if !bytes.Equal(r, results[0]) {

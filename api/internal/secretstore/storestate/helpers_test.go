@@ -124,11 +124,14 @@ type innerSource struct {
 	mu    sync.Mutex
 	calls int
 	value string
-	err   error
-	do    func(ctx context.Context) error
+	// env is the value map returned beside the compose (#776); nil returns
+	// none.
+	env map[string]secret.Value
+	err error
+	do  func(ctx context.Context) error
 }
 
-func (s *innerSource) ResolveCompose(ctx context.Context, _, _ string) (secret.Value, error) {
+func (s *innerSource) ResolveCompose(ctx context.Context, _, _ string) (secret.Value, map[string]secret.Value, error) {
 	s.mu.Lock()
 	s.calls++
 	s.mu.Unlock()
@@ -137,9 +140,9 @@ func (s *innerSource) ResolveCompose(ctx context.Context, _, _ string) (secret.V
 		err = s.do(ctx)
 	}
 	if err != nil {
-		return secret.Value{}, err
+		return secret.Value{}, nil, err
 	}
-	return secret.New([]byte(s.value)), nil
+	return secret.New([]byte(s.value)), s.env, nil
 }
 
 func (s *innerSource) count() int {

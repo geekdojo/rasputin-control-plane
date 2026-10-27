@@ -30,8 +30,11 @@ const functionalEnv = "RASPUTIN_APPSECRET_FUNCTIONAL"
 //     unescaped does not degrade, it breaks the deploy.
 //   - `$${secret:x}` parses, and Compose emits the literal — the value never
 //     resolves on a path that must not see it.
-//   - a resolved compose parses and the base64url-nopad value arrives intact
-//     and unquoted, which is why that encoding was chosen.
+//   - a resolved compose holds ${RASPUTIN_SECRET_<NAME>} references
+//     (geekdojo/geekdojo-brain#776): with the map as Compose's process
+//     environment the value arrives intact and unquoted in the service's
+//     environment, which is why base64url-nopad was chosen; without it, the
+//     value is nowhere in Compose's output (TC-776-31).
 //
 // Skips where Docker or the Compose plugin is absent, so it is free on a laptop
 // without them. RASPUTIN_APPSECRET_FUNCTIONAL=required turns those skips into
@@ -65,12 +68,12 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolved, err := str(Resolve(tile, "01K5R6P8Q9ZJ7V2XW4YB3D5EFG", seed, InitialVersion))
+	resolvedCompose, env, err := resolved(Resolve(tile, "01K5R6P8Q9ZJ7V2XW4YB3D5EFG", seed, InitialVersion))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	run := func(t *testing.T, body string, args ...string) (string, error) {
+	runEnv := func(t *testing.T, body string, env map[string]string, args ...string) (string, error) {
 		t.Helper()
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "docker-compose.yml"), []byte(body), 0o644); err != nil {
@@ -78,8 +81,16 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 		}
 		cmd := exec.Command("docker", append([]string{"compose"}, args...)...)
 		cmd.Dir = dir
+		cmd.Env = os.Environ()
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
 		out, err := cmd.CombinedOutput()
 		return string(out), err
+	}
+	run := func(t *testing.T, body string, args ...string) (string, error) {
+		t.Helper()
+		return runEnv(t, body, nil, args...)
 	}
 
 	// The volume gate's own call. A raw token must fail it — that is the bug.
@@ -101,14 +112,23 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 		t.Errorf("escaped compose must pass the volume gate's own call: %v\n%s", err, out)
 	}
 
-	// Resolved: parses, and the derived value arrives intact and unquoted.
-	out, err := run(t, resolved, "config")
+	// TC-776-31. Resolved: the compose holds the reference and no value. With
+	// the map as the process environment it parses and the derived value
+	// arrives intact and unquoted in the service's environment; without the
+	// map the value is nowhere in Compose's output.
+	if strings.Contains(resolvedCompose, want) || !strings.Contains(resolvedCompose, "${RASPUTIN_SECRET_SESSION_KEY}") {
+		t.Fatalf("the resolved compose must hold the reference and no value:\n%s", resolvedCompose)
+	}
+	out, err := runEnv(t, resolvedCompose, env, "config")
 	if err != nil {
-		t.Fatalf("resolved compose must parse: %v\n%s", err, out)
+		t.Fatalf("resolved compose must parse with its values: %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "SESSION_KEY: "+want) {
 		t.Errorf("the derived value must arrive intact and need no quoting (which is why the\n"+
 			"encoding is base64url-nopad). want %q in:\n%s", "SESSION_KEY: "+want, out)
+	}
+	if out, _ := run(t, resolvedCompose, "config"); strings.Contains(out, want) {
+		t.Errorf("without the map Compose must not see the value; got:\n%s", out)
 	}
 
 	// TC-762-26: a compose the store source resolved (geekdojo-brain#762),
@@ -134,11 +154,14 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromStore, err := str(src.ResolveCompose(context.Background(), appID, tile))
+	fromStore, storeEnv, err := resolved(src.ResolveCompose(context.Background(), appID, tile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err = run(t, fromStore, "config")
+	if strings.Contains(fromStore, stored) {
+		t.Fatalf("the store-resolved compose must hold no value:\n%s", fromStore)
+	}
+	out, err = runEnv(t, fromStore, storeEnv, "config")
 	if err != nil {
 		t.Fatalf("the store-resolved compose must parse: %v\n%s", err, out)
 	}

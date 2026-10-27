@@ -570,7 +570,7 @@ func TestStopAndSQLiteOnTheDockerMock(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "ha", "Home Assistant", "services: {}\n"); err != nil {
+	if _, _, err := mb.Deploy(ctx, "ha", "Home Assistant", "services: {}\n", nil); err != nil {
 		t.Fatal(err)
 	}
 	dir, err := mb.VolumeDir("ha", "homeassistant-config")
