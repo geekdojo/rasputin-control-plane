@@ -196,8 +196,27 @@ func newTestBackend(t *testing.T) (*OpenWrtABBackend, func() abState, *recording
 		t.Fatal(err)
 	}
 
+	// The slot just written, as OpenSlot sees it: a bundle with its own kernel.
+	slotRoot := filepath.Join(dir, "slot-root")
+	writeFile(t, filepath.Join(slotRoot, "boot", "vmlinuz"), []byte("KERNEL"))
+	writeFile(t, filepath.Join(slotRoot, "boot", "grub.cfg"), []byte("CFG"))
+	media := &fakeMedia{
+		espRoot: filepath.Join(dir, "esp"),
+		slotRoots: map[string]string{
+			filepath.Join(dir, "slot-A.dev"): slotRoot,
+			filepath.Join(dir, "slot-B.dev"): slotRoot,
+		},
+	}
+	if err := os.MkdirAll(filepath.Join(media.espRoot, "boot", "grub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	reboots := &recordingRebooter{}
 	b := &OpenWrtABBackend{
+		media:       media,
+		mods:        &fakeMods{},
+		fs:          fakeFS{list: procFilesystemsWithVFAT},
+		logger:      discardLogger(),
 		stateDir:    stateDir,
 		grubenvPath: grubenvPath,
 		procCmdline: cmdlinePath,
