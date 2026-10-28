@@ -1,13 +1,21 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
+	"github.com/geekdojo/rasputin-control-plane/logkit"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // The agent is a daemon that both shipping units start with no arguments
@@ -46,6 +54,10 @@ func dispatchCLI(args []string, stdout, stderr io.Writer) (exitCode int, handled
 		return runVerifyArtifact(args[1:], stdout, stderr), true
 	case "seed":
 		return runSeed(args[1:], stdout, stderr), true
+	case "install-rootfs":
+		return runInstallRootfs(args[1:], stdout, stderr, logkit.New(stderr, logkit.RedactSecrets()), newRootfsInstaller), true
+	case "repair-slot-boot":
+		return runRepairSlotBoot(args[1:], stdout, stderr, logkit.New(stderr, logkit.RedactSecrets()), newSlotRepairer), true
 	default:
 		fmt.Fprintf(stderr, "rasputin-agent: unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -62,6 +74,8 @@ func dispatchCLI(args []string, stdout, stderr io.Writer) (exitCode int, handled
 func printShortUsage(w io.Writer) {
 	fmt.Fprint(w, `usage: rasputin-agent verify-artifact <artifact> [--sig <path>] [--trust-root <path>]
        rasputin-agent seed check <path> [--role <role>]
+       rasputin-agent install-rootfs [--state-dir <dir>] <bundle-id>
+       rasputin-agent repair-slot-boot
        rasputin-agent help
 `)
 }
@@ -84,6 +98,16 @@ Commands:
         source instead of sourcing the operator's file directly. Nothing is
         printed unless the seed is usable. Exits 1 on an unusable seed,
         naming the field and what to do about it.
+  install-rootfs [--state-dir <dir>] <bundle-id>
+        Firewall only. Verify and install <dir>/bundles/<bundle-id>.rootfs
+        into the inactive slot, with its kernel and grub.cfg, and arm a trial
+        boot of it. Does not reboot. --state-dir defaults to the agent's
+        updater state directory. Exits 1 if the install fails.
+  repair-slot-boot
+        Firewall only, run by the kernel-match guard at boot. Copy the running
+        slot's own kernel and grub.cfg onto the ESP and re-arm its trial, or
+        mark the slot bad if that cannot be done. Does not reboot. Exits 0
+        when the caller should reboot, 3 when the ESP cannot be mounted.
   version
         Print the agent version and exit.
   help
@@ -188,5 +212,146 @@ func runVerifyArtifact(args []string, stdout, stderr io.Writer) int {
 func exitCLI() {
 	if code, handled := dispatchCLI(os.Args[1:], os.Stdout, os.Stderr); handled {
 		os.Exit(code)
+	}
+}
+
+// ---- firewall per-slot kernel verbs (geekdojo/geekdojo-brain#888) ----------
+
+// rootfsInstaller is the backend as install-rootfs uses it.
+type rootfsInstaller interface {
+	Precheck(ctx context.Context) (*proto.UpdatePrecheckAck, error)
+	ArtifactPath(bundleID string) (string, error)
+	Install(ctx context.Context, bundleID, localPath string, slot proto.UpdateSlot, progress func(string, int)) (string, error)
+}
+
+// slotRepairer is the backend as repair-slot-boot uses it.
+type slotRepairer interface {
+	RepairRunningSlot() (updater.RepairOutcome, error)
+}
+
+// errNoDownload is the trust source of a verb that never downloads: a backend
+// that tried would be refused rather than handed a default TLS config.
+func errNoDownload() (*tls.Config, error) {
+	return nil, errors.New("this command does not download, so it has no download trust")
+}
+
+// newRootfsInstaller is install-rootfs's composition root.
+func newRootfsInstaller(stateDir string, logger *slog.Logger) (rootfsInstaller, error) {
+	media, err := updater.NewOpenWrtBootMedia(logger)
+	if err != nil {
+		return nil, err
+	}
+	return updater.NewOpenWrtABBackend(stateDir, errNoDownload, media, updater.UnixModuleLoader{},
+		updater.ProcFilesystems{}, logger)
+}
+
+// newSlotRepairer is repair-slot-boot's composition root. It takes no state
+// directory: the repair runs on a boot whose /overlay may be RAM-only or
+// read-only, and needs no bundle store (F-888-07).
+func newSlotRepairer(logger *slog.Logger) (slotRepairer, error) {
+	media, err := updater.NewOpenWrtBootMedia(logger)
+	if err != nil {
+		return nil, err
+	}
+	return updater.NewOpenWrtSlotRepairer(media, updater.UnixModuleLoader{}, updater.ProcFilesystems{}, logger)
+}
+
+// runInstallRootfs installs a bundle already in the bundle store into the
+// inactive slot, exactly as the OTA's install step does, without the bus and
+// without a reboot. It is the seam the firewall's update smoke test drives.
+func runInstallRootfs(args []string, stdout, stderr io.Writer, logger *slog.Logger,
+	build func(stateDir string, logger *slog.Logger) (rootfsInstaller, error)) int {
+	fs := flag.NewFlagSet("install-rootfs", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	stateDir := fs.String("state-dir", "", "updater state directory (default: the agent's)")
+	fs.Usage = func() { printShortUsage(stderr) }
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintln(stderr, "Name exactly one bundle id: the file name, without .rootfs, of an artifact in the bundle store.")
+		printShortUsage(stderr)
+		return 2
+	}
+	bundleID := fs.Arg(0)
+	if *stateDir == "" {
+		*stateDir = updaterStateDir(agentStateDir(envOr("RASPUTIN_NODE_ID", "node-dev")))
+	}
+
+	b, err := build(*stateDir, logger)
+	if err != nil {
+		fmt.Fprintf(stderr, "Could not set up the installer: %v.\n", err)
+		return 1
+	}
+	artifact, err := b.ArtifactPath(bundleID)
+	if err != nil {
+		fmt.Fprintf(stderr, "The bundle id %q cannot name an artifact: %v.\n", bundleID, err)
+		return 1
+	}
+	for _, f := range []struct{ path, what string }{
+		{artifact, "artifact"},
+		{artifactsig.SigPathFor(artifact), "signature"},
+	} {
+		if _, err := os.Stat(f.path); err != nil {
+			fmt.Fprintf(stderr, "The %s %s cannot be read: %v.\n", f.what, f.path, err)
+			return 1
+		}
+	}
+	ctx := context.Background()
+	ack, err := b.Precheck(ctx)
+	if err == nil && !ack.OK {
+		err = errors.New(ack.Detail)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "Could not find the inactive slot: %v.\n", err)
+		return 1
+	}
+	version, err := b.Install(ctx, bundleID, "", ack.InactiveSlot, nil)
+	slot := strings.ToUpper(string(ack.InactiveSlot))
+	if err != nil {
+		fmt.Fprintf(stderr, "The install into slot %s failed: %v.\n", slot, err)
+		return 1
+	}
+	if version == "" {
+		version = "unknown"
+	}
+	fmt.Fprintf(stdout, "Installed %s (version %s) into slot %s. It boots on the next reboot; this command does not reboot.\n",
+		bundleID, version, slot)
+	return 0
+}
+
+// exitESPUnavailable tells the kernel-match guard the repair changed nothing
+// because the ESP could not be mounted, so only the boot counter can roll the
+// slot back.
+const exitESPUnavailable = 3
+
+// runRepairSlotBoot repairs the running slot's boot files. It never reboots:
+// the guard that calls it does, on exit 0.
+func runRepairSlotBoot(args []string, stdout, stderr io.Writer, logger *slog.Logger,
+	build func(logger *slog.Logger) (slotRepairer, error)) int {
+	if len(args) != 0 {
+		fmt.Fprintln(stderr, "The repair-slot-boot command takes no arguments.")
+		printShortUsage(stderr)
+		return 2
+	}
+	r, err := build(logger)
+	if err != nil {
+		fmt.Fprintf(stderr, "Could not set up the slot repair: %v.\n", err)
+		return 1
+	}
+	outcome, err := r.RepairRunningSlot()
+	switch {
+	case outcome == updater.RepairRepaired:
+		fmt.Fprintln(stdout, "Repaired the running slot's kernel and grub.cfg. Reboot to run them.")
+		return 0
+	case outcome == updater.RepairFallback:
+		fmt.Fprintln(stdout, "Marked the running slot bad. Reboot to fall back to the other slot.")
+		return 0
+	case errors.Is(err, updater.ErrESPUnavailable):
+		fmt.Fprintf(stderr, "The ESP could not be mounted, so nothing was changed: %v.\n", err)
+		return exitESPUnavailable
+	default:
+		fmt.Fprintf(stderr, "The slot repair did not run: %v.\n", err)
+		return 1
 	}
 }

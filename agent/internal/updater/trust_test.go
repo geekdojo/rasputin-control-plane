@@ -43,7 +43,7 @@ func TestDownload_RefusesATrustConfigWithNoRoots(t *testing.T) {
 		t.Run("openwrt-ab: "+src.name, func(t *testing.T) {
 			bundleURL, sigURL, hits := tlsArtifactServer(t, ca, body, []byte("sig"))
 			stateDir := t.TempDir()
-			b, err := NewOpenWrtABBackend(stateDir, src.trust)
+			b, err := newTestAB(stateDir, src.trust)
 			if err != nil {
 				t.Fatal(err)
 			}

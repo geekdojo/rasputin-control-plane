@@ -41,7 +41,7 @@ func TestOpenWrtDownload_MultiChunkBodyIsWrittenWhole(t *testing.T) {
 	wantSHA := hex.EncodeToString(sum[:])
 	as := newArtifactServer(t, body, []byte("detached-cms-bytes"))
 
-	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
+	b, err := newTestAB(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestOpenWrtDownload_RejectsShaMismatch(t *testing.T) {
 	body := []byte("SQUASHFS-BYTES")
 	as := newArtifactServer(t, body, []byte("detached-cms-bytes"))
 
-	b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
+	b, err := newTestAB(t.TempDir(), trustNoTLS)
 	if err != nil {
 		t.Fatal(err)
 	}

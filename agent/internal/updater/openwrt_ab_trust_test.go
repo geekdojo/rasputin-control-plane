@@ -50,7 +50,7 @@ func TestOpenWrtDownload_SigAndArtifactThroughOneTrustedClient(t *testing.T) {
 	t.Run("(a) trusting the server: both fetched, one trust call", func(t *testing.T) {
 		bundleURL, sigURL, hits := tlsArtifactServer(t, serverCA, body, sig)
 		trust, calls := countCalls(trusting(t, serverCA))
-		b, err := NewOpenWrtABBackend(t.TempDir(), trust)
+		b, err := newTestAB(t.TempDir(), trust)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -72,7 +72,7 @@ func TestOpenWrtDownload_SigAndArtifactThroughOneTrustedClient(t *testing.T) {
 	t.Run("(b) trusting an unrelated CA: refused at the signature fetch", func(t *testing.T) {
 		bundleURL, sigURL, _ := tlsArtifactServer(t, serverCA, body, sig)
 		stateDir := t.TempDir()
-		b, err := NewOpenWrtABBackend(stateDir, trusting(t, tlstest.NewCA(t, "unrelated")))
+		b, err := newTestAB(stateDir, trusting(t, tlstest.NewCA(t, "unrelated")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,7 +90,7 @@ func TestOpenWrtDownload_SigAndArtifactThroughOneTrustedClient(t *testing.T) {
 		bundleURL, sigURL, hits := tlsArtifactServer(t, serverCA, body, sig)
 		errTrust := errors.New("controlplane CA bundle /etc/rasputin/mesh/tailscaled-ca.pem: no such file")
 		stateDir := t.TempDir()
-		b, err := NewOpenWrtABBackend(stateDir, func() (*tls.Config, error) { return nil, errTrust })
+		b, err := newTestAB(stateDir, func() (*tls.Config, error) { return nil, errTrust })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -110,7 +110,7 @@ func TestOpenWrtDownload_SigAndArtifactThroughOneTrustedClient(t *testing.T) {
 
 // TC-590-11 (openwrt-ab): a backend with no trust source cannot be built.
 func TestNewOpenWrtABBackend_RefusesANilTrustSource(t *testing.T) {
-	b, err := NewOpenWrtABBackend(t.TempDir(), nil)
+	b, err := newTestAB(t.TempDir(), nil)
 	if b != nil || err == nil {
 		t.Errorf("NewOpenWrtABBackend(nil trust) = (%v, %v), want (nil, error)", b, err)
 	}

@@ -74,7 +74,7 @@ func TestBackends_RefuseAnEmptyExpectedSHABeforeDownloading(t *testing.T) {
 
 	t.Run("openwrt-ab", func(t *testing.T) {
 		srv, hits := newServer(t)
-		b, err := NewOpenWrtABBackend(t.TempDir(), trustNoTLS)
+		b, err := newTestAB(t.TempDir(), trustNoTLS)
 		if err != nil {
 			t.Fatal(err)
 		}

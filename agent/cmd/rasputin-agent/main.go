@@ -720,7 +720,12 @@ func main() {
 			rb.SetRebooter(rebooter)
 			upBackend = rb
 		case "openwrt-ab":
-			ab, err := updater.NewOpenWrtABBackend(updaterDir, trustStore.ClientTLSConfig)
+			media, err := updater.NewOpenWrtBootMedia(logger)
+			if err != nil {
+				log.Fatalf("rasputin-agent: openwrt-ab boot media: %v", err)
+			}
+			ab, err := updater.NewOpenWrtABBackend(updaterDir, trustStore.ClientTLSConfig, media,
+				updater.UnixModuleLoader{}, updater.ProcFilesystems{}, logger)
 			if err != nil {
 				log.Fatalf("rasputin-agent: openwrt-ab backend: %v", err)
 			}

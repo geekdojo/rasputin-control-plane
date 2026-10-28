@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,10 +24,12 @@ import (
 
 // OpenWrtABBackend drives A/B OS updates on the firewall (OpenWrt) node WITHOUT
 // RAUC. It reproduces the compute (n100) image's update contract — a GRUB
-// boot-counter in grubenv, two squashfs rootfs slots, a shared kernel on the
-// ESP, and a persistent overlay that survives a slot switch — but does the
-// slot write and the bootloader-env flip itself, because RAUC isn't packaged
-// for OpenWrt.
+// boot-counter in grubenv, two squashfs rootfs slots, and a persistent overlay
+// that survives a slot switch — but does the slot write and the bootloader-env
+// flip itself, because RAUC isn't packaged for OpenWrt. Each slot boots its
+// own kernel from the ESP (boot/vmlinuz-A, boot/vmlinuz-B), copied out of the
+// slot's own bundle at install; until geekdojo/geekdojo-brain#888 the ESP held
+// one shared kernel, which a kernel-changing update left behind.
 //
 // Why a separate backend instead of reusing RAUCBackend: the two differ only in
 // the mechanism (rauc CLI vs. dd + a grubenv codec); the saga, the NATS
@@ -38,8 +41,10 @@ import (
 // The install artifact is the raw rootfs squashfs (the same image genimage
 // embeds in a compute slot), NOT the legacy full-disk combined-efi .img.gz —
 // flashing a whole disk would clobber the other slot, the ESP, and config. The
-// update path is: verify → dd the squashfs into the inactive rootfs partition →
-// flip grubenv (ORDER + <slot>_OK/_TRY) → reboot → health-gated mark-good.
+// update path is: verify → mark the target slot not bootable → dd the squashfs
+// into the inactive rootfs partition → copy its kernel and grub.cfg to the ESP
+// (slotboot.go) → flip grubenv (ORDER + <slot>_OK/_TRY) → reboot →
+// health-gated mark-good.
 //
 // OS-coupled operations (partition resolution, the raw block write, reboot,
 // signature verification) are injectable fields so the pure logic — slot math
@@ -76,31 +81,76 @@ type OpenWrtABBackend struct {
 	// baked publisher trust root before install, and fails the install if it
 	// cannot. Overridden in tests, which have no baked trust root.
 	verifySig func(ctx context.Context, rootfsPath string) error
+
+	// --- collaborators (constructor-injected) ---------------------------
+	// media mounts the ESP and the slot just written.
+	media BootMedia
+	// mods and fs make vfat available to a mismatched kernel (slotboot.go).
+	mods ModuleLoader
+	fs   FilesystemLister
+	// logger is the agent's structured logger.
+	logger *slog.Logger
+	// procOSRelease and procKernelVersion are `uname -r` and `uname -v`.
+	procOSRelease     string
+	procKernelVersion string
 }
 
 // NewOpenWrtABBackend constructs the backend with production defaults. It does
 // not probe the environment — the agent selects it by role (firewall) + the
-// absence of rauc; see autodetectUpdaterBackend / main.go.
-func NewOpenWrtABBackend(stateDir string, trust TrustSource) (*OpenWrtABBackend, error) {
+// absence of rauc; see autodetectUpdaterBackend / main.go. Every collaborator
+// is required.
+func NewOpenWrtABBackend(stateDir string, trust TrustSource, media BootMedia, mods ModuleLoader,
+	fsl FilesystemLister, logger *slog.Logger) (*OpenWrtABBackend, error) {
 	if trust == nil {
 		return nil, fmt.Errorf("openwrt-ab backend: %w", errNoTrustSource)
+	}
+	b, err := newOpenWrtAB(media, mods, fsl, logger)
+	if err != nil {
+		return nil, err
 	}
 	if err := atrest.EnsureSecretDir(filepath.Join(stateDir, "bundles")); err != nil {
 		return nil, err
 	}
-	b := &OpenWrtABBackend{
-		stateDir: stateDir,
+	b.stateDir = stateDir
+	b.trust = trust
+	return b, nil
+}
+
+// newOpenWrtAB builds the parts of the backend that need no bundle store, which
+// is all the slot repair needs (NewOpenWrtSlotRepairer).
+func newOpenWrtAB(media BootMedia, mods ModuleLoader, fsl FilesystemLister, logger *slog.Logger) (*OpenWrtABBackend, error) {
+	switch {
+	case media == nil:
+		return nil, errors.New("openwrt-ab backend: no boot media wired")
+	case mods == nil:
+		return nil, errors.New("openwrt-ab backend: no module loader wired")
+	case fsl == nil:
+		return nil, errors.New("openwrt-ab backend: no filesystem lister wired")
+	case logger == nil:
+		return nil, errors.New("openwrt-ab backend: no logger wired")
+	}
+	return &OpenWrtABBackend{
 		// grubenvPath empty → mount the ESP on demand (see withGrubenv). The
 		// firewall doesn't mount the ESP at runtime, so there's no fixed path.
-		grubenvPath: "",
-		procCmdline: "/proc/cmdline",
-		versionFile: "/etc/rasputin/image-version",
-		trust:       trust,
-	}
-	b.resolveDevice = defaultResolveDevice
-	b.writeSlot = defaultWriteSlot
-	b.verifySig = defaultVerifySig
-	return b, nil
+		grubenvPath:       "",
+		procCmdline:       "/proc/cmdline",
+		versionFile:       "/etc/rasputin/image-version",
+		procOSRelease:     "/proc/sys/kernel/osrelease",
+		procKernelVersion: "/proc/sys/kernel/version",
+		resolveDevice:     defaultResolveDevice,
+		writeSlot:         defaultWriteSlot,
+		verifySig:         defaultVerifySig,
+		media:             media,
+		mods:              mods,
+		fs:                fsl,
+		logger:            logger,
+	}, nil
+}
+
+// ArtifactPath is where Install looks for bundleID's artifact when it is given
+// no local path. Its detached signature sits beside it.
+func (o *OpenWrtABBackend) ArtifactPath(bundleID string) (string, error) {
+	return resolveBundlePath(o.stateDir, bundleID, "", ".rootfs")
 }
 
 // SetRebooter wires the agent's one reboot function.
@@ -402,11 +452,20 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 	if err != nil {
 		return "", fmt.Errorf("openwrt-ab install: resolve slot %s: %w", letter, err)
 	}
+	// The target stops being bootable BEFORE anything of it is overwritten: a
+	// failure from here on leaves a half-written slot, or a slot whose ESP
+	// kernel is not its own, and GRUB must never pick it.
+	if err := o.deactivateSlot(letter); err != nil {
+		return "", fmt.Errorf("openwrt-ab install: deactivate slot %s: %w", letter, err)
+	}
 	if progressFn != nil {
 		progressFn("write", 10)
 	}
 	if err := o.writeSlot(ctx, localPath, dev, progressFn); err != nil {
 		return "", fmt.Errorf("openwrt-ab install: write slot %s (%s): %w", letter, dev, err)
+	}
+	if err := o.installBootFromSlot(dev, letter); err != nil {
+		return "", fmt.Errorf("openwrt-ab install: %w", err)
 	}
 
 	// Flip the boot-counter: make the target slot the first ORDER entry, good
@@ -468,6 +527,35 @@ func (o *OpenWrtABBackend) installedVersion(localPath string) string {
 		}
 	}
 	return ""
+}
+
+// installBootFromSlot mounts the slot just written read-only and copies its
+// kernel and grub.cfg onto the ESP. The unmount's error is returned too.
+func (o *OpenWrtABBackend) installBootFromSlot(dev, letter string) error {
+	root, release, err := o.media.OpenSlot(dev)
+	if err != nil {
+		return fmt.Errorf("open slot %s (%s): %w", letter, dev, err)
+	}
+	bootErr := o.installSlotBoot(root, letter)
+	if err := release(); err != nil {
+		bootErr = errors.Join(bootErr, fmt.Errorf("release slot %s (%s): %w", letter, dev, err))
+	}
+	return bootErr
+}
+
+// deactivateSlot sets the target slot OK=0 TRY=0, in place, leaving ORDER and
+// the other slot alone.
+func (o *OpenWrtABBackend) deactivateSlot(letter string) error {
+	return o.withGrubenv(func(path string) error {
+		kv, err := readGrubenv(path)
+		if err != nil {
+			return err
+		}
+		st := decodeAB(kv)
+		st.ok[letter] = false
+		st.try[letter] = false
+		return writeGrubenv(path, encodeAB(kv, st))
+	})
 }
 
 // activateSlot sets ORDER=[target, other] with target OK+untried, in place.
@@ -543,7 +631,10 @@ func (o *OpenWrtABBackend) MarkBad(ctx context.Context, bundleID, reason string)
 }
 
 // markRunning sets the currently-booted slot's OK flag to `good` and clears its
-// TRY flag, in place. Determines the running slot from /proc/cmdline.
+// TRY flag, in place. Determines the running slot from /proc/cmdline. Marking
+// it good also drops its <slot>_REPAIR flag: the slot has booted its own kernel
+// to a healthy agent, so a later mismatch is a new problem, not a failed
+// repair (slotboot.go).
 func (o *OpenWrtABBackend) markRunning(good bool) error {
 	cmdline, err := os.ReadFile(o.procCmdline)
 	if err != nil {
@@ -561,6 +652,9 @@ func (o *OpenWrtABBackend) markRunning(good bool) error {
 		st := decodeAB(kv)
 		st.ok[running] = good
 		st.try[running] = false
+		if good {
+			delete(kv, running+"_REPAIR")
+		}
 		return writeGrubenv(path, encodeAB(kv, st))
 	})
 }
@@ -568,33 +662,16 @@ func (o *OpenWrtABBackend) markRunning(good bool) error {
 // withGrubenv runs fn with a readable+writable path to the GRUB env block. When
 // grubenvPath is set (tests, or an image that pre-mounts the ESP) it's used
 // directly. Otherwise — the production firewall — the ESP isn't mounted at
-// runtime, so we resolve it (`block info`, see espDevice), mount it rw on a
-// temp dir, run fn against <mnt>/boot/grub/grubenv, then sync + unmount promptly
-// to keep the FAT-dirty window small. writeGrubenv still overwrites in place, so
-// GRUB's save_env block-list stays valid across the remount.
+// runtime, so it is mounted for fn (BootMedia.WithESP) and fn runs against
+// <esp>/boot/grub/grubenv. writeGrubenv still overwrites in place, so GRUB's
+// save_env block-list stays valid across the remount.
 func (o *OpenWrtABBackend) withGrubenv(fn func(path string) error) error {
 	if o.grubenvPath != "" {
 		return fn(o.grubenvPath)
 	}
-	dev, err := espDevice()
-	if err != nil {
-		return fmt.Errorf("resolve ESP: %w", err)
-	}
-	mnt, err := os.MkdirTemp("", "rasputin-esp-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(mnt)
-	if out, err := exec.Command("mount", "-t", "vfat", "-o", "rw,noatime", dev, mnt).CombinedOutput(); err != nil {
-		return fmt.Errorf("mount ESP %s: %w: %s", dev, err, out)
-	}
-	defer func() {
-		_ = exec.Command("sync").Run()
-		if out, err := exec.Command("umount", mnt).CombinedOutput(); err != nil {
-			log.Printf("rasputin-agent: openwrt-ab: umount ESP %s: %v: %s", mnt, err, out)
-		}
-	}()
-	return fn(filepath.Join(mnt, "boot", "grub", "grubenv"))
+	return o.media.WithESP(func(root string) error {
+		return fn(filepath.Join(root, "boot", "grub", "grubenv"))
+	})
 }
 
 // ---- default OS-coupled implementations -------------------------------------
@@ -626,20 +703,6 @@ func defaultResolveDevice(slot string) (string, error) {
 		return active, nil
 	}
 	return inactive, nil
-}
-
-// espDevice resolves the ESP block device via `block info`. No udev / by-label
-// symlinks needed. See parseESPDevice for the RASPUTINEFI / legacy RASPUTIN-FW
-// label handling.
-func espDevice() (string, error) {
-	info, err := blockInfo()
-	if err != nil {
-		return "", err
-	}
-	if dev := parseESPDevice(info); dev != "" {
-		return dev, nil
-	}
-	return "", errors.New("ESP (vfat LABEL=RASPUTINEFI, or legacy RASPUTIN-FW) not found in `block info`")
 }
 
 // blockInfo runs OpenWrt's `block info` and returns its raw output.
