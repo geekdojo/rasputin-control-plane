@@ -13,22 +13,21 @@ import (
 	"strings"
 )
 
-// slotboot.go — per-slot kernels on the firewall ESP (geekdojo/geekdojo-brain#888).
+// slotboot.go — the firewall's one-time bootloader repair
+// (geekdojo/geekdojo-brain#888, reworked by geekdojo/geekdojo-brain#893).
 //
-// Each rootfs bundle carries its own kernel and grub.cfg under /boot. Before a
-// slot is activated, Install copies that kernel to the ESP as boot/vmlinuz-<S>
-// and the grub.cfg to boot/grub/grub.cfg, so the slot boots the kernel its
-// modules were built for and the fallback slot keeps booting its own.
+// GRUB boots each slot's kernel straight from that slot's own squashfs, and
+// falls back to the ESP's shared boot/vmlinuz for a rootfs that ships none. No
+// agent writes a kernel to the ESP: Install changes only grubenv.
 //
-// A box that took the bundle through an older agent boots the new rootfs on the
-// old shared kernel. The rootfs's kernel-match guard then calls
-// `rasputin-agent repair-slot-boot`, which is RepairRunningSlot: it does the
-// same copy from inside that mismatched boot and re-arms the slot's trial.
+// A box on the 2026.10.3 layout has a GRUB EFI that cannot read squashfs, so
+// after an update it boots the new rootfs on the old shared kernel. The
+// rootfs's kernel-match guard then calls `rasputin-agent repair-slot-boot`,
+// which is RepairRunningSlot: it copies the running rootfs's bootx64.efi and
+// grub.cfg onto the ESP and re-arms the slot's trial. That happens once per box.
 
 // BootMedia is the firewall's boot storage, as the backend uses it.
 type BootMedia interface {
-	// OpenSlot mounts the rootfs squashfs on dev read-only. release unmounts it.
-	OpenSlot(dev string) (root string, release func() error, err error)
 	// WithESP mounts the ESP read-write, runs fn on its root and unmounts it.
 	// A failed unmount is returned, joined with fn's error.
 	WithESP(fn func(root string) error) error
@@ -45,25 +44,18 @@ type FilesystemLister interface {
 }
 
 const (
-	// Inside the bundle (relative to a slot root).
-	bundleKernel  = "boot/vmlinuz"
-	bundleGrubCfg = "boot/grub.cfg"
-	legacyKmods   = "boot/legacy-kmods"
+	// Inside the running rootfs (relative to its root).
+	srcEFI      = "boot/bootx64.efi"
+	srcGrubCfg  = "boot/grub.cfg"
+	legacyKmods = "boot/legacy-kmods"
 	// On the ESP.
+	espEFI     = "EFI/BOOT/bootx64.efi"
 	espGrubCfg = "boot/grub/grub.cfg"
 )
 
 // legacyModuleOrder is the load order of the bundled 6.12.94 FAT modules: vfat
 // needs fat, and the nls tables are needed by the mount's codepage/iocharset.
 var legacyModuleOrder = []string{"fat", "vfat", "nls_cp437", "nls_iso8859-1", "nls_utf8"}
-
-func espKernel(slot string) string { return "boot/vmlinuz-" + slot }
-
-// errPreFixArtifact refuses a bundle built before per-slot kernels. Installing
-// it would leave the slot booting another release's kernel, which is the
-// #888 outage itself.
-var errPreFixArtifact = errors.New("the artifact predates per-slot kernels (geekdojo/geekdojo-brain#888) " +
-	"and would boot on another release's kernel")
 
 // ErrESPUnavailable means the repair could not mount the ESP at all, so it
 // changed nothing and could not mark the slot bad either.
@@ -75,8 +67,8 @@ type RepairOutcome int
 const (
 	// RepairNone: nothing was written (see the returned error).
 	RepairNone RepairOutcome = iota
-	// RepairRepaired: the slot's kernel and grub.cfg are on the ESP and its
-	// trial is re-armed. Reboot.
+	// RepairRepaired: the running rootfs's bootx64.efi and grub.cfg are on the
+	// ESP and the slot's trial is re-armed. Reboot.
 	RepairRepaired
 	// RepairFallback: the slot is marked bad (OK=0). Reboot to fall back.
 	RepairFallback
@@ -97,69 +89,62 @@ type bootFile struct {
 	data []byte
 }
 
-// installSlotBoot copies srcRoot's kernel and grub.cfg onto the ESP for slot.
+// installBootloader copies srcRoot's /boot/bootx64.efi and /boot/grub.cfg
+// onto the ESP, each only when its bytes differ from the ESP's copy.
 //
-// The kernel is written as <name>.new and fsynced, the ESP is unmounted (which
-// drops its page cache) and mounted again, and the file is read back. Only a
-// read-back whose sha256 matches is renamed into place. grub.cfg goes the same
-// way, and only when its bytes differ, so an unchanged one keeps its inode.
-func (o *OpenWrtABBackend) installSlotBoot(srcRoot, slot string) error {
-	kernel, err := readBundleFile(srcRoot, bundleKernel)
-	if err != nil {
-		return err
+// A changed file is written as <name>.new and fsynced, the ESP is unmounted
+// (which drops its page cache) and mounted again, and every staged file is read
+// back. Only when all read back intact are they renamed into place. An
+// unchanged file keeps its inode, and when nothing differs the ESP is mounted
+// once and nothing on it is written. slot is for the log records only.
+func (o *OpenWrtABBackend) installBootloader(srcRoot, slot string) error {
+	var want []bootFile
+	for _, f := range []struct{ src, dst string }{{srcEFI, espEFI}, {srcGrubCfg, espGrubCfg}} {
+		b, err := os.ReadFile(filepath.Join(srcRoot, f.src))
+		if err != nil {
+			return fmt.Errorf("read /%s from the running rootfs: %w", f.src, err)
+		}
+		want = append(want, bootFile{name: f.dst, data: b})
 	}
-	cfg, err := readBundleFile(srcRoot, bundleGrubCfg)
-	if err != nil {
-		return err
-	}
-	files := []bootFile{{name: espKernel(slot), data: kernel}}
 
-	cfgChanged := false
+	var changed []bootFile
 	if err := o.media.WithESP(func(root string) error {
-		cur, err := os.ReadFile(filepath.Join(root, espGrubCfg))
-		if err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("read %s: %w", espGrubCfg, err)
-		}
-		cfgChanged = err != nil || !bytes.Equal(cur, cfg)
-		if cfgChanged {
-			files = append(files, bootFile{name: espGrubCfg, data: cfg})
-		}
-		for _, f := range files {
+		for _, f := range want {
+			cur, err := os.ReadFile(filepath.Join(root, f.name))
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("read %s: %w", f.name, err)
+			}
+			if err == nil && bytes.Equal(cur, f.data) {
+				continue
+			}
 			if err := writeSynced(filepath.Join(root, f.name+".new"), f.data); err != nil {
 				return fmt.Errorf("write %s.new: %w", f.name, err)
 			}
+			changed = append(changed, f)
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("stage slot %s boot files: %w", slot, err)
+		return fmt.Errorf("stage the bootloader files: %w", err)
 	}
 
-	if err := o.media.WithESP(func(root string) error { return commitBootFiles(root, files) }); err != nil {
-		return fmt.Errorf("install slot %s boot files: %w", slot, err)
+	if len(changed) > 0 {
+		if err := o.media.WithESP(func(root string) error { return commitBootFiles(root, changed) }); err != nil {
+			return fmt.Errorf("install the bootloader files: %w", err)
+		}
 	}
 
-	sum := sha256.Sum256(kernel)
-	o.logger.Info("openwrt-ab: slot kernel installed on the ESP", "slot", slot, "step", "kernel",
-		"file", espKernel(slot), "kernel_sha256", hex.EncodeToString(sum[:]), "kernel_bytes", len(kernel))
-	grub := "unchanged"
-	if cfgChanged {
-		grub = "replaced"
+	for _, f := range want {
+		outcome := "unchanged"
+		for _, c := range changed {
+			if c.name == f.name {
+				outcome = "replaced"
+			}
+		}
+		sum := sha256.Sum256(f.data)
+		o.logger.Info("openwrt-ab: bootloader file on the ESP", "slot", slot, "step", "bootloader",
+			"file", f.name, "sha256", hex.EncodeToString(sum[:]), "outcome", outcome)
 	}
-	o.logger.Info("openwrt-ab: slot grub.cfg on the ESP", "slot", slot, "step", "grub_cfg", "grub_cfg", grub)
 	return nil
-}
-
-// readBundleFile reads rel from a slot root, and names a missing file as a
-// pre-fix artifact.
-func readBundleFile(srcRoot, rel string) ([]byte, error) {
-	b, err := os.ReadFile(filepath.Join(srcRoot, rel))
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("%w: /%s is missing", errPreFixArtifact, rel)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read /%s from the slot: %w", rel, err)
-	}
-	return b, nil
 }
 
 // commitBootFiles runs on a fresh ESP mount: every staged file is read back and
@@ -252,8 +237,9 @@ func (r *SlotRepairer) RepairRunningSlot() (RepairOutcome, error) {
 //     kernel is exactly the one they were built for.
 //  3. If grubenv already has X_REPAIR=1, this is a second mismatched boot after
 //     a repair: X is marked bad (X_OK=0 X_TRY=0, X_REPAIR dropped) → Fallback.
-//  4. Otherwise X's kernel and grub.cfg are installed, and the trial re-armed
-//     with X_TRY=0 X_REPAIR=1, leaving X_OK and ORDER alone → Repaired.
+//  4. Otherwise the running rootfs's bootx64.efi and grub.cfg are installed
+//     (installBootloader), and the trial re-armed with X_TRY=0 X_REPAIR=1,
+//     leaving X_OK and ORDER alone → Repaired.
 //  5. Any failure after the ESP has mounted marks X bad → Fallback. An ESP that
 //     cannot be mounted at all returns ErrESPUnavailable.
 func (o *OpenWrtABBackend) repairRunningSlot(srcRoot string) (RepairOutcome, error) {
@@ -294,7 +280,7 @@ func (o *OpenWrtABBackend) repairRunningSlot(srcRoot string) (RepairOutcome, err
 		return RepairFallback, nil
 	}
 
-	if err := o.installSlotBoot(srcRoot, slot); err != nil {
+	if err := o.installBootloader(srcRoot, slot); err != nil {
 		return o.fallback(slot, "install_boot", err)
 	}
 	if err := o.withGrubenv(func(path string) error {
@@ -306,7 +292,7 @@ func (o *OpenWrtABBackend) repairRunningSlot(srcRoot string) (RepairOutcome, err
 	}); err != nil {
 		return o.fallback(slot, "rearm", err)
 	}
-	o.logger.Info("openwrt-ab: slot repair: the slot's own kernel is on the ESP; reboot to run it",
+	o.logger.Info("openwrt-ab: slot repair: the bootloader on the ESP now reads the slot's own kernel; reboot to run it",
 		"slot", slot, "outcome", RepairRepaired.String())
 	return RepairRepaired, nil
 }

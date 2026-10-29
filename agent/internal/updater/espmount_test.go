@@ -140,29 +140,6 @@ func TestOpenWrtBootMedia_MountFailureNeverRunsFn(t *testing.T) {
 	})
 }
 
-func TestOpenWrtBootMedia_OpenSlotIsReadOnlyAndReleaseReturnsUmount(t *testing.T) {
-	noStdLog(t)
-	r := &fakeRunner{}
-	m, _ := newOpenWrtBootMedia(discardLogger(), r.run)
-	root, release, err := m.OpenSlot("/dev/nvme0n1p3")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.cmds[0] != "mount -t squashfs -o ro /dev/nvme0n1p3 "+root {
-		t.Errorf("mount = %q, want a read-only squashfs mount", r.cmds[0])
-	}
-	r.fails = map[string]error{"umount": errors.New("exit status 32")}
-	if err := release(); err == nil || !strings.Contains(err.Error(), "umount /dev/nvme0n1p3") {
-		t.Errorf("release = %v, want the umount error", err)
-	}
-	os.Remove(root)
-
-	r.fails = map[string]error{"mount": errors.New("exit status 32")}
-	if _, _, err := m.OpenSlot("/dev/nvme0n1p3"); err == nil || !strings.Contains(err.Error(), "mount slot /dev/nvme0n1p3 read-only") {
-		t.Errorf("OpenSlot = %v, want the mount error naming the device", err)
-	}
-}
-
 func TestUnixModuleLoader_MissingFileIsAnErrorNamingIt(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "vfat.ko")
 	if err := (UnixModuleLoader{}).Load(p); err == nil || !strings.Contains(err.Error(), p) {

@@ -26,10 +26,10 @@ import (
 // RAUC. It reproduces the compute (n100) image's update contract — a GRUB
 // boot-counter in grubenv, two squashfs rootfs slots, and a persistent overlay
 // that survives a slot switch — but does the slot write and the bootloader-env
-// flip itself, because RAUC isn't packaged for OpenWrt. Each slot boots its
-// own kernel from the ESP (boot/vmlinuz-A, boot/vmlinuz-B), copied out of the
-// slot's own bundle at install; until geekdojo/geekdojo-brain#888 the ESP held
-// one shared kernel, which a kernel-changing update left behind.
+// flip itself, because RAUC isn't packaged for OpenWrt. GRUB boots each slot's
+// kernel from that slot's own squashfs, falling back to the ESP's shared
+// boot/vmlinuz for a rootfs that ships none, so an install writes nothing on
+// the ESP but grubenv (geekdojo/geekdojo-brain#893).
 //
 // Why a separate backend instead of reusing RAUCBackend: the two differ only in
 // the mechanism (rauc CLI vs. dd + a grubenv codec); the saga, the NATS
@@ -42,9 +42,8 @@ import (
 // embeds in a compute slot), NOT the legacy full-disk combined-efi .img.gz —
 // flashing a whole disk would clobber the other slot, the ESP, and config. The
 // update path is: verify → mark the target slot not bootable → dd the squashfs
-// into the inactive rootfs partition → copy its kernel and grub.cfg to the ESP
-// (slotboot.go) → flip grubenv (ORDER + <slot>_OK/_TRY) → reboot →
-// health-gated mark-good.
+// into the inactive rootfs partition → flip grubenv (ORDER + <slot>_OK/_TRY) →
+// reboot → health-gated mark-good.
 //
 // OS-coupled operations (partition resolution, the raw block write, reboot,
 // signature verification) are injectable fields so the pure logic — slot math
@@ -83,7 +82,7 @@ type OpenWrtABBackend struct {
 	verifySig func(ctx context.Context, rootfsPath string) error
 
 	// --- collaborators (constructor-injected) ---------------------------
-	// media mounts the ESP and the slot just written.
+	// media mounts the ESP.
 	media BootMedia
 	// mods and fs make vfat available to a mismatched kernel (slotboot.go).
 	mods ModuleLoader
@@ -453,8 +452,8 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 		return "", fmt.Errorf("openwrt-ab install: resolve slot %s: %w", letter, err)
 	}
 	// The target stops being bootable BEFORE anything of it is overwritten: a
-	// failure from here on leaves a half-written slot, or a slot whose ESP
-	// kernel is not its own, and GRUB must never pick it.
+	// failure from here on leaves a half-written slot, and GRUB must never
+	// pick it.
 	if err := o.deactivateSlot(letter); err != nil {
 		return "", fmt.Errorf("openwrt-ab install: deactivate slot %s: %w", letter, err)
 	}
@@ -463,9 +462,6 @@ func (o *OpenWrtABBackend) Install(ctx context.Context, bundleID, localPath stri
 	}
 	if err := o.writeSlot(ctx, localPath, dev, progressFn); err != nil {
 		return "", fmt.Errorf("openwrt-ab install: write slot %s (%s): %w", letter, dev, err)
-	}
-	if err := o.installBootFromSlot(dev, letter); err != nil {
-		return "", fmt.Errorf("openwrt-ab install: %w", err)
 	}
 
 	// Flip the boot-counter: make the target slot the first ORDER entry, good
@@ -527,20 +523,6 @@ func (o *OpenWrtABBackend) installedVersion(localPath string) string {
 		}
 	}
 	return ""
-}
-
-// installBootFromSlot mounts the slot just written read-only and copies its
-// kernel and grub.cfg onto the ESP. The unmount's error is returned too.
-func (o *OpenWrtABBackend) installBootFromSlot(dev, letter string) error {
-	root, release, err := o.media.OpenSlot(dev)
-	if err != nil {
-		return fmt.Errorf("open slot %s (%s): %w", letter, dev, err)
-	}
-	bootErr := o.installSlotBoot(root, letter)
-	if err := release(); err != nil {
-		bootErr = errors.Join(bootErr, fmt.Errorf("release slot %s (%s): %w", letter, dev, err))
-	}
-	return bootErr
 }
 
 // deactivateSlot sets the target slot OK=0 TRY=0, in place, leaving ORDER and
