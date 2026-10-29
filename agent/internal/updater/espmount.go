@@ -9,15 +9,14 @@ import (
 	"os/exec"
 )
 
-// espmount.go — the firewall's real BootMedia: the code that mounts the ESP and
-// a rootfs slot on OpenWrt. It was the body of withGrubenv until
-// geekdojo/geekdojo-brain#888 needed the same mount for the per-slot kernel and
-// grub.cfg, and for a read-only look inside the slot just written.
+// espmount.go — the firewall's real BootMedia: the code that mounts the ESP on
+// OpenWrt. It was the body of withGrubenv until geekdojo/geekdojo-brain#888
+// needed the same mount for the boot files the slot repair writes.
 //
-// OpenWrt mounts neither at runtime, has no udev by-label links, and has no
-// findfs or blkid, so the ESP is found through `block info` (parseESPDevice) and
-// mounted on a fresh temp dir for each operation, then synced and unmounted
-// straight away to keep the FAT-dirty window small.
+// OpenWrt does not mount the ESP at runtime, has no udev by-label links, and
+// has no findfs or blkid, so the ESP is found through `block info`
+// (parseESPDevice) and mounted on a fresh temp dir for each operation, then
+// synced and unmounted straight away to keep the FAT-dirty window small.
 
 // commandRunner runs one external command and returns its combined output.
 type commandRunner func(name string, args ...string) ([]byte, error)
@@ -26,7 +25,7 @@ func execCombined(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).CombinedOutput()
 }
 
-// OpenWrtBootMedia mounts the firewall's ESP and rootfs slots.
+// OpenWrtBootMedia mounts the firewall's ESP.
 type OpenWrtBootMedia struct {
 	logger *slog.Logger
 	run    commandRunner
@@ -51,7 +50,7 @@ func newOpenWrtBootMedia(logger *slog.Logger, run commandRunner) (*OpenWrtBootMe
 // unmounts it.
 //
 // A failed umount is an error, returned joined with fn's own (F-888-04). It is
-// not merely untidy: the per-slot kernel install unmounts precisely so that the
+// not merely untidy: the bootloader install unmounts precisely so that the
 // next mount reads the file back from the disk rather than from the page cache,
 // and a read-back after an umount that did not happen proves nothing. The
 // caller therefore never gets a nil error from a mount that is still live.
@@ -73,16 +72,6 @@ func (m *OpenWrtBootMedia) WithESP(fn func(root string) error) error {
 		fnErr = fmt.Errorf("ESP %s: %w", dev, fnErr)
 	}
 	return errors.Join(fnErr, m.unmount(dev, mnt))
-}
-
-// OpenSlot mounts the squashfs on dev read-only and returns its root. release
-// unmounts it, and its error is the umount's.
-func (m *OpenWrtBootMedia) OpenSlot(dev string) (string, func() error, error) {
-	mnt, err := m.mount(dev, "squashfs", "ro", "rasputin-slot-")
-	if err != nil {
-		return "", nil, fmt.Errorf("mount slot %s read-only: %w", dev, err)
-	}
-	return mnt, func() error { return m.unmount(dev, mnt) }, nil
 }
 
 func (m *OpenWrtBootMedia) mount(dev, fstype, opts, prefix string) (string, error) {

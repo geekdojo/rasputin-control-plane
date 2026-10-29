@@ -165,8 +165,10 @@ type fakeRepairer struct {
 func (f *fakeRepairer) RepairRunningSlot() (updater.RepairOutcome, error) { return f.outcome, f.err }
 func (f *fakeRepairer) Reboot()                                           { f.reboots++ }
 
-// TC-888-31: the repair-slot-boot verb's exit codes, which the kernel-match
-// guard reads, and its construction without the agent state dir (F-888-07).
+// TC-893-12 (and TC-888-31): the repair-slot-boot verb's exit codes, which the
+// kernel-match guard reads: repaired 0, fallback 0, esp_unavailable 3, refused
+// for a cmdline with no slot 1, any argument 2. Also its construction without
+// the agent state dir (F-888-07).
 func TestRepairSlotBoot(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -174,9 +176,9 @@ func TestRepairSlotBoot(t *testing.T) {
 		want int
 	}{
 		{"repaired", &fakeRepairer{outcome: updater.RepairRepaired}, 0},
-		{"fallback", &fakeRepairer{outcome: updater.RepairFallback, err: errors.New("write boot/vmlinuz-B.new: no space left on device")}, 0},
+		{"fallback", &fakeRepairer{outcome: updater.RepairFallback, err: errors.New("write EFI/BOOT/bootx64.efi.new: no space left on device")}, 0},
 		{"ESP unavailable", &fakeRepairer{err: fmt.Errorf("repair slot B: mount: %w", updater.ErrESPUnavailable)}, 3},
-		{"refused", &fakeRepairer{err: errors.New("cannot determine the running slot")}, 1},
+		{"refused", &fakeRepairer{err: errors.New("repair slot: cmdline: cannot determine the running slot from the kernel command line")}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errBuf bytes.Buffer
@@ -196,7 +198,9 @@ func TestRepairSlotBoot(t *testing.T) {
 		if code != 2 {
 			t.Errorf("exit %d, want 2", code)
 		}
-		assertSentence(t, stderr)
+		if !strings.HasPrefix(stderr, "The repair-slot-boot command takes no arguments.\n") {
+			t.Errorf("stderr %q, want it to open with the no-arguments sentence", stderr)
+		}
 	})
 	t.Run("construction fails", func(t *testing.T) {
 		var errBuf bytes.Buffer

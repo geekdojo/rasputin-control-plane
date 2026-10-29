@@ -100,13 +100,14 @@ Commands:
         naming the field and what to do about it.
   install-rootfs [--state-dir <dir>] <bundle-id>
         Firewall only. Verify and install <dir>/bundles/<bundle-id>.rootfs
-        into the inactive slot, with its kernel and grub.cfg, and arm a trial
-        boot of it. Does not reboot. --state-dir defaults to the agent's
+        into the inactive slot and arm a trial boot of it. Writes nothing on
+        the ESP but grubenv. Does not reboot. --state-dir defaults to the agent's
         updater state directory. Exits 1 if the install fails.
   repair-slot-boot
         Firewall only, run by the kernel-match guard at boot. Copy the running
-        slot's own kernel and grub.cfg onto the ESP and re-arm its trial, or
-        mark the slot bad if that cannot be done. Does not reboot. Exits 0
+        rootfs's bootx64.efi and grub.cfg onto the ESP where they differ, so
+        GRUB boots the slot's own kernel, and re-arm its trial, or mark the
+        slot bad if that cannot be done. Does not reboot. Exits 0
         when the caller should reboot, 3 when the ESP cannot be mounted.
   version
         Print the agent version and exit.
@@ -215,7 +216,7 @@ func exitCLI() {
 	}
 }
 
-// ---- firewall per-slot kernel verbs (geekdojo/geekdojo-brain#888) ----------
+// ---- firewall slot verbs (geekdojo/geekdojo-brain#888) ------------------------
 
 // rootfsInstaller is the backend as install-rootfs uses it.
 type rootfsInstaller interface {
@@ -342,7 +343,7 @@ func runRepairSlotBoot(args []string, stdout, stderr io.Writer, logger *slog.Log
 	outcome, err := r.RepairRunningSlot()
 	switch {
 	case outcome == updater.RepairRepaired:
-		fmt.Fprintln(stdout, "Repaired the running slot's kernel and grub.cfg. Reboot to run them.")
+		fmt.Fprintln(stdout, "Repaired the running slot's bootloader. Reboot to run the slot's own kernel.")
 		return 0
 	case outcome == updater.RepairFallback:
 		fmt.Fprintln(stdout, "Marked the running slot bad. Reboot to fall back to the other slot.")

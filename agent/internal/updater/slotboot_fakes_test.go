@@ -19,21 +19,16 @@ import (
 // OpenWrtBootMedia names the real one.
 const fakeESPDevice = "/dev/fake-esp"
 
-// fakeMedia is a BootMedia over plain directories: the ESP is espRoot, and each
-// slot device maps to a directory standing in for its mounted squashfs.
+// fakeMedia is a BootMedia over a plain directory standing in for the ESP.
 type fakeMedia struct {
-	mu        sync.Mutex
-	espRoot   string
-	slotRoots map[string]string
-	calls     *callLog
+	mu      sync.Mutex
+	espRoot string
+	calls   *callLog
 
 	// mountErr, when set, fails ESP mounts before fn runs: every mount from the
 	// mountErrFrom-th (1-based; 0 means from the first).
 	mountErr     error
 	mountErrFrom int
-	// openSlotErr fails OpenSlot; releaseErr fails the slot's release.
-	openSlotErr error
-	releaseErr  error
 	// umountErrOn fails the umount of the n-th ESP mount (1-based), after fn ran.
 	umountErrOn int
 	// beforeFn runs before fn on the n-th ESP mount (1-based), e.g. to corrupt a
@@ -63,21 +58,6 @@ func (m *fakeMedia) WithESP(fn func(root string) error) error {
 		return errors.Join(fnErr, errors.New("umount "+fakeESPDevice+": device busy"))
 	}
 	return fnErr
-}
-
-func (m *fakeMedia) OpenSlot(dev string) (string, func() error, error) {
-	m.calls.add("OpenSlot")
-	if m.openSlotErr != nil {
-		return "", nil, m.openSlotErr
-	}
-	root, ok := m.slotRoots[dev]
-	if !ok {
-		return "", nil, errors.New("fake media: no slot root for " + dev)
-	}
-	return root, func() error {
-		m.calls.add("release")
-		return m.releaseErr
-	}, nil
 }
 
 // callLog records collaborator calls, with an optional snapshot taken at each.
