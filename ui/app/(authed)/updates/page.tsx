@@ -31,7 +31,6 @@ import type {
   NodeRole,
   NodeResult,
   NodeUpdate,
-  NodeUpdateStatus,
   PlanTarget,
   SkippedNode,
   SkipReason,
@@ -61,19 +60,7 @@ import {
   thStyle,
 } from '../../../components/kit';
 import { ACCENT, accentA, MONO } from '../../../components/ui-theme';
-
-function nodeUpdateColor(s: NodeUpdateStatus): string {
-  switch (s) {
-    case 'committed':
-      return '#4ade80';
-    case 'rolled_back':
-      return '#facc15';
-    case 'failed':
-      return '#f87171';
-    default:
-      return ACCENT; // in_progress
-  }
-}
+import { changeColor, childFellBack, nodeUpdateColor, prettyStatus } from '../../../lib/update-status';
 
 function jobColor(s: JobStatus): string {
   switch (s) {
@@ -86,14 +73,6 @@ function jobColor(s: JobStatus): string {
     default:
       return DIM;
   }
-}
-
-function changeColor(change: string): string {
-  if (change === 'committed') return '#4ade80';
-  if (change === 'rolled_back') return '#facc15';
-  if (change === 'failed') return '#f87171';
-  if (change === 'started') return ACCENT;
-  return DIM;
 }
 
 export default function UpdatesPage() {
@@ -278,7 +257,7 @@ export default function UpdatesPage() {
             <SectionLabel>SYSTEM UPDATES</SectionLabel>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {systemJobs.map((j) => (
-                <SystemUpdateRow key={j.id} job={j} />
+                <SystemUpdateRow key={j.id} job={j} history={history} />
               ))}
             </div>
           </div>
@@ -1097,7 +1076,7 @@ function stepResult<T>(steps: JobStep[], name: string): T | undefined {
   return s?.result as T | undefined;
 }
 
-function SystemUpdateRow({ job }: { job: Job }) {
+function SystemUpdateRow({ job, history }: { job: Job; history: NodeUpdate[] }) {
   const [children, setChildren] = useState<Job[]>([]);
   const [steps, setSteps] = useState<JobStep[]>([]);
 
@@ -1178,7 +1157,17 @@ function SystemUpdateRow({ job }: { job: Job }) {
                   <td style={{ ...tdStyle, color: DIM }}>{r.tier ?? '—'}</td>
                   <td style={{ ...tdStyle, color: DIM }}>{r.compatible ?? '—'}</td>
                   <td style={tdStyle}>
-                    <Badge color={outcomeColor(r.outcome)}>{outcomeLabel(r.outcome)}</Badge>
+                    <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <Badge color={outcomeColor(r.outcome)}>{outcomeLabel(r.outcome)}</Badge>
+                      {/* The outcome is the run's verdict and never changes; a
+                          later fallback is recorded on the History row
+                          (geekdojo/geekdojo-brain#894). */}
+                      {childFellBack(r.childJobId, history) && (
+                        <Badge color={nodeUpdateColor('fallen_back')} title="This node later started reporting a different version. See its History row.">
+                          {prettyStatus('fallen_back')}
+                        </Badge>
+                      )}
+                    </span>
                   </td>
                   <td style={{ ...tdStyle, color: DIM }}>{child?.startedAt ? new Date(child.startedAt).toLocaleTimeString() : '—'}</td>
                   <td style={{ ...tdStyle, color: DIM }}>{child?.finishedAt ? new Date(child.finishedAt).toLocaleTimeString() : '—'}</td>
@@ -1347,12 +1336,6 @@ function extractNodeId(spec: unknown): string {
     return (spec as Record<string, string>).nodeId;
   }
   return '';
-}
-
-function prettyStatus(s: NodeUpdateStatus): string {
-  if (s === 'in_progress') return 'IN PROGRESS';
-  if (s === 'rolled_back') return 'ROLLED BACK';
-  return s.toUpperCase();
 }
 
 function formatBytes(n: number): string {

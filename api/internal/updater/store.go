@@ -141,6 +141,26 @@ func (s *Store) UpdateNodeUpdate(ctx context.Context, jobID string, status NodeU
 	return err
 }
 
+// MarkNodeUpdateFallenBack moves a committed row to fallen_back and records
+// note, reporting whether a row changed (geekdojo/geekdojo-brain#894). The
+// status guard makes the flip one-shot: a row that is not committed, including
+// one already fallen back, is left exactly as it is. to_slot, to_version and
+// finished_at are not touched — they still describe the update that committed.
+func (s *Store) MarkNodeUpdateFallenBack(ctx context.Context, jobID, note string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE node_updates SET status = ?, error = ?
+        WHERE job_id = ? AND status = ?`,
+		string(NodeUpdateFallenBack), note, jobID, string(NodeUpdateCommitted))
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // SetNodeUpdateVerifyGaps records which conjuncts of the verify contract could
 // not be evaluated for this update (ADR-0005 Decision 3). Written once, when
 // verify completes, so the per-node report can say that a green row rests on

@@ -216,6 +216,9 @@ const (
 	UpdateCommitted  UpdateChangeType = "committed"
 	UpdateRolledBack UpdateChangeType = "rolled_back"
 	UpdateFailed     UpdateChangeType = "failed"
+	// UpdateFallenBack: an update that committed, after which the node began
+	// reporting a different image version (geekdojo/geekdojo-brain#894).
+	UpdateFallenBack UpdateChangeType = "fallen_back"
 )
 
 // UpdateChangeEvt is the payload published when a node transitions through

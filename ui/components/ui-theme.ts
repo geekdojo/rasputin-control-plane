@@ -11,6 +11,9 @@
 
 export const ACCENT = 'var(--rasp-accent)'; // resolves to the active theme's accent
 
+/** Dimmed text and inactive states. Here, not in kit.tsx, so lib/ helpers can use it. */
+export const DIM = 'var(--rasp-dim)';
+
 /** Translucent accent, e.g. accentA(0.12) → 'rgba(var(--rasp-accent-rgb), 0.12)'. */
 export const accentA = (alpha: number) => `rgba(var(--rasp-accent-rgb), ${alpha})`;
 

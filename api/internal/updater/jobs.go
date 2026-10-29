@@ -730,13 +730,24 @@ func bootIDForLog(id string) string {
 	return proto.ShortFingerprint(id)
 }
 
+// publishChange publishes ev and logs a failure. The saga steps that call it
+// have no injected logger; the fallback detector, which does, calls
+// publishChangeErr and logs the failure with its own fields.
 func publishChange(nc *nats.Conn, ev proto.UpdateChangeEvt) {
+	if err := publishChangeErr(nc, ev); err != nil {
+		log.Printf("updater: %v", err)
+	}
+}
+
+// publishChangeErr marshals ev and publishes it on its lifecycle subject,
+// returning any failure.
+func publishChangeErr(pub publisher, ev proto.UpdateChangeEvt) error {
 	payload, err := json.Marshal(ev)
 	if err != nil {
-		log.Printf("updater: marshal change: %v", err)
-		return
+		return fmt.Errorf("marshal change: %w", err)
 	}
-	if err := nc.Publish(proto.UpdateChangeSubject(ev.NodeID, ev.Change), payload); err != nil {
-		log.Printf("updater: publish change: %v", err)
+	if err := pub.Publish(proto.UpdateChangeSubject(ev.NodeID, ev.Change), payload); err != nil {
+		return fmt.Errorf("publish change: %w", err)
 	}
+	return nil
 }

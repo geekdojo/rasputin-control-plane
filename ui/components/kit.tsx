@@ -11,13 +11,13 @@ import { usePathname } from 'next/navigation';
 import type { CSSProperties, ElementType, ReactNode } from 'react';
 import { forwardRef, useState } from 'react';
 import { ModalPortal, useModalChrome } from './modal';
-import { ACCENT, accentA, MONO } from './ui-theme';
+import { ACCENT, accentA, DIM, MONO } from './ui-theme';
 
 export const PANEL = 'var(--rasp-panel)';
 export const HAIR = 'rgba(var(--rasp-fg-rgb),0.18)';
 export const HAIR_SOFT = 'rgba(var(--rasp-fg-rgb),0.1)';
 export const FG = 'var(--rasp-fg)';
-export const DIM = 'var(--rasp-dim)';
+export { DIM };
 
 export function PageShell({ children }: { children: ReactNode }) {
   return (

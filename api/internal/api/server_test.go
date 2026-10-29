@@ -1185,6 +1185,39 @@ func TestHandleListUpdates_Empty(t *testing.T) {
 	}
 }
 
+// TC-894-17 (geekdojo/geekdojo-brain#894): a fallen_back row reaches the API
+// as "status":"fallen_back" with its note in "error".
+func TestHandleListUpdates_FallenBackRow(t *testing.T) {
+	f := newAPIFixture(t)
+	c := f.authenticate(t)
+	now := time.Now().UTC()
+	if err := f.updStore.CreateNodeUpdate(f.ctx, &updater.NodeUpdate{
+		JobID: "j1", NodeID: "fw-1", BundleSHA256: "sha", ToVersion: "2026.10.3",
+		Status: updater.NodeUpdateInProgress, StartedAt: now,
+	}); err != nil {
+		t.Fatalf("seed row: %v", err)
+	}
+	if err := f.updStore.UpdateNodeUpdate(f.ctx, "j1", updater.NodeUpdateCommitted, proto.SlotB, "2026.10.3", "", now); err != nil {
+		t.Fatalf("commit row: %v", err)
+	}
+	const note = "After this update committed, the node started reporting version 2026.10.3-dev.168, not 2026.10.3. It fell back to its other slot or was reinstalled."
+	if ok, err := f.updStore.MarkNodeUpdateFallenBack(f.ctx, "j1", note); err != nil || !ok {
+		t.Fatalf("flip row: %v, %v", ok, err)
+	}
+
+	w := f.do(t, http.MethodGet, "/api/updates?nodeId=fw-1", "", c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d (body %s)", w.Code, w.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("decode %s: %v", w.Body.String(), err)
+	}
+	if len(rows) != 1 || rows[0]["status"] != "fallen_back" || rows[0]["error"] != note {
+		t.Errorf("rows = %v, want one row with status fallen_back and the note in error", rows)
+	}
+}
+
 func TestHandleCreateUpdate_BadJSON(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
