@@ -361,6 +361,14 @@ func main() {
 		log.Fatalf("rasputin-api: updater store: %v", err)
 	}
 	defer updaterStore.Close()
+	// A committed update whose node later registers on a different image
+	// version is relabelled fallen_back (geekdojo/geekdojo-brain#894). Run from
+	// the registration hook below.
+	fallbacks, err := updater.NewFallbackDetector(updaterStore, busSrv.Conn(), logger, time.Now)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: fallback detector", "err", err.Error())
+		os.Exit(1)
+	}
 
 	meshStore, err := mesh.OpenStore(ctx, dbPath)
 	if err != nil {
@@ -1281,6 +1289,7 @@ func main() {
 	invSvc.SetOnRegistered(func(hookCtx context.Context, n *proto.Node) {
 		onFirewallRegistration(hookCtx, n)
 		consoleConverger.OnRegistered(hookCtx, n)
+		fallbacks.OnRegistered(hookCtx, n)
 	})
 	// A node whose registered key was REPLACED raises a crit alert
 	// (geekdojo/geekdojo-brain#514). inventory audits the change in the log

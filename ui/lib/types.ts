@@ -675,7 +675,8 @@ export type UpdateChange =
   | 'installed'
   | 'committed'
   | 'rolled_back'
-  | 'failed';
+  | 'failed'
+  | 'fallen_back';
 
 export interface Bundle {
   sha256: string;
@@ -794,7 +795,8 @@ export type NodeUpdateStatus =
   | 'in_progress'
   | 'committed'
   | 'rolled_back'
-  | 'failed';
+  | 'failed'
+  | 'fallen_back';
 
 export interface NodeUpdate {
   jobId: string;

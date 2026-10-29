@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS node_updates (
     to_slot         TEXT NOT NULL DEFAULT 'unknown',
     from_version    TEXT NOT NULL DEFAULT '',
     to_version      TEXT NOT NULL DEFAULT '',
-    status          TEXT NOT NULL,  -- 'in_progress' | 'committed' | 'rolled_back' | 'failed'
+    status          TEXT NOT NULL,  -- 'in_progress' | 'committed' | 'rolled_back' | 'failed' | 'fallen_back'
     started_at      INTEGER NOT NULL,
     finished_at     INTEGER,
     error           TEXT NOT NULL DEFAULT '',

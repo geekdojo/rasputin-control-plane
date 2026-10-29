@@ -32,6 +32,11 @@ const (
 	NodeUpdateCommitted  NodeUpdateStatus = "committed"
 	NodeUpdateRolledBack NodeUpdateStatus = "rolled_back"
 	NodeUpdateFailed     NodeUpdateStatus = "failed"
+	// NodeUpdateFallenBack is a committed update whose node later registered
+	// reporting a different image version: it fell back to its other slot, or
+	// was reinstalled (geekdojo/geekdojo-brain#894). Only a committed row ever
+	// becomes fallen_back; see FallbackDetector.
+	NodeUpdateFallenBack NodeUpdateStatus = "fallen_back"
 )
 
 // NodeUpdate is one row of update history per node.
