@@ -34,6 +34,14 @@ type RefRecorder interface {
 	RecordSecretRef(ctx context.Context, appID, name string) error
 }
 
+// OperatorDeclarations reads the operator-secret declarations of an app's
+// installed compose (geekdojo/geekdojo-brain#604): the names its OWNER
+// supplies, which are never derived. main adapts apps.Store to it, since
+// appsecret cannot import apps.
+type OperatorDeclarations interface {
+	OperatorSecrets(ctx context.Context, appID string) ([]tileschema.OperatorSecret, error)
+}
+
 // StoreSourceDeps is everything a StoreSource needs. NewStoreSource refuses a
 // nil one.
 type StoreSourceDeps struct {
@@ -43,7 +51,10 @@ type StoreSourceDeps struct {
 	Refs RefRecorder
 	// Seed derives the value an absent entry is created with.
 	Seed *Seed
-	Log  *slog.Logger
+	// Operator says which absent names are the owner's to supply, and so
+	// must never be derived.
+	Operator OperatorDeclarations
+	Log      *slog.Logger
 }
 
 // StoreSource resolves an app's compose from the secret store, through the
@@ -58,6 +69,11 @@ type StoreSourceDeps struct {
 // CodeValueConflict. Because the derivation is frozen, the entry an upgraded
 // cluster creates holds the value the app already runs with.
 //
+// An absent entry whose name the app declares as an operator secret is never
+// derived (geekdojo/geekdojo-brain#604): an optional one resolves to an empty
+// value, with no entry created and no reference recorded; a required one, or
+// a declaration lookup that fails, refuses the resolve.
+//
 // Each entry, once confirmed (read, or created and read back), is recorded
 // through Refs. The entry is written before the row that names it (S15 write
 // order); a record that fails refuses the resolve, because an unrecorded
@@ -68,11 +84,12 @@ type StoreSourceDeps struct {
 // does not parse, the app lookup) is a wrapped error. Neither carries a value
 // or the store's own text.
 type StoreSource struct {
-	secrets Secrets
-	apps    AppNodes
-	refs    RefRecorder
-	seed    *Seed
-	log     *slog.Logger
+	secrets  Secrets
+	apps     AppNodes
+	refs     RefRecorder
+	seed     *Seed
+	operator OperatorDeclarations
+	log      *slog.Logger
 }
 
 // NewStoreSource checks d and returns a StoreSource. It does no I/O.
@@ -86,10 +103,12 @@ func NewStoreSource(d StoreSourceDeps) (*StoreSource, error) {
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Refs is nil")
 	case d.Seed == nil:
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Seed is nil")
+	case d.Operator == nil:
+		return nil, errors.New("appsecret: NewStoreSource: Deps.Operator is nil")
 	case d.Log == nil:
 		return nil, errors.New("appsecret: NewStoreSource: Deps.Log is nil")
 	}
-	return &StoreSource{secrets: d.Secrets, apps: d.Apps, refs: d.Refs, seed: d.Seed, log: d.Log}, nil
+	return &StoreSource{secrets: d.Secrets, apps: d.Apps, refs: d.Refs, seed: d.Seed, operator: d.Operator, log: d.Log}, nil
 }
 
 // ResolveCompose returns compose with every token replaced by its Compose
@@ -133,6 +152,17 @@ func (s *StoreSource) value(ctx context.Context, actor secrets.Actor, appID, nam
 	}
 	if !errors.Is(err, secretstore.ErrNotFound) {
 		return secret.Value{}, s.refuse(ctx, appID, ref, "read", err)
+	}
+	// An absent name the owner supplies is never derived.
+	decls, err := s.operator.OperatorSecrets(ctx, appID)
+	if err != nil {
+		return secret.Value{}, s.failed(ctx, appID, ref.String(), fmt.Errorf("appsecret: resolve %s: reading the operator secret declarations: %w", appID, err))
+	}
+	if decl, declared := tileschema.OperatorSecretByName(decls, name); declared {
+		if decl.IsRequired() {
+			return secret.Value{}, s.failed(ctx, appID, ref.String(), fmt.Errorf("appsecret: resolve %s: the operator secret %s is required and not set", appID, ref))
+		}
+		return secret.New(nil), nil
 	}
 	derived, err := s.seed.Derive(appID, name, InitialVersion)
 	if err != nil {

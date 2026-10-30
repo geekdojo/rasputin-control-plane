@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // appTargetNodes is the secrets service's view of the apps table: each app's
@@ -32,12 +35,17 @@ func (a appTargetNodes) TargetNode(ctx context.Context, appID string) (string, b
 // secretsWiring builds the secrets service (geekdojo/geekdojo-brain#761) over
 // the api's store session: the KV repository, and the service that authorizes
 // every call against the apps table. It makes no store call.
-func secretsWiring(session *storesession.Session, appsStore *apps.Store, logger *slog.Logger) (*secrets.Service, error) {
+//
+// sw is the store's switch marker (geekdojo/geekdojo-brain#604), which every
+// operator write sets first: storeSwitchFor's choice.
+func secretsWiring(session *storesession.Session, appsStore *apps.Store, sw secrets.Switch, logger *slog.Logger) (*secrets.Service, error) {
 	switch {
 	case session == nil:
 		return nil, errors.New("secrets: the store session is nil")
 	case appsStore == nil:
 		return nil, errors.New("secrets: the apps store is nil")
+	case sw == nil:
+		return nil, errors.New("secrets: the store switch is nil")
 	case logger == nil:
 		return nil, errors.New("secrets: the logger is nil")
 	}
@@ -45,7 +53,54 @@ func secretsWiring(session *storesession.Session, appsStore *apps.Store, logger 
 	if err != nil {
 		return nil, err
 	}
-	return secrets.NewService(secrets.Deps{Repo: repo, Apps: appTargetNodes{store: appsStore}, Log: logger})
+	return secrets.NewService(secrets.Deps{Repo: repo, Apps: appTargetNodes{store: appsStore}, Switch: sw, Log: logger})
+}
+
+// storeSwitchReader is the switch marker as the boot read sees it.
+type storeSwitchReader interface {
+	Switched(ctx context.Context) (bool, error)
+}
+
+// storeSwitchedAtBoot reads the switch marker once, at boot
+// (geekdojo/geekdojo-brain#604). An unreadable marker is an error, which main
+// treats as FATAL: guessing either answer could put HKDF in front of a
+// cluster that holds an owner's credential, or refuse every deploy on one
+// that does not.
+func storeSwitchedAtBoot(ctx context.Context, marker storeSwitchReader) (bool, error) {
+	switched, err := marker.Switched(ctx)
+	if err != nil {
+		return false, fmt.Errorf("secret store switch marker: %w", err)
+	}
+	return switched, nil
+}
+
+// storeSwitchFor is the switch operator writes set (geekdojo/geekdojo-brain#604):
+// the marker when a store backend is requested, and NoStore when none is, so
+// an operator write on a box with no store is refused and the marker never
+// set (F-604-07).
+func storeSwitchFor(requested string, marker *storeswitch.Marker) secrets.Switch {
+	if requested == "" {
+		return storeswitch.NoStore{}
+	}
+	return marker
+}
+
+// appOperatorSecrets is the apps table's operator-secret declarations as
+// appsecret's StoreSource reads them (geekdojo/geekdojo-brain#604): appsecret
+// cannot import apps, which imports it.
+type appOperatorSecrets struct{ store *apps.Store }
+
+// OperatorSecrets reads the app's row. A missing row is an error: the source
+// refuses rather than deriving a name it cannot check.
+func (a appOperatorSecrets) OperatorSecrets(ctx context.Context, appID string) ([]tileschema.OperatorSecret, error) {
+	app, err := a.store.Get(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, fmt.Errorf("app %s does not exist", appID)
+	}
+	return app.OperatorSecrets, nil
 }
 
 // appSecretRefs is the store reference record as appsecret sees it: apps

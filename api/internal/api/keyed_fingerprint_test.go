@@ -77,7 +77,7 @@ func TestNewServer_RefusesANilFirewallState(t *testing.T) {
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, nil, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
-		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
+		f.srv.bus, f.srv.operatorSecrets, f.srv.log, f.srv.newCorrelationID)
 	if err == nil || srv != nil {
 		t.Fatalf("NewServer with a nil firewall state = (%v, %v), want (nil, an error)", srv, err)
 	}

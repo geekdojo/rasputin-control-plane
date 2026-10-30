@@ -35,8 +35,15 @@ type readinessWiring struct {
 //
 // It makes no store call: the api starts whatever state the store is in.
 //
+// switched is the switch marker's verdict at boot (geekdojo/geekdojo-brain#604):
+// once the cluster has held an operator-supplied value, nothing requested no
+// longer means "the previous release's behaviour". The monitor then runs over
+// the store passed in (Disabled), reads Unreachable and raises its crit
+// alert, and deploySourceWiring returns the Gate, so secret-bearing deploys
+// refuse and the HKDF source is never reached.
+//
 // blank is the empty-store marker's verdict (#765); required.
-func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.Store, now func() time.Time,
+func storeReadinessWiring(requested string, switched bool, mode string, store secretStore, js *jobs.Store, now func() time.Time,
 	blank func(context.Context) (bool, error), logger *slog.Logger) (readinessWiring, error) {
 	switch {
 	case store == nil:
@@ -50,8 +57,12 @@ func storeReadinessWiring(requested, mode string, store secretStore, js *jobs.St
 	case logger == nil:
 		return readinessWiring{}, errors.New("store readiness: the logger is nil")
 	}
-	if requested == "" {
+	if requested == "" && !switched {
 		return readinessWiring{store: store}, nil
+	}
+	if requested == "" {
+		logger.Warn("secret store switched but not configured: secret-bearing deploys are refused until a store is configured",
+			"component", "secretstore", "event", "secretstore.switched_unconfigured", "mode", mode)
 	}
 	monitor, err := storestate.New(storestate.Deps{Store: store, Now: now, Log: logger, JobRunning: jobRunning(js), Blank: blank})
 	if err != nil {

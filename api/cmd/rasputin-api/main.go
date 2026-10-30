@@ -54,6 +54,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemarker"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -401,6 +402,19 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store marker", "err", err.Error())
 		os.Exit(1)
 	}
+	// The secret store's one-way switch marker (geekdojo/geekdojo-brain#604):
+	// one key in the same settings table, set before the first operator value
+	// reaches the store. Read once here; an unreadable marker is FATAL.
+	storeSwitch, err := storeswitch.New(storeswitch.Deps{Settings: setupStore, Now: time.Now, Log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store switch marker", "err", err.Error())
+		os.Exit(1)
+	}
+	storeSwitched, err := storeSwitchedAtBoot(ctx, storeSwitch)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store switch marker", "err", err.Error())
+		os.Exit(1)
+	}
 	// The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): read
 	// into the job ledger just before READY, and again after each store
 	// restart the api performs; their alert joins the aggregator below. The
@@ -536,7 +550,7 @@ func main() {
 	// source) refuses secret-bearing deploys until the store reads ready, and
 	// whose alerts report a store that cannot serve secrets. It makes no store call, so the api starts whatever state
 	// the store is in. Every store consumer below takes readiness.store.
-	readiness, err := storeReadinessWiring(storeBackend, storeW.mode, storeW.store, jobStore, time.Now, storeMarker.Blank, logger)
+	readiness, err := storeReadinessWiring(storeBackend, storeSwitched, storeW.mode, storeW.store, jobStore, time.Now, storeMarker.Blank, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store readiness", "err", err.Error())
 		os.Exit(1)
@@ -573,7 +587,7 @@ func main() {
 		os.Exit(1)
 	}
 	// The secrets service and its KV repository (geekdojo/geekdojo-brain#761).
-	secretsSvc, err := secretsWiring(storeSession, appsStore, logger)
+	secretsSvc, err := secretsWiring(storeSession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
@@ -583,7 +597,8 @@ func main() {
 	// which reads each ${secret:} value through the secrets service and
 	// creates an absent one from the seed; with none, the HKDF source alone.
 	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{
-		Secrets: secretsSvc, Apps: appTargetNodes{store: appsStore}, Refs: appSecretRefs{store: appsStore}, Seed: appSecretSeed, Log: logger,
+		Secrets: secretsSvc, Apps: appTargetNodes{store: appsStore}, Refs: appSecretRefs{store: appsStore}, Seed: appSecretSeed,
+		Operator: appOperatorSecrets{store: appsStore}, Log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store secret source", "err", err.Error())
@@ -599,6 +614,13 @@ func main() {
 	deploySource, err := deploySourceWiring(readiness.monitor, gatedStore, gatedHKDF, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: deploy secret source", "err", err.Error())
+		os.Exit(1)
+	}
+	// The operator secret service behind GET/PUT /api/apps/{id}/secrets
+	// (geekdojo/geekdojo-brain#604).
+	operatorSecrets, err := apps.NewOperatorSecrets(apps.OperatorSecretsDeps{Apps: appsStore, Secrets: secretsSvc, Refs: appsStore, Log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: operator secrets", "err", err.Error())
 		os.Exit(1)
 	}
 	// The store's audit file rotation and the data partition's free-space alert
@@ -1583,7 +1605,7 @@ func main() {
 	// busState is a value, never nil: bustls.Available or bustls.Unavailable.
 	// The correlation id a coded error carries is crypto/rand's Text.
 	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
-		busState, logger, cryptorand.Text)
+		busState, operatorSecrets, logger, cryptorand.Text)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: api server", "err", err.Error())
 		os.Exit(1)

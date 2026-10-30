@@ -18,4 +18,8 @@ var (
 	// ErrConflict: Replace lost a race with another write. It is not retried,
 	// since a retry would silently overwrite the other writer's value.
 	ErrConflict = errors.New("secrets: concurrent change")
+	// ErrSwitch: an operator write was refused because the secret store's
+	// switch marker could not be set first (geekdojo/geekdojo-brain#604). The
+	// store was not called. The marker's own error is wrapped beside it.
+	ErrSwitch = errors.New("secrets: the secret store switch marker could not be set")
 )

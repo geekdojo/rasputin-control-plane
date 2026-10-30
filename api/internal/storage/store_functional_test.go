@@ -21,7 +21,9 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storepolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
@@ -123,7 +125,7 @@ func apiChain(t *testing.T, s *secretstoretest.Store, logger *slog.Logger, jobRu
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: fnApps{}, Log: logger})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: fnApps{}, Switch: realSwitch(t, logger), Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,4 +516,20 @@ func mustMkdirAll(t *testing.T, dir string) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// realSwitch is the secret store's switch marker over a real settings table
+// in a temporary rasputin.db (geekdojo/geekdojo-brain#604).
+func realSwitch(t *testing.T, log *slog.Logger) *storeswitch.Marker {
+	t.Helper()
+	st, err := setup.OpenStore(context.Background(), filepath.Join(t.TempDir(), "rasputin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	m, err := storeswitch.New(storeswitch.Deps{Settings: st, Now: time.Now, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -67,7 +68,7 @@ func TestSecretsWiring(t *testing.T) {
 				t.Fatal(err)
 			}
 			store := &countingStore{secretStore: w.store}
-			r, err := storeReadinessWiring(backend, w.mode, store, js, time.Now, notBlank, log)
+			r, err := storeReadinessWiring(backend, false, w.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -76,7 +77,7 @@ func TestSecretsWiring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc, err := secretsWiring(sess, as, log)
+			svc, err := secretsWiring(sess, as, storeSwitchFor(backend, testSwitch(t)), log)
 			if err != nil || svc == nil {
 				t.Fatalf("secretsWiring = %v, %v; want a service", svc, err)
 			}
@@ -90,9 +91,16 @@ func TestSecretsWiring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// With the store off, an operator write is refused by NoStore
+			// before the store (F-604-07); a deploy job's create still reaches
+			// it and is ErrDisabled.
 			_, err = svc.Create(t.Context(), secrets.OperatorActor("u1"), ref, secret.New([]byte("v")))
+			if !errors.Is(err, storeswitch.ErrNoStore) {
+				t.Errorf("an operator Create with the store off = %v, want ErrNoStore", err)
+			}
+			_, err = svc.Create(t.Context(), secrets.DeployActor(wiringAppID, "node-1"), ref, secret.New([]byte("v")))
 			if !errors.Is(err, secretstore.ErrDisabled) {
-				t.Errorf("Create with the store off = %v, want ErrDisabled", err)
+				t.Errorf("a deploy Create with the store off = %v, want ErrDisabled", err)
 			}
 		})
 	}
@@ -103,14 +111,17 @@ func TestSecretsWiring(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s, err := secretsWiring(nil, as, log); err == nil || s != nil {
+		if s, err := secretsWiring(nil, as, testSwitch(t), log); err == nil || s != nil {
 			t.Errorf("nil session: %v, %v; want an error", s, err)
 		}
-		if s, err := secretsWiring(sess, nil, log); err == nil || s != nil {
+		if s, err := secretsWiring(sess, nil, testSwitch(t), log); err == nil || s != nil {
 			t.Errorf("nil apps store: %v, %v; want an error", s, err)
 		}
-		if s, err := secretsWiring(sess, as, nil); err == nil || s != nil {
+		if s, err := secretsWiring(sess, as, testSwitch(t), nil); err == nil || s != nil {
 			t.Errorf("nil logger: %v, %v; want an error", s, err)
+		}
+		if s, err := secretsWiring(sess, as, nil, log); err == nil || s != nil {
+			t.Errorf("nil switch: %v, %v; want an error", s, err)
 		}
 	})
 }

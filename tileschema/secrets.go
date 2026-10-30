@@ -124,10 +124,12 @@ const CapabilityOperatorSecrets = "tile.operator-secrets"
 // never a value. The value is set by the owner, write-only, and lives only in
 // the secret store.
 //
-// Every declared operator secret is required: a deploy is refused while one
-// the compose uses is unset. Optional operator secrets come later, as an
-// additive field that an older reader ignores and so fails closed on (it keeps
-// refusing until the value is set).
+// A declared operator secret is required unless it carries `required: false`
+// (geekdojo/geekdojo-brain#604): a deploy is refused while a required one the
+// compose uses is unset. An optional one that is unset reaches the app as an
+// empty string, and is never derived. The field is additive: a reader from
+// before it ignores it, and so fails closed on an optional secret, refusing
+// the deploy until the value is set.
 type OperatorSecret struct {
 	// Name is the ${secret:<name>} name the compose uses for this value. It is
 	// held to ValidSecretName, like every other secret name.
@@ -135,6 +137,25 @@ type OperatorSecret struct {
 	// Label is what the owner is shown when asked for the value, for example
 	// "Feed API key".
 	Label string `json:"label"`
+	// Required is false only for a secret the app can run without. Absent
+	// means required, which is how every declaration before the field read.
+	Required *bool `json:"required,omitempty"`
+}
+
+// IsRequired reports whether a deploy must refuse while the value is unset:
+// true unless the declaration says `required: false`.
+func (s OperatorSecret) IsRequired() bool { return s.Required == nil || *s.Required }
+
+// OperatorSecretByName is the declaration in decls named name, and whether
+// there is one. It is the one lookup the deploy gate, the operator secret
+// service and the store source share.
+func OperatorSecretByName(decls []OperatorSecret, name string) (OperatorSecret, bool) {
+	for _, d := range decls {
+		if d.Name == name {
+			return d, true
+		}
+	}
+	return OperatorSecret{}, false
 }
 
 // validateOperatorSecrets checks a tile's operator-secret declarations against

@@ -42,7 +42,7 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, err := storeReadinessWiring(storeModeMock, w.mode, w.store, openJobStore(t), time.Now, notBlank, log)
+	r, err := storeReadinessWiring(storeModeMock, false, w.mode, w.store, openJobStore(t), time.Now, notBlank, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +50,11 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secretsWiring(sess, as, log)
+	svc, err := secretsWiring(sess, as, testSwitch(t), log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appTargetNodes{store: as}, Refs: appSecretRefs{store: as}, Seed: seed, Log: log})
+	storeSource, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appTargetNodes{store: as}, Refs: appSecretRefs{store: as}, Seed: seed, Operator: appOperatorSecrets{store: as}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

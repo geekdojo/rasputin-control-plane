@@ -33,6 +33,9 @@ import (
 
 // Server bundles the HTTP handlers for the api.
 type Server struct {
+	// operatorSecrets serves GET/PUT /api/apps/{id}/secrets
+	// (geekdojo/geekdojo-brain#604).
+	operatorSecrets operatorSecretsService
 	store           *jobs.Store
 	runner          *jobs.Runner
 	inv             *inventory.Store
@@ -201,11 +204,13 @@ func (s *Server) SetHostLANInfo(fn func() (ip string, mac string)) {
 // configured with an "allow-all" middleware in a future refactor — for v0
 // auth is always on.
 //
-// fwState, bus, logger and newCorrelationID are required, and NewServer
-// returns an error rather than a Server that would fail on its first use:
-// fwState is the firewall service the state route reads, bus is the bus TLS
-// state (bustls.Available or bustls.Unavailable), logger the process logger,
-// and newCorrelationID the source of the id a coded error carries.
+// fwState, bus, operatorSecrets, logger and newCorrelationID are required,
+// and NewServer returns an error rather than a Server that would fail on its
+// first use: fwState is the firewall service the state route reads, bus is
+// the bus TLS state (bustls.Available or bustls.Unavailable), operatorSecrets
+// the business service behind the operator secret routes
+// (geekdojo/geekdojo-brain#604), logger the process logger, and
+// newCorrelationID the source of the id a coded error carries.
 func NewServer(
 	store *jobs.Store,
 	runner *jobs.Runner,
@@ -227,6 +232,7 @@ func NewServer(
 	busTokens *busauth.Store,
 	nc *nats.Conn,
 	bus BusState,
+	operatorSecrets operatorSecretsService,
 	logger *slog.Logger,
 	newCorrelationID func() string,
 ) (*Server, error) {
@@ -235,6 +241,8 @@ func NewServer(
 		return nil, errors.New("api: NewServer: a firewall state service is required")
 	case bus == nil:
 		return nil, errors.New("api: NewServer: a BusState is required")
+	case operatorSecrets == nil:
+		return nil, errors.New("api: NewServer: an operator secrets service is required")
 	case logger == nil:
 		return nil, errors.New("api: NewServer: a logger is required")
 	case newCorrelationID == nil:
@@ -267,7 +275,7 @@ func NewServer(
 		// caller for a process-wide constant; reading it here keeps the one
 		// source without disturbing the signature.
 		selfNodeID: os.Getenv("RASPUTIN_SELF_NODE_ID"),
-		bus:        bus, log: logger, newCorrelationID: newCorrelationID,
+		bus:        bus, operatorSecrets: operatorSecrets, log: logger, newCorrelationID: newCorrelationID,
 	}, nil
 }
 
@@ -372,6 +380,10 @@ func (s *Server) routes() *routeMux {
 	// backup generation. Explicit, per app, operator-initiated.
 	mux.HandleFunc("GET /api/apps/{id}/restore-sources", reqd(s.handleAppRestoreSources))
 	mux.HandleFunc("POST /api/apps/{id}/restore", reqd(s.handleAppRestore))
+	// geekdojo/geekdojo-brain#604: the app's owner-supplied secrets,
+	// write-only. GET reports which are set; PUT sets one.
+	mux.HandleFunc("GET /api/apps/{id}/secrets", reqd(s.handleListOperatorSecrets))
+	mux.HandleFunc("PUT /api/apps/{id}/secrets/{name}", reqd(s.handlePutOperatorSecret))
 	mux.HandleFunc("GET /api/volumes/orphans", reqd(s.handleListOrphanVolumes))
 	mux.HandleFunc("POST /api/volumes/orphans/reclaim", reqd(s.handleReclaimOrphanVolumes))
 	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))

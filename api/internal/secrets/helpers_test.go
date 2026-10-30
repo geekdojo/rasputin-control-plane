@@ -30,6 +30,7 @@ type rig struct {
 	t    *testing.T
 	svc  *secrets.Service
 	repo *fakeRepo
+	sw   *fakeSwitch
 	rec  *logkittest.Recorder
 	errs []error
 }
@@ -43,11 +44,12 @@ func newRig(t *testing.T, repo secrets.Repository, apps secrets.AppTargets) *rig
 	}
 	log, rec := logkittest.New()
 	fr := &fakeRepo{inner: repo}
-	svc, err := secrets.NewService(secrets.Deps{Repo: fr, Apps: apps, Log: log})
+	sw := &fakeSwitch{log: fr}
+	svc, err := secrets.NewService(secrets.Deps{Repo: fr, Apps: apps, Switch: sw, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &rig{t: t, svc: svc, repo: fr, rec: rec}
+	return &rig{t: t, svc: svc, repo: fr, sw: sw, rec: rec}
 }
 
 // keep records err for the redaction scan and returns it.

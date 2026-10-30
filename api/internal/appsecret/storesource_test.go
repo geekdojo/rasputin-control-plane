@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -21,9 +22,12 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storepolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"gopkg.in/yaml.v3"
 )
 
@@ -169,7 +173,7 @@ func newHarness(t *testing.T, seed *Seed, entries map[string]string) *harness {
 	svc := newFakeSecrets(entries)
 	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
 	refs := &fakeRefs{}
-	src, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: refs, Seed: seed, Log: log})
+	src, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: refs, Seed: seed, Operator: noOperatorSecrets{}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,13 +626,14 @@ func TestStoreSource_SeveralTokensRepeatsAndPartialFailure(t *testing.T) {
 // TC-762-11: the constructor refuses each nil collaborator.
 func TestNewStoreSource_RefusesNil(t *testing.T) {
 	log, _ := logkittest.New()
-	full := StoreSourceDeps{Secrets: newFakeSecrets(nil), Apps: &fakeNodes{}, Refs: &fakeRefs{}, Seed: testSeed(t), Log: log}
+	full := StoreSourceDeps{Secrets: newFakeSecrets(nil), Apps: &fakeNodes{}, Refs: &fakeRefs{}, Seed: testSeed(t), Operator: noOperatorSecrets{}, Log: log}
 	for name, clear := range map[string]func(*StoreSourceDeps){
-		"Secrets": func(d *StoreSourceDeps) { d.Secrets = nil },
-		"Apps":    func(d *StoreSourceDeps) { d.Apps = nil },
-		"Refs":    func(d *StoreSourceDeps) { d.Refs = nil },
-		"Seed":    func(d *StoreSourceDeps) { d.Seed = nil },
-		"Log":     func(d *StoreSourceDeps) { d.Log = nil },
+		"Secrets":  func(d *StoreSourceDeps) { d.Secrets = nil },
+		"Apps":     func(d *StoreSourceDeps) { d.Apps = nil },
+		"Refs":     func(d *StoreSourceDeps) { d.Refs = nil },
+		"Seed":     func(d *StoreSourceDeps) { d.Seed = nil },
+		"Operator": func(d *StoreSourceDeps) { d.Operator = nil }, // TC-604-09
+		"Log":      func(d *StoreSourceDeps) { d.Log = nil },
 	} {
 		d := full
 		clear(&d)
@@ -698,11 +703,11 @@ func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: nodes, Log: log})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: nodes, Switch: realSwitch(t, log), Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: &fakeRefs{}, Seed: seed, Log: log})
+	store, err := NewStoreSource(StoreSourceDeps{Secrets: svc, Apps: nodes, Refs: &fakeRefs{}, Seed: seed, Operator: noOperatorSecrets{}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,4 +841,27 @@ func TestStoreSource_HostileValueCannotChangeTheCompose(t *testing.T) {
 			}
 		})
 	}
+}
+
+// realSwitch is the secret store's switch marker over a real settings table
+// in a temporary rasputin.db (geekdojo/geekdojo-brain#604).
+func realSwitch(t *testing.T, log *slog.Logger) *storeswitch.Marker {
+	t.Helper()
+	st, err := setup.OpenStore(context.Background(), filepath.Join(t.TempDir(), "rasputin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	m, err := storeswitch.New(storeswitch.Deps{Settings: st, Now: time.Now, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// noOperatorSecrets is an app that declares no operator secrets.
+type noOperatorSecrets struct{}
+
+func (noOperatorSecrets) OperatorSecrets(context.Context, string) ([]tileschema.OperatorSecret, error) {
+	return nil, nil
 }

@@ -55,7 +55,7 @@ func TestStoreSessionWiring(t *testing.T) {
 			t.Fatalf("%q: storeWiring.login is nil", backend)
 		}
 		store := &countingStore{secretStore: w.store}
-		r, err := storeReadinessWiring(backend, w.mode, store, js, time.Now, notBlank, log)
+		r, err := storeReadinessWiring(backend, false, w.mode, store, js, time.Now, notBlank, log)
 		if err != nil {
 			t.Fatal(err)
 		}

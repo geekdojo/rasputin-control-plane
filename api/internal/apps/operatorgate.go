@@ -48,7 +48,9 @@ type OperatorSecretGateDeps struct {
 // OperatorSecretGate is the secret source placed in front of the deploy
 // family's resolver (geekdojo/geekdojo-brain#780). It refuses a compose that
 // uses a secret the app's tile declares its OWNER supplies while that value
-// is not set, and otherwise delegates to Next unchanged.
+// is not set, and otherwise delegates to Next unchanged. A declaration marked
+// `required: false` does not refuse while unset (geekdojo/geekdojo-brain#604):
+// Next resolves it to an empty value.
 //
 // Without it, the resolver behind it would treat the name like any other
 // ${secret:} token: derive a random value, store it, and hand it to the app
@@ -108,11 +110,13 @@ func (g *OperatorSecretGate) ResolveCompose(ctx context.Context, appID, compose 
 		if !used[decl.Name] {
 			continue
 		}
+		// An optional name is read too: with the store off every read fails,
+		// so an app using any operator name is refused, never derived.
 		set, err := g.isSet(ctx, actor, appID, decl.Name)
 		if err != nil {
 			return secret.Value{}, nil, err
 		}
-		if !set {
+		if !set && decl.IsRequired() {
 			unset = append(unset, decl)
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats.go"
 )
 
@@ -99,7 +100,7 @@ func gatedStoreSource(t *testing.T, svc *memSecrets, hs *healthStore) (SecretSou
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Operator: noDecls{}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestResolveError_PassesTheStoreRefusalThrough(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: nodeN{}, Refs: refSink{}, Seed: seed, Operator: noDecls{}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,4 +326,11 @@ func TestStoreSource_ClosedOutcomesLeaveTheAppUntouched(t *testing.T) {
 			}
 		})
 	}
+}
+
+// noDecls is an app that declares no operator secrets.
+type noDecls struct{}
+
+func (noDecls) OperatorSecrets(context.Context, string) ([]tileschema.OperatorSecret, error) {
+	return nil, nil
 }
