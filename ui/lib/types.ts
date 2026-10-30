@@ -318,6 +318,20 @@ export type AppStatus =
   | 'failed'
   | 'unknown';
 
+/**
+ * One owner-supplied secret an app's tile declares, as the owner sees it
+ * (geekdojo/geekdojo-brain#604, GET /api/apps/{id}/secrets). Mirrors
+ * apps.OperatorSecretStatus: there is deliberately no value field — the api
+ * never returns one.
+ */
+export interface OperatorSecretStatus {
+  name: string;
+  label: string;
+  required: boolean;
+  /** Whether a value has been stored. */
+  set: boolean;
+}
+
 export type AppChange = 'deploying' | 'stopping' | 'deployed' | 'stopped' | 'failed' | 'deleted';
 
 /**

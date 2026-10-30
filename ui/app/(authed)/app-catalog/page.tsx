@@ -15,7 +15,10 @@ import {
   listNodes,
   openInventoryWS,
   refreshCatalog,
+  setAppSecret,
 } from '../../../lib/api';
+import { footerNote, saveThenDeploy } from '../../../lib/operator-secrets';
+import { OperatorSecretFields, useOperatorSecrets } from '../../../components/OperatorSecretFields';
 import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '../../../lib/types';
 import { coLocatedSecretsWarning, grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
@@ -736,20 +739,24 @@ function InstalledFooter({ app, clusterId, postInstall }: { app: App; clusterId:
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [deployed, setDeployed] = useState(false);
+  // The app's owner-supplied secrets (geekdojo/geekdojo-brain#781, S20):
+  // DEPLOY NOW saves whatever was typed first, then deploys once, so a typed
+  // value is never thrown away. A refused write deploys nothing.
+  const secrets = useOperatorSecrets(app.id);
 
   const access = appAccess(app, clusterId);
 
   async function deployNow() {
     setBusy(true);
     setErr(null);
-    try {
-      await deployApp(app.id);
-      setDeployed(true);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
+    const r = await saveThenDeploy(secrets.writes, {
+      put: (name, value) => setAppSecret(app.id, name, value),
+      deploy: () => deployApp(app.id),
+    });
+    secrets.afterSave(r);
+    if (r.job) setDeployed(true);
+    else setErr(footerNote(r));
+    setBusy(false);
   }
 
   return (
@@ -785,12 +792,15 @@ function InstalledFooter({ app, clusterId, postInstall }: { app: App; clusterId:
           <LinkBtn href="/apps" variant="primary">GO TO APPS</LinkBtn>
         </>
       ) : (
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <Btn variant="primary" disabled={busy} onClick={deployNow}>
-            <UploadCloud size={11} /> {busy ? 'DEPLOYING…' : 'DEPLOY NOW'}
-          </Btn>
-          <LinkBtn href="/apps">VIEW IN APPS</LinkBtn>
-        </div>
+        <>
+          <OperatorSecretFields secrets={secrets} disabled={busy} />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Btn variant="primary" disabled={busy} onClick={deployNow}>
+              <UploadCloud size={11} /> {busy ? 'DEPLOYING…' : 'DEPLOY NOW'}
+            </Btn>
+            <LinkBtn href="/apps">VIEW IN APPS</LinkBtn>
+          </div>
+        </>
       )}
       {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
     </>

@@ -553,9 +553,10 @@ jobs:
       # ui/ had no test runner at all until 2026-09-01, which meant the §4.6
       # archive-key crypto — the part of this frontend where a silent mistake
       # costs an operator their backup — was covered by nothing. `npm test`
-      # compiles lib/ and components/storage/ to CommonJS and runs them under
-      # node --test; it adds no dependency to package.json, deliberately (see
-      # ui/tsconfig.test.json for why that mattered here).
+      # compiles lib/, components/storage/ and the component tests to CommonJS
+      # and runs them under node --test. Its one test dependency is happy-dom,
+      # the DOM the component tests render into (see ui/tsconfig.test.json for
+      # why dependencies here are added one decision at a time).
       - name: test
         run: npm test
 
