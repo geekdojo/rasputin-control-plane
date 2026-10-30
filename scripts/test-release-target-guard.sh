@@ -32,6 +32,7 @@ w tag light-a
 w tag -a annotated-a -m "annotated on A"
 w -c advice.nestedTag=false tag -a nested-a -m "annotated tag of an annotated tag" annotated-a
 w tag v1.1 # a longer name that shares a prefix with the absent tag v1
+w tag -a tileschema/v1.5.0 -m "a module tag on A"
 w commit -q --allow-empty -m B
 b="$(w rev-parse HEAD)"
 w tag light-b
@@ -77,6 +78,14 @@ check "an upper-case SHA is refused" 2 "not a full 40-character SHA" "$remote" l
 check "a tag name with glob characters is refused" 2 "refusing tag name" "$remote" 'light-*' "$a"
 check "a tag name starting with a dash is refused" 2 "refusing tag name" "$remote" '-light-a' "$a"
 check "missing arguments are a usage error" 2 "usage" "$remote" light-a
+# A module tag line (tileschema/vM.m.p, #897): '/' between segments is a tag
+# name, and every glob or ref-syntax character is still refused.
+check "a slash tag name on the built commit passes" 0 "$a" "$remote" tileschema/v1.5.0 "$a"
+check "a slash tag name on another commit fails" 1 "points at $a, but this run built $b" "$remote" tileschema/v1.5.0 "$b"
+for bad in 'tileschema/v1..5' 'a..b' '/tileschema/v1.5.0' 'tileschema/v1.5.0/' 'tileschema//v1.5.0' \
+	'tileschema/*' 'tileschema/v1.?' 'tileschema/[v]1' 'tileschema/v1~1' 'tileschema/v1^0' 'tileschema:v1'; do
+	check "the tag name '$bad' is refused" 2 "refusing tag name" "$remote" "$bad" "$a"
+done
 
 if [ "$failures" -ne 0 ]; then
 	echo "$failures release-target-guard test(s) failed"

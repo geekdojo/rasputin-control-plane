@@ -41,7 +41,7 @@ func ValidateTile(t Tile) error {
 	// to installability made a must-understand rule quietly optional.
 	for _, capability := range t.Requires {
 		if !KnownCapabilities[capability] {
-			return fmt.Errorf("requires unknown capability %q (schema %d) — refusing rather than loading without it", capability, SchemaVersion)
+			return fmt.Errorf("requires unknown capability %q, which this control plane (contract %d.%d) does not know: refusing this tile rather than loading it without it", capability, ContractMajor, ContractMinor)
 		}
 	}
 

@@ -9,7 +9,9 @@ name: ci
 #   release-target-guard — tests for scripts/release-target-guard.sh, which
 #              release.yml runs to prove a release tag is on the built commit,
 #              and for scripts/pack-store-policy.sh, which build-release.sh
-#              runs to pack the secrets store's policy text.
+#              runs to pack the secrets store's policy text, and for
+#              scripts/tileschema-contract.sh, which this file's backend job
+#              and tileschema-tag.yml run.
 #
 #   auth-register — .github/auth-register.tsv still describes the code it
 #              anchors to (scripts/auth-register.sh --gate), plus the gate's
@@ -36,6 +38,9 @@ name: ci
 #              RASPUTIN_SECRETSTORE_FUNCTIONAL=required, so the secret store
 #              smoke test must run against the real OpenBao and pass rather
 #              than skip (geekdojo-brain#753, docs/testing-secret-store.md).
+#              And it refuses a tileschema contract change that did not bump
+#              ContractMinor over the latest tileschema/v* tag
+#              (scripts/tileschema-contract.sh check, geekdojo-brain#897).
 #
 #   caddy-admin-socket — the agent's Caddy supervisor against the real Caddy
 #              the OS image ships, run as root: the admin API is reachable
@@ -130,6 +135,10 @@ jobs:
       # TC-804-09).
       - name: store policy packing tests
         run: ./scripts/test-pack-store-policy.sh
+      # scripts/tileschema-contract.sh: the contract version, the CI gate on
+      # it, and the tagger tileschema-tag.yml runs (geekdojo/geekdojo-brain#897).
+      - name: tileschema contract script tests
+        run: ./scripts/test-tileschema-contract.sh
 
   auth-register:
     # The auth exception register: one canonical authentication method per cell,
@@ -245,6 +254,19 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+
+      # The tileschema contract (ADR-0012, geekdojo/geekdojo-brain#897): a
+      # change to the contract surface golden must raise ContractMinor above
+      # the latest tileschema/v* tag. The checkout is shallow and carries no
+      # tags, so the tileschema tag line is fetched first; with no tag the
+      # check fails rather than passing unchecked. TestContractSurface, which
+      # keeps the golden equal to the code, runs in "test (remaining modules)".
+      - name: tileschema contract version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin '+refs/tags/tileschema/*:refs/tags/tileschema/*'
+          ./scripts/tileschema-contract.sh check
 
       - name: vet
         run: |

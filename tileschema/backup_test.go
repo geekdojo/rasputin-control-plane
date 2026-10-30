@@ -275,7 +275,7 @@ func TestBundle_RefusesATileWithAnUnclassifiedVolume(t *testing.T) {
 		Compose: "services: {}",
 		Safety:  okFacts(),
 	}
-	b := Bundle{SchemaVersion: BundleSchemaVersion, Version: 1, Tiles: []BundleTile{bt}}
+	b := Bundle{SchemaVersion: ContractMajor, Version: 1, Tiles: []BundleTile{bt}}
 	if err := b.Validate(); err == nil {
 		t.Fatal("strict parse should refuse a tile with an unclassified volume")
 	}

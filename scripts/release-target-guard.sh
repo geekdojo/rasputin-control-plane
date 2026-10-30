@@ -40,10 +40,14 @@ remote="$1"
 tag="$2"
 built="$3"
 
-# Tag names here are v-prefixed CalVer (vYYYY.MM.MICRO, optionally -dev.N).
-# Refusing anything outside a plain tag-name alphabet keeps glob and
-# ref-syntax characters out of the ls-remote patterns below.
-[[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*$ ]] || fail 2 "refusing tag name '$tag'"
+# Tag names here are v-prefixed CalVer (vYYYY.MM.MICRO, optionally -dev.N),
+# from release.yml, and the tileschema module's own line, tileschema/vM.m.p,
+# from scripts/tileschema-contract.sh. Refusing anything outside a plain
+# tag-name alphabet, with '/' only between non-empty segments, keeps glob and
+# ref-syntax characters out of the ls-remote patterns below; git's own
+# check-ref-format then refuses '..' and its other structural rules.
+[[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(/[A-Za-z0-9][A-Za-z0-9._+-]*)*$ ]] || fail 2 "refusing tag name '$tag'"
+git check-ref-format "refs/tags/$tag" || fail 2 "refusing tag name '$tag'"
 [[ "$built" =~ ^[0-9a-f]{40}$ ]] || fail 2 "built commit '$built' is not a full 40-character SHA"
 
 errfile="$(mktemp)"
