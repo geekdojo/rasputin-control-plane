@@ -589,7 +589,14 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store secret source", "err", err.Error())
 		os.Exit(1)
 	}
-	deploySource, err := deploySourceWiring(readiness.monitor, storeSource, appSecrets, logger)
+	// Both sources go behind the operator-secret gate (#780): a secret the
+	// app's owner supplies is never derived, whichever source resolves.
+	gatedStore, gatedHKDF, err := operatorGated(storeSource, appSecrets, appsStore, secretsSvc, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: operator secret gate", "err", err.Error())
+		os.Exit(1)
+	}
+	deploySource, err := deploySourceWiring(readiness.monitor, gatedStore, gatedHKDF, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: deploy secret source", "err", err.Error())
 		os.Exit(1)

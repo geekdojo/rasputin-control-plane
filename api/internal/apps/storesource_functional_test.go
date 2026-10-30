@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // storeCallTimeout is the client's bound on one store call in this test. It
@@ -54,7 +55,11 @@ func (a appNodes) TargetNode(ctx context.Context, appID string) (string, bool, e
 // the real client, Monitor, ObservedStore, login session, repository and
 // secrets service, appsecret.StoreSource behind the readiness Gate, and a
 // real runner with a fake deploy agent. The legs run in order on one store,
-// because each changes it (TC-762-21 to TC-762-25, and the sealed leg).
+// because each changes it (TC-762-21 to TC-762-25, TC-780-17, and the sealed
+// leg).
+//
+// The source is wired as main wires it: the readiness Gate around the
+// operator-secret gate (geekdojo/geekdojo-brain#780) around StoreSource.
 func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	bin := os.Getenv(binEnv)
 	if bin == "" {
@@ -147,7 +152,11 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := storestate.NewGate(src, monitor, log)
+	opGate, err := apps.NewOperatorSecretGate(apps.OperatorSecretGateDeps{Next: src, Apps: appStore, Secrets: svc, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate, err := storestate.NewGate(opGate, monitor, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,9 +184,9 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 
 	var texts []string // every job error and alert a person reads
 	var jobIDs []string
-	deploy := func(t *testing.T) *jobs.Job {
+	deployApp := func(t *testing.T, appID string) *jobs.Job {
 		t.Helper()
-		j, err := runner.Submit(ctx, "app.deploy", apps.DeploySpec{AppID: id}, "test")
+		j, err := runner.Submit(ctx, "app.deploy", apps.DeploySpec{AppID: appID}, "test")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -192,6 +201,10 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 			texts = append(texts, a.Title, a.Detail)
 		}
 		return got
+	}
+	deploy := func(t *testing.T) *jobs.Job {
+		t.Helper()
+		return deployApp(t, id)
 	}
 	deploysWith := func(t *testing.T, want string) *jobs.Job {
 		t.Helper()
@@ -278,6 +291,56 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 			t.Fatalf("current_version %d, want 2", v)
 		}
 	})
+	const operatorValue = "S-780-owner-supplied"
+	t.Run("TC-780-17 an unset operator secret refuses and creates nothing; the owner's value is delivered", func(t *testing.T) {
+		const opID = "01J9ZK3Q0M8X7Y6W5V4T3S2FD0"
+		now := time.Now().UTC()
+		if err := appStore.Create(ctx, &apps.App{
+			ID: opID, Name: "feeds", TargetNode: "n", PublishedPort: 8081, DeployBudgetSeconds: 300,
+			ComposeYAML:     "services:\n  feeds:\n    image: me/feeds:1\n    environment:\n      FEED_KEY: ${secret:feed-key}\n",
+			OperatorSecrets: []tileschema.OperatorSecret{{Name: "feed-key", Label: "Feed API key"}},
+			LastStatus:      proto.AppStatusStopped, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		opRef, err := secrets.AppSecret(opID, "feed-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		opPath, err := secretstore.NewKVPath(storepolicy.Mount, opRef.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		j := deployApp(t, opID)
+		if j.Status != jobs.StatusFailed || !strings.Contains(j.Error, apps.CodeOperatorSecretUnset) {
+			t.Fatalf("the deploy ended %s with %q, want failed with %s", j.Status, j.Error, apps.CodeOperatorSecretUnset)
+		}
+		if err := nc.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		if n := len(deploys); n != 0 {
+			t.Fatalf("%d AppDeployCmd(s) reached the agent for a refused deploy", n)
+		}
+		if _, err := sess.Versions(ctx, opPath); !errors.Is(err, secretstore.ErrNotFound) {
+			t.Fatalf("after the refusal the store answers %v for %s, want not found: the name was derived", err, opRef)
+		}
+
+		if _, err := svc.Create(ctx, secrets.OperatorActor("u1"), opRef, secret.New([]byte(operatorValue))); err != nil {
+			t.Fatalf("the operator could not set the value: %v", err)
+		}
+		j = deployApp(t, opID)
+		if j.Status != jobs.StatusSucceeded {
+			t.Fatalf("the deploy after the value was set ended %s: %s", j.Status, j.Error)
+		}
+		cmd := apps.ReceiveDeployWithin(t, deploys, "the agent never received the deploy command")
+		if cmd.SecretEnv[proto.SecretEnvName("feed-key")] != operatorValue {
+			t.Fatal("the agent did not receive the owner's value byte-exact")
+		}
+		if strings.Contains(cmd.ComposeYAML, operatorValue) {
+			t.Fatal("the owner's value reached the compose")
+		}
+	})
 	t.Run("TC-762-24 T42: a blocked audit sink reads audit-blocked and refuses", func(t *testing.T) {
 		release := store.HoldStdout()
 		defer release()
@@ -331,7 +394,7 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, v := range []string{derived, replaced} {
+		for _, v := range []string{derived, replaced, operatorValue} {
 			if strings.Contains(rec.Text(), v) {
 				t.Error("a value reached a log record")
 			}

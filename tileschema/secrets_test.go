@@ -99,9 +99,10 @@ func TestTileSecretsIsAKnownCapability(t *testing.T) {
 	if !KnownCapabilities[CapabilityTileSecrets] {
 		t.Fatalf("%q is not in KnownCapabilities, so a tile declaring it is refused by this build", CapabilityTileSecrets)
 	}
-	// It is the THIRD entry, not the first — ADR-0006's own text is stale on
+	// It was the THIRD entry, not the first — ADR-0006's own text is stale on
 	// that point and this is where the count is checked rather than restated.
-	if len(KnownCapabilities) != 3 {
+	// tile.operator-secrets made it four (#780).
+	if len(KnownCapabilities) != 4 {
 		t.Errorf("KnownCapabilities holds %d entries; if that is deliberate, update this assertion and say why in the PR", len(KnownCapabilities))
 	}
 }

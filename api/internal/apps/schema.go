@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS apps (
     previous_privilege_tier TEXT NOT NULL DEFAULT '',  -- privilege_tier as it was beside previous_compose_yaml
     privilege_ack_at        INTEGER,                   -- consent to a tier-raising upgrade (dec 12); NULL = none needed yet
     privilege_ack_by        TEXT NOT NULL DEFAULT '',  -- the consenting user's name (never a token)
-    privilege_ack_what      TEXT NOT NULL DEFAULT ''   -- JSON PrivilegeConsent: what was accepted
+    privilege_ack_what      TEXT NOT NULL DEFAULT '',  -- JSON PrivilegeConsent: what was accepted
+    operator_secrets        TEXT NOT NULL DEFAULT '',  -- JSON []tileschema.OperatorSecret the compose's tile declares ('' = none) (#780)
+    previous_operator_secrets TEXT NOT NULL DEFAULT '' -- operator_secrets as it was beside previous_compose_yaml
 );
 CREATE INDEX IF NOT EXISTS idx_apps_target_node ON apps(target_node);
 CREATE INDEX IF NOT EXISTS idx_apps_status      ON apps(last_status);
@@ -132,4 +134,12 @@ var migrations = []string{
 	`ALTER TABLE apps ADD COLUMN privilege_ack_at INTEGER`,
 	`ALTER TABLE apps ADD COLUMN privilege_ack_by TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE apps ADD COLUMN privilege_ack_what TEXT NOT NULL DEFAULT ''`,
+	// operator_secrets / previous_operator_secrets: the operator-supplied
+	// secrets the installed compose's tile declares, as JSON names and labels
+	// (geekdojo/geekdojo-brain#780). '' reads as none, which is true of every
+	// existing row: no tile declared any before this column existed. The
+	// previous twin is swapped on a re-apply like previous_privilege_tier, so
+	// a reverted compose is gated by the declarations that went with it.
+	`ALTER TABLE apps ADD COLUMN operator_secrets TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE apps ADD COLUMN previous_operator_secrets TEXT NOT NULL DEFAULT ''`,
 }
