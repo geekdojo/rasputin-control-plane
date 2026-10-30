@@ -15,6 +15,14 @@
 // the wrong trade to make quietly. If a component-rendering framework is wanted
 // later, that is a dependency decision to take on its own merits.
 //
+// It was taken on 2026-10-30 (geekdojo/geekdojo-brain#781, Bryce: "Add
+// component tests"): the component tests (components/**/*.test.tsx and
+// test/**) render React into happy-dom, one dev dependency with six small
+// transitive packages, all read by the npm audit gate. They drive React through
+// react-dom/client and act() directly, so no testing-library rides along.
+// test/dom.ts holds the setup; the page tests import the real pages, which
+// pulls their modules into this build through the imports.
+//
 // `module: commonjs` is the load-bearing setting. The lib sources import each
 // other WITHOUT file extensions (`./passphrase-kdf`), which Node's ESM resolver
 // refuses and its CommonJS resolver handles — so tsc emits CJS into .test-out/
@@ -29,5 +37,5 @@
     "incremental": false,
     "types": ["node"]
   },
-  "include": ["lib/**/*.ts", "components/storage/*.ts"]
+  "include": ["lib/**/*.ts", "components/storage/*.ts", "components/**/*.test.tsx", "test/**/*.ts", "test/**/*.tsx"]
 }
