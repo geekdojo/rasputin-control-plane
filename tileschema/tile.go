@@ -96,10 +96,16 @@ var (
 // reader that cannot resolve ${secret:<name>} cannot tell that it failed to,
 // because the token is an ordinary string. It would deploy the literal as a
 // password. See CapabilityTileSecrets.
+//
+// tile.operator-secrets is the fourth (#780). A control plane that knows
+// tile.secrets but not this would ignore operatorSecrets, derive a random value
+// for each declared name, store it, and hand it to the app as the owner's key.
+// Nothing would show that it went wrong. See CapabilityOperatorSecrets.
 var KnownCapabilities = map[string]bool{
-	CapabilityPrivilegeTiers: true,
-	CapabilityWebPort:        true,
-	CapabilityTileSecrets:    true,
+	CapabilityPrivilegeTiers:  true,
+	CapabilityWebPort:         true,
+	CapabilityTileSecrets:     true,
+	CapabilityOperatorSecrets: true,
 }
 
 // Port is a structured published port. The reverse proxy must route
@@ -226,6 +232,13 @@ type Tile struct {
 	// cannot succeed is not a fast failure, it is a broken tile wearing a
 	// flaky network's clothes.
 	DeployBudgetSeconds int `json:"deployBudgetSeconds,omitempty"`
+
+	// OperatorSecrets declares the secrets the app's OWNER supplies, as
+	// opposed to the ones the control plane derives (#780). Each is used in the
+	// compose as an ordinary ${secret:<name>} token; declaring it here is what
+	// stops the control plane deriving it. A tile declaring any must list
+	// tile.operator-secrets in Requires. See OperatorSecret.
+	OperatorSecrets []OperatorSecret `json:"operatorSecrets,omitempty"`
 
 	// ComposeYAML is loaded from the sibling docker-compose.yml, not tile.json.
 	// A preview tile may omit it — it cannot be installed.

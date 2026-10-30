@@ -112,20 +112,25 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 // hash of what was actually stored.
 func (s *Store) Create(ctx context.Context, a *App) error {
 	a.ComposeSHA256 = ComposeHash(a.ComposeYAML)
+	opSecrets, err := encodeOperatorSecrets(a.OperatorSecrets)
+	if err != nil {
+		return err
+	}
 	var ackAt sql.NullInt64
 	ackBy := ""
 	if a.BackupAck != nil {
 		ackAt = sql.NullInt64{Int64: ms(a.BackupAck.At), Valid: true}
 		ackBy = a.BackupAck.By
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
         INSERT INTO apps (id, name, compose_yaml, target_node, published_port,
                           source_tile, deploy_budget_s, expose_lan, web_tls, last_status, created_at, updated_at,
-                          backup_ack_at, backup_ack_by, compose_sha256, compose_catalog_version, privilege_tier)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                          backup_ack_at, backup_ack_by, compose_sha256, compose_catalog_version, privilege_tier,
+                          operator_secrets)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		a.ID, a.Name, a.ComposeYAML, a.TargetNode, a.PublishedPort,
 		a.SourceTile, a.DeployBudgetSeconds, a.ExposeLAN, a.WebTLS, string(a.LastStatus), ms(a.CreatedAt), ms(a.UpdatedAt),
-		ackAt, ackBy, a.ComposeSHA256, a.ComposeCatalogVersion, a.PrivilegeTier)
+		ackAt, ackBy, a.ComposeSHA256, a.ComposeCatalogVersion, a.PrivilegeTier, opSecrets)
 	return err
 }
 
@@ -185,6 +190,9 @@ type ComposeUpgrade struct {
 	// PrivilegeTier is the tile's declared tier, resolved, so the row keeps
 	// describing the compose it holds (#522).
 	PrivilegeTier string
+	// OperatorSecrets are the tile's operator-secret declarations, for the
+	// same reason (#780).
+	OperatorSecrets []tileschema.OperatorSecret
 }
 
 // ErrComposeChanged is UpgradeCompose refusing because the installed compose
@@ -203,17 +211,23 @@ var ErrComposeChanged = errors.New("apps: the installed compose changed since it
 // that was actually running before either began. A mismatch is
 // ErrComposeChanged; an unknown id is sql.ErrNoRows.
 func (s *Store) UpgradeCompose(ctx context.Context, id, fromHash string, up ComposeUpgrade, now time.Time) error {
+	opSecrets, err := encodeOperatorSecrets(up.OperatorSecrets)
+	if err != nil {
+		return err
+	}
 	res, err := s.db.ExecContext(ctx, `
         UPDATE apps SET previous_compose_yaml = compose_yaml,
                         previous_compose_catalog_version = compose_catalog_version,
                         previous_published_port = published_port, previous_web_tls = web_tls,
                         previous_deploy_budget_s = deploy_budget_s,
                         previous_privilege_tier = privilege_tier,
+                        previous_operator_secrets = operator_secrets,
                         compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = ?,
-                        published_port = ?, web_tls = ?, deploy_budget_s = ?, privilege_tier = ?, updated_at = ?
+                        published_port = ?, web_tls = ?, deploy_budget_s = ?, privilege_tier = ?,
+                        operator_secrets = ?, updated_at = ?
         WHERE id = ? AND compose_sha256 = ?`,
 		up.ComposeYAML, ComposeHash(up.ComposeYAML), up.CatalogVersion,
-		up.PublishedPort, up.WebTLS, up.DeployBudgetSeconds, up.PrivilegeTier, ms(now),
+		up.PublishedPort, up.WebTLS, up.DeployBudgetSeconds, up.PrivilegeTier, opSecrets, ms(now),
 		id, fromHash)
 	if err != nil {
 		return err
@@ -264,7 +278,9 @@ func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML strin
                         previous_published_port = published_port, previous_web_tls = web_tls,
                         previous_deploy_budget_s = deploy_budget_s,
                         previous_privilege_tier = privilege_tier,
-                        compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, privilege_tier = '', updated_at = ?
+                        previous_operator_secrets = operator_secrets,
+                        compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, privilege_tier = '',
+                        operator_secrets = '', updated_at = ?
         WHERE id = ? AND compose_sha256 = ? AND source_tile = ''`,
 		composeYAML, ComposeHash(composeYAML), ms(now), id, fromHash)
 	if err != nil {
@@ -324,6 +340,7 @@ func (s *Store) RevertCompose(ctx context.Context, id, fromHash, previousYAML st
                         web_tls = previous_web_tls, previous_web_tls = web_tls,
                         deploy_budget_s = previous_deploy_budget_s, previous_deploy_budget_s = deploy_budget_s,
                         privilege_tier = previous_privilege_tier, previous_privilege_tier = privilege_tier,
+                        operator_secrets = previous_operator_secrets, previous_operator_secrets = operator_secrets,
                         updated_at = ?
         WHERE id = ? AND compose_sha256 = ? AND previous_compose_yaml = ?`,
 		ComposeHash(previousYAML), ms(now), id, fromHash, previousYAML)
@@ -504,7 +521,8 @@ func (s *Store) Get(ctx context.Context, id string) (*App, error) {
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
                previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
-               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what,
+               operator_secrets, previous_operator_secrets
         FROM apps WHERE id = ?`, id)
 	return scanApp(row.Scan)
 }
@@ -515,7 +533,8 @@ func (s *Store) GetByName(ctx context.Context, name string) (*App, error) {
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
                previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
-               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what,
+               operator_secrets, previous_operator_secrets
         FROM apps WHERE name = ?`, name)
 	return scanApp(row.Scan)
 }
@@ -526,7 +545,8 @@ func (s *Store) List(ctx context.Context) ([]*App, error) {
                last_deployed, last_stopped, last_status_at, created_at, updated_at, backup_ack_at, backup_ack_by,
                compose_sha256, compose_catalog_version, previous_compose_yaml,
                previous_compose_catalog_version, previous_published_port, previous_web_tls, previous_deploy_budget_s,
-               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what
+               privilege_tier, previous_privilege_tier, privilege_ack_at, privilege_ack_by, privilege_ack_what,
+               operator_secrets, previous_operator_secrets
         FROM apps ORDER BY created_at ASC`)
 	if err != nil {
 		return nil, err
@@ -557,13 +577,16 @@ func scanApp(scan func(...any) error) (*App, error) {
 		privAckAt    sql.NullString
 		privAckBy    string
 		privAckWhat  string
+		opSecrets    string
+		prevSecrets  string
 	)
 	if err := scan(&a.ID, &a.Name, &a.ComposeYAML, &a.TargetNode, &a.PublishedPort,
 		&a.SourceTile, &a.DeployBudgetSeconds, &a.ExposeLAN, &a.WebTLS, &status, &a.LastDetail, &lastDeployed, &lastStopped, &lastStatusAt,
 		&createdAt, &updatedAt, &ackAt, &ackBy,
 		&a.ComposeSHA256, &a.ComposeCatalogVersion, &a.PreviousComposeYAML,
 		&a.PreviousComposeCatalogVersion, &a.PreviousPublishedPort, &a.PreviousWebTLS, &a.PreviousDeployBudgetSeconds,
-		&a.PrivilegeTier, &a.PreviousPrivilegeTier, &privAckAt, &privAckBy, &privAckWhat); err != nil {
+		&a.PrivilegeTier, &a.PreviousPrivilegeTier, &privAckAt, &privAckBy, &privAckWhat,
+		&opSecrets, &prevSecrets); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
@@ -588,7 +611,51 @@ func scanApp(scan func(...any) error) (*App, error) {
 		a.BackupAck = &BackupAck{At: fromMs(ackAt.Int64), By: ackBy}
 	}
 	a.PrivilegeAck = readPrivilegeAck(a.ID, privAckAt, privAckBy, privAckWhat)
+	var err error
+	if a.OperatorSecrets, err = decodeOperatorSecrets(a.ID, "operator_secrets", opSecrets); err != nil {
+		return nil, err
+	}
+	if a.PreviousOperatorSecrets, err = decodeOperatorSecrets(a.ID, "previous_operator_secrets", prevSecrets); err != nil {
+		return nil, err
+	}
 	return &a, nil
+}
+
+// encodeOperatorSecrets is the operator_secrets column for decls: "" for
+// none, so a row with nothing declared reads exactly like a row from before
+// the column existed, and JSON otherwise.
+func encodeOperatorSecrets(decls []tileschema.OperatorSecret) (string, error) {
+	if len(decls) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(decls)
+	if err != nil {
+		return "", fmt.Errorf("apps: encoding operator secrets: %w", err)
+	}
+	return string(b), nil
+}
+
+// decodeOperatorSecrets reads an operator_secrets column (#780).
+//
+// "" is none: every row from before the column existed, and every app whose
+// tile declares nothing. A field this build does not know is IGNORED, not
+// refused (ADR-0006 Decision 7): a later release may add one, such as a
+// required flag, and a control plane rolled back to this one must still read
+// the row, or one app's declarations would fail GET /api/apps for every app.
+//
+// JSON that does not parse is an error, and the row fails to read, so the
+// app cannot be deployed (ERR-CLOSED). Ignoring it would read as "nothing
+// declared", and the deploy would then derive the owner's secrets. Only
+// encodeOperatorSecrets writes the column, so this is a damaged database.
+func decodeOperatorSecrets(appID, column, raw string) ([]tileschema.OperatorSecret, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	var out []tileschema.OperatorSecret
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("apps: app %s: the %s column does not decode: %w", appID, column, err)
+	}
+	return out, nil
 }
 
 // readPrivilegeAck turns the three privilege_ack_* columns into the app's

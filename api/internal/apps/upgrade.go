@@ -45,6 +45,7 @@ func (t UpgradeTarget) ComposeUpgrade() ComposeUpgrade {
 		WebTLS:              t.Tile.WebPortTLS(),
 		DeployBudgetSeconds: t.Tile.DeployBudgetSeconds,
 		PrivilegeTier:       t.Tile.DeclaredPrivilege().EffectiveTier(),
+		OperatorSecrets:     t.Tile.OperatorSecrets,
 	}
 }
 

@@ -172,6 +172,9 @@ func ValidateTile(t Tile) error {
 		return fmt.Errorf("compose uses %s%s} but the tile does not list %q in requires — a control plane that cannot resolve the token would deploy the literal string as a credential, so it must refuse this tile instead",
 			SecretTokenPrefix, secretTokens[0].Name, CapabilityTileSecrets)
 	}
+	if err := validateOperatorSecrets(t, secretTokens); err != nil {
+		return err
+	}
 
 	// A tile promising public exposure with nothing to expose is a metadata
 	// bug that would otherwise surface as a broken proxy route at install.

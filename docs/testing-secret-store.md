@@ -481,7 +481,9 @@ Self-init creates the `rasputin-secrets` mount and the `rasputin-api` cert role 
 `storepolicy` text, and the harness's audit device writes to the store's stdout
 (`Config.AuditStdout`). The chain is all production code: the client, a real `Monitor` and
 `ObservedStore`, the login session, the repository, the secrets service,
-`appsecret.StoreSource` behind the readiness `Gate`, and a real `jobs.Runner` with in-process
+`appsecret.StoreSource` behind the operator-secret gate behind the readiness `Gate` (the order
+`main` wires them, [geekdojo-brain#780](https://github.com/geekdojo/geekdojo-brain/issues/780)),
+and a real `jobs.Runner` with in-process
 NATS and a fake deploy agent. The steps run in order on one store, because each changes it:
 
 - **First deploy (TC-762-21).** The deploy succeeds. `apps/<app ID>/db-password` is at version 1,
@@ -490,6 +492,12 @@ NATS and a fake deploy agent. The steps run in order on one store, because each 
   the job.
 - **The store is the source (TC-762-23).** After an operator replaces the value, the next deploy
   carries the replaced value at version 2, not the derived one.
+- **An owner-supplied secret (TC-780-17).** A second app declares `feed-key` as a secret its
+  owner supplies, and its compose uses it. While the value is unset the deploy fails with
+  `operator_secret_unset`, sends no deploy command, and `apps/<app ID>/feed-key` is still not
+  found: nothing was derived or created. After an operator creates the value through the
+  secrets service, the next deploy succeeds and the deploy command carries that value
+  byte-exact.
 - **Audit blocked (TC-762-24, row T42).** The harness stops reading the store's stdout
   (`Store.HoldStdout`). Audited reads run until the first runs out of time on the client's bound;
   the loop is capped, and hitting the cap fails as "the audit sink never blocked". At that moment
@@ -498,7 +506,7 @@ NATS and a fake deploy agent. The steps run in order on one store, because each 
   RUNNING. After the hold is released the next deploy succeeds and the `Monitor` no longer reads
   audit-blocked.
 - **Sealed.** After `RestartSealed` the deploy refuses and the app is untouched.
-- **Nothing leaks (TC-762-25).** No derived or replaced value appears in any log record, job
+- **Nothing leaks (TC-762-25).** No derived, replaced or owner-supplied value appears in any log record, job
   spec, step, event, job error, alert or the apps row, and no job error or alert names the
   vendor.
 
@@ -793,6 +801,12 @@ The cases for geekdojo-brain#762 that this document's tests check:
 | TC-762-23 | After an operator replace, the deploy carries the stored value | `TestStoreSource_AgainstTheRealStore` |
 | TC-762-24 | Audit blocked (T42): health 200 unsealed, the `Monitor` reads audit-blocked, the deploy refuses, then recovers; the harness's `AuditStdout` and `HoldStdout` | `TestStoreSource_AgainstTheRealStore`, `TestAuditStdout_RenderAndRefusal`, `TestHoldStdout_ReleaseResumesTheReader` |
 | TC-762-25 | No value leaks across the steps; no vendor name in the copy; required mode | `TestStoreSource_AgainstTheRealStore`, and the `env -u` command above with `-run TestStoreSource_ ./api/internal/apps` |
+
+The cases for geekdojo-brain#780 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-780-17 | An unset owner-supplied secret refuses the deploy and creates no entry; once the operator sets it, the deploy delivers that value | `TestStoreSource_AgainstTheRealStore` |
 
 The cases for geekdojo-brain#765 that this document's tests check:
 

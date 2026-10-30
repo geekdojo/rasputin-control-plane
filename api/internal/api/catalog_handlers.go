@@ -185,11 +185,15 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		// raises it (dec 12, #522). Recorded, not consented: install asks the
 		// server for nothing (Bryce, 2026-09-12).
 		PrivilegeTier: tile.DeclaredPrivilege().EffectiveTier(),
-		ExposeLAN:     req.ExposeLAN,
-		LastStatus:    proto.AppStatusStopped,
-		CreatedAt:     now,
-		UpdatedAt:     now,
-		BackupAck:     backupAck,
+		// The secrets only the owner can supply (#780), copied for the same
+		// reason as the budget. The deploy gate reads them from this row; a
+		// name missing here would be derived as the owner's key.
+		OperatorSecrets: tile.OperatorSecrets,
+		ExposeLAN:       req.ExposeLAN,
+		LastStatus:      proto.AppStatusStopped,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		BackupAck:       backupAck,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())

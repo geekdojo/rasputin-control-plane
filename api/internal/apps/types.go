@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // App is the api's view of a user-defined application. The api holds the
@@ -89,6 +90,17 @@ type App struct {
 	// PreviousPrivilegeTier is PrivilegeTier as it was beside
 	// PreviousComposeYAML.
 	PreviousPrivilegeTier string `json:"previousPrivilegeTier,omitempty"`
+	// OperatorSecrets are the secrets the installed compose's tile declares
+	// its owner supplies (geekdojo/geekdojo-brain#780): names and labels only,
+	// never a value. Copied from the tile by install and by every catalog
+	// upgrade, cleared by a custom edit, and swapped with
+	// PreviousOperatorSecrets by a re-apply, so they always describe
+	// ComposeYAML — the same lifecycle as PrivilegeTier. The deploy family's
+	// OperatorSecretGate reads them: a declared name is never derived.
+	OperatorSecrets []tileschema.OperatorSecret `json:"operatorSecrets,omitempty"`
+	// PreviousOperatorSecrets is OperatorSecrets as it was beside
+	// PreviousComposeYAML.
+	PreviousOperatorSecrets []tileschema.OperatorSecret `json:"previousOperatorSecrets,omitempty"`
 	// PrivilegeAck is the most recent consent an owner gave to a catalog
 	// upgrade that raises this app's tier: who, when, and exactly what they
 	// accepted. Nil when no upgrade has needed one. Written by PUT

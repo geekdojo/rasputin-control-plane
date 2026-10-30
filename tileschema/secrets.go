@@ -104,3 +104,80 @@ func ScanSecretTokens(compose string) ([]SecretToken, error) {
 // asking. One implementation, so the rules cannot drift apart while looking
 // like they agree.
 func ValidSecretName(s string) bool { return ValidDNSLabel(s) }
+
+// CapabilityOperatorSecrets is the Requires capability a tile names when it
+// declares operator-supplied secrets in Tile.OperatorSecrets
+// (geekdojo/geekdojo-brain#780, S20 option A).
+//
+// It is must-understand for the same reason tile.secrets is, one step further
+// along. A control plane that knows tile.secrets but not this capability would
+// ignore the unknown operatorSecrets field (Decision 7's tolerance), see an
+// ordinary ${secret:<name>} token, DERIVE a random value for it, store it, and
+// hand it to the app as the owner's API key. Nothing would show that it went
+// wrong: the app would start, and fail against the third-party service much
+// later, with a key nobody chose. Naming the capability makes that older
+// reader refuse the tile instead.
+const CapabilityOperatorSecrets = "tile.operator-secrets"
+
+// OperatorSecret declares one secret the app's OWNER supplies, rather than one
+// the control plane derives. It is a name and the label the owner is shown;
+// never a value. The value is set by the owner, write-only, and lives only in
+// the secret store.
+//
+// Every declared operator secret is required: a deploy is refused while one
+// the compose uses is unset. Optional operator secrets come later, as an
+// additive field that an older reader ignores and so fails closed on (it keeps
+// refusing until the value is set).
+type OperatorSecret struct {
+	// Name is the ${secret:<name>} name the compose uses for this value. It is
+	// held to ValidSecretName, like every other secret name.
+	Name string `json:"name"`
+	// Label is what the owner is shown when asked for the value, for example
+	// "Feed API key".
+	Label string `json:"label"`
+}
+
+// validateOperatorSecrets checks a tile's operator-secret declarations against
+// its Requires and against the ${secret:} tokens its compose uses. tokens is
+// the scan ValidateTile has already made, passed in rather than re-scanned.
+//
+// Each refusal is one sentence an author reads in CI, naming the declaration
+// it is about.
+func validateOperatorSecrets(t Tile, tokens []SecretToken) error {
+	if len(t.OperatorSecrets) == 0 {
+		return nil
+	}
+	if !requires(t, CapabilityOperatorSecrets) {
+		return fmt.Errorf("the tile declares operatorSecrets but does not list %q in requires — a control plane that does not know operator secrets would derive a random value for the name and hand it to the app as the owner's key, so it must refuse this tile instead",
+			CapabilityOperatorSecrets)
+	}
+
+	used := make(map[string]bool, len(tokens))
+	for _, tok := range tokens {
+		used[tok.Name] = true
+	}
+	hasCompose := strings.TrimSpace(t.ComposeYAML) != ""
+
+	seen := make(map[string]bool, len(t.OperatorSecrets))
+	for i, s := range t.OperatorSecrets {
+		if !ValidSecretName(s.Name) {
+			return fmt.Errorf("operatorSecrets[%d]: name %q must be a DNS-1123 label (1-63 chars, [a-z0-9-], no leading/trailing hyphen)", i, s.Name)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("operatorSecrets[%d] %q: duplicate name — each operator secret is declared once", i, s.Name)
+		}
+		seen[s.Name] = true
+		if strings.TrimSpace(s.Label) == "" {
+			return fmt.Errorf("operatorSecrets[%d] %q: label is required — it is what the owner is shown when asked for the value", i, s.Name)
+		}
+		// A declared name the compose never uses asks the owner for a value
+		// that goes nowhere, and usually means a typo: the compose's token then
+		// names a DIFFERENT secret, which the control plane derives at random.
+		// A preview tile with no compose has nothing to check this against.
+		if hasCompose && !used[s.Name] {
+			return fmt.Errorf("operatorSecrets[%d] %q: the compose never uses %s%s} — the owner would be asked for a value that reaches no container",
+				i, s.Name, SecretTokenPrefix, s.Name)
+		}
+	}
+	return nil
+}

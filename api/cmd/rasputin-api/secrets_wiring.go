@@ -70,3 +70,30 @@ func (a appSecretRefs) ListSecretRefs(ctx context.Context) ([]appsecret.SecretRe
 	}
 	return out, nil
 }
+
+// operatorGated puts the operator-secret gate (geekdojo/geekdojo-brain#780)
+// in front of BOTH deploy sources, so the source deploySourceWiring picks in
+// either store mode refuses a compose whose owner-supplied secret is unset and
+// never derives it. With the store requested, the readiness Gate then wraps
+// the gated store source, so its not-ready refusal still comes first. With
+// the store off, the secrets service reads through secretstore.Disabled, so
+// every presence check fails and an app declaring operator secrets is refused
+// rather than handed a derived value.
+func operatorGated(storeSource, hkdf apps.SecretSource, appsStore *apps.Store, secretsSvc *secrets.Service, logger *slog.Logger) (gatedStore, gatedHKDF apps.SecretSource, err error) {
+	if appsStore == nil {
+		return nil, nil, errors.New("operator secrets: the apps store is nil")
+	}
+	if secretsSvc == nil {
+		return nil, nil, errors.New("operator secrets: the secrets service is nil")
+	}
+	gate := func(next apps.SecretSource) (apps.SecretSource, error) {
+		return apps.NewOperatorSecretGate(apps.OperatorSecretGateDeps{Next: next, Apps: appsStore, Secrets: secretsSvc, Log: logger})
+	}
+	if gatedStore, err = gate(storeSource); err != nil {
+		return nil, nil, err
+	}
+	if gatedHKDF, err = gate(hkdf); err != nil {
+		return nil, nil, err
+	}
+	return gatedStore, gatedHKDF, nil
+}
