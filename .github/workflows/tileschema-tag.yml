@@ -1,0 +1,56 @@
+name: tileschema tag
+
+# Cuts the tileschema module's own tag, tileschema/vM.m.p, on the main commit
+# that set its contract version (ADR-0012 Decision 2, geekdojo/geekdojo-brain#897).
+# Independent of release.yml and the CalVer train: a capability merged to main
+# is consumable by the catalog at merge, not at the next stable cut.
+#
+# scripts/tileschema-contract.sh tag does the work: it runs the same contract
+# check as ci.yml's backend job, does nothing if the tag already exists (a tag
+# is never moved: the Go module proxy keeps a version forever), and otherwise
+# pushes an annotated tag on this commit and proves where it landed with
+# scripts/release-target-guard.sh.
+#
+# Push to main only, and no manual trigger: a manual run can target any branch,
+# and a module tag cut from an unmerged branch would be permanent in the proxy.
+# A failed run is retried with "Re-run failed jobs" on the same commit. It does
+# not warm the Go proxy: consumers fetch on their own schedule, and a proxy blip
+# would turn this run red with nothing wrong.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tileschema/**"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tileschema-tag
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  tag:
+    name: cut the tileschema tag
+    runs-on: ubuntu-latest
+    steps:
+      # Default persisted credentials: the fetch and the tag push below use
+      # them, so no token appears on a command line.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: fetch the tileschema tags
+        run: git fetch --no-tags --depth=1 origin '+refs/tags/tileschema/*:refs/tags/tileschema/*'
+
+      - name: git identity
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: cut the tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/tileschema-contract.sh tag origin "$GITHUB_SHA"

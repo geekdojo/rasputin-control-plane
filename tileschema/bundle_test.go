@@ -2,6 +2,7 @@ package tileschema
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ func okBundleTile() BundleTile {
 
 func okBundle() Bundle {
 	return Bundle{
-		SchemaVersion: BundleSchemaVersion,
+		SchemaVersion: ContractMajor,
 		Version:       1,
 		PublishedAt:   "2026-08-20T00:00:00Z",
 		Tiles:         []BundleTile{okBundleTile()},
@@ -46,7 +47,7 @@ func TestParseBundle_HappyPath(t *testing.T) {
 // envelope has no basis for being selective about the contents.
 func TestParseBundle_RefusesFutureSchema(t *testing.T) {
 	b := okBundle()
-	b.SchemaVersion = BundleSchemaVersion + 1
+	b.SchemaVersion = ContractMajor + 1
 	_, err := ParseBundle(mustJSON(t, b))
 	if err == nil {
 		t.Fatal("a bundle from a newer schema must be refused, not partially read")
@@ -229,7 +230,7 @@ func TestParseFetchedBundle_EnvelopeStaysAllOrNothing(t *testing.T) {
 	// about the contents, so these must fail the bundle even in the tolerant
 	// path — the opposite of the per-tile rule above.
 	for name, mutate := range map[string]func(*Bundle){
-		"schema from the future": func(b *Bundle) { b.SchemaVersion = BundleSchemaVersion + 1 },
+		"schema from the future": func(b *Bundle) { b.SchemaVersion = ContractMajor + 1 },
 		"no version":             func(b *Bundle) { b.Version = 0 },
 		"no tiles at all":        func(b *Bundle) { b.Tiles = nil },
 	} {
@@ -263,8 +264,8 @@ func TestParseFetchedBundle_DuplicateIDDropsTheDuplicateNotTheCatalog(t *testing
 	if len(got.Tiles) != 1 || got.Tiles[0].Tile.Name != "The First One" {
 		t.Fatalf("the FIRST occurrence wins — a later entry must not be able to shadow an earlier one: %+v", got.Tiles)
 	}
-	if len(rejected) != 1 || !strings.Contains(rejected[0].Reason, "duplicate") {
-		t.Errorf("want the duplicate reported, got %+v", rejected)
+	if want := `Duplicate tile id "twice".`; len(rejected) != 1 || rejected[0].Reason != want {
+		t.Errorf("want the duplicate reported as %q, got %+v", want, rejected)
 	}
 }
 
@@ -307,5 +308,116 @@ func TestParseFetchedBundle_IsDeterministicAcrossReparse(t *testing.T) {
 	}
 	if len(first.Tiles) != 6 || len(firstRej) != 2 {
 		t.Fatalf("want 6 kept / 2 rejected, got %d/%d", len(first.Tiles), len(firstRej))
+	}
+}
+
+// --- Contract version in the envelope (#897, ADR-0012) ----------------------
+
+// TC-897-03: the envelope carries the major in schemaVersion as a JSON integer,
+// so a deployed v1.4.0 reader (which decodes it into an int) still reads it, and
+// the minor rides beside it in schemaMinor.
+func TestBundle_EnvelopeStaysReadableByMajorOneReaders(t *testing.T) {
+	b := okBundle()
+	b.SchemaVersion = ContractMajor
+	b.SchemaMinor = ContractMinor
+	raw := mustJSON(t, b)
+
+	for _, want := range []string{`"schemaVersion":1,`, `"schemaMinor":5,`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("marshalled envelope lacks %s: %s", want, raw)
+		}
+	}
+
+	// The v1.4.0 reader's shape: schemaVersion as an int, nothing else.
+	var oldReader struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if err := json.Unmarshal(raw, &oldReader); err != nil {
+		t.Fatalf("a major-1 reader can no longer decode the envelope: %v", err)
+	}
+	if oldReader.SchemaVersion != 1 {
+		t.Errorf("a major-1 reader decodes schemaVersion %d, want 1", oldReader.SchemaVersion)
+	}
+}
+
+// TC-897-04: the minor never gates a reader. A bundle from a later minor, one
+// from before schemaMinor existed, and one with an explicit 0 all load whole,
+// through both the strict and the tolerant path.
+func TestBundle_SchemaMinorNeverGates(t *testing.T) {
+	two := func() Bundle {
+		b := okBundle()
+		second := okBundleTile()
+		second.Tile.ID = "second"
+		b.Tiles = append(b.Tiles, second)
+		return b
+	}
+	cases := map[string][]byte{}
+	future := two()
+	future.SchemaMinor = 99
+	cases["schemaMinor 99"] = mustJSON(t, future)
+	cases["schemaMinor 0"] = []byte(strings.Replace(string(mustJSON(t, two())), `{"schemaVersion":1,`, `{"schemaVersion":1,"schemaMinor":0,`, 1))
+	absent := mustJSON(t, two())
+	if strings.Contains(string(absent), "schemaMinor") {
+		t.Fatalf("a zero SchemaMinor must be omitted, as in a pre-#901 bundle: %s", absent)
+	}
+	cases["schemaMinor absent"] = absent
+
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if name == "schemaMinor 0" && !strings.Contains(string(raw), `"schemaMinor":0`) {
+				t.Fatal("test did not inject schemaMinor 0")
+			}
+			strict, err := ParseBundle(raw)
+			if err != nil {
+				t.Fatalf("ParseBundle refused it: %v", err)
+			}
+			if len(strict.Tiles) != 2 {
+				t.Errorf("ParseBundle kept %d tiles, want 2", len(strict.Tiles))
+			}
+			got, rejected, err := ParseFetchedBundle(raw)
+			if err != nil {
+				t.Fatalf("ParseFetchedBundle refused it: %v", err)
+			}
+			if len(got.Tiles) != 2 || len(rejected) != 0 {
+				t.Errorf("ParseFetchedBundle kept %d tiles and rejected %+v, want 2 kept and none rejected", len(got.Tiles), rejected)
+			}
+		})
+	}
+}
+
+// TC-897-06: a tile requiring a capability this reader lacks is refused alone,
+// and the Reason an operator reads names the capability and this reader's
+// contract, as a sentence.
+func TestParseFetchedBundle_UnknownCapabilityReasonIsASentence(t *testing.T) {
+	b := okBundle()
+	future := okBundleTile()
+	future.Tile.ID = "from-the-future"
+	future.Tile.Requires = []string{"tile.future"}
+	b.Tiles = []BundleTile{future, okBundleTile()}
+
+	got, rejected, err := ParseFetchedBundle(mustJSON(t, b))
+	if err != nil {
+		t.Fatalf("one unknown capability must cost one tile, not the bundle: %v", err)
+	}
+	if len(got.Tiles) != 1 || got.Tiles[0].Tile.ID != okBundleTile().Tile.ID {
+		t.Fatalf("want only the other tile kept, got %+v", got.Tiles)
+	}
+	want := `Requires unknown capability "tile.future", which this control plane (contract 1.5) does not know: refusing this tile rather than loading it without it.`
+	if len(rejected) != 1 || rejected[0].ID != "from-the-future" || rejected[0].Reason != want {
+		t.Fatalf("want one rejection with Reason\n%q\ngot %+v", want, rejected)
+	}
+}
+
+func TestSentence(t *testing.T) {
+	for in, want := range map[string]string{
+		"duplicate tile id":   "Duplicate tile id.",
+		"already a sentence.": "Already a sentence.",
+		"is this a question?": "Is this a question?",
+		"stop!":               "Stop!",
+		"élan":                "Élan.",
+	} {
+		if got := sentence(errors.New(in)); got != want {
+			t.Errorf("sentence(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

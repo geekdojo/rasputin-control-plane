@@ -36,7 +36,7 @@ func catalogBundle(version int, tile tileschema.Tile) tileschema.Bundle {
 	tile.Collection, tile.Arch, tile.ExposureDefault = tileschema.CollectionEssentials, "both", "lan-only"
 	tile.RAMFloorMB, tile.Status = 256, tileschema.StatusPreview
 	return tileschema.Bundle{
-		SchemaVersion: tileschema.BundleSchemaVersion,
+		SchemaVersion: tileschema.ContractMajor,
 		Version:       version,
 		PublishedAt:   "2026-09-03T00:00:00Z",
 		Tiles:         []tileschema.BundleTile{{Tile: tile}},

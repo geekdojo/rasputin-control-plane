@@ -17,14 +17,6 @@
 // Design: projects/rasputin/adr/0006-app-catalog-delivery.md (geekdojo-brain).
 package tileschema
 
-// SchemaVersion is the tile-contract version this module implements.
-//
-// ADR-0006 Decision 7: within a major version a reader IGNORES fields it does
-// not recognise, and refuses a bundle whose major exceeds what it understands.
-// Tolerance alone is not safe, so a tile may also declare Requires — see
-// SafetyFacts and ValidateTileSafety.
-const SchemaVersion = 1
-
 // Collections group tiles in the catalog UI. Order here is display order.
 const (
 	CollectionEssentials = "essentials"
@@ -101,12 +93,12 @@ var (
 // tile.secrets but not this would ignore operatorSecrets, derive a random value
 // for each declared name, store it, and hand it to the app as the owner's key.
 // Nothing would show that it went wrong. See CapabilityOperatorSecrets.
-var KnownCapabilities = map[string]bool{
-	CapabilityPrivilegeTiers:  true,
-	CapabilityWebPort:         true,
-	CapabilityTileSecrets:     true,
-	CapabilityOperatorSecrets: true,
-}
+//
+// Since geekdojo/geekdojo-brain#897 it is BUILT from the capability history
+// in contract.go, which records the minor each capability arrived in; add a
+// capability there, not here. The exported map keeps its type for importers
+// (ADR-0012).
+var KnownCapabilities = knownCapabilitiesFrom(capabilityIntroducedIn)
 
 // Port is a structured published port. The reverse proxy must route
 // <app>.<zone> to a concrete host port without parsing compose, so a tile with

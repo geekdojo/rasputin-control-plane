@@ -162,7 +162,7 @@ func (stubVerifier) VerifyForPurpose(artifactPath, sigPath string) error { retur
 
 func oneTileBundle(version int, id string) tileschema.Bundle {
 	return tileschema.Bundle{
-		SchemaVersion: tileschema.BundleSchemaVersion,
+		SchemaVersion: tileschema.ContractMajor,
 		Version:       version,
 		PublishedAt:   "2026-08-21T00:00:00Z",
 		Tiles: []tileschema.BundleTile{{

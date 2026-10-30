@@ -4,14 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
-
-// BundleSchemaVersion is the catalog-bundle contract this module implements.
-//
-// Separate from SchemaVersion, which versions a TILE. A bundle can gain fields
-// without the tile contract moving and vice versa, and conflating them would
-// force a lockstep bump on two things that change for different reasons.
-const BundleSchemaVersion = 1
 
 // Bundle is one published catalog: the whole tile corpus plus the metadata a
 // reader needs to decide whether to trust and adopt it.
@@ -28,7 +24,19 @@ type Bundle struct {
 	// A reader refuses a bundle whose value exceeds what it understands
 	// (Decision 7) — the whole bundle, not a tile, because a reader that
 	// cannot parse the envelope cannot be selective about its contents.
+	//
+	// It carries the contract MAJOR only, as an integer: every deployed reader
+	// decodes it into an int and refuses anything above 1, so the minor cannot
+	// ride in it (ADR-0012, geekdojo/geekdojo-brain#897).
 	SchemaVersion int `json:"schemaVersion"`
+
+	// SchemaMinor is the contract minor the publisher wrote against
+	// (ContractMinor). INFORMATIONAL: no reader gates on it (ADR-0012 Decision
+	// 1) — a tile needing something a reader lacks says so in Tile.Requires and
+	// is refused alone. Absent in bundles published before
+	// geekdojo/geekdojo-brain#901, which read as 0; omitempty keeps such a
+	// bundle byte-identical on re-marshal.
+	SchemaMinor int `json:"schemaMinor,omitempty"`
 
 	// Version is the monotonic catalog version. A reader REFUSES a bundle
 	// whose version is not greater than the one it already has (Decision 5):
@@ -168,13 +176,28 @@ func (b Bundle) partitionTiles() (kept []BundleTile, rejected []TileRejection) {
 	seen := make(map[string]bool, len(b.Tiles))
 	for _, bt := range b.Tiles {
 		if err := checkTile(bt, seen); err != nil {
-			rejected = append(rejected, TileRejection{ID: bt.Tile.ID, Reason: err.Error()})
+			rejected = append(rejected, TileRejection{ID: bt.Tile.ID, Reason: sentence(err)})
 			continue
 		}
 		seen[bt.Tile.ID] = true
 		kept = append(kept, bt)
 	}
 	return kept, rejected
+}
+
+// sentence turns a per-tile error into the Reason an operator reads in the app
+// catalog: a capital first letter and closing punctuation (ERR-MESSAGE). The
+// error values themselves stay lowercase Go errors; this is the one point
+// where they become text a person sees.
+func sentence(err error) string {
+	msg := err.Error()
+	if r, size := utf8.DecodeRuneInString(msg); size > 0 {
+		msg = string(unicode.ToUpper(r)) + msg[size:]
+	}
+	if !strings.HasSuffix(msg, ".") && !strings.HasSuffix(msg, "?") && !strings.HasSuffix(msg, "!") {
+		msg += "."
+	}
+	return msg
 }
 
 // checkTile is the per-tile judgement, shared by the strict and tolerant paths
@@ -234,10 +257,10 @@ func (b Bundle) validateEnvelope() error {
 	if b.SchemaVersion <= 0 {
 		return fmt.Errorf("bundle declares no schemaVersion")
 	}
-	if b.SchemaVersion > BundleSchemaVersion {
+	if b.SchemaVersion > ContractMajor {
 		return fmt.Errorf(
 			"bundle schemaVersion %d exceeds the %d this build understands — refusing the whole bundle rather than guessing at it",
-			b.SchemaVersion, BundleSchemaVersion)
+			b.SchemaVersion, ContractMajor)
 	}
 	if b.Version <= 0 {
 		return fmt.Errorf("bundle version must be a positive integer, got %d", b.Version)
