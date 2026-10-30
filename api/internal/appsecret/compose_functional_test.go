@@ -3,9 +3,12 @@ package appsecret
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -168,4 +171,80 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	if !strings.Contains(out, "SESSION_KEY: "+stored) {
 		t.Errorf("the stored value must arrive intact. want %q in:\n%s", "SESSION_KEY: "+stored, out)
 	}
+
+	// TC-779-07: a stored value that would change compose text if it were
+	// ever written into it (geekdojo/geekdojo-brain#779). Compose interpolates
+	// it once and never re-reads it, so the parsed model has the key paths of
+	// the benign run and the service gets the value byte-exact, after undoing
+	// Compose's own $ -> $$ output escape.
+	modelOf := func(t *testing.T, value string) (paths []string, sessionKey string) {
+		t.Helper()
+		src, err := NewStoreSource(StoreSourceDeps{
+			Secrets: newFakeSecrets(map[string]string{ref.String(): value}),
+			Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Log: log,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		compose, env, err := resolved(src.ResolveCompose(context.Background(), appID, tile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := runEnv(t, compose, env, "config", "--format", "json")
+		if err != nil {
+			t.Fatalf("the store-resolved compose must parse: %v\n%s", err, out)
+		}
+		var model struct {
+			Services map[string]struct {
+				Environment map[string]string `json:"environment"`
+			} `json:"services"`
+		}
+		if err := json.Unmarshal([]byte(out), &model); err != nil {
+			t.Fatalf("compose config output is not JSON: %v\n%s", err, out)
+		}
+		var raw any
+		if err := json.Unmarshal([]byte(out), &raw); err != nil {
+			t.Fatal(err)
+		}
+		return jsonKeyPaths(raw, ""), model.Services["app"].Environment["SESSION_KEY"]
+	}
+	t.Run("hostile values", func(t *testing.T) {
+		if v, err := exec.Command("docker", "compose", "version", "--short").Output(); err == nil {
+			t.Logf("docker compose %s", strings.TrimSpace(string(v)))
+		}
+		benign, _ := modelOf(t, stored)
+		for _, v := range hostileValues {
+			t.Run(fmt.Sprintf("%q", v), func(t *testing.T) {
+				paths, got := modelOf(t, v)
+				if !slices.Equal(paths, benign) {
+					t.Errorf("the parsed model's key paths changed:\n%v\nwant:\n%v", paths, benign)
+				}
+				if got = strings.ReplaceAll(got, "$$", "$"); got != v {
+					t.Errorf("SESSION_KEY = %q, want %q byte-exact", got, v)
+				}
+			})
+		}
+	})
+}
+
+// jsonKeyPaths is the sorted set of object-key paths in a decoded JSON value,
+// an array item's index standing in for its key.
+func jsonKeyPaths(v any, prefix string) []string {
+	var out []string
+	switch x := v.(type) {
+	case map[string]any:
+		for k, c := range x {
+			p := prefix + "/" + k
+			out = append(out, p)
+			out = append(out, jsonKeyPaths(c, p)...)
+		}
+	case []any:
+		for i, c := range x {
+			p := fmt.Sprintf("%s/%d", prefix, i)
+			out = append(out, p)
+			out = append(out, jsonKeyPaths(c, p)...)
+		}
+	}
+	slices.Sort(out)
+	return out
 }

@@ -80,6 +80,8 @@ func (f *fakeStore) callCount() int {
 type fakeRepo struct {
 	mu    sync.Mutex
 	calls []string
+	// written is the bytes of each value Write was given, in order.
+	written []string
 	// inner, when set, answers each call.
 	inner secrets.Repository
 }
@@ -103,6 +105,9 @@ func (f *fakeRepo) Get(ctx context.Context, r secrets.Ref) (secrets.Secret, erro
 
 func (f *fakeRepo) Write(ctx context.Context, r secrets.Ref, v secret.Value, cas int) (int, error) {
 	f.note("write")
+	f.mu.Lock()
+	f.written = append(f.written, string(v.Reveal()))
+	f.mu.Unlock()
 	return f.inner.Write(ctx, r, v, cas)
 }
 

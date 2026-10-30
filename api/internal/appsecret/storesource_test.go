@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
+	"gopkg.in/yaml.v3"
 )
 
 // The sentinels the store-source tests plant, so a leak scan has something
@@ -739,4 +740,100 @@ func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
 		}
 	}
 	assertNoLeak(t, rec, nil, derivedValue(t, seed, appID, "db-password"), derivedValue(t, seed, appID, "session-key"))
+}
+
+// hostileValues are stored values that would change compose text if they
+// were ever written into it (geekdojo/geekdojo-brain#779, TC-779-04's list).
+var hostileValues = []string{
+	"a$b",
+	"x${HOME}y",
+	"$$z",
+	"${RASPUTIN_SECRET_OTHER}",
+	"${RASPUTIN_SECRET_OTHER:-leak}",
+	"a\nprivileged: true\nvolumes: [\"/:/host\"]",
+	"it's",
+	`say "hi"`,
+	"- a: b # c & *x !t | > % @",
+}
+
+// hostileTile carries a secret token beside a non-secret key and a volume.
+const hostileTile = `services:
+  app:
+    image: alpine:3.20
+    environment:
+      SESSION_KEY: ${secret:session-key}
+      DATA_DIR: /data
+    volumes:
+      - ./data:/data
+`
+
+// keyPaths is the set of mapping-key paths in a YAML document, a sequence
+// item's index standing in for its key.
+func keyPaths(t *testing.T, doc string) []string {
+	t.Helper()
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatalf("the compose does not parse: %v", err)
+	}
+	var out []string
+	var walk func(n *yaml.Node, prefix string)
+	walk = func(n *yaml.Node, prefix string) {
+		switch n.Kind {
+		case yaml.DocumentNode:
+			for _, c := range n.Content {
+				walk(c, prefix)
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(n.Content); i += 2 {
+				p := prefix + "/" + n.Content[i].Value
+				out = append(out, p)
+				walk(n.Content[i+1], p)
+			}
+		case yaml.SequenceNode:
+			for i, c := range n.Content {
+				p := fmt.Sprintf("%s/%d", prefix, i)
+				out = append(out, p)
+				walk(c, p)
+			}
+		}
+	}
+	walk(&root, "")
+	slices.Sort(out)
+	return out
+}
+
+// TC-779-06: the issue's acceptance. Over each stored hostile value the
+// resolved compose is (a) byte-identical to the one for a benign base64url
+// value and free of the hostile value, (b) parses to the key paths of the
+// tile before substitution, and (c) the value reaches the map byte-exact.
+func TestStoreSource_HostileValueCannotChangeTheCompose(t *testing.T) {
+	ref := mustRef(t, appID, "session-key")
+	resolveWith := func(t *testing.T, v string) (string, map[string]string) {
+		t.Helper()
+		h := newHarness(t, testSeed(t), map[string]string{ref.String(): v})
+		got, env, err := resolved(h.src.ResolveCompose(jobCtx(), appID, hostileTile))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got, env
+	}
+	benign, _ := resolveWith(t, "AbCdEf-_0123456789")
+	want := keyPaths(t, hostileTile)
+	for _, v := range hostileValues {
+		t.Run(fmt.Sprintf("%q", v), func(t *testing.T) {
+			got, env := resolveWith(t, v)
+			if got != benign {
+				t.Errorf("(a) the compose differs from the benign value's:\n%s\nwant:\n%s", got, benign)
+			}
+			if strings.Contains(got, v) {
+				t.Errorf("(a) the compose holds the value:\n%s", got)
+			}
+			if paths := keyPaths(t, got); !slices.Equal(paths, want) {
+				t.Errorf("(b) key paths %v, want %v", paths, want)
+			}
+			if e, ok := env["RASPUTIN_SECRET_SESSION_KEY"]; !ok || e != v {
+				t.Errorf("(c) the map holds %q, want %q", e, v)
+			}
+		})
+	}
 }

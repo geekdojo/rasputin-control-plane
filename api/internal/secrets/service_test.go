@@ -1,6 +1,7 @@
 package secrets_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
@@ -556,5 +558,165 @@ func TestConstructors_RefuseNil(t *testing.T) {
 		if s, err := secrets.NewService(d); err == nil || s != nil {
 			t.Errorf("NewService with nil %s = %v, %v; want an error", name, s, err)
 		}
+	}
+}
+
+// nulRows are a value with a NUL byte at the first, a middle and the last
+// byte, so a check that skips either end is caught.
+var nulRows = map[string]string{
+	"first byte":  "\x00abc",
+	"middle byte": "ab\x00cd",
+	"last byte":   "abc\x00",
+}
+
+// hostileValues are values that would change compose text if they were ever
+// written into it (geekdojo/geekdojo-brain#779). The appsecret tests carry
+// the same list; each is legal for a credential and must be stored unchanged.
+var hostileValues = []string{
+	"a$b",
+	"x${HOME}y",
+	"$$z",
+	"${RASPUTIN_SECRET_OTHER}",
+	"${RASPUTIN_SECRET_OTHER:-leak}",
+	"a\nprivileged: true\nvolumes: [\"/:/host\"]",
+	"it's",
+	`say "hi"`,
+	"- a: b # c & *x !t | > % @",
+}
+
+// TC-779-01: a value with a NUL byte is refused at Create as
+// secretstore.ErrInvalidValue, version 0, naming the reference, before any
+// repository call.
+func TestService_CreateRefusesNUL(t *testing.T) {
+	op := secrets.OperatorActor("u1")
+	r := appRef(t, appX, "db-pass")
+	for name, v := range nulRows {
+		t.Run(name, func(t *testing.T) {
+			repo, _ := mockRepo(t)
+			rg := newRig(t, repo, nil)
+			got, err := rg.svc.Create(t.Context(), op, r, val(v))
+			if !errors.Is(err, secretstore.ErrInvalidValue) || got != 0 {
+				t.Fatalf("Create = %d, %v; want 0 and ErrInvalidValue", got, err)
+			}
+			if !strings.Contains(err.Error(), r.String()) {
+				t.Errorf("the refusal %q does not name the reference %s", err, r)
+			}
+			if n := rg.repo.callCount(); n != 0 {
+				t.Errorf("the refused Create made %d repository calls, want 0", n)
+			}
+		})
+	}
+}
+
+// TC-779-02: a value with a NUL byte is refused at Replace as
+// secretstore.ErrInvalidValue with no CurrentVersion or Write call, and the
+// stored entry keeps its version 1 bytes.
+func TestService_ReplaceRefusesNUL(t *testing.T) {
+	op := secrets.OperatorActor("u1")
+	r := appRef(t, appX, "db-pass")
+	repo, m := mockRepo(t)
+	if _, err := newRig(t, repo, nil).svc.Create(t.Context(), op, r, val("original")); err != nil {
+		t.Fatal(err)
+	}
+	rg := newRig(t, repo, nil)
+	for name, v := range nulRows {
+		if _, err := rg.svc.Replace(t.Context(), op, r, val(v)); !errors.Is(err, secretstore.ErrInvalidValue) {
+			t.Errorf("%s: Replace = %v, want ErrInvalidValue", name, err)
+		}
+	}
+	if n := rg.repo.callCount(); n != 0 {
+		t.Errorf("the refused Replaces made %d repository calls, want 0", n)
+	}
+	if got, version, err := readMock(t, m, mockPath(t, r), 0); err != nil || got != "original" || version != 1 {
+		t.Errorf("after the refused Replaces: %q at version %d (%v), want the original at version 1", got, version, err)
+	}
+}
+
+// TC-779-03: the rule binds every actor. A deploy job for its own app is
+// refused a NUL value with no repository call; a deploy job for another app
+// is ErrForbidden, not ErrInvalidValue, because authorization runs first.
+func TestService_NULRuleBindsEveryActor(t *testing.T) {
+	r := appRef(t, appX, "db-pass")
+	repo, _ := mockRepo(t)
+	rg := newRig(t, repo, nil)
+	if _, err := rg.svc.Create(t.Context(), secrets.DeployActor(appX, nodeN), r, val("a\x00b")); !errors.Is(err, secretstore.ErrInvalidValue) {
+		t.Errorf("own-app deploy Create = %v, want ErrInvalidValue", err)
+	}
+	_, err := rg.svc.Create(t.Context(), secrets.DeployActor(appY, nodeN), r, val("a\x00b"))
+	if !errors.Is(err, secrets.ErrForbidden) || errors.Is(err, secretstore.ErrInvalidValue) {
+		t.Errorf("other-app deploy Create = %v, want ErrForbidden and not ErrInvalidValue", err)
+	}
+	if n := rg.repo.callCount(); n != 0 {
+		t.Errorf("%d repository calls, want 0", n)
+	}
+}
+
+// TC-779-04: every hostile value is accepted by Create (on a new reference,
+// version 1) and by Replace (on an existing one), and the repository's Write
+// receives the bytes unchanged.
+func TestService_HostileValuesAreStoredUnchanged(t *testing.T) {
+	op := secrets.OperatorActor("u1")
+	for i, v := range hostileValues {
+		t.Run(fmt.Sprintf("%q", v), func(t *testing.T) {
+			repo, _ := mockRepo(t)
+			rg := newRig(t, repo, nil)
+			r := appRef(t, appX, fmt.Sprintf("k%d", i))
+			if got, err := rg.svc.Create(t.Context(), op, r, val(v)); err != nil || got != 1 {
+				t.Fatalf("Create = %d, %v; want 1", got, err)
+			}
+			if _, err := rg.svc.Replace(t.Context(), op, r, val(v)); err != nil {
+				t.Fatalf("Replace = %v", err)
+			}
+			if len(rg.repo.written) != 2 || rg.repo.written[0] != v || rg.repo.written[1] != v {
+				t.Fatalf("the repository's Write received %q, want %q twice", rg.repo.written, v)
+			}
+		})
+	}
+}
+
+// TC-779-05: a refused value leaks nowhere: the sentinel inside a NUL value
+// is in no error string and no log record, and the refused calls write no
+// record at all.
+func TestService_NULRefusalLeaksNothingAndLogsNothing(t *testing.T) {
+	op := secrets.OperatorActor("u1")
+	r := appRef(t, appX, "db-pass")
+	repo, _ := mockRepo(t)
+	if _, err := newRig(t, repo, nil).svc.Create(t.Context(), op, r, val("original")); err != nil {
+		t.Fatal(err)
+	}
+	rg := newRig(t, repo, nil)
+	bad := val(sentinel + "\x00" + sentinel)
+	if _, err := rg.svc.Create(t.Context(), op, appRef(t, appX, "fresh"), bad); !errors.Is(rg.keep(err), secretstore.ErrInvalidValue) {
+		t.Errorf("Create = %v, want ErrInvalidValue", err)
+	}
+	if _, err := rg.svc.Replace(t.Context(), op, r, bad); !errors.Is(rg.keep(err), secretstore.ErrInvalidValue) {
+		t.Errorf("Replace = %v, want ErrInvalidValue", err)
+	}
+	rg.assertNoSentinel()
+	if n := len(rg.rec.Records()); n != 0 {
+		t.Errorf("the refused calls wrote %d log records, want 0", n)
+	}
+}
+
+// TC-779-08: a derived value, the only kind earlier releases stored, still
+// passes the rule: a deploy job's Create of Seed.Derive succeeds at version 1
+// and the repository receives the derived bytes.
+func TestService_DerivedValuePassesTheRule(t *testing.T) {
+	seed, err := appsecret.NewSeed(bytes.Repeat([]byte{0x11}, appsecret.SeedLen), appsecret.DerivationVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	derived, err := seed.Derive(appX, "session-key", appsecret.InitialVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := string(derived.Reveal())
+	repo, _ := mockRepo(t)
+	rg := newRig(t, repo, nil)
+	if got, err := rg.svc.Create(t.Context(), secrets.DeployActor(appX, nodeN), appRef(t, appX, "session-key"), derived); err != nil || got != 1 {
+		t.Fatalf("Create = %d, %v; want 1", got, err)
+	}
+	if len(rg.repo.written) != 1 || rg.repo.written[0] != want {
+		t.Fatal("the repository did not receive the derived bytes")
 	}
 }
