@@ -90,7 +90,9 @@ func (s *Service) Exists(ctx context.Context, a Actor, r Ref) (bool, error) {
 }
 
 // Create sets r to value only if r is not set yet (check-and-set 0), and
-// returns version 1. A secret already set is ErrExists.
+// returns version 1. A secret already set is ErrExists. A value the
+// environment channel cannot carry is secretstore.ErrInvalidValue, refused
+// before any store call (value.go).
 //
 // Write order (S15 part 2, geekdojo/geekdojo-brain#765): a caller creates the
 // entry before it writes the database row that references it, and refers to
@@ -98,6 +100,9 @@ func (s *Service) Exists(ctx context.Context, a Actor, r Ref) (bool, error) {
 // and the store after, so every row it captured has its entry in the copy.
 func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opCreate, a, r); err != nil {
+		return 0, err
+	}
+	if err := checkDeliverable(r, value); err != nil {
 		return 0, err
 	}
 	v, err := s.repo.Write(ctx, r, value, 0)
@@ -119,6 +124,9 @@ func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value
 // replaced value (S15 part 2).
 func (s *Service) Replace(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opReplace, a, r); err != nil {
+		return 0, err
+	}
+	if err := checkDeliverable(r, value); err != nil {
 		return 0, err
 	}
 	cur, err := s.repo.CurrentVersion(ctx, r)

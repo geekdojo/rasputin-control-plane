@@ -48,6 +48,12 @@ Against the Compose on the machine running it:
 - A compose the store source resolved (`StoreSource`, over a fake secrets service holding a
   value of the derived shape) parses with its map, and the stored value arrives intact
   ([geekdojo-brain#762](https://github.com/geekdojo/geekdojo-brain/issues/762), TC-762-26).
+- A stored value that would change compose text if it were ever written into it (`$`,
+  `${HOME}`, `$$`, another secret's reference, a newline followed by `privileged: true` and
+  `volumes:`, quotes, YAML indicators) leaves the parsed model with the same key paths as a
+  benign value, and reaches `SESSION_KEY` byte-exact once Compose's `$` to `$$` output escape is
+  undone: Compose interpolates it once and never re-reads it
+  ([geekdojo-brain#779](https://github.com/geekdojo/geekdojo-brain/issues/779), TC-779-07).
 
 The agent test, against the Compose and daemon on the machine running it, with a fresh random
 value per run and `busybox:1.36.1`:
