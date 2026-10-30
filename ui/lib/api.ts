@@ -38,6 +38,7 @@ import type {
   MeshStateEnvelope,
   MetricSeries,
   Node,
+  OperatorSecretStatus,
   NodeUpdate,
   ObsSeries,
   ObsSeriesMetric,
@@ -71,13 +72,31 @@ const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 // renders `String(e)` is unchanged — and the status rides along as a field so
 // a caller that has to tell "this job does not exist" (404) from "the api is
 // down" can do so without parsing the message.
+//
+// sentence is the api's own user-facing sentence (the body's `error`), apart
+// from the message, so a screen can show it without the request URL and the
+// status arrow (ERR-MESSAGE, geekdojo/geekdojo-brain#781). Absent when the
+// reply had no JSON body with a string `error`.
 export class ApiError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  readonly sentence?: string;
+  constructor(message: string, status: number, sentence?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.sentence = sentence;
   }
+}
+
+/**
+ * The sentence to put on screen for a failed call: the api's own sentence
+ * when the failure carried one, and `fallback` otherwise (no body, a non-JSON
+ * body, or a request that never reached the api). New screens turn an error
+ * into text only through this, never through String(e) or e.message, which
+ * carry the request URL.
+ */
+export function errorSentence(e: unknown, fallback: string): string {
+  return e instanceof ApiError && e.sentence ? e.sentence : fallback;
 }
 
 /** True when `e` is a jsonFetch failure with HTTP status 404. */
@@ -91,16 +110,22 @@ async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!res.ok) {
-    let detail = '';
-    try {
-      const body = await res.json();
-      detail = body?.error ? `: ${body.error}` : '';
-    } catch {
-      // ignore body parse failure
-    }
-    throw new ApiError(`${input} → ${res.status}${detail}`, res.status);
+    const sentence = await readErrorSentence(res);
+    const detail = sentence ? `: ${sentence}` : '';
+    throw new ApiError(`${input} → ${res.status}${detail}`, res.status, sentence);
   }
   return (await res.json()) as T;
+}
+
+// readErrorSentence is the api's `error` sentence from a refusal's JSON body,
+// or undefined when the body is absent, not JSON, or carries no string error.
+async function readErrorSentence(res: Response): Promise<string | undefined> {
+  try {
+    const body = await res.json();
+    return typeof body?.error === 'string' && body.error ? body.error : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export type MetricsRange = '5m' | '15m' | '1h' | '6h' | '24h';
@@ -578,6 +603,28 @@ export function reclaimOrphanVolumes(nodeId: string, names: string[]): Promise<R
 
 export function deployApp(id: string): Promise<Job> {
   return jsonFetch<Job>(`/api/apps/${id}/deploy`, { method: 'POST' });
+}
+
+// listAppSecrets is GET /api/apps/{id}/secrets (geekdojo/geekdojo-brain#604):
+// each owner-supplied secret the app's tile declares, set or not. Never a value.
+export async function listAppSecrets(appId: string): Promise<OperatorSecretStatus[]> {
+  return (await jsonFetch<OperatorSecretStatus[] | null>(`/api/apps/${encodeURIComponent(appId)}/secrets`)) ?? [];
+}
+
+// setAppSecret is PUT /api/apps/{id}/secrets/{name}: write-only, 204 on
+// success. The value travels only in the body — never in the URL — and a
+// refusal throws an ApiError whose message is the api's sentence, never the
+// request URL. It starts no deploy; the caller decides that.
+export async function setAppSecret(appId: string, name: string, value: string): Promise<void> {
+  const res = await fetch(`${BASE}/api/apps/${encodeURIComponent(appId)}/secrets/${encodeURIComponent(name)}`, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value }),
+  });
+  if (res.status === 204) return;
+  const sentence = (await readErrorSentence(res)) ?? `The secret could not be saved (HTTP ${res.status}).`;
+  throw new ApiError(sentence, res.status, sentence);
 }
 
 // putAppCompose is PUT /api/apps/{id}/compose — every compose change: upgrade

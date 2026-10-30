@@ -14,6 +14,7 @@ import {
   openAppsWS,
   reclaimOrphanVolumes,
   setAppExposure,
+  setAppSecret,
   stopApp,
 } from '../../../lib/api';
 import type { App, AppVolumesResponse, CatalogTile, OrphanVolume, OrphanVolumesResponse } from '../../../lib/types';
@@ -45,6 +46,8 @@ import {
 import { UninstallAppModal, type UninstallVolumeRow } from '../../../components/UninstallAppModal';
 import { RestoreAppDataModal } from '../../../components/RestoreAppDataModal';
 import { ComposeChangeModal, type ComposeChangeResult } from '../../../components/ComposeChangeModal';
+import { OperatorSecretFields, useOperatorSecrets } from '../../../components/OperatorSecretFields';
+import { redeployAfterSave, saveNote, saveOperatorSecrets } from '../../../lib/operator-secrets';
 import { ACCENT, MONO } from '../../../components/ui-theme';
 
 // Fixed column widths so the table doesn't reflow as per-row action buttons
@@ -541,6 +544,11 @@ function AppDetail({
   // explicit, per app, never automatic. Offered only for an app installed
   // from a tile, because only a tile classifies the volumes a backup holds.
   const [restoreOpen, setRestoreOpen] = useState(false);
+  // Owner-supplied secrets (geekdojo/geekdojo-brain#781): write-only fields,
+  // and a SAVE that redeploys a running or failed app once.
+  const secrets = useOperatorSecrets(app.id);
+  const [secretsBusy, setSecretsBusy] = useState(false);
+  const [secretsNote, setSecretsNote] = useState<{ text: string; warn: boolean; jobId?: string } | null>(null);
 
   useEffect(() => {
     if (app.sourceTile) getCatalogTile(app.sourceTile).then(setTile).catch(() => {});
@@ -569,6 +577,20 @@ function AppDetail({
     } finally {
       setExposureBusy(false);
     }
+  }
+
+  async function saveSecrets() {
+    setSecretsBusy(true);
+    setSecretsNote(null);
+    // The live row's status: the drawer re-renders with every change event.
+    const redeploy = redeployAfterSave(app.lastStatus);
+    const r = await saveOperatorSecrets(secrets.writes, redeploy, {
+      put: (name, value) => setAppSecret(app.id, name, value),
+      deploy: () => deployApp(app.id),
+    });
+    secrets.afterSave(r);
+    setSecretsNote({ text: saveNote(r), warn: !!(r.failed || r.deployError), jobId: r.job?.id });
+    setSecretsBusy(false);
   }
 
   return (
@@ -747,6 +769,36 @@ function AppDetail({
                 {compose.updateBadge
                   ? `The catalog${app.upgradeCatalogVersion ? ` (v${app.upgradeCatalogVersion})` : ''} carries a newer compose for this app. Nothing changes until you upgrade.`
                   : 'A custom app: edit its compose and redeploy it in place, keeping its volumes.'}
+              </Hint>
+            )}
+          </div>
+        )}
+
+        {(secrets.statuses.length > 0 || secrets.listError) && (
+          <div>
+            <SectionLabel>SECRETS</SectionLabel>
+            <OperatorSecretFields secrets={secrets} disabled={secretsBusy} />
+            {secrets.statuses.length > 0 && (
+              <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                <Btn
+                  variant="primary"
+                  small
+                  disabled={secretsBusy || secrets.writes.length === 0}
+                  aria-label={`Save secrets of ${app.name}`}
+                  onClick={() => void saveSecrets()}
+                >
+                  {secretsBusy ? 'SAVING…' : 'SAVE'}
+                </Btn>
+                {secretsNote?.jobId && (
+                  <LinkBtn href={`/tasks?id=${encodeURIComponent(secretsNote.jobId)}`} small aria-label="View the redeploy task">
+                    <ClipboardList size={10} /> VIEW TASK
+                  </LinkBtn>
+                )}
+              </div>
+            )}
+            {secretsNote && (
+              <Hint warn={secretsNote.warn} style={{ marginTop: 6 }}>
+                <span role="status">{secretsNote.text}</span>
               </Hint>
             )}
           </div>
