@@ -69,7 +69,7 @@ func TestOperatorGated_GatesBothModes(t *testing.T) {
 			if tc.sealed {
 				store = sealedMock{w.store.(*secretstore.Mock)}
 			}
-			r, err := storeReadinessWiring(tc.backend, w.mode, store, js, time.Now, notBlank, log)
+			r, err := storeReadinessWiring(tc.backend, false, w.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestOperatorGated_GatesBothModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc, err := secretsWiring(sess, as, log)
+			svc, err := secretsWiring(sess, as, testSwitch(t), log)
 			if err != nil {
 				t.Fatal(err)
 			}

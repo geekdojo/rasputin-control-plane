@@ -77,7 +77,7 @@ func (f *apiFixture) useBusState(t *testing.T, st BusState) {
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		st, f.srv.log, f.srv.newCorrelationID)
+		st, f.srv.operatorSecrets, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -241,20 +241,24 @@ func TestNewServer_RefusesNilCollaborators(t *testing.T) {
 	key := bustls.Available(f.busKey)
 	logger := slog.New(&logCapture{})
 	ids := sequentialIDs()
+	ops := f.srv.operatorSecrets
 	for name, tc := range map[string]struct {
 		bus BusState
+		ops operatorSecretsService
 		log *slog.Logger
 		ids func() string
 	}{
-		"nil BusState":     {nil, logger, ids},
-		"nil logger":       {key, nil, ids},
-		"nil id generator": {key, logger, nil},
+		"nil BusState":     {nil, ops, logger, ids},
+		"nil logger":       {key, ops, nil, ids},
+		"nil id generator": {key, ops, logger, nil},
+		// TC-604-10: the operator secrets service is required too.
+		"nil operator secrets service": {key, nil, logger, ids},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 				f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 				f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
-				tc.bus, tc.log, tc.ids)
+				tc.bus, tc.ops, tc.log, tc.ids)
 			if err == nil || srv != nil {
 				t.Fatalf("NewServer = (%v, %v), want (nil, an error)", srv, err)
 			}

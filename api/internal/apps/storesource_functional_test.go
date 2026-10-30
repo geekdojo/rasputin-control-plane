@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,7 +21,9 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storepolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -47,6 +50,21 @@ func (a appNodes) TargetNode(ctx context.Context, appID string) (string, bool, e
 		return "", false, err
 	}
 	return app.TargetNode, true, nil
+}
+
+// appDecls is the app's operator-secret declarations as appsecret reads
+// them, as main's appOperatorSecrets is.
+type appDecls struct{ s *apps.Store }
+
+func (a appDecls) OperatorSecrets(ctx context.Context, appID string) ([]tileschema.OperatorSecret, error) {
+	app, err := a.s.Get(ctx, appID)
+	if err != nil {
+		return nil, err
+	}
+	if app == nil {
+		return nil, errors.New("the app does not exist")
+	}
+	return app.OperatorSecrets, nil
 }
 
 // TestStoreSource_AgainstTheRealStore runs the deploy family's store source
@@ -136,7 +154,17 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: appNodes{s: appStore}, Log: log})
+	// The switch marker over a real settings table (geekdojo/geekdojo-brain#604).
+	settings, err := setup.OpenStore(ctx, filepath.Join(t.TempDir(), "rasputin.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = settings.Close() })
+	sw, err := storeswitch.New(storeswitch.Deps{Settings: settings, Now: time.Now, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: appNodes{s: appStore}, Switch: sw, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +176,7 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appNodes{s: appStore}, Refs: appStore, Seed: seed, Log: log})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appNodes{s: appStore}, Refs: appStore, Seed: seed, Operator: appDecls{s: appStore}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,6 +369,82 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 			t.Fatal("the owner's value reached the compose")
 		}
 	})
+	const ownerFirst, ownerSecond = "S-604-owner-first", "S-604-owner-second"
+	t.Run("TC-604-19 an optional name is never derived; the owner's value is replaced and delivered", func(t *testing.T) {
+		const optID = "01J9ZK3Q0M8X7Y6W5V4T3S2FD1"
+		no := false
+		now := time.Now().UTC()
+		if err := appStore.Create(ctx, &apps.App{
+			ID: optID, Name: "radar", TargetNode: "n", PublishedPort: 8082, DeployBudgetSeconds: 300,
+			ComposeYAML: "services:\n  radar:\n    image: me/radar:1\n    environment:\n      FEED_KEY: ${secret:feed-key}\n      OPT_KEY: ${secret:opt-key}\n",
+			OperatorSecrets: []tileschema.OperatorSecret{
+				{Name: "feed-key", Label: "Feed API key"},
+				{Name: "opt-key", Label: "Optional key", Required: &no},
+			},
+			LastStatus: proto.AppStatusStopped, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		ops, err := apps.NewOperatorSecrets(apps.OperatorSecretsDeps{Apps: appStore, Secrets: svc, Refs: appStore, Log: log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, v := range []string{ownerFirst, ownerSecond} {
+			if err := ops.Set(ctx, "u1", optID, "feed-key", secret.New([]byte(v))); err != nil {
+				t.Fatalf("Set: %v", err)
+			}
+		}
+		if on, err := sw.Switched(ctx); err != nil || !on {
+			t.Fatalf("after the owner's write the marker reads %v (%v), want set", on, err)
+		}
+		feedRef, err := secrets.AppSecret(optID, "feed-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		feedPath, err := secretstore.NewKVPath(storepolicy.Mount, feedRef.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if md, err := sess.Versions(ctx, feedPath); err != nil || md.CurrentVersion != 2 {
+			t.Fatalf("the required name's version = %+v (%v), want 2", md, err)
+		}
+
+		j := deployApp(t, optID)
+		if j.Status != jobs.StatusSucceeded {
+			t.Fatalf("the deploy ended %s: %s", j.Status, j.Error)
+		}
+		cmd := apps.ReceiveDeployWithin(t, deploys, "the agent never received the deploy command")
+		if cmd.SecretEnv[proto.SecretEnvName("feed-key")] != ownerSecond {
+			t.Fatal("the deploy does not carry the owner's second value")
+		}
+		if v, ok := cmd.SecretEnv[proto.SecretEnvName("opt-key")]; !ok || v != "" {
+			t.Fatalf("the optional key is %q (present %v), want present and empty", v, ok)
+		}
+		optRef, err := secrets.AppSecret(optID, "opt-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		optPath, err := secretstore.NewKVPath(storepolicy.Mount, optRef.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := sess.Versions(ctx, optPath); !errors.Is(err, secretstore.ErrNotFound) {
+			t.Fatalf("the store answers %v for %s, want not found: the optional name was derived or stored", err, optRef)
+		}
+		refs, err := appStore.ListSecretRefs(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, r := range refs {
+			if r.AppID == optID {
+				names = append(names, r.Name)
+			}
+		}
+		if len(names) != 1 || names[0] != "feed-key" {
+			t.Fatalf("refs for the app %v, want feed-key only", names)
+		}
+	})
 	t.Run("TC-762-24 T42: a blocked audit sink reads audit-blocked and refuses", func(t *testing.T) {
 		release := store.HoldStdout()
 		defer release()
@@ -394,7 +498,7 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, v := range []string{derived, replaced, operatorValue} {
+		for _, v := range []string{derived, replaced, operatorValue, ownerFirst, ownerSecond} {
 			if strings.Contains(rec.Text(), v) {
 				t.Error("a value reached a log record")
 			}

@@ -550,10 +550,12 @@ func TestConstructors_RefuseNil(t *testing.T) {
 	log, _ := logkittest.New()
 	repo := mustRepo(t, &fakeStore{})
 	apps := fakeApps{}
+	sw := &fakeSwitch{log: &fakeRepo{}}
 	for name, d := range map[string]secrets.Deps{
-		"Repo": {Apps: apps, Log: log},
-		"Apps": {Repo: repo, Log: log},
-		"Log":  {Repo: repo, Apps: apps},
+		"Repo":   {Apps: apps, Switch: sw, Log: log},
+		"Apps":   {Repo: repo, Switch: sw, Log: log},
+		"Switch": {Repo: repo, Apps: apps, Log: log}, // TC-604-05
+		"Log":    {Repo: repo, Apps: apps, Switch: sw},
 	} {
 		if s, err := secrets.NewService(d); err == nil || s != nil {
 			t.Errorf("NewService with nil %s = %v, %v; want an error", name, s, err)

@@ -74,7 +74,7 @@ func (noExists) Exists(context.Context, secrets.Actor, secrets.Ref) (bool, error
 // openbao.
 func rollbackFor(t *testing.T, requested, mode string, store secretStore, runner *fakeRollbackRunner, log *slog.Logger) (storeRollback, *storeRollbackDeps) {
 	t.Helper()
-	r, err := storeReadinessWiring(requested, mode, store, openJobStore(t), time.Now, notBlank, log)
+	r, err := storeReadinessWiring(requested, false, mode, store, openJobStore(t), time.Now, notBlank, log)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestStoreRollbackWiring(t *testing.T) {
 		log, _ := logkittest.New()
 		run := newFakeRollbackRunner()
 		store := &switchableHealth{secretStore: secretstore.NewMock(time.Now), down: true}
-		r, err := storeReadinessWiring(storeModeOpenBao, storeModeOpenBao, store, openJobStore(t), time.Now, notBlank, log)
+		r, err := storeReadinessWiring(storeModeOpenBao, false, storeModeOpenBao, store, openJobStore(t), time.Now, notBlank, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -259,7 +259,7 @@ func TestStoreBackupControl_CarriesItsReason(t *testing.T) {
 		t.Run(reason.String(), func(t *testing.T) {
 			ctx := jobs.ContextWithJobID(context.Background(), "job-r")
 			log, rec := logkittest.New()
-			r, err := storeReadinessWiring(storeModeOpenBao, storeModeOpenBao, secretstore.NewMock(time.Now), openJobStore(t), time.Now, notBlank, log)
+			r, err := storeReadinessWiring(storeModeOpenBao, false, storeModeOpenBao, secretstore.NewMock(time.Now), openJobStore(t), time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}

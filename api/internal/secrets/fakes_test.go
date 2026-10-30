@@ -92,10 +92,10 @@ func (f *fakeRepo) note(op string) {
 	f.calls = append(f.calls, op)
 }
 
+// callCount is the number of repository calls; the switch's entries in the
+// shared log are not repository calls.
 func (f *fakeRepo) callCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.calls)
+	return len(f.repoCalls())
 }
 
 func (f *fakeRepo) Get(ctx context.Context, r secrets.Ref) (secrets.Secret, error) {
@@ -119,6 +119,45 @@ func (f *fakeRepo) CurrentVersion(ctx context.Context, r secrets.Ref) (int, erro
 func (f *fakeRepo) Delete(ctx context.Context, r secrets.Ref) error {
 	f.note("delete")
 	return f.inner.Delete(ctx, r)
+}
+
+// fakeSwitch is a secrets.Switch that records each MarkSwitched in the log
+// it shares with a fakeRepo, so a test sees the marker's place among the
+// repository calls, and fails with err when it is set.
+type fakeSwitch struct {
+	log *fakeRepo
+	err error
+}
+
+func (f *fakeSwitch) MarkSwitched(context.Context) error {
+	f.log.note("mark")
+	return f.err
+}
+
+// marks is how many times the switch was set.
+func (f *fakeRepo) marks() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.calls {
+		if c == "mark" {
+			n++
+		}
+	}
+	return n
+}
+
+// repoCalls is the log without the switch's entries.
+func (f *fakeRepo) repoCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, c := range f.calls {
+		if c != "mark" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // fakeApps is a secrets.AppTargets over a map of app ID to target node.

@@ -119,7 +119,13 @@ startup log names the result as `secret store wired mode=<off|mock|openbao>`.
 
 - **unset:** no store, logged at INFO as `secret store off: not configured`.
   Deploys get their secrets from the HKDF source, as every release before
-  geekdojo/geekdojo-brain#762 did.
+  geekdojo/geekdojo-brain#762 did, but only while rasputin.db's settings table
+  has no `secretstore.switched_at`. That marker is set before the first
+  operator-supplied secret reaches a store (geekdojo/geekdojo-brain#604); once
+  it is set, secret-bearing deploys refuse until a store is configured, and the
+  api logs `secretstore.switched_unconfigured` at WARN. With no backend
+  requested, an operator secret `PUT /api/apps/{id}/secrets/{name}` answers 503
+  and never sets the marker.
 - **`mock` or `openbao`:** secret-bearing deploys go through the store's
   readiness gate, so they resolve through the store or are refused. `mock` logs
   at WARN: `secret store is the in-memory mock: nothing it holds survives a restart`.

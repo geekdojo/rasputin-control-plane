@@ -15,6 +15,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // functionalEnv is the switch that makes this file's skips failures.
@@ -152,7 +153,7 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 	log, _ := logkittest.New()
 	src, err := NewStoreSource(StoreSourceDeps{
 		Secrets: newFakeSecrets(map[string]string{ref.String(): stored}),
-		Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Log: log,
+		Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Operator: noOperatorSecrets{}, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 		t.Helper()
 		src, err := NewStoreSource(StoreSourceDeps{
 			Secrets: newFakeSecrets(map[string]string{ref.String(): value}),
-			Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Log: log,
+			Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Operator: noOperatorSecrets{}, Log: log,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -223,6 +224,72 @@ func TestCompose_AcceptsEscapedRefusesRawResolvesDerived(t *testing.T) {
 					t.Errorf("SESSION_KEY = %q, want %q byte-exact", got, v)
 				}
 			})
+		}
+	})
+
+	// TC-604-18 (geekdojo/geekdojo-brain#604): an unset optional operator
+	// secret resolves to "" and real Compose delivers it as an empty string:
+	// the parsed model has the key paths of a run with a value, and the
+	// service's variable is "".
+	t.Run("TC-604-18 an empty optional value", func(t *testing.T) {
+		const optTile = `services:
+  app:
+    image: alpine:3.20
+    environment:
+      OPT_KEY: ${secret:opt-key}
+      DATA_DIR: /data
+`
+		no := false
+		decls := &fakeDecls{decls: []tileschema.OperatorSecret{{Name: "opt-key", Label: "Optional key", Required: &no}}}
+		optRef, err := secrets.AppSecret(appID, "opt-key")
+		if err != nil {
+			t.Fatal(err)
+		}
+		model := func(t *testing.T, entries map[string]string) (paths []string, env map[string]string, optKey string) {
+			t.Helper()
+			src, err := NewStoreSource(StoreSourceDeps{
+				Secrets: newFakeSecrets(entries),
+				Apps:    &fakeNodes{nodes: map[string]string{appID: "n"}}, Refs: &fakeRefs{}, Seed: seed, Operator: decls, Log: log,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			compose, env, err := resolved(src.ResolveCompose(context.Background(), appID, optTile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := runEnv(t, compose, env, "config", "--format", "json")
+			if err != nil {
+				t.Fatalf("the resolved compose must parse: %v\n%s", err, out)
+			}
+			var m struct {
+				Services map[string]struct {
+					Environment map[string]*string `json:"environment"`
+				} `json:"services"`
+			}
+			if err := json.Unmarshal([]byte(out), &m); err != nil {
+				t.Fatalf("compose config output is not JSON: %v\n%s", err, out)
+			}
+			var raw any
+			if err := json.Unmarshal([]byte(out), &raw); err != nil {
+				t.Fatal(err)
+			}
+			v := m.Services["app"].Environment["OPT_KEY"]
+			if v == nil {
+				t.Fatalf("OPT_KEY is missing or null in the parsed model:\n%s", out)
+			}
+			return jsonKeyPaths(raw, ""), env, *v
+		}
+		withValue, _, _ := model(t, map[string]string{optRef.String(): "set-value"})
+		paths, env, got := model(t, nil)
+		if v, ok := env["RASPUTIN_SECRET_OPT_KEY"]; !ok || v != "" {
+			t.Fatalf("the resolved env holds %q (present %v), want present and empty", v, ok)
+		}
+		if !slices.Equal(paths, withValue) {
+			t.Errorf("the parsed model's key paths changed with an empty value:\n%v\nwant:\n%v", paths, withValue)
+		}
+		if got != "" {
+			t.Errorf("OPT_KEY = %q, want \"\"", got)
 		}
 	})
 }

@@ -157,16 +157,58 @@ func TestOperatorSecretsColumnDecoding(t *testing.T) {
 			t.Fatal("List read a corrupt column")
 		}
 	})
+	// TC-604-02 (F-604-05): retargeted at a field this build does not know,
+	// now that required is one it does.
 	t.Run("an unknown field is ignored", func(t *testing.T) {
 		s := newStore(t)
 		createOperatorApp(t, s, nil)
-		if _, err := s.db.ExecContext(ctx, `UPDATE apps SET operator_secrets = '[{"name":"a","label":"A","required":false}]' WHERE id = ?`, opStoreAppID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE apps SET operator_secrets = '[{"name":"a","label":"A","rotateEvery":"30d"}]' WHERE id = ?`, opStoreAppID); err != nil {
 			t.Fatal(err)
 		}
 		want := []tileschema.OperatorSecret{{Name: "a", Label: "A"}}
 		got, listed := readBoth(t, s)
 		if !reflect.DeepEqual(got.OperatorSecrets, want) || !reflect.DeepEqual(listed.OperatorSecrets, want) {
 			t.Fatalf("read %+v / %+v, want %+v", got.OperatorSecrets, listed.OperatorSecrets, want)
+		}
+	})
+}
+
+// TC-604-02: a row declaring required:false reads it back through Get and
+// List, and a row from the previous release (no required) reads as nil,
+// which is required.
+func TestOperatorSecretsRequiredDecoding(t *testing.T) {
+	ctx := context.Background()
+	no := false
+	for _, c := range []struct {
+		why, column string
+		want        []tileschema.OperatorSecret
+		required    bool
+	}{
+		{"required false", `[{"name":"a","label":"A","required":false}]`, []tileschema.OperatorSecret{{Name: "a", Label: "A", Required: &no}}, false},
+		{"previous release", `[{"name":"a","label":"A"}]`, []tileschema.OperatorSecret{{Name: "a", Label: "A"}}, true},
+	} {
+		t.Run(c.why, func(t *testing.T) {
+			s := newStore(t)
+			createOperatorApp(t, s, nil)
+			if _, err := s.db.ExecContext(ctx, `UPDATE apps SET operator_secrets = ? WHERE id = ?`, c.column, opStoreAppID); err != nil {
+				t.Fatal(err)
+			}
+			got, listed := readBoth(t, s)
+			if !reflect.DeepEqual(got.OperatorSecrets, c.want) || !reflect.DeepEqual(listed.OperatorSecrets, c.want) {
+				t.Fatalf("read %+v / %+v, want %+v", got.OperatorSecrets, listed.OperatorSecrets, c.want)
+			}
+			if got.OperatorSecrets[0].IsRequired() != c.required || listed.OperatorSecrets[0].IsRequired() != c.required {
+				t.Fatalf("IsRequired() = %v, want %v", got.OperatorSecrets[0].IsRequired(), c.required)
+			}
+		})
+	}
+	t.Run("round trip through Create", func(t *testing.T) {
+		s := newStore(t)
+		decls := []tileschema.OperatorSecret{{Name: "a", Label: "A", Required: &no}}
+		createOperatorApp(t, s, decls)
+		got, _ := readBoth(t, s)
+		if !reflect.DeepEqual(got.OperatorSecrets, decls) {
+			t.Fatalf("read back %+v, want %+v", got.OperatorSecrets, decls)
 		}
 	})
 }

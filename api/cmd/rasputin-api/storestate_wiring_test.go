@@ -82,7 +82,7 @@ func TestStoreReadinessWiring(t *testing.T) {
 
 	t.Run("nothing requested", func(t *testing.T) {
 		store := &countingStore{secretStore: secretstore.Disabled{}}
-		w, err := storeReadinessWiring("", storeModeOff, store, js, time.Now, notBlank, log)
+		w, err := storeReadinessWiring("", false, storeModeOff, store, js, time.Now, notBlank, log)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -106,7 +106,7 @@ func TestStoreReadinessWiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &countingStore{secretStore: tc.store}
-			w, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, notBlank, log)
+			w, err := storeReadinessWiring(tc.requested, false, tc.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -147,7 +147,7 @@ func TestStoreReadinessWiring(t *testing.T) {
 		} {
 			a := full
 			clear(&a)
-			if _, err := storeReadinessWiring("mock", storeModeMock, a.store, a.js, a.now, a.blank, a.log); err == nil {
+			if _, err := storeReadinessWiring("mock", false, storeModeMock, a.store, a.js, a.now, a.blank, a.log); err == nil {
 				t.Errorf("storeReadinessWiring with a nil %s = nil error", name)
 			}
 		}
@@ -178,7 +178,7 @@ func TestDeploySourceWiring(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &countingStore{secretStore: tc.store}
-			r, err := storeReadinessWiring(tc.requested, tc.mode, store, js, time.Now, notBlank, log)
+			r, err := storeReadinessWiring(tc.requested, false, tc.mode, store, js, time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}

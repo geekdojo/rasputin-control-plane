@@ -91,6 +91,7 @@ type apiFixture struct {
 	nc              *nats.Conn
 	busKey          *bustls.Key
 	logs            *logCapture
+	opSecrets       *fakeOperatorSecrets
 	hasFirewallNode bool
 }
 
@@ -293,10 +294,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		t.Fatalf("bus key: %v", err)
 	}
 	logs := &logCapture{}
+	opSecrets := &fakeOperatorSecrets{}
+	f.opSecrets = opSecrets
 	srv, err := NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc,
-		bustls.Available(busKey), slog.New(logs), sequentialIDs())
+		bustls.Available(busKey), opSecrets, slog.New(logs), sequentialIDs())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -1668,7 +1671,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		f.fw, f.fwSvc, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		f.srv.bus, f.srv.log, f.srv.newCorrelationID)
+		f.srv.bus, f.srv.operatorSecrets, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

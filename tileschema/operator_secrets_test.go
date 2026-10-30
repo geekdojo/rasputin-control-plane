@@ -107,3 +107,39 @@ func TestOperatorSecretsTileIsRefusedByAReaderWithoutTheCapability(t *testing.T)
 		}
 	}
 }
+
+// TC-604-01: a declaration is required unless it says `required: false`; a
+// tile carrying the field validates; the one name lookup finds a declared
+// name and nothing else.
+func TestOperatorSecretRequiredAndLookup(t *testing.T) {
+	yes, no := true, false
+	for _, c := range []struct {
+		why  string
+		req  *bool
+		want bool
+	}{
+		{"absent", nil, true},
+		{"true", &yes, true},
+		{"false", &no, false},
+	} {
+		if got := (OperatorSecret{Name: "k", Label: "K", Required: c.req}).IsRequired(); got != c.want {
+			t.Errorf("required %s: IsRequired() = %v, want %v", c.why, got, c.want)
+		}
+	}
+
+	tile := operatorTile()
+	tile.OperatorSecrets[0].Required = &no
+	if err := ValidateTile(tile); err != nil {
+		t.Fatalf("a tile declaring required:false was refused: %v", err)
+	}
+
+	decls := []OperatorSecret{{Name: "feed-key", Label: "Feed API key"}, {Name: "opt-key", Label: "Optional", Required: &no}}
+	got, ok := OperatorSecretByName(decls, "opt-key")
+	if !ok || got.Name != "opt-key" || got.Label != "Optional" || got.IsRequired() {
+		t.Errorf("OperatorSecretByName(opt-key) = %+v, %v; want the optional declaration", got, ok)
+	}
+	got, ok = OperatorSecretByName(decls, "db-password")
+	if ok || got != (OperatorSecret{}) {
+		t.Errorf("OperatorSecretByName(db-password) = %+v, %v; want the zero declaration and false", got, ok)
+	}
+}

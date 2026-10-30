@@ -37,8 +37,10 @@ func (f *fakeAppReader) Get(_ context.Context, id string) (*App, error) {
 // absent from both, secretstore.ErrNotFound. Every value it hands out is kept
 // so a test can check it was destroyed.
 type fakeSecretReader struct {
-	set    map[string]bool
-	err    error
+	set map[string]bool
+	err error
+	// errFor fails the read of one name only.
+	errFor map[string]error
 	reads  []string
 	actors []secrets.Actor
 	given  []secret.Value
@@ -52,6 +54,11 @@ func (f *fakeSecretReader) Read(_ context.Context, a secrets.Actor, r secrets.Re
 	if f.err != nil {
 		// A value alongside the error, which the gate must neither use nor leak.
 		return secrets.Secret{Value: v}, f.err
+	}
+	for name, err := range f.errFor {
+		if strings.HasSuffix(r.String(), "/"+name) {
+			return secrets.Secret{Value: v}, err
+		}
 	}
 	for name := range f.set {
 		if strings.HasSuffix(r.String(), "/"+name) {
@@ -383,4 +390,47 @@ func TestNewOperatorSecretGateRefusesANilDependency(t *testing.T) {
 	if _, err := NewOperatorSecretGate(full()); err != nil {
 		t.Errorf("a full set of deps was refused: %v", err)
 	}
+}
+
+// TC-604-08: an optional declaration does not refuse while unset, a required
+// one still does (listing only it), and the optional's presence read failing
+// is the store-unavailable refusal with no Next call.
+func TestOperatorSecretGateOptionalNames(t *testing.T) {
+	no := false
+	app := func() *App {
+		return &App{ID: opGateAppID, TargetNode: "n1", OperatorSecrets: []tileschema.OperatorSecret{
+			{Name: "feed-key", Label: "Feed API key"},
+			{Name: "map-key", Label: "Map token", Required: &no},
+		}}
+	}
+	t.Run("optional unset, required set", func(t *testing.T) {
+		r := newGateRig(t, app(), &fakeSecretReader{set: map[string]bool{"feed-key": true}})
+		if _, _, err := r.gate.ResolveCompose(opJobCtx(), opGateAppID, gateCompose); err != nil {
+			t.Fatalf("refused: %v", err)
+		}
+		if r.next.calls != 1 {
+			t.Fatalf("Next called %d time(s), want 1", r.next.calls)
+		}
+		if len(r.sec.reads) != 2 {
+			t.Fatalf("%d presence reads, want 2: the optional name is read too", len(r.sec.reads))
+		}
+	})
+	t.Run("required unset", func(t *testing.T) {
+		r := newGateRig(t, app(), &fakeSecretReader{})
+		_, _, err := r.gate.ResolveCompose(opJobCtx(), opGateAppID, gateCompose)
+		if opCodeOf(err) != CodeOperatorSecretUnset || r.next.calls != 0 {
+			t.Fatalf("err %v, Next calls %d; want %s and none", err, r.next.calls, CodeOperatorSecretUnset)
+		}
+		if !strings.Contains(err.Error(), "Feed API key (feed-key)") || strings.Contains(err.Error(), "map-key") {
+			t.Fatalf("the refusal must list only the required name: %q", err)
+		}
+	})
+	t.Run("the optional's read fails", func(t *testing.T) {
+		r := newGateRig(t, app(), &fakeSecretReader{set: map[string]bool{"feed-key": true},
+			errFor: map[string]error{"map-key": &secretstore.Error{Op: "read", Kind: secretstore.ErrUnreachable}}})
+		_, _, err := r.gate.ResolveCompose(opJobCtx(), opGateAppID, gateCompose)
+		if opCodeOf(err) != appsecret.CodeStoreUnavailable || r.next.calls != 0 {
+			t.Fatalf("err %v, Next calls %d; want %s and none", err, r.next.calls, appsecret.CodeStoreUnavailable)
+		}
+	})
 }

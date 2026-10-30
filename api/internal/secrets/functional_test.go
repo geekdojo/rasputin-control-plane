@@ -83,7 +83,7 @@ func TestService_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: fakeApps{nodes: map[string]string{appX: nodeN}}, Log: logger})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: fakeApps{nodes: map[string]string{appX: nodeN}}, Switch: &fakeSwitch{log: &fakeRepo{}}, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

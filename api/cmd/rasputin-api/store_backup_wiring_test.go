@@ -87,7 +87,7 @@ func TestRestoreBootIsNotAFalseBlank(t *testing.T) {
 
 			blankID, _ := settings.Get(ctx, storemarker.KeyBlankBootID)
 			errs := rec.Matching(slog.LevelError, "started blank")
-			r, err := storeReadinessWiring(storeModeMock, storeModeMock, secretstore.NewMock(time.Now), openJobStore(t), time.Now, marker.Blank, log)
+			r, err := storeReadinessWiring(storeModeMock, false, storeModeMock, secretstore.NewMock(time.Now), openJobStore(t), time.Now, marker.Blank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -189,7 +189,7 @@ func TestEnsureCAs_StoreCAGuard(t *testing.T) {
 			if err != nil || w.mode != storeModeOff {
 				t.Fatalf("wiring = (%s, %v), want the store off", w.mode, err)
 			}
-			r, err := storeReadinessWiring(storeModeOpenBao, w.mode, w.store, openJobStore(t), time.Now, notBlank, log)
+			r, err := storeReadinessWiring(storeModeOpenBao, false, w.mode, w.store, openJobStore(t), time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -304,7 +304,7 @@ func TestStoreBackupWiringKeysOnTheRequestedBackend(t *testing.T) {
 		{"", storeModeOff, secretstore.Disabled{}, false, ""},
 	} {
 		t.Run(tc.requested, func(t *testing.T) {
-			r, err := storeReadinessWiring(tc.requested, tc.mode, tc.store, openJobStore(t), time.Now, notBlank, log)
+			r, err := storeReadinessWiring(tc.requested, false, tc.mode, tc.store, openJobStore(t), time.Now, notBlank, log)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -341,7 +341,7 @@ func TestStoreBackupControl(t *testing.T) {
 	log, rec := logkittest.New()
 	key, _ := sealrotate.ParseKeyID("rasputin-11111111-1111-4111-8111-111111111111")
 	store := versionedStore{secretStore: secretstore.NewMock(time.Now)}
-	r, err := storeReadinessWiring(storeModeOpenBao, storeModeOpenBao, store, openJobStore(t), time.Now, notBlank, log)
+	r, err := storeReadinessWiring(storeModeOpenBao, false, storeModeOpenBao, store, openJobStore(t), time.Now, notBlank, log)
 	if err != nil {
 		t.Fatal(err)
 	}

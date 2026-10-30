@@ -24,6 +24,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // The OS update's copy of the store and the reference check after it is put
@@ -101,7 +102,7 @@ func TestPreUpdateCopy_AgainstTheRealStore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: rs.repo, Apps: appsAt{appStore}, Log: logger})
+	svc, err := secrets.NewService(secrets.Deps{Repo: rs.repo, Apps: appsAt{appStore}, Switch: realSwitch(t, logger), Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +110,7 @@ func TestPreUpdateCopy_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appsAt{appStore}, Refs: appStore, Seed: seed, Log: logger})
+	src, err := appsecret.NewStoreSource(appsecret.StoreSourceDeps{Secrets: svc, Apps: appsAt{appStore}, Refs: appStore, Seed: seed, Operator: noDecls{}, Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,4 +325,11 @@ func newFunctionalAlerts(t *testing.T, h *runHarness) *alerts.Service {
 		inv = newInventory(t)
 	}
 	return alerts.New(inv, h.jobStore, as, setup.NewService(ss, setup.Probes{}, "", "", ""), nil, nil, true)
+}
+
+// noDecls is an app that declares no operator secrets.
+type noDecls struct{}
+
+func (noDecls) OperatorSecrets(context.Context, string) ([]tileschema.OperatorSecret, error) {
+	return nil, nil
 }

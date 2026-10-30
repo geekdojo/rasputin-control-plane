@@ -25,11 +25,20 @@ type AppTargets interface {
 	TargetNode(ctx context.Context, appID string) (node string, found bool, err error)
 }
 
+// Switch sets the secret store's one-way switch marker
+// (geekdojo/geekdojo-brain#604, storeswitch): from the first operator value
+// on, a deploy never derives a secret without a configured store. It is
+// called before the first repository call of every operator write.
+type Switch interface {
+	MarkSwitched(ctx context.Context) error
+}
+
 // Deps is everything a Service needs. NewService refuses an incomplete one.
 type Deps struct {
-	Repo Repository
-	Apps AppTargets
-	Log  *slog.Logger
+	Repo   Repository
+	Apps   AppTargets
+	Switch Switch
+	Log    *slog.Logger
 }
 
 // Service is the business service for secrets: it authorizes every call and
@@ -37,6 +46,7 @@ type Deps struct {
 type Service struct {
 	repo Repository
 	apps AppTargets
+	sw   Switch
 	log  *slog.Logger
 }
 
@@ -47,10 +57,12 @@ func NewService(d Deps) (*Service, error) {
 		return nil, errors.New("secrets: NewService: Deps.Repo is nil")
 	case d.Apps == nil:
 		return nil, errors.New("secrets: NewService: Deps.Apps is nil")
+	case d.Switch == nil:
+		return nil, errors.New("secrets: NewService: Deps.Switch is nil")
 	case d.Log == nil:
 		return nil, errors.New("secrets: NewService: Deps.Log is nil")
 	}
-	return &Service{repo: d.Repo, apps: d.Apps, log: d.Log}, nil
+	return &Service{repo: d.Repo, apps: d.Apps, sw: d.Switch, log: d.Log}, nil
 }
 
 // The operations, as authorization and the log records name them.
@@ -98,11 +110,16 @@ func (s *Service) Exists(ctx context.Context, a Actor, r Ref) (bool, error) {
 // entry before it writes the database row that references it, and refers to
 // it by path, never by a KV version. A backup snapshots the database first
 // and the store after, so every row it captured has its entry in the copy.
+//
+// An operator's create sets the switch marker first (markSwitched).
 func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opCreate, a, r); err != nil {
 		return 0, err
 	}
 	if err := checkDeliverable(r, value); err != nil {
+		return 0, err
+	}
+	if err := s.markSwitched(ctx, a, r); err != nil {
 		return 0, err
 	}
 	v, err := s.repo.Write(ctx, r, value, 0)
@@ -121,12 +138,16 @@ func (s *Service) Create(ctx context.Context, a Actor, r Ref, value secret.Value
 // set is secretstore.ErrNotFound; a write that loses a race with another is
 // ErrConflict and is never retried. Reads are latest-by-path, so a restore
 // of a backup taken between a Replace and its caller's next row returns the
-// replaced value (S15 part 2).
+// replaced value (S15 part 2). An operator's replace sets the switch marker
+// first (markSwitched).
 func (s *Service) Replace(ctx context.Context, a Actor, r Ref, value secret.Value) (int, error) {
 	if err := s.authorize(ctx, opReplace, a, r); err != nil {
 		return 0, err
 	}
 	if err := checkDeliverable(r, value); err != nil {
+		return 0, err
+	}
+	if err := s.markSwitched(ctx, a, r); err != nil {
 		return 0, err
 	}
 	cur, err := s.repo.CurrentVersion(ctx, r)
@@ -156,6 +177,21 @@ func (s *Service) Delete(ctx context.Context, a Actor, r Ref) error {
 		return err
 	}
 	s.done(ctx, opDelete, a, r)
+	return nil
+}
+
+// markSwitched sets the switch marker before an operator's value reaches the
+// store, so rasputin.db says "switched" before the store holds anything that
+// cannot be derived. A deploy job's create stores the derived value, which
+// needs no marker. A marker that cannot be set refuses the write with
+// ErrSwitch, wrapping the cause.
+func (s *Service) markSwitched(ctx context.Context, a Actor, r Ref) error {
+	if a.kind != actorOperator {
+		return nil
+	}
+	if err := s.sw.MarkSwitched(ctx); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrSwitch, r, err)
+	}
 	return nil
 }
 
