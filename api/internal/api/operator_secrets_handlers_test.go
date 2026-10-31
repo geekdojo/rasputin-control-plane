@@ -172,7 +172,7 @@ func TestOperatorSecretPut_NoValueLeaks(t *testing.T) {
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
-		f.srv.bus, ops, log, func() string { return "cid-fixed" })
+		f.srv.bus, ops, f.srv.nodeApps, log, func() string { return "cid-fixed" })
 	if err != nil {
 		t.Fatal(err)
 	}

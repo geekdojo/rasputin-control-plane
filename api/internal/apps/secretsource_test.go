@@ -18,9 +18,11 @@ func TestDeployFamilyConstructorsRequireASecretSource(t *testing.T) {
 		{"app.deploy", func(s SecretSource) (jobs.Workflow, error) { return DeployWorkflow(nil, nil, nil, nil, s) }},
 		{"app.revert", func(s SecretSource) (jobs.Workflow, error) { return RevertWorkflow(nil, nil, nil, nil, s) }},
 		{"app.edit", func(s SecretSource) (jobs.Workflow, error) {
-			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), s)
+			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), s, testSecretDeps())
 		}},
-		{"app.upgrade", func(s SecretSource) (jobs.Workflow, error) { return UpgradeWorkflow(nil, nil, nil, nil, nil, s) }},
+		{"app.upgrade", func(s SecretSource) (jobs.Workflow, error) {
+			return UpgradeWorkflow(nil, nil, nil, nil, nil, s, testSecretDeps())
+		}},
 	} {
 		t.Run(tc.kind+"/nil source", func(t *testing.T) {
 			w, err := tc.build(nil)

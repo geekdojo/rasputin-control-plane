@@ -39,6 +39,16 @@ const (
 	// was not taken on this control-plane version, records no version, or
 	// this build carries no version stamp (geekdojo/geekdojo-brain#872).
 	codeRestoreVersionMismatch = "restore_version_mismatch"
+	// codeNodeSecretsUnavailable: a node removal was refused, with nothing
+	// removed, because the secret store cannot take the deletes of its apps'
+	// secrets (geekdojo/geekdojo-brain#783).
+	codeNodeSecretsUnavailable = "node_secrets_unavailable"
+	// codeNodeSecretsUnreadable: a node removal was refused, with nothing
+	// removed, because its apps' recorded secrets could not be read.
+	codeNodeSecretsUnreadable = "node_secrets_unreadable"
+	// codeNodeSecretsLeft: the node was removed, but some of its apps'
+	// secrets are still in the secret store.
+	codeNodeSecretsLeft = "node_secrets_left"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

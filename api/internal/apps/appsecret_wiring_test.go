@@ -68,6 +68,12 @@ func testSource(t *testing.T) SecretSource {
 	return src
 }
 
+// testSecretDeps is a DeleteSecretsDeps over a ready store and a deleter that
+// succeeds, for a test of upgrade or edit that is not about releasing secrets.
+func testSecretDeps() DeleteSecretsDeps {
+	return DeleteSecretsDeps{Secrets: &fakeSecretDeleter{}, Store: &fakeStoreState{}, Log: discardLog()}
+}
+
 // wf unwraps a deploy-family constructor's (Workflow, error), failing the test
 // on a refusal.
 func wf(t *testing.T) func(jobs.Workflow, error) jobs.Workflow {

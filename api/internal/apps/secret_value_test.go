@@ -152,14 +152,14 @@ func deployFamilyCases(id string) []deployFamilyCase {
 			store, inv := seedUpgradeApp(t, id)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return store, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src)), ComposeChangeSpec{AppID: id}, nil, tile
+			return store, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps())), ComposeChangeSpec{AppID: id}, nil, tile
 		}},
 		{"app.edit", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, customV1)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			stash := NewComposeStash()
 			put := func(jobID string) error { return stash.Put(jobID, secretComposeV2) }
-			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src)), ComposeChangeSpec{AppID: id}, put, secretComposeV2
+			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src, testSecretDeps())), ComposeChangeSpec{AppID: id}, put, secretComposeV2
 		}},
 		{"app.revert", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
