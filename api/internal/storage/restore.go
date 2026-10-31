@@ -349,6 +349,13 @@ type RestoreReport struct {
 	Scope               string    `json:"scope,omitempty"`
 	Complete            bool      `json:"complete"`
 	ManifestVersion     int       `json:"manifestVersion"`
+	// GenerationJobID and GenerationAppVolumes are the manifest's jobId and
+	// appVolumes: the backup run that wrote the generation and what it
+	// captured. The restore boot settles that run from them, because the
+	// restored database caught it mid-job (#903). Phase 1 only; JobID above
+	// already means the phase-2 saga.
+	GenerationJobID      string           `json:"generationJobId,omitempty"`
+	GenerationAppVolumes *AppVolumeReport `json:"generationAppVolumes,omitempty"`
 	// The disk it came from.
 	PartUUID    string `json:"partUuid"`
 	SourceLabel string `json:"sourceLabel,omitempty"`
@@ -1145,6 +1152,9 @@ func (s *identityStream) extract(staging *os.File) (*RestoreReport, error) {
 		PreparedAt: time.Now().UTC(),
 	}
 	report.AppVolumesPresent, report.AppVolumesAbsent = appVolumeMentions(&m)
+	report.GenerationJobID = m.JobID
+	appVolumes := m.AppVolumes
+	report.GenerationAppVolumes = &appVolumes
 
 	seen := map[string]bool{}
 	for {
