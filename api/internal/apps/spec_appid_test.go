@@ -131,12 +131,12 @@ func TestAppSagas_InvalidAppIDFailsAtFirstStep(t *testing.T) {
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, DeploySpec{AppID: id})) }},
 		{"app.upgrade", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(UpgradeWorkflow(s, i, nc, nil, lookup, testSource(t)))
+				return wf(t)(UpgradeWorkflow(s, i, nc, nil, lookup, testSource(t), testSecretDeps()))
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.edit", customApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(EditWorkflow(s, i, nc, nil, NewComposeStash(), testSource(t)))
+				return wf(t)(EditWorkflow(s, i, nc, nil, NewComposeStash(), testSource(t), testSecretDeps()))
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.revert", installedApp,

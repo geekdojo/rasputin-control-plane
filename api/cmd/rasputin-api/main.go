@@ -592,6 +592,10 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
 	}
+	// What every path that destroys an app's secrets needs of the store
+	// (geekdojo/geekdojo-brain#783): app delete, the release step of upgrade
+	// and edit, and node removal.
+	appSecretDeps := apps.DeleteSecretsDeps{Secrets: secretsSvc, Store: appStoreState{monitor: readiness.monitor}, Log: logger}
 	// The deploy family's secret source (geekdojo/geekdojo-brain#762, S14):
 	// with a backend requested, the readiness Gate around the store source,
 	// which reads each ${secret:} value through the secrets service and
@@ -935,11 +939,10 @@ func main() {
 	// is given the same stash below, and the workflow discards what it holds
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, deploySource)))
+	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, deploySource, appSecretDeps)))
 	// app.delete deletes the app's secret store entries with its volumes
 	// (#783), and refuses up front when the store cannot take the deletes.
-	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf,
-		apps.DeleteSecretsDeps{Secrets: secretsSvc, Store: appStoreState{monitor: readiness.monitor}, Log: logger})))
+	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf, appSecretDeps)))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	// node.update is registered below, after the seal rotation: its copy of
@@ -1013,7 +1016,7 @@ func main() {
 	}
 	// app.upgrade (#409) registers here rather than with the other app sagas
 	// above because its new compose comes from this store and nowhere else.
-	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, deploySource)))
+	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, deploySource, appSecretDeps)))
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.
@@ -1605,10 +1608,17 @@ func main() {
 		}, appliedRestore.ID)
 	}
 
+	// DELETE /api/nodes/{id} removes the node's apps and every secret they
+	// had in the store (geekdojo/geekdojo-brain#783).
+	nodeApps, err := apps.NewNodeApps(appsStore, appSecretDeps)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: node app remover", "err", err.Error())
+		os.Exit(1)
+	}
 	// busState is a value, never nil: bustls.Available or bustls.Unavailable.
 	// The correlation id a coded error carries is crypto/rand's Text.
 	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
-		busState, operatorSecrets, logger, cryptorand.Text)
+		busState, operatorSecrets, nodeApps, logger, cryptorand.Text)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: api server", "err", err.Error())
 		os.Exit(1)

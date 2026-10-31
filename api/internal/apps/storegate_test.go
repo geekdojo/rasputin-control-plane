@@ -78,7 +78,7 @@ func TestPushStep_CodedRefusalIsTheJobError(t *testing.T) {
 			store, inv := seedUpgradeApp(t, id)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src)), ComposeChangeSpec{AppID: id}
+			return wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps())), ComposeChangeSpec{AppID: id}
 		}},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {

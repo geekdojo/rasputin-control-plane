@@ -63,13 +63,23 @@ type deleteCall struct {
 type fakeSecretDeleter struct {
 	mu    sync.Mutex
 	calls []deleteCall
-	fail  map[string]error
+	fail  map[string]error // by name of delAppID's secrets
+	// failRef fails by ref.String(), for any app.
+	failRef map[string]error
+	// onDelete, when set, runs before each Delete is recorded.
+	onDelete func(secrets.Ref)
 }
 
 func (f *fakeSecretDeleter) Delete(ctx context.Context, a secrets.Actor, r secrets.Ref) error {
+	if f.onDelete != nil {
+		f.onDelete(r)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, deleteCall{jobID: jobs.JobIDFromContext(ctx), actor: a, ref: r})
+	if err, ok := f.failRef[r.String()]; ok {
+		return err
+	}
 	for name, err := range f.fail {
 		if ref, _ := secrets.AppSecret(delAppID, name); ref == r {
 			return err
@@ -283,19 +293,18 @@ func TestDelete_TC783_09_RowDeleteReturnsTheNames(t *testing.T) {
 	}
 }
 
-// A compose the scanner refuses rolls the row delete back.
-func TestDeleteWithSecretNames_ScanErrorKeepsTheRow(t *testing.T) {
+// F-783-24: a compose the scanner refuses names no secret, so the row delete
+// goes ahead and returns the recorded refs alone.
+func TestDeleteWithSecretNames_RefusedComposeNamesNothing(t *testing.T) {
 	ctx := context.Background()
 	store, _ := seedOnlineApp(t, "n", delAppID, "immich")
 	withSecrets(t, store, delAppID, "x: ${secret:Bad_Name}\n", "", "db-password")
-	if _, err := store.DeleteWithSecretNames(ctx, delAppID); err == nil {
-		t.Fatal("DeleteWithSecretNames accepted a compose the scanner refuses")
+	names, err := store.DeleteWithSecretNames(ctx, delAppID)
+	if err != nil || !slices.Equal(names, []string{"db-password"}) {
+		t.Fatalf("DeleteWithSecretNames = %v, %v; want [db-password]", names, err)
 	}
-	if row, _ := store.Get(ctx, delAppID); row == nil {
-		t.Error("the row went although the names could not be read")
-	}
-	if names, _ := store.SecretRefNames(ctx, delAppID); !slices.Equal(names, []string{"db-password"}) {
-		t.Errorf("refs = %v; want them kept", names)
+	if row, _ := store.Get(ctx, delAppID); row != nil {
+		t.Error("the row survived")
 	}
 }
 
@@ -636,16 +645,52 @@ func TestDelete_Preflight_F783_04_NoNamesSkipsTheStateRead(t *testing.T) {
 	}
 }
 
-// F-783-04: a compose the scanner refuses refuses the delete before any stop.
-func TestDelete_Preflight_F783_04_ScanErrorRefusesBeforeStop(t *testing.T) {
-	_, run, agent := preflightFixture(t, "x: ${secret:Bad_Name}\n")
-	_, err := run(&fakeStoreState{})
-	if err == nil || !strings.HasPrefix(err.Error(), "The app's compose could not be scanned for secrets, so nothing was deleted") {
-		t.Fatalf("err = %v", err)
-	}
-	if len(agent.stops()) != 0 {
-		t.Errorf("stops sent = %v; want none", agent.stops())
-	}
+// TC-783-33 (F-783-24 ruling): a compose the scanner refuses names no
+// secret. With no ref rows the preflight finds no names, never reads the
+// store state, both stops are sent, the delete succeeds and the deleter is
+// never called. With a recorded ref r beside the bad compose, only r is
+// destroyed.
+func TestDelete_TC783_33_RefusedComposeNamesNoSecret(t *testing.T) {
+	const bad = "x: ${secret:Bad_Name}\n"
+	t.Run("no refs", func(t *testing.T) {
+		st := &fakeStoreState{state: storestate.Sealed}
+		store, run, agent := preflightFixture(t, bad)
+		if _, err := run(st); err != nil {
+			t.Fatalf("deleteStop: %v", err)
+		}
+		if st.stateReads() != 0 || len(agent.stops()) != 2 {
+			t.Errorf("state reads = %d, stops = %v; want no read and two stops", st.stateReads(), agent.stops())
+		}
+		names, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		if err != nil || len(names) != 0 {
+			t.Fatalf("remove = %v, %v; want no names", names, err)
+		}
+		del := &fakeSecretDeleter{}
+		sc, _ := destroyCtx(t, withVolumesSpec, "alice", names...)
+		out, err := deleteDestroySecrets(DeleteSecretsDeps{Secrets: del, Store: st, Log: discardLog()})(sc)
+		if err != nil || string(out) != `{"secrets":"none"}` || len(del.recorded()) != 0 {
+			t.Errorf("destroy_secrets = %s, %v, %d calls; want none and no call", out, err, len(del.recorded()))
+		}
+	})
+	t.Run("a recorded ref beside it", func(t *testing.T) {
+		st := &fakeStoreState{}
+		store, run, _ := preflightFixture(t, bad, "r")
+		if _, err := run(st); err != nil {
+			t.Fatalf("deleteStop: %v", err)
+		}
+		names, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		if err != nil || !slices.Equal(names, []string{"r"}) {
+			t.Fatalf("remove = %v, %v; want [r]", names, err)
+		}
+		del := &fakeSecretDeleter{}
+		sc, _ := destroyCtx(t, withVolumesSpec, "alice", names...)
+		if _, err := deleteDestroySecrets(DeleteSecretsDeps{Secrets: del, Store: st, Log: discardLog()})(sc); err != nil {
+			t.Fatal(err)
+		}
+		if got := del.recorded(); len(got) != 1 || got[0].ref != mustRef(t, delAppID, "r") {
+			t.Errorf("deletes = %+v; want r only", got)
+		}
+	})
 }
 
 // TC-783-35: a keep-volumes delete runs the same store preflight

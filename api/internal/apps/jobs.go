@@ -295,7 +295,7 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 //
 // It refuses a DeleteSecretsDeps with a nil field.
 func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover, d DeleteSecretsDeps) (jobs.Workflow, error) {
-	if err := d.check(); err != nil {
+	if err := d.check("DeleteWorkflow"); err != nil {
 		return jobs.Workflow{}, err
 	}
 	return jobs.Workflow{

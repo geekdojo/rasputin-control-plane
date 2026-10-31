@@ -37,12 +37,14 @@ func (s monitorState) State(ctx context.Context) (storestate.State, error) {
 	return s.m.State(ctx)
 }
 
-// TestDelete_AgainstTheRealStore is the app delete's F1.4 functional test
-// (geekdojo/geekdojo-brain#783): the delete saga's steps over embedded NATS
-// with a fake agent, the real apps SQLite, the real secrets service on the
-// real chain (client, Monitor, ObservedStore, login session, repository),
-// against the pinned OpenBao under the shipped rasputin-api policy. The legs
-// run in order on one store (TC-783-20 to TC-783-24).
+// TestDelete_AgainstTheRealStore is the F1.4 functional test of every path
+// that destroys an app's secrets (geekdojo/geekdojo-brain#783): the delete
+// saga's steps over embedded NATS with a fake agent, the release step of a
+// compose change, and node removal, with the real apps SQLite and the real
+// secrets service on the real chain (client, Monitor, ObservedStore, login
+// session, repository), against the pinned OpenBao under the shipped
+// rasputin-api policy. The legs run in order on one store (TC-783-20 to
+// TC-783-24, TC-783-58 to TC-783-60).
 func TestDelete_AgainstTheRealStore(t *testing.T) {
 	bin := os.Getenv(binEnv)
 	if bin == "" {
@@ -332,6 +334,100 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		}
 		if !named {
 			t.Error("the ledger's remove result does not name both of B's entries")
+		}
+	})
+
+	deps := apps.DeleteSecretsDeps{Secrets: svc, Store: monitorState{m: monitor}, Log: log}
+	var released []string // the release steps' results and errors, for TC-783-60
+
+	t.Run("TC-783-58 a compose change releases only what both composes dropped", func(t *testing.T) {
+		const idE = "01J9ZK3Q0M8X7Y6W5V4T3S2R1E"
+		composeE := "services:\n  web:\n    image: me/web:1\n    environment:\n      X: ${secret:x}\n      Y: ${secret:y}\n"
+		if err := appStore.Create(ctx, &apps.App{ID: idE, Name: "app-E", ComposeYAML: composeE, TargetNode: "n",
+			LastStatus: proto.AppStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		put(t, idE, "x", "S-783-e-x-v1", "S-783-e-x-v2")
+		put(t, idE, "y", "S-783-e-y-v1")
+		record(t, idE, "x", "y")
+		release := func(t *testing.T, jobID, from, to string) {
+			t.Helper()
+			if err := appStore.EditCompose(ctx, idE, apps.ComposeHash(from), to, time.Now().UTC()); err != nil {
+				t.Fatal(err)
+			}
+			out, err := apps.ReleaseUnusedSecrets(appStore, deps)(&jobs.StepCtx{Ctx: ctx, JobID: jobID, CreatedBy: "alice",
+				Spec: []byte(`{"appId":"` + idE + `"}`), Log: func(_, msg string) { released = append(released, msg) }})
+			released = append(released, string(out))
+			if err != nil {
+				released = append(released, err.Error())
+				t.Fatalf("release_secrets after %s: %v", jobID, err)
+			}
+		}
+		composeB := "services:\n  web:\n    image: me/web:2\n    environment:\n      Y: ${secret:y}\n"
+		composeC := "services:\n  web:\n    image: me/web:3\n    environment:\n      Y: ${secret:y}\n"
+		release(t, "job-783-58-b", composeE, composeB)
+		reads(t, idE, "x", "S-783-e-x-v2", 2)
+		release(t, "job-783-58-c", composeB, composeC)
+		gone(t, idE, "x", 2)
+		reads(t, idE, "y", "S-783-e-y-v1", 1)
+		audited(t, idE, "job-783-58-c", "x")
+		if names, _ := appStore.SecretRefNames(ctx, idE); len(names) != 1 || names[0] != "y" {
+			t.Errorf("E's refs = %v; want [y]", names)
+		}
+	})
+
+	t.Run("TC-783-59 node removal deletes every secret of the node's apps", func(t *testing.T) {
+		const (
+			idP = "01J9ZK3Q0M8X7Y6W5V4T3S2R1P"
+			idR = "01J9ZK3Q0M8X7Y6W5V4T3S2R1R"
+			idS = "01J9ZK3Q0M8X7Y6W5V4T3S2R1S"
+		)
+		for id, node := range map[string]string{idP: "m", idR: "m", idS: "other"} {
+			if err := appStore.Create(ctx, &apps.App{ID: id, Name: "app-" + id[len(id)-1:], ComposeYAML: composeA, TargetNode: node,
+				LastStatus: proto.AppStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		put(t, idP, "db-password", "S-783-p-pw-v1", "S-783-p-pw-v2")
+		put(t, idP, "api-key", "S-783-p-key-v1")
+		put(t, idR, "db-password", "S-783-r-pw-v1", "S-783-r-pw-v2")
+		put(t, idR, "api-key", "S-783-r-key-v1")
+		put(t, idS, "db-password", "S-783-s-pw-v1")
+		record(t, idP, "db-password", "api-key")
+		record(t, idR, "db-password", "api-key")
+		record(t, idS, "db-password")
+		nodeApps, err := apps.NewNodeApps(appStore, deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := nodeApps.CheckSecrets(ctx, "m"); err != nil {
+			t.Fatalf("CheckSecrets: %v", err)
+		}
+		ids, err := nodeApps.Remove(ctx, "alice", "m")
+		if err != nil {
+			released = append(released, err.Error())
+			t.Fatalf("Remove: %v", err)
+		}
+		if len(ids) != 2 {
+			t.Errorf("removed %v; want P and R", ids)
+		}
+		for _, id := range []string{idP, idR} {
+			gone(t, id, "db-password", 2)
+			gone(t, id, "api-key", 1)
+			audited(t, id, "", "db-password", "api-key")
+		}
+		reads(t, idS, "db-password", "S-783-s-pw-v1", 1)
+	})
+
+	t.Run("TC-783-60 no value leaks from a release or a node removal", func(t *testing.T) {
+		all := strings.Join(append([]string{rec.Text()}, released...), "\n")
+		if len(released) == 0 || !strings.Contains(all, "secrets.delete") {
+			t.Fatal("the scan holds no delete record, so it read the wrong thing")
+		}
+		for _, v := range written {
+			if strings.Contains(all, v) {
+				t.Errorf("a written value appears in a log, error or result")
+			}
 		}
 	})
 

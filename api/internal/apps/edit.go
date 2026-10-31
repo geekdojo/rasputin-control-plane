@@ -100,6 +100,9 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 //  5. leaf    — the deploy saga's leaf step
 //  6. drop_volumes — delete the volumes the new compose drops that the owner
 //     named in deleteVolumes, now that `up` has succeeded (#412)
+//  7. release_secrets — destroy the store entries of the secrets neither
+//     compose nor either operator-secret declaration names any more
+//     (geekdojo/geekdojo-brain#783, releasesecrets.go)
 //
 // In place is the point, as for the upgrade: the app keeps its ULID, so its
 // Compose project (proto.AppProjectName) and named volumes
@@ -117,10 +120,14 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 // It never appears in the job's spec, a step result or a log line: the steps
 // record its hash, and stash holds the text until OnTerminal discards it.
 //
-// It refuses a nil secrets source, returning the zero Workflow.
-func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash, secrets SecretSource) (jobs.Workflow, error) {
+// It refuses a nil secrets source or a DeleteSecretsDeps with a nil field,
+// returning the zero Workflow.
+func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash, secrets SecretSource, d DeleteSecretsDeps) (jobs.Workflow, error) {
 	const kind = "app.edit"
 	if err := requireSecretSource(kind, secrets); err != nil {
+		return jobs.Workflow{}, err
+	}
+	if err := d.check("EditWorkflow"); err != nil {
 		return jobs.Workflow{}, err
 	}
 	return jobs.Workflow{
@@ -134,6 +141,10 @@ func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Leaf
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
+			// Last, so it runs only once the new compose is up. One store call
+			// per unused entry; never retried, as destroy_secrets is not: the
+			// next compose change or the app's delete is the retry (#783).
+			{Name: "release_secrets", Timeout: 60 * time.Second, Do: releaseUnusedSecrets(store, d, composeChangeSpecAppID)},
 		},
 		// Every terminal path — success, a failed step, and an orphan failed at
 		// startup — ends here, so a held compose never outlives its job.
