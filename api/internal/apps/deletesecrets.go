@@ -60,18 +60,18 @@ func (d DeleteSecretsDeps) check() error {
 func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreState, app *App) error {
 	refs, err := store.SecretRefNames(ctx, app.ID)
 	if err != nil {
-		return fmt.Errorf("The app's recorded secrets could not be read, so nothing was deleted: %w", err)
+		return fmt.Errorf("the app's recorded secrets could not be read, so nothing was deleted: %w", err)
 	}
 	names, err := secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)
 	if err != nil {
-		return fmt.Errorf("The app's compose could not be scanned for secrets, so nothing was deleted: %w", err)
+		return fmt.Errorf("the app's compose could not be scanned for secrets, so nothing was deleted: %w", err)
 	}
 	if len(names) == 0 {
 		return nil
 	}
 	if !st.Configured() {
 		if len(refs) > 0 {
-			return fmt.Errorf("No secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted.", len(refs), plural(len(refs), "secret", "secrets"))
+			return fmt.Errorf("no secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted", len(refs), plural(len(refs), "secret", "secrets"))
 		}
 		// With no store and no recorded reference, the names were derived on
 		// every deploy and never stored: there is nothing to delete.

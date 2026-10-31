@@ -288,7 +288,6 @@ func handleStop(b Backend, m *nats.Msg) {
 		if err := b.RemoveCompose(ctx, cmd.AppID); err != nil {
 			bus.Respond(m, proto.AppStopAck{OK: false, Status: proto.AppStatusStopped,
 				Detail: "Stopped, but the app's compose file could not be removed: " + err.Error() + "."})
-			log.Printf("rasputin-agent: docker.stop %s: remove compose: %v", cmd.AppID, err)
 			return
 		}
 		detail = joinDetail(detail, "the app's compose file was removed")

@@ -13,9 +13,9 @@ import (
 )
 
 // runTeardown runs collector teardown for node "n1" against a fake agent that
-// answers ack, and returns the stop command the agent received, the step's
-// error and its log lines.
-func runTeardown(t *testing.T, ack proto.AppStopAck) (proto.AppStopCmd, error, []string) {
+// answers ack, and returns the stop command the agent received, its log
+// lines and the step's error.
+func runTeardown(t *testing.T, ack proto.AppStopAck) (proto.AppStopCmd, []string, error) {
 	t.Helper()
 	srv := natsserver.RunRandClientPortServer()
 	t.Cleanup(srv.Shutdown)
@@ -48,13 +48,13 @@ func runTeardown(t *testing.T, ack proto.AppStopAck) (proto.AppStopCmd, error, [
 	default:
 		t.Fatal("the agent received no stop command")
 	}
-	return cmd, stepErr, logs
+	return cmd, logs, stepErr
 }
 
 // TC-783-18: collector teardown asks the agent to remove the collector's
 // compose file.
 func TestCollectorTeardown_TC783_18_AsksForComposeRemoval(t *testing.T) {
-	cmd, err, logs := runTeardown(t, proto.AppStopAck{OK: true, Status: proto.AppStatusStopped})
+	cmd, logs, err := runTeardown(t, proto.AppStopAck{OK: true, Status: proto.AppStatusStopped})
 	if err != nil {
 		t.Fatalf("teardown: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestCollectorTeardown_TC783_18_AsksForComposeRemoval(t *testing.T) {
 // the collector stopped.
 func TestCollectorTeardown_TC783_19_FailsWhenComposeNotRemoved(t *testing.T) {
 	const detail = "Stopped, but the app's compose file could not be removed: permission denied."
-	_, err, logs := runTeardown(t, proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail})
+	_, logs, err := runTeardown(t, proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail})
 	if err == nil || err.Error() != detail {
 		t.Fatalf("teardown err = %v; want %q", err, detail)
 	}
