@@ -52,6 +52,19 @@ func (d DeleteSecretsDeps) check() error {
 	return nil
 }
 
+// sentenceError is an error whose text is a sentence a person reads as the
+// job's error (ERR-MESSAGE); the string type follows storage's and updater's
+// sentenceError, which are unexported there.
+type sentenceError string
+
+func (e sentenceError) Error() string { return string(e) }
+
+// The preflight's refusals that wrap a cause; the cause follows the sentence.
+const (
+	errRefsUnreadable sentenceError = "The app's recorded secrets could not be read, so nothing was deleted"
+	errScanRefused    sentenceError = "The app's compose could not be scanned for secrets, so nothing was deleted"
+)
+
 // deleteSecretsPreflight refuses a delete with volumes whose secrets the store
 // cannot take the deletes for, before anything is stopped or deleted
 // (F-783-04). The runner never resumes a failed job, and once the row is gone
@@ -60,18 +73,18 @@ func (d DeleteSecretsDeps) check() error {
 func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreState, app *App) error {
 	refs, err := store.SecretRefNames(ctx, app.ID)
 	if err != nil {
-		return fmt.Errorf("the app's recorded secrets could not be read, so nothing was deleted: %w", err)
+		return fmt.Errorf("%s: %w", errRefsUnreadable, err)
 	}
 	names, err := secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)
 	if err != nil {
-		return fmt.Errorf("the app's compose could not be scanned for secrets, so nothing was deleted: %w", err)
+		return fmt.Errorf("%s: %w", errScanRefused, err)
 	}
 	if len(names) == 0 {
 		return nil
 	}
 	if !st.Configured() {
 		if len(refs) > 0 {
-			return fmt.Errorf("no secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted", len(refs), plural(len(refs), "secret", "secrets"))
+			return sentenceError(fmt.Sprintf("No secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted.", len(refs), plural(len(refs), "secret", "secrets")))
 		}
 		// With no store and no recorded reference, the names were derived on
 		// every deploy and never stored: there is nothing to delete.

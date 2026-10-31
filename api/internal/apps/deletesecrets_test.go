@@ -585,7 +585,7 @@ func TestDelete_Preflight_F783_04_StateReadErrorRefuses(t *testing.T) {
 func TestDelete_Preflight_F783_04_UnconfiguredWithRefsRefuses(t *testing.T) {
 	_, run, agent := preflightFixture(t, composeNaming("db-password"), "db-password", "admin-token")
 	_, err := run(&fakeStoreState{unconfigured: true})
-	want := "no secret store is configured, so the app's 2 stored secrets cannot be deleted; nothing was deleted"
+	want := "No secret store is configured, so the app's 2 stored secrets cannot be deleted; nothing was deleted."
 	if err == nil || err.Error() != want {
 		t.Fatalf("err = %v; want %q", err, want)
 	}
@@ -630,7 +630,7 @@ func TestDelete_Preflight_F783_04_NoNamesSkipsTheStateRead(t *testing.T) {
 func TestDelete_Preflight_F783_04_ScanErrorRefusesBeforeStop(t *testing.T) {
 	_, run, agent := preflightFixture(t, "x: ${secret:Bad_Name}\n")
 	_, err := run(&fakeStoreState{})
-	if err == nil || !strings.HasPrefix(err.Error(), "the app's compose could not be scanned for secrets, so nothing was deleted") {
+	if err == nil || !strings.HasPrefix(err.Error(), "The app's compose could not be scanned for secrets, so nothing was deleted") {
 		t.Fatalf("err = %v", err)
 	}
 	if len(agent.stops()) != 0 {
