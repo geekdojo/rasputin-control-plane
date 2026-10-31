@@ -76,7 +76,7 @@ func TestDeleteWorkflow_InvalidAppIDRemovesNothing(t *testing.T) {
 
 	for _, id := range invalidAppIDs {
 		spec := deleteSpecFor(t, id)
-		if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(spec, nc)); err == nil {
+		if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(spec, nc)); err == nil {
 			t.Errorf("stop step accepted appId %q", id)
 		}
 		if _, err := deleteLeaf(store, inv, nc, rm)(newStepCtxNATS(spec, nc)); err == nil {

@@ -43,7 +43,7 @@ func TestDelete_OnlineStopsThenRemoves(t *testing.T) {
 	defer func() { _ = deletedSub.Unsubscribe() }()
 
 	// Step 1: stop.
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
 	// Step 2: remove.
@@ -72,7 +72,7 @@ func TestDelete_OnlineStopFailsKeepsRow(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err == nil {
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err == nil {
 		t.Fatal("expected deleteStop to fail when the agent reports stop failed")
 	}
 	if got, _ := store.Get(ctx, delAppID); got == nil {
@@ -100,7 +100,7 @@ func TestDelete_OfflineNodeSkipsStopButRemoves(t *testing.T) {
 	}
 
 	// No agent responder — the node is offline; deleteStop must not block on it.
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
+	out, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
 	if err != nil {
 		t.Fatalf("deleteStop on offline node should not fail: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestDelete_MissingAppIsIdempotent(t *testing.T) {
 	nc := startNATS(t)
 	store := newStore(t)
 	inv := newInventory(t)
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
 		t.Errorf("deleteStop on a missing app should succeed, got %v", err)
 	}
 	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
@@ -154,7 +154,7 @@ func TestDelete_DefaultKeepsVolumes(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n")
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
+	out, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
 	if err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestDelete_DeleteVolumesReachesAgent(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	agent := fakeDeleteAgent(t, nc, "n", delVolData, delVolAnon)
-	out, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name, delVolAnon.Name), nc))
+	out, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name, delVolAnon.Name), nc))
 	if err != nil {
 		t.Fatalf("deleteStop: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestDelete_UnconfirmedVolumeRefusesAfterStop(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	agent := fakeDeleteAgent(t, nc, "n", delVolData, delVolAnon)
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	_, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil || !strings.Contains(err.Error(), delVolAnon.Name) || !strings.Contains(err.Error(), "no volume was deleted") {
 		t.Fatalf("deleteStop = %v; want a refusal naming the unconfirmed volume", err)
 	}
@@ -218,7 +218,7 @@ func TestDelete_NameNotOnNodeRefusesAfterStop(t *testing.T) {
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	agent := fakeDeleteAgent(t, nc, "n", delVolData)
 	ghost := proto.AppVolumeName(delAppID, "ghost")
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name, ghost), nc))
+	_, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name, ghost), nc))
 	if err == nil || !strings.Contains(err.Error(), ghost) || !strings.Contains(err.Error(), "does not have") {
 		t.Fatalf("deleteStop = %v; want a refusal naming %s", err, ghost)
 	}
@@ -233,7 +233,7 @@ func TestDelete_OtherAppsVolumeIsNotThisAppsToDelete(t *testing.T) {
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	other := proto.AppVolumeInfo{Name: proto.AppVolumeName(missingAppID, "data"), AppID: missingAppID, Volume: "data"}
 	agent := fakeDeleteAgent(t, nc, "n", delVolData, other)
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc)); err != nil {
 		t.Fatalf("deleteStop: %v — another app's volume must not be required", err)
 	}
 	if got := agent.stops(); len(got) != 2 || !got[1] {
@@ -250,7 +250,7 @@ func TestDelete_ListingFailsDeletesNothing(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
 	got := captureStopCmd(t, nc, "n") // answers stops, never the listing
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	_, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil || !strings.Contains(err.Error(), "could not be listed") {
 		t.Fatalf("deleteStop = %v; want a refusal saying the volumes could not be listed", err)
 	}
@@ -284,6 +284,11 @@ func TestDelete_FlagNeverLeaksIntoOtherKinds(t *testing.T) {
 	}
 	if got.DeleteVolumes {
 		t.Fatal("a plain app.stop must send deleteVolumes:false")
+	}
+	// TC-783-07 (b): app.stop keeps the compose file; it never asks for its
+	// removal.
+	if got.RemoveCompose {
+		t.Fatal("app.stop sent removeCompose:true; a stopped app keeps its compose")
 	}
 }
 
@@ -328,7 +333,7 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 	if err := store.Create(ctx, a); err != nil {
 		t.Fatalf("Create app: %v", err)
 	}
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	_, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil {
 		t.Fatal("expected a refusal on an offline node")
 	}
@@ -339,7 +344,7 @@ func TestDelete_DeleteVolumesOnOfflineNodeRefuses(t *testing.T) {
 		t.Error("the app row must remain when the delete was refused")
 	}
 	// And the keep path on the same offline node still proceeds, as before.
-	if _, err := deleteStop(store, inv, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
 		t.Errorf("keep-volumes delete on an offline node must still proceed: %v", err)
 	}
 }
@@ -357,7 +362,7 @@ func TestDelete_DeleteVolumesWithVolumesLeftBehindKeepsRow(t *testing.T) {
 	agent := fakeDeleteAgent(t, nc, "n", delVolData)
 	agent.deleteAck = proto.AppStopAck{OK: false, Status: proto.AppStatusStopped, Detail: detail}
 
-	_, err := deleteStop(store, inv, nc)(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
+	_, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(deleteSpecJSON(delVolData.Name), nc))
 	if err == nil || !strings.Contains(err.Error(), "NOT deleted") || !strings.Contains(err.Error(), "deadbeef") {
 		t.Fatalf("deleteStop = %v, want the agent's naming of the volume left behind", err)
 	}
@@ -389,6 +394,7 @@ func deleteSpecJSON(names ...string) string {
 type deleteAgent struct {
 	mu        sync.Mutex
 	stopCmds  []bool
+	removes   []bool
 	listCalls int
 	deleteAck proto.AppStopAck
 }
@@ -397,6 +403,13 @@ func (a *deleteAgent) stops() []bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]bool(nil), a.stopCmds...)
+}
+
+// removeComposes is each stop's removeCompose, in order.
+func (a *deleteAgent) removeComposes() []bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]bool(nil), a.removes...)
 }
 
 func (a *deleteAgent) lists() int {
@@ -413,6 +426,7 @@ func fakeDeleteAgent(t *testing.T, nc *nats.Conn, nodeID string, vols ...proto.A
 		_ = json.Unmarshal(m.Data, &cmd)
 		a.mu.Lock()
 		a.stopCmds = append(a.stopCmds, cmd.DeleteVolumes)
+		a.removes = append(a.removes, cmd.RemoveCompose)
 		ack := proto.AppStopAck{OK: true, Status: proto.AppStatusStopped}
 		if cmd.DeleteVolumes {
 			ack = a.deleteAck

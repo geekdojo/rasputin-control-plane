@@ -270,7 +270,20 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 //     UNLESS deleteVolumes is set, in which case the step refuses naming
 //     the node, because data the operator asked to destroy would
 //     otherwise be left behind as an orphan they believe is gone.
-//  2. remove — delete the ledger row + emit the `deleted` change event.
+//  2. remove — delete the ledger row + emit the `deleted` change event. The
+//     secret names the row had (its recorded references and the ${secret:}
+//     names in its compose and previous compose) are read in the same
+//     transaction and become the step's result.
+//  3. destroy_secrets — delete each of those entries from the secret
+//     store, every version and its metadata, on behalf of the operator who
+//     submitted the job (geekdojo/geekdojo-brain#783). Every delete does
+//     this, with the volumes kept or deleted (F-783-05). Store order is
+//     S15's: the row first, then the store.
+//
+// The stop step first checks the store can take the deletes and refuses,
+// before anything is stopped, when it cannot (F-783-04). With the volumes
+// kept, the stop asks the agent to remove the app's compose file and
+// config-hash record as well, keeping volumes.json.
 //
 // Ordering, and the failure between the two steps (geekdojo/geekdojo-brain#399):
 // with deleteVolumes the volumes are gone at the end of step 1, and if step 2
@@ -279,18 +292,26 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // (deleteStop treats a missing compose file as stopped and says the volumes
 // were not touched). The reverse ordering — row first, volumes second — is
 // the failure mode this issue exists to fix: data with no owner.
-func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover) jobs.Workflow {
+//
+// It refuses a DeleteSecretsDeps with a nil field.
+func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover, d DeleteSecretsDeps) (jobs.Workflow, error) {
+	if err := d.check(); err != nil {
+		return jobs.Workflow{}, err
+	}
 	return jobs.Workflow{
 		Kind: "app.delete",
 		Steps: []jobs.WorkflowStep{
 			// Keeping data is one `compose down`. Deleting it is a `down`, a
 			// volume listing (appVolumesListRPC) and a `down -v` with the
 			// sweep behind it, each a single round trip to the node.
-			{Name: "stop", Timeout: 90 * time.Second, Do: deleteStop(store, inv, nc)},
+			{Name: "stop", Timeout: 90 * time.Second, Do: deleteStop(store, inv, nc, d.Store)},
 			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc, removeLeaf)},
 			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
+			// One store call per entry. Never retried: a retry would be a
+			// timer-driven re-attempt, and a failure names what is left.
+			{Name: "destroy_secrets", Timeout: 60 * time.Second, Do: deleteDestroySecrets(d)},
 		},
-	}
+	}, nil
 }
 
 // ReconcileWorkflow sweeps every app's actual status from its target node
@@ -1028,7 +1049,7 @@ func stopPush(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 // deleteStop stops the deployment before its record is removed. It reuses the
 // same docker.stop RPC as app.stop. On a reachable node the stop must succeed;
 // on an unreachable one it warns and lets the delete proceed (best-effort).
-func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
+func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn, st SecretStoreState) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseDeleteSpec(sc.Spec)
 		if err != nil {
@@ -1048,23 +1069,27 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		node, _ := inv.Get(sc.Ctx, app.TargetNode)
 		online := node != nil && computeNodeStatus(node.LastSeen) == proto.StatusOnline
 		deleting := len(spec.DeleteVolumes) > 0
+		if !online && deleting {
+			// The operator asked for the data to go, and the node holding
+			// it cannot be reached. Removing the row anyway would leave the
+			// volumes behind as orphans while the operator believes they
+			// were deleted — the one thing #399 exists to prevent. Refuse,
+			// name the node, keep the row: uninstall without deleting
+			// volumes is still available, and so is retrying later.
+			return nil, fmt.Errorf("node %q is unreachable, so its volumes cannot be deleted; uninstall without deleting volumes, or retry when the node is back", app.TargetNode)
+		}
+		// Every delete destroys the app's secrets, so nothing is stopped or
+		// removed until the store can take those deletes (F-783-04, F-783-05).
+		if err := deleteSecretsPreflight(sc.Ctx, store, st, app); err != nil {
+			return nil, err
+		}
 		if !online {
-			if deleting {
-				// The operator asked for the data to go, and the node holding
-				// it cannot be reached. Removing the row anyway would leave the
-				// volumes behind as orphans while the operator believes they
-				// were deleted — the one thing #399 exists to prevent. Refuse,
-				// name the node, keep the row: uninstall without deleting
-				// volumes is still available, and so is retrying later.
-				return nil, fmt.Errorf("node %q is unreachable, so its volumes cannot be deleted; uninstall without deleting volumes, or retry when the node is back", app.TargetNode)
-			}
 			// Can't reach the node to stop it. Delete should still work (a user
 			// expects "delete" to remove the record), but warn loudly: if that
 			// node returns, its container may reappear until reconciled.
 			sc.Log("warn", fmt.Sprintf("node %q is unreachable — removing the record WITHOUT stopping; its container may reappear if the node returns", app.TargetNode))
 			return json.Marshal(map[string]string{"appId": app.ID, "stop": "skipped-unreachable"})
 		}
-
 		if deleting {
 			sc.Log("info", fmt.Sprintf("stopping %q on %s before delete; then deleting the %d volume(s) the operator named: %s",
 				app.Name, app.TargetNode, len(spec.DeleteVolumes), strings.Join(spec.DeleteVolumes, ", ")))
@@ -1079,11 +1104,14 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 		// with data it is what makes the listing below final: no container
 		// of the app is left to create a volume, and the agent records every
 		// anonymous volume the containers mounted before it removes them.
-		if _, err := deleteStopRPC(sc, store, nc, app, false); err != nil {
+		//
+		// With the volumes kept this is the only stop, and the agent removes
+		// the app's compose file and config-hash record after it (#783).
+		if _, err := deleteStopRPC(sc, store, nc, app, false, !deleting); err != nil {
 			return nil, err
 		}
 		if !deleting {
-			sc.Log("info", "stopped; volumes kept")
+			sc.Log("info", "stopped; volumes kept; the app's compose file was removed from the node")
 			return json.Marshal(map[string]string{"appId": app.ID, "stop": "ok", "volumes": "kept"})
 		}
 
@@ -1098,7 +1126,7 @@ func deleteStop(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.DoFn {
 			return nil, deleteKeptVolumes(sc, store, nc, app, "stopped, but no volume was deleted: "+err.Error())
 		}
 
-		ack, err := deleteStopRPC(sc, store, nc, app, true)
+		ack, err := deleteStopRPC(sc, store, nc, app, true, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1121,10 +1149,10 @@ func deleteKeptVolumes(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, 
 }
 
 // deleteStopRPC sends one docker.stop for app, deleting its volumes or not,
-// and records a failure on the row. A failed ack is an error carrying the
-// agent's detail.
-func deleteStopRPC(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, deleteVolumes bool) (*proto.AppStopAck, error) {
-	cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID, DeleteVolumes: deleteVolumes})
+// and removing its compose file or not, and records a failure on the row. A
+// failed ack is an error carrying the agent's detail.
+func deleteStopRPC(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, deleteVolumes, removeCompose bool) (*proto.AppStopAck, error) {
+	cmd, _ := json.Marshal(proto.AppStopCmd{AppID: app.ID, DeleteVolumes: deleteVolumes, RemoveCompose: removeCompose})
 	msg, err := nc.RequestWithContext(sc.Ctx, proto.AppStopSubject(app.TargetNode), cmd)
 	if err != nil {
 		fctx, cancel := detachCtx(sc.Ctx)
@@ -1151,19 +1179,29 @@ func deleteStopRPC(sc *jobs.StepCtx, store *Store, nc *nats.Conn, app *App, dele
 }
 
 // deleteRemove drops the ledger row and emits the deleted event. Idempotent:
-// a missing row is treated as already-removed.
+// a missing row is treated as already-removed. Its result names the secrets
+// the row had (names, never values), which destroy_secrets reads.
 func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseDeleteSpec(sc.Spec)
 		if err != nil {
 			return nil, err
 		}
-		if err := store.Delete(sc.Ctx, spec.AppID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		names, err := store.DeleteWithSecretNames(sc.Ctx, spec.AppID)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
+			sc.Log("info", "app already removed")
+			return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "already-removed", SecretNames: []string{}})
+		case err != nil:
 			return nil, fmt.Errorf("delete app: %w", err)
+		}
+		if names == nil {
+			names = []string{}
 		}
 		emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
 		sc.Log("info", "removed from the app list")
-		return json.Marshal(map[string]string{"appId": spec.AppID, "deleted": "true"})
+		return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "true", SecretNames: names})
 	}
 }
 

@@ -532,7 +532,9 @@ func collectorTeardown() jobs.DoFn {
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil || spec.NodeID == "" {
 			return nil, fmt.Errorf("collector teardown: bad spec: %v", err)
 		}
-		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: collectorAppID})
+		// The collector's compose goes with it (#783): it is not stopped to be
+		// started again, it is removed from the node.
+		cmd, _ := json.Marshal(proto.AppStopCmd{AppID: collectorAppID, RemoveCompose: true})
 		sc.Log("info", fmt.Sprintf("stopping observability collector on %s", spec.NodeID))
 		msg, err := sc.NATS.RequestWithContext(sc.Ctx, proto.AppStopSubject(spec.NodeID), cmd)
 		if err != nil {
@@ -542,7 +544,10 @@ func collectorTeardown() jobs.DoFn {
 		if err := json.Unmarshal(msg.Data, &ack); err != nil {
 			return nil, fmt.Errorf("collector teardown: decode ack: %w", err)
 		}
-		if !ack.OK && ack.Status == proto.AppStatusFailed {
+		// Any !OK fails the teardown, including a stopped collector whose
+		// compose file the agent could not remove (F-783-02). A plain stop
+		// fails only with status failed, so no ack that passed before fails now.
+		if !ack.OK {
 			detail := ack.Detail
 			if detail == "" {
 				detail = "agent reported collector teardown failed"

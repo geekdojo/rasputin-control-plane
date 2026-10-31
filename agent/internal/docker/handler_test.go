@@ -231,6 +231,7 @@ func (errBackend) CheckVolumes(_ context.Context, _, _ string) ([]string, []prot
 func (errBackend) Stop(_ context.Context, _ string, _ bool) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
+func (errBackend) RemoveCompose(_ context.Context, _ string) error { return errOh }
 func (errBackend) Status(_ context.Context, _ string) (proto.AppStatus, []proto.AppServiceStatus, error) {
 	return proto.AppStatusUnknown, nil, errOh
 }

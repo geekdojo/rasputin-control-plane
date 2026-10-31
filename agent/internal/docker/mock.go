@@ -146,6 +146,17 @@ func (m *MockBackend) Stop(ctx context.Context, appID string, deleteVolumes bool
 	return proto.AppStatusStopped, "mock backend: pretend-stopped", nil
 }
 
+// RemoveCompose removes the mock's copy of appID's compose file. Absent is
+// success; the mock's state file stays, as the real backend's volumes.json does.
+func (m *MockBackend) RemoveCompose(_ context.Context, appID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := os.Remove(m.composePath(appID)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", composeFileName, err)
+	}
+	return nil
+}
+
 func (m *MockBackend) Status(ctx context.Context, appID string) (proto.AppStatus, []proto.AppServiceStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
