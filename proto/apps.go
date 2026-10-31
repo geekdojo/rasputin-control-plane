@@ -264,6 +264,15 @@ type AppStopCmd struct {
 	// must be in the agent's own record of volumes this app's containers
 	// mounted; and no volume any container still references is removed.
 	DeleteVolumes bool `json:"deleteVolumes,omitempty"`
+	// RemoveCompose asks the agent, after a successful stop, to remove the
+	// app's compose file and its config-hash record, keeping volumes.json and
+	// every other file in the app's state directory (geekdojo/geekdojo-brain#783).
+	//
+	// Set ONLY by the app.delete saga when the volumes are kept, and by the
+	// observability collector's teardown. app.stop never sets it: a stopped
+	// app keeps its compose so START brings the same stack back. Absent is
+	// false, which is what an api older than this field sends.
+	RemoveCompose bool `json:"removeCompose,omitempty"`
 }
 
 type AppStopAck struct {

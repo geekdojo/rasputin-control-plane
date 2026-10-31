@@ -280,7 +280,28 @@ func handleStop(b Backend, m *nats.Msg) {
 		log.Printf("rasputin-agent: docker.stop %s: %v", cmd.AppID, err)
 		return
 	}
+	if cmd.RemoveCompose && status == proto.AppStatusStopped {
+		// The app is being deleted with its volumes kept, or it is the
+		// collector being torn down: its compose file goes too (#783). The
+		// containers are stopped either way, so a failed removal keeps the
+		// true status and fails the ack; the caller fails on !OK.
+		if err := b.RemoveCompose(ctx, cmd.AppID); err != nil {
+			bus.Respond(m, proto.AppStopAck{OK: false, Status: proto.AppStatusStopped,
+				Detail: "Stopped, but the app's compose file could not be removed: " + err.Error() + "."})
+			log.Printf("rasputin-agent: docker.stop %s: remove compose: %v", cmd.AppID, err)
+			return
+		}
+		detail = joinDetail(detail, "the app's compose file was removed")
+	}
 	bus.Respond(m, proto.AppStopAck{OK: status == proto.AppStatusStopped, Status: status, Detail: detail})
+}
+
+// joinDetail appends more to an ack's detail.
+func joinDetail(detail, more string) string {
+	if detail == "" {
+		return more
+	}
+	return detail + "; " + more
 }
 
 func handleStatus(b Backend, m *nats.Msg) {

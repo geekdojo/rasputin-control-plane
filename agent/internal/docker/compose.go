@@ -375,6 +375,27 @@ func (c *ComposeBackend) Stop(ctx context.Context, appID string, deleteVolumes b
 	return proto.AppStatusStopped, detail, nil
 }
 
+// RemoveCompose removes appID's compose file and config-hash record, the two
+// files that held what a deploy rendered for the app. volumes.json stays,
+// because the orphan reaper reads it to list the kept anonymous volumes once
+// the app row is gone (appvolumes.go), and every other file stays, because a
+// tile's bind mount can be rooted in this directory. An absent file is
+// success.
+func (c *ComposeBackend) RemoveCompose(_ context.Context, appID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !safeAppID(appID) {
+		return fmt.Errorf("refusing app id %q: not a single path element", appID)
+	}
+	if err := os.Remove(c.composePath(appID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", composeFileName, err)
+	}
+	if err := c.removeConfigHashRecord(appID); err != nil {
+		return fmt.Errorf("remove %s: %w", configHashRecordFile, err)
+	}
+	return nil
+}
+
 func (c *ComposeBackend) Status(ctx context.Context, appID string) (proto.AppStatus, []proto.AppServiceStatus, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -54,6 +54,13 @@ type Backend interface {
 	// Without it, Stop removes no volume of any class.
 	Stop(ctx context.Context, appID string, deleteVolumes bool) (proto.AppStatus, string, error)
 
+	// RemoveCompose removes appID's compose file and its config-hash record,
+	// and nothing else: volumes.json stays for the orphan reaper, and any
+	// other file in the app's directory may be a tile's bind-mount data. An
+	// absent file is success. It is called only after a successful Stop, when
+	// the stop command carries RemoveCompose (geekdojo/geekdojo-brain#783).
+	RemoveCompose(ctx context.Context, appID string) error
+
 	// Status returns the current status of an app's services. Used by the
 	// docker.status handler — not currently exercised in v0 workflows but
 	// will feed periodic reconciliation later.

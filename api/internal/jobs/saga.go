@@ -28,6 +28,11 @@ type StepCtx struct {
 	// re-issuing the RPC. nil-safe — a freshly-constructed StepCtx may
 	// have a nil map.
 	PriorResults map[string]json.RawMessage
+	// CreatedBy is the job's submitter as the server recorded it: the
+	// operator's user name for a job an endpoint submitted on their session,
+	// or the subsystem's name for an internal one. A step that acts on the
+	// operator's behalf names them with it (geekdojo/geekdojo-brain#783).
+	CreatedBy string
 	// Log appends a log line both to the persistent job_events table and to
 	// the live NATS event stream so the UI sees it in real time.
 	Log func(level, message string)
@@ -599,6 +604,7 @@ func (r *Runner) runStep(ctx context.Context, j *Job, seq int, step WorkflowStep
 			Spec:         j.Spec,
 			NATS:         r.nc,
 			PriorResults: prior,
+			CreatedBy:    j.CreatedBy,
 			Log: func(level, message string) {
 				r.emit(ctx, j.ID, proto.JobLog, proto.LogEventData{
 					Level: level, Message: message,

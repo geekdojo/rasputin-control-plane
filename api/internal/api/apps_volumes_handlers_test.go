@@ -517,7 +517,7 @@ func TestDeleteApp_BodyCarriesExactVolumeNames(t *testing.T) {
 	f, cookie, _ := volumesFixture(t)
 	seedVolumesApp(t, f, volULIDLive, "immich")
 	// The fixture's runner knows no workflows; Submit refuses an unknown kind.
-	f.runner.Register(apps.DeleteWorkflow(f.appsStore, f.inv, f.nc, nil))
+	f.runner.Register(deleteWorkflowForTest(t, f))
 	db := proto.AppVolumeName(volULIDLive, "immich-db")
 	upload := proto.AppVolumeName(volULIDLive, "immich-upload")
 	anon := strings.Repeat("c4", 32)
@@ -610,7 +610,7 @@ func TestDeleteApp_BodyCarriesExactVolumeNames(t *testing.T) {
 func TestDeleteApp_VolumesNeedAListingNode(t *testing.T) {
 	f, cookie, _ := volumesFixture(t)
 	seedVolumesApp(t, f, volULIDLive, "immich")
-	f.runner.Register(apps.DeleteWorkflow(f.appsStore, f.inv, f.nc, nil))
+	f.runner.Register(deleteWorkflowForTest(t, f))
 	body := `{"deleteVolumes":["` + proto.AppVolumeName(volULIDLive, "immich-db") + `"]}`
 
 	// n1 is online and nobody answers its docker.volumes.list.

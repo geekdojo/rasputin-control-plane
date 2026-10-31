@@ -13,6 +13,7 @@ var (
 	WatchDeploying      = watchDeploying
 	AssertLedgerLacks   = assertLedgerLacks
 	ReceiveDeployWithin = receiveWithin[proto.AppDeployCmd]
+	FakeDeleteAgent     = fakeDeleteAgent
 )
 
 // SecretComposeV1 is a custom compose that asks for the secret db-password.

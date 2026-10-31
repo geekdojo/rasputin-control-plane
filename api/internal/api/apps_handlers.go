@@ -379,7 +379,9 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	j, err := s.runner.Submit(r.Context(), "app.delete", apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named}, creator(r))
+	// The operator, not a placeholder: destroy_secrets deletes the app's store
+	// entries on their behalf (#783).
+	j, err := s.runner.Submit(r.Context(), "app.delete", apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named}, userName(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

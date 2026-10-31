@@ -10,6 +10,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
@@ -30,6 +31,22 @@ func (a appTargetNodes) TargetNode(ctx context.Context, appID string) (string, b
 		return "", false, nil
 	}
 	return app.TargetNode, true, nil
+}
+
+// appStoreState is the app.delete saga's view of the secret store
+// (apps.SecretStoreState): the readiness monitor the deploy gate reads.
+type appStoreState struct{ monitor *storestate.Monitor }
+
+// Configured is false exactly when the monitor is nil: no backend is
+// requested and the switch marker is unset (storeReadinessWiring).
+func (a appStoreState) Configured() bool { return a.monitor != nil }
+
+// State reads the store's state once. It is called only when Configured.
+func (a appStoreState) State(ctx context.Context) (storestate.State, error) {
+	if a.monitor == nil {
+		return "", errors.New("no secret store is configured")
+	}
+	return a.monitor.State(ctx)
 }
 
 // secretsWiring builds the secrets service (geekdojo/geekdojo-brain#761) over

@@ -936,7 +936,10 @@ func main() {
 	// when the job ends.
 	composeStash := apps.NewComposeStash()
 	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, deploySource)))
-	runner.Register(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf))
+	// app.delete deletes the app's secret store entries with its volumes
+	// (#783), and refuses up front when the store cannot take the deletes.
+	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf,
+		apps.DeleteSecretsDeps{Secrets: secretsSvc, Store: appStoreState{monitor: readiness.monitor}, Log: logger})))
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	// node.update is registered below, after the seal rotation: its copy of

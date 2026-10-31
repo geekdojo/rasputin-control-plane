@@ -27,7 +27,9 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "kind is required")
 		return
 	}
-	j, err := s.runner.SubmitRawSpec(r.Context(), req.Kind, req.Spec, "user")
+	// The job records the operator who submitted it: a step acting on their
+	// behalf (app.delete's store deletes) names them (#783).
+	j, err := s.runner.SubmitRawSpec(r.Context(), req.Kind, req.Spec, userName(r))
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return
