@@ -408,23 +408,33 @@ func TestDestroySecrets_TC783_12_StoreFailuresFailTheJob(t *testing.T) {
 	}
 }
 
-// TC-783-13: a keep-volumes delete keeps the entries: no deleter call, the
-// result says kept, and the job log says so.
-func TestDestroySecrets_TC783_13_KeepVolumesKeepsTheEntries(t *testing.T) {
+// TC-783-13: a keep-volumes delete destroys the entries (F-783-05 ruling):
+// each name is deleted with OperatorActor(createdBy) and the job's id in the
+// context, exactly as TC-783-10, and nothing says the secrets are kept.
+func TestDestroySecrets_TC783_13_KeepVolumesDestroysTheEntries(t *testing.T) {
 	del := &fakeSecretDeleter{}
-	st := &fakeStoreState{}
 	sc, l := destroyCtx(t, `{"appId":"`+delAppID+`"}`, "alice", "a", "b")
-	out, err := deleteDestroySecrets(DeleteSecretsDeps{Secrets: del, Store: st, Log: discardLog()})(sc)
+	out, err := deleteDestroySecrets(DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()})(sc)
 	if err != nil {
 		t.Fatalf("destroy_secrets: %v", err)
 	}
-	if len(del.recorded()) != 0 || st.stateReads() != 0 {
-		t.Errorf("a keep-volumes delete reached the store: %d deletes, %d state reads", len(del.recorded()), st.stateReads())
+	calls := del.recorded()
+	if len(calls) != 2 {
+		t.Fatalf("deleter calls = %d; want 2", len(calls))
 	}
-	if string(out) != `{"secrets":"kept"}` {
+	for i, name := range []string{"a", "b"} {
+		c := calls[i]
+		if c.ref != mustRef(t, delAppID, name) || c.actor != secrets.OperatorActor("alice") || c.jobID != "job-783" {
+			t.Errorf("call %d = %+v; want ref %s, operator alice, job job-783", i, c, name)
+		}
+	}
+	if string(out) != `{"count":2,"secrets":"deleted"}` {
 		t.Errorf("result = %s", out)
 	}
-	if !strings.Contains(l.text(), "the app's 2 secrets are kept in the secret store with its volumes") {
+	if strings.Contains(string(out), "kept") || strings.Contains(l.text(), "kept") {
+		t.Errorf("a keep-volumes delete says the secrets are kept: result %s, job log %q", out, l.text())
+	}
+	if !strings.Contains(l.text(), "deleted the app's 2 secrets from the secret store, every version") {
 		t.Errorf("job log = %q", l.text())
 	}
 }
@@ -638,18 +648,44 @@ func TestDelete_Preflight_F783_04_ScanErrorRefusesBeforeStop(t *testing.T) {
 	}
 }
 
-// The preflight runs only for a delete with volumes: a keep-volumes delete
-// of an app with secrets proceeds with the store sealed.
-func TestDelete_Preflight_KeepVolumesNeedsNoStore(t *testing.T) {
-	nc := startNATS(t)
-	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
-	withSecrets(t, store, delAppID, composeNaming("db-password"), "", "db-password")
-	agent := fakeDeleteAgent(t, nc, "n")
-	st := &fakeStoreState{state: storestate.Sealed}
-	if _, err := deleteStop(store, inv, nc, st)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc)); err != nil {
-		t.Fatalf("deleteStop: %v", err)
-	}
-	if st.stateReads() != 0 || len(agent.stops()) != 1 {
-		t.Errorf("state reads = %d, stops = %v", st.stateReads(), agent.stops())
+// TC-783-35: a keep-volumes delete runs the same store preflight
+// (F-783-05 ruling). With the store sealed the stop step fails with
+// TC-783-28's sentence, sends no stop and leaves the row unchanged; with the
+// store ready it sends its one stop.
+func TestDelete_TC783_35_KeepVolumesRunsTheStorePreflight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		state   storestate.State
+		wantErr string
+		stops   int
+	}{
+		{"sealed", storestate.Sealed, "The secret store " + storestate.Clause(storestate.Sealed) + ", so the app's secrets could not be deleted; nothing was deleted. Retry when the store is ready.", 0},
+		{"ready", storestate.Ready, "", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			nc := startNATS(t)
+			store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+			withSecrets(t, store, delAppID, composeNaming("db-password"), "", "db-password")
+			agent := fakeDeleteAgent(t, nc, "n")
+			before, _ := store.Get(ctx, delAppID)
+			st := &fakeStoreState{state: tc.state}
+			_, err := deleteStop(store, inv, nc, st)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("deleteStop: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || err.Error() != tc.wantErr) {
+				t.Fatalf("err = %v; want %q", err, tc.wantErr)
+			}
+			if st.stateReads() != 1 || len(agent.stops()) != tc.stops {
+				t.Errorf("state reads = %d, stops = %v; want one read and %d stops", st.stateReads(), agent.stops(), tc.stops)
+			}
+			if tc.wantErr != "" {
+				after, _ := store.Get(ctx, delAppID)
+				if after == nil || after.LastStatus != before.LastStatus || after.LastDetail != before.LastDetail || !sameTime(after.LastStatusAt, before.LastStatusAt) {
+					t.Errorf("row changed: before %+v after %+v", before, after)
+				}
+			}
+		})
 	}
 }

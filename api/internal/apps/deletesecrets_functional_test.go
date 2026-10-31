@@ -90,8 +90,9 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 	}
 	t.Cleanup(client.CloseIdleConnections)
 
-	// A, D: deleted with volumes. B: deleted keeping them. C: a reinstall
-	// under a new ULID with B's secret names.
+	// A, D: deleted with volumes. B: deleted keeping them, which destroys its
+	// secrets all the same (F-783-05). C: a reinstall under a new ULID with
+	// B's secret names, while B is not yet deleted.
 	const (
 		idA = "01J9ZK3Q0M8X7Y6W5V4T3S2R1A"
 		idB = "01J9ZK3Q0M8X7Y6W5V4T3S2R1B"
@@ -101,7 +102,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 	nc := apps.StartNATS(t)
 	composeA := "services:\n  web:\n    image: me/web:1\n    environment:\n      P: ${secret:db-password}\n      K: ${secret:api-key}\n"
 	composeD := "services:\n  web:\n    image: me/web:1\n    environment:\n      T: ${secret:legacy-token}\n"
-	composeB := "services:\n  web:\n    image: me/web:1\n    environment:\n      P: ${secret:db-password}\n"
+	composeB := "services:\n  web:\n    image: me/web:1\n    environment:\n      P: ${secret:db-password}\n      K: ${secret:api-key}\n"
 	appStore, inv := apps.SeedComposeApp(t, idA, composeA)
 	now := time.Now().UTC()
 	for id, compose := range map[string]string{idB: composeB, idD: composeD} {
@@ -244,6 +245,30 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		}
 		return got
 	}
+	// audited checks one INFO secrets.delete record per name of appID, as
+	// alice, under job jobID.
+	audited := func(t *testing.T, appID, jobID string, names ...string) {
+		t.Helper()
+		for _, name := range names {
+			r, _ := ref(t, appID, name)
+			var n int
+			for _, rc := range rec.Matching(slog.LevelInfo, "secret deleted") {
+				if v, _ := logkittest.Attr(rc, "ref"); v != r.String() {
+					continue
+				}
+				n++
+				event, _ := logkittest.Attr(rc, "event")
+				user, _ := logkittest.Attr(rc, "user_id")
+				job, _ := logkittest.Attr(rc, "job_id")
+				if event != "secrets.delete" || user != "alice" || job != jobID {
+					t.Errorf("%s: record event=%q user_id=%q job_id=%q; want secrets.delete, alice, %s", name, event, user, job, jobID)
+				}
+			}
+			if n != 1 {
+				t.Errorf("%s: %d secrets.delete records; want 1", name, n)
+			}
+		}
+	}
 	var jobIDs []string
 
 	t.Run("TC-783-20 delete with volumes leaves nothing readable", func(t *testing.T) {
@@ -260,25 +285,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		if names, _ := appStore.SecretRefNames(ctx, idA); len(names) != 0 {
 			t.Errorf("A's refs survived: %v", names)
 		}
-		for _, name := range []string{"db-password", "api-key"} {
-			r, _ := ref(t, idA, name)
-			var n int
-			for _, rc := range rec.Matching(slog.LevelInfo, "secret deleted") {
-				if v, _ := logkittest.Attr(rc, "ref"); v != r.String() {
-					continue
-				}
-				n++
-				event, _ := logkittest.Attr(rc, "event")
-				user, _ := logkittest.Attr(rc, "user_id")
-				job, _ := logkittest.Attr(rc, "job_id")
-				if event != "secrets.delete" || user != "alice" || job != j.ID {
-					t.Errorf("%s: record event=%q user_id=%q job_id=%q; want secrets.delete, alice, %s", name, event, user, job, j.ID)
-				}
-			}
-			if n != 1 {
-				t.Errorf("%s: %d secrets.delete records; want 1", name, n)
-			}
-		}
+		audited(t, idA, j.ID, "db-password", "api-key")
 	})
 
 	t.Run("TC-783-21 unrecorded entries are deleted too", func(t *testing.T) {
@@ -288,12 +295,31 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		gone(t, idD, "legacy-token", 1)
 	})
 
-	t.Run("TC-783-23 keep-volumes delete keeps the entries", func(t *testing.T) {
+	t.Run("TC-783-22 a new ULID starts empty", func(t *testing.T) {
 		put(t, idB, "db-password", "S-783-b-pw-v1", "S-783-b-pw-v2")
-		record(t, idB, "db-password")
+		put(t, idB, "api-key", "S-783-b-key-v1")
+		record(t, idB, "db-password", "api-key")
+		if err := appStore.Create(ctx, &apps.App{ID: idC, Name: "app-C", ComposeYAML: composeB, TargetNode: "n",
+			LastStatus: proto.AppStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"db-password", "api-key"} {
+			r, _ := ref(t, idC, name)
+			if ok, err := svc.Exists(ctx, secrets.CheckActor(), r); err != nil || ok {
+				t.Fatalf("Exists(C %s) = %v, %v; want false", name, ok, err)
+			}
+		}
+		put(t, idC, "db-password", "S-783-c-pw-v1")
+		reads(t, idC, "db-password", "S-783-c-pw-v1", 1)
+		reads(t, idB, "db-password", "S-783-b-pw-v2", 2)
+	})
+
+	t.Run("TC-783-23 keep-volumes delete leaves nothing readable", func(t *testing.T) {
 		j := deleteApp(t, idB, false)
 		jobIDs = append(jobIDs, j.ID)
-		reads(t, idB, "db-password", "S-783-b-pw-v2", 2)
+		gone(t, idB, "db-password", 2)
+		gone(t, idB, "api-key", 1)
+		audited(t, idB, j.ID, "db-password", "api-key")
 		steps, err := jst.ListSteps(ctx, j.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -301,26 +327,12 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		var named bool
 		for _, st := range steps {
 			if st.Name == "remove" {
-				named = strings.Contains(string(st.Result), `"secretNames":["db-password"]`)
+				named = strings.Contains(string(st.Result), `"secretNames":["api-key","db-password"]`)
 			}
 		}
 		if !named {
-			t.Error("the ledger's remove result does not name B's kept entry")
+			t.Error("the ledger's remove result does not name both of B's entries")
 		}
-	})
-
-	t.Run("TC-783-22 a new ULID starts empty", func(t *testing.T) {
-		if err := appStore.Create(ctx, &apps.App{ID: idC, Name: "app-C", ComposeYAML: composeB, TargetNode: "n",
-			LastStatus: proto.AppStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
-			t.Fatal(err)
-		}
-		r, _ := ref(t, idC, "db-password")
-		if ok, err := svc.Exists(ctx, secrets.CheckActor(), r); err != nil || ok {
-			t.Fatalf("Exists(C db-password) = %v, %v; want false", ok, err)
-		}
-		put(t, idC, "db-password", "S-783-c-pw-v1")
-		reads(t, idC, "db-password", "S-783-c-pw-v1", 1)
-		reads(t, idB, "db-password", "S-783-b-pw-v2", 2)
 	})
 
 	t.Run("TC-783-24 no value leaks", func(t *testing.T) {

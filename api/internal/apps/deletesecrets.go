@@ -65,9 +65,9 @@ const (
 	errScanRefused    sentenceError = "The app's compose could not be scanned for secrets, so nothing was deleted"
 )
 
-// deleteSecretsPreflight refuses a delete with volumes whose secrets the store
-// cannot take the deletes for, before anything is stopped or deleted
-// (F-783-04). The runner never resumes a failed job, and once the row is gone
+// deleteSecretsPreflight refuses a delete, with or without volumes, whose
+// secrets the store cannot take the deletes for, before anything is stopped
+// or deleted (F-783-04, F-783-05). The runner never resumes a failed job, and once the row is gone
 // the delete cannot be submitted again, so a store that is down is found here
 // rather than after the app and its data are gone. The row is not touched.
 func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreState, app *App) error {
@@ -109,11 +109,11 @@ type removeResult struct {
 	SecretNames []string `json:"secretNames"`
 }
 
-// deleteDestroySecrets is the app.delete saga's last step. With the volumes
-// kept, the app's store entries are kept too and nothing is called. With the
-// volumes deleted, every entry the app had is deleted, every version and its
-// metadata, on behalf of the operator who submitted the job. Every name is
-// tried; any failure fails the job, naming the entries still in the store.
+// deleteDestroySecrets is the app.delete saga's last step. On every delete,
+// with the volumes kept or deleted (F-783-05), every entry the app had is
+// deleted, every version and its metadata, on behalf of the operator who
+// submitted the job. Every name is tried; any failure fails the job, naming
+// the entries still in the store.
 func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseDeleteSpec(sc.Spec)
@@ -130,10 +130,6 @@ func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 		}
 		names := removed.SecretNames
 		n := len(names)
-		if len(spec.DeleteVolumes) == 0 {
-			sc.Log("info", fmt.Sprintf("the app's %d %s kept in the secret store with its volumes", n, plural(n, "secret is", "secrets are")))
-			return json.Marshal(map[string]string{"secrets": "kept"})
-		}
 		if n == 0 {
 			sc.Log("info", "the app had no secrets in the secret store")
 			return json.Marshal(map[string]string{"secrets": "none"})

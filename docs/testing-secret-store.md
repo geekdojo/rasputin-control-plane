@@ -533,10 +533,9 @@ absent and the switch set it fails, naming the variable, exactly as the smoke te
 
 `TestDelete_AgainstTheRealStore`, in `api/internal/apps/deletesecrets_functional_test.go`,
 runs the `app.delete` saga against the real store, under the same switch, in the same CI step
-([geekdojo-brain#783](https://github.com/geekdojo/geekdojo-brain/issues/783)). A delete that
-removes the app's volumes also deletes every store entry the app had, every version and its
-metadata, on behalf of the operator who submitted the job. A delete that keeps the volumes keeps
-the entries. The unit tests in `api/internal/apps` run the saga over fakes; this test shows the
+([geekdojo-brain#783](https://github.com/geekdojo/geekdojo-brain/issues/783)). Every delete,
+whether it removes the app's volumes or keeps them, deletes every store entry the app had, every
+version and its metadata, on behalf of the operator who submitted the job. The unit tests in `api/internal/apps` run the saga over fakes; this test shows the
 real store, under the shipped policy, does what the fakes do.
 
 The chain is all production code: the client, a real `Monitor` and `ObservedStore`, the login
@@ -551,10 +550,13 @@ the volume listing. The steps run in order on one store:
 - **An entry with no reference row (TC-783-21).** App D's entry was created with no reference
   row, the state of an app last deployed on v2026.10.2, and its compose names it. After a
   delete with volumes it reads not-found too.
-- **Keep volumes (TC-783-23).** App B's entry still reads its latest value and version after a
-  delete that keeps the volumes, and the job's `remove` step result names it.
-- **A new ULID starts empty (TC-783-22).** App C, a fresh ULID with B's secret name, has no
-  entry under the reference check. After C's entry is created, B's still reads its value.
+- **A new ULID starts empty (TC-783-22).** App C, a fresh ULID with B's secret names, has no
+  entry under the reference check while B is not yet deleted. After C's entry is created, B's
+  still reads its value.
+- **Keep volumes (TC-783-23).** A delete that keeps the volumes destroys the app's secrets just
+  as a delete with volumes does. App B has two entries, one replaced (versions 1 and 2). After
+  the delete, every version and the metadata of each read not-found, each has one INFO
+  `secrets.delete` record with the user and job, and the job's `remove` step result names both.
 - **Nothing leaks (TC-783-24).** No value written appears in any log record, job error, step
   result or job event.
 
@@ -879,6 +881,6 @@ The cases for geekdojo-brain#783 that this document's tests check:
 |---|---|---|
 | TC-783-20 | A delete with volumes leaves no version or metadata readable; one `secrets.delete` record per entry with the user and job | `TestDelete_AgainstTheRealStore` |
 | TC-783-21 | An entry with no reference row, named in the compose, is deleted too | `TestDelete_AgainstTheRealStore` |
-| TC-783-22 | A new ULID starts empty, and the kept entry of the deleted app is unchanged | `TestDelete_AgainstTheRealStore` |
-| TC-783-23 | A keep-volumes delete keeps the entries, and the ledger names them | `TestDelete_AgainstTheRealStore` |
+| TC-783-22 | A new ULID starts empty, and the entry of an app not yet deleted is unchanged | `TestDelete_AgainstTheRealStore` |
+| TC-783-23 | A keep-volumes delete leaves no version or metadata readable, and the ledger names the entries | `TestDelete_AgainstTheRealStore` |
 | TC-783-24 | No value in any log record, error, event or result | `TestDelete_AgainstTheRealStore` |
