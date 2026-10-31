@@ -1131,18 +1131,19 @@ func runAssemble(cfg RunConfig) jobs.DoFn {
 			manifest.Scope, manifest.AppVolumes.CapturedCount, manifest.AppVolumes.NodesConsulted,
 			manifest.AppVolumes.SkippedCount, manifest.AppVolumes.FailedCount, manifest.AppVolumes.Summary))
 
+		out := volumeOutcome(manifest.AppVolumes, manifest.Complete)
 		return json.Marshal(runAssembleResult{
 			StagingName:        name,
 			SizeBytes:          byteCount(info.Size()),
 			Scope:              manifest.Scope,
-			Complete:           manifest.Complete,
+			Complete:           out.Complete,
 			EntryCount:         len(manifest.Entries),
-			AppVolumesCaptured: manifest.AppVolumes.CapturedCount,
-			AppVolumesSkipped:  manifest.AppVolumes.SkippedCount,
-			AppVolumesFailed:   manifest.AppVolumes.FailedCount,
-			FailedVolumes:      manifest.AppVolumes.Failed,
-			FailedApps:         manifest.AppVolumes.FailedApps(),
-			AppsLeftDown:       manifest.AppVolumes.AppsLeftDown,
+			AppVolumesCaptured: out.AppVolumesCaptured,
+			AppVolumesSkipped:  out.AppVolumesSkipped,
+			AppVolumesFailed:   out.AppVolumesFailed,
+			FailedVolumes:      out.FailedVolumes,
+			FailedApps:         out.FailedApps,
+			AppsLeftDown:       out.AppsLeftDown,
 			Warning:            manifest.Warning,
 			ManifestJSON:       string(manifestJSON),
 		})
@@ -1362,57 +1363,53 @@ func runPrune(store *Store, cfg RunConfig) jobs.DoFn {
 			At:                 time.Now().UTC(),
 		}
 
-		// §4.7's one intolerable outcome, and the reason this step can fail a
-		// run that produced a perfectly good archive.
+		// §4.7's one intolerable outcome and §4.4's other red outcome, and the
+		// reason this step can fail a run that produced a perfectly good
+		// archive. runVerdict holds the rule and its order; this step records
+		// the facts and says why in the feed.
 		//
-		// AppRestored false means the agent stopped an app to copy a volume and
-		// could not start it again. The app is DOWN, right now, because of a
-		// backup — which §4.7 says is worse than a failed backup. The watchdog
-		// is still retrying and a boot sweep will restart it, but nothing tells
-		// the operator unless this does: #298's alert path is not built, so the
-		// job feed is the only place it can be loud today.
+		// AppsLeftDown non-empty means the agent stopped an app to copy a
+		// volume and could not start it again. The app is DOWN, right now,
+		// because of a backup — which §4.7 says is worse than a failed backup.
+		// The watchdog is still retrying and a boot sweep will restart it, but
+		// nothing tells the operator unless this does: #298's alert path is not
+		// built, so the job feed is the only place it can be loud today.
 		//
-		// The archive is NOT thrown away for it. It is already written, sealed
-		// and pruned to; discarding it would turn one problem into two. So the
-		// generation is recorded, the retention is recorded, and then the run
-		// ends FAILED with the app named — the terminal hook writes that
-		// verdict onto the row, which still names the generation that landed.
-		if len(asm.AppsLeftDown) > 0 {
-			res.Warning = appsLeftDownMessage(asm.AppsLeftDown)
-			if err := store.MarkRunRetention(sc.Ctx, sc.JobID, res); err != nil {
-				log.Printf("storage: record retention for run %s: %v", sc.JobID, err)
-			}
-			for _, app := range asm.AppsLeftDown {
-				sc.Log("error", fmt.Sprintf("APP LEFT DOWN: %s did not come back after this backup stopped it", app))
-			}
-			sc.Log("info", fmt.Sprintf("generation %s IS on the target (%s) and is intact — this run is failed for the app(s) above, not for the archive",
-				wrote.GenerationID, humanBytes(wrote.SizeBytes)))
-			return nil, errors.New(res.Warning)
-		}
-
-		// §4.4's other red outcome: a volume this run tried to take and could
-		// not — its node was offline, its agent refused, its upload did not
-		// land. "Failed, not skipped": the generation is on the target with
-		// everything that DID arrive, the row names it, and the run ends
-		// FAILED with the volumes named so the job feed, the OVERDUE tile and
+		// AppVolumesFailed non-zero is a volume this run tried to take and
+		// could not — its node was offline, its agent refused, its upload did
+		// not land. "Failed, not skipped": the job feed, the OVERDUE tile and
 		// the alert path (#298) all see red rather than a green run with a
 		// caveat nobody reads.
-		if asm.AppVolumesFailed > 0 {
-			res.Warning = failedVolumesMessage(asm.FailedApps, asm.FailedVolumes)
+		//
+		// The archive is NOT thrown away for either. It is already written,
+		// sealed and pruned to; discarding it would turn one problem into two.
+		// So the generation is recorded, the retention is recorded, and then
+		// the run ends FAILED with the app or volumes named — the terminal hook
+		// writes that verdict onto the row, which still names the generation
+		// that landed.
+		errMsg, warning := runVerdict(asm.volumeOutcome())
+		if errMsg != "" {
+			res.Warning = errMsg
 			if err := store.MarkRunRetention(sc.Ctx, sc.JobID, res); err != nil {
 				log.Printf("storage: record retention for run %s: %v", sc.JobID, err)
 			}
-			for _, v := range asm.FailedVolumes {
-				sc.Log("error", fmt.Sprintf("VOLUME FAILED: %s was not backed up by this run; the manifest names why", v))
+			if len(asm.AppsLeftDown) > 0 {
+				for _, app := range asm.AppsLeftDown {
+					sc.Log("error", fmt.Sprintf("APP LEFT DOWN: %s did not come back after this backup stopped it", app))
+				}
+				sc.Log("info", fmt.Sprintf("generation %s IS on the target (%s) and is intact — this run is failed for the app(s) above, not for the archive",
+					wrote.GenerationID, humanBytes(wrote.SizeBytes)))
+			} else {
+				for _, v := range asm.FailedVolumes {
+					sc.Log("error", fmt.Sprintf("VOLUME FAILED: %s was not backed up by this run; the manifest names why", v))
+				}
+				sc.Log("info", fmt.Sprintf("generation %s IS on the target (%s) with %d volume member(s) — this run is failed for the volume(s) above, not for what landed",
+					wrote.GenerationID, humanBytes(wrote.SizeBytes), asm.AppVolumesCaptured))
 			}
-			sc.Log("info", fmt.Sprintf("generation %s IS on the target (%s) with %d volume member(s) — this run is failed for the volume(s) above, not for what landed",
-				wrote.GenerationID, humanBytes(wrote.SizeBytes), asm.AppVolumesCaptured))
-			return nil, errors.New(res.Warning)
+			return nil, errors.New(errMsg)
 		}
 
-		if !asm.Complete {
-			res.Warning = fmt.Sprintf("%d app volume(s) were not captured; the manifest names each one and its reason", asm.AppVolumesSkipped)
-		}
+		res.Warning = warning
 		if err := store.FinishRun(sc.Ctx, sc.JobID, res); err != nil {
 			return nil, fmt.Errorf("record backup run outcome: %w", err)
 		}
@@ -1677,6 +1674,64 @@ func fileSize(path string) uint64 {
 // it is: the fan-out needs to know what is installed, and nothing else.
 type AppLister interface {
 	List(ctx context.Context) ([]*apps.App, error)
+}
+
+// runVolumeOutcome is what a run's fan-out decided, in the shape runPrune's
+// verdict reads. It is derived from the manifest's own record by
+// volumeOutcome, which both runAssemble (into its step result) and the restore
+// boot's RestoredRunReconciler (from the restored manifest) call, so the two
+// cannot reach different verdicts over the same generation (#903).
+type runVolumeOutcome struct {
+	Complete           bool
+	AppVolumesCaptured int
+	AppVolumesSkipped  int
+	AppVolumesFailed   int
+	FailedVolumes      []string
+	FailedApps         []AppFailure
+	AppsLeftDown       []string
+}
+
+// volumeOutcome derives the verdict inputs from a manifest's fan-out record
+// and its Complete flag.
+func volumeOutcome(r AppVolumeReport, complete bool) runVolumeOutcome {
+	return runVolumeOutcome{
+		Complete:           complete,
+		AppVolumesCaptured: r.CapturedCount,
+		AppVolumesSkipped:  r.SkippedCount,
+		AppVolumesFailed:   r.FailedCount,
+		FailedVolumes:      r.Failed,
+		FailedApps:         r.FailedApps(),
+		AppsLeftDown:       r.AppsLeftDown,
+	}
+}
+
+// volumeOutcome is the same inputs, as the assemble step recorded them.
+func (a runAssembleResult) volumeOutcome() runVolumeOutcome {
+	return runVolumeOutcome{
+		Complete:           a.Complete,
+		AppVolumesCaptured: a.AppVolumesCaptured,
+		AppVolumesSkipped:  a.AppVolumesSkipped,
+		AppVolumesFailed:   a.AppVolumesFailed,
+		FailedVolumes:      a.FailedVolumes,
+		FailedApps:         a.FailedApps,
+		AppsLeftDown:       a.AppsLeftDown,
+	}
+}
+
+// runVerdict is the rule a run that wrote its generation ends on. A non-empty
+// errMsg fails the run with that message: an app left down first (§4.7), then
+// a volume the run tried to take and could not (§4.4). Otherwise the run
+// succeeds, and warning is the caveat an incomplete generation carries.
+func runVerdict(o runVolumeOutcome) (errMsg, warning string) {
+	switch {
+	case len(o.AppsLeftDown) > 0:
+		return appsLeftDownMessage(o.AppsLeftDown), ""
+	case o.AppVolumesFailed > 0:
+		return failedVolumesMessage(o.FailedApps, o.FailedVolumes), ""
+	case !o.Complete:
+		return "", fmt.Sprintf("%d app volume(s) were not captured; the manifest names each one and its reason", o.AppVolumesSkipped)
+	}
+	return "", ""
 }
 
 // appsLeftDownMessage is the sentence a run dies on when a backup stopped an

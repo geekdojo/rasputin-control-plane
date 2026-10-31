@@ -447,6 +447,12 @@ func main() {
 		log.Printf("rasputin-api: record applied restore: %v", err)
 	} else if rep != nil {
 		log.Printf("rasputin-api: restore %s from generation %s recorded in the restored database", rep.ID, rep.GenerationID)
+		// The restored database caught the generation's own backup run
+		// mid-job; settle it from the manifest before runner.Recover fails it
+		// as restarted mid-job (geekdojo/geekdojo-brain#903).
+		if err := storage.NewRestoredRunReconciler(backupStore, jobStore, logger, time.Now).Reconcile(ctx, rep); err != nil {
+			logger.ErrorContext(ctx, "rasputin-api: reconcile the restored generation's backup run", "restore_id", rep.ID, "err", err.Error())
+		}
 	}
 	// A restore that carried the store re-bases the empty-store marker on
 	// this boot, before any outcome read can observe this boot's store init
