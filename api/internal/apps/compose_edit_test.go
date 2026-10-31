@@ -104,13 +104,13 @@ func TestComposeStash(t *testing.T) {
 }
 
 func TestEditWorkflowShape(t *testing.T) {
-	w := wf(t)(EditWorkflow(nil, nil, nil, nil, nil, testSource(t)))
+	w := wf(t)(EditWorkflow(nil, nil, nil, nil, nil, testSource(t), testSecretDeps()))
 	var names []string
 	for _, s := range w.Steps {
 		names = append(names, s.Name)
 	}
-	if w.Kind != "app.edit" || strings.Join(names, ",") != "load,pull,persist,push,leaf,drop_volumes" {
-		t.Errorf("workflow = %s %v, want app.edit load,pull,persist,push,leaf,drop_volumes", w.Kind, names)
+	if w.Kind != "app.edit" || strings.Join(names, ",") != "load,pull,persist,push,leaf,drop_volumes,release_secrets" {
+		t.Errorf("workflow = %s %v, want app.edit load,pull,persist,push,leaf,drop_volumes,release_secrets", w.Kind, names)
 	}
 	if w.OnTerminal == nil {
 		t.Fatal("app.edit must discard the held compose when the job ends")
@@ -137,7 +137,7 @@ func TestEditSaga_DeploysTheSubmittedComposeToTheSameULIDWithoutRecordingIt(t *t
 		t.Fatal(err)
 	}
 
-	run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t))), nc, `{"appId":"`+id+`"}`, jobID)
+	run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps())), nc, `{"appId":"`+id+`"}`, jobID)
 	if run.err != nil {
 		t.Fatalf("step %s: %v", run.failedAt, run.err)
 	}
@@ -196,7 +196,7 @@ func TestEditSaga_AFailedPullChangesNothing(t *testing.T) {
 	stash := NewComposeStash()
 	_ = stash.Put("j", customV2)
 
-	run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t))), nc, `{"appId":"`+testAppID+`"}`, "j")
+	run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps())), nc, `{"appId":"`+testAppID+`"}`, "j")
 	if run.failedAt != "pull" || !strings.Contains(run.err.Error(), "manifest unknown") {
 		t.Fatalf("want the pull to fail with the agent's reason, got step=%q err=%v", run.failedAt, run.err)
 	}
@@ -228,7 +228,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 		store, inv := seedCustomApp(t, testAppID)
 		before, _ := store.Get(ctx, testAppID)
 		pulls := fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
-		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, NewComposeStash(), testSource(t))), nc, `{"appId":"`+testAppID+`"}`, "j")
+		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, NewComposeStash(), testSource(t), testSecretDeps())), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "pull" || !errors.Is(run.err, errEditComposeNotHeld) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -247,7 +247,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 		store, inv := seedUpgradeApp(t, testAppID)
 		stash := NewComposeStash()
 		_ = stash.Put("j", customV2)
-		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t))), nc, `{"appId":"`+testAppID+`"}`, "j")
+		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps())), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "load" || !errors.Is(run.err, ErrEditCatalogApp) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
 		}
@@ -255,7 +255,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 	t.Run("spec carrying a compose", func(t *testing.T) {
 		nc := startNATS(t)
 		store, inv := seedCustomApp(t, testAppID)
-		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, NewComposeStash(), testSource(t))), nc, `{"appId":"`+testAppID+`","composeYaml":"x"}`, "j")
+		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, NewComposeStash(), testSource(t), testSecretDeps())), nc, `{"appId":"`+testAppID+`","composeYaml":"x"}`, "j")
 		if run.failedAt != "load" || run.err == nil {
 			t.Fatalf("a spec with a compose in it must be refused, got step=%q err=%v", run.failedAt, run.err)
 		}

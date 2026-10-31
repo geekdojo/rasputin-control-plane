@@ -67,10 +67,10 @@ func upgradeFixtureWith(t *testing.T, extra ...tileschema.BundleTile) (*apiFixtu
 		}
 		return w
 	}
-	f.runner.Register(must(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned, src)))
+	f.runner.Register(must(apps.UpgradeWorkflow(f.appsStore, f.inv, f.nc, nil, cat.GetVersioned, src, testAppSecretDeps())))
 	f.runner.Register(must(apps.RevertWorkflow(f.appsStore, f.inv, f.nc, nil, src)))
 	stash := apps.NewComposeStash()
-	f.runner.Register(must(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash, src)))
+	f.runner.Register(must(apps.EditWorkflow(f.appsStore, f.inv, f.nc, nil, stash, src, testAppSecretDeps())))
 	f.srv.SetComposeStash(stash)
 
 	// The volumes check every compose change's pull step makes first (#412);

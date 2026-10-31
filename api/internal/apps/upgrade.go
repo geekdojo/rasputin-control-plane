@@ -115,6 +115,9 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 //     port or changed its scheme, and the route is built from the row
 //  6. drop_volumes — delete the volumes the new compose drops that the owner
 //     named in deleteVolumes, now that `up` has succeeded (#412, volumegate.go)
+//  7. release_secrets — destroy the store entries of the secrets neither
+//     compose nor either operator-secret declaration names any more
+//     (geekdojo/geekdojo-brain#783, releasesecrets.go)
 //
 // The pull step refuses, before it pulls, a compose that would leave a named
 // volume the app has on disk undeclared unless the owner named exactly those
@@ -160,10 +163,14 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 // containers may have started and migrated the data. Retrying is an ordinary
 // deploy; going back is the owner's explicit re-apply (RevertWorkflow).
 //
-// It refuses a nil secrets source, returning the zero Workflow.
-func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource) (jobs.Workflow, error) {
+// It refuses a nil secrets source or a DeleteSecretsDeps with a nil field,
+// returning the zero Workflow.
+func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource, d DeleteSecretsDeps) (jobs.Workflow, error) {
 	const kind = "app.upgrade"
 	if err := requireSecretSource(kind, secrets); err != nil {
+		return jobs.Workflow{}, err
+	}
+	if err := d.check("UpgradeWorkflow"); err != nil {
 		return jobs.Workflow{}, err
 	}
 	return jobs.Workflow{
@@ -180,6 +187,10 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate L
 			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
+			// Last, so it runs only once the new compose is up. One store call
+			// per unused entry; never retried, as destroy_secrets is not: the
+			// next compose change or the app's delete is the retry (#783).
+			{Name: "release_secrets", Timeout: 60 * time.Second, Do: releaseUnusedSecrets(store, d, composeChangeSpecAppID)},
 		},
 	}, nil
 }

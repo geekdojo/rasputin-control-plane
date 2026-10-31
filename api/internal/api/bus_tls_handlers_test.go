@@ -77,7 +77,7 @@ func (f *apiFixture) useBusState(t *testing.T, st BusState) {
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		st, f.srv.operatorSecrets, f.srv.log, f.srv.newCorrelationID)
+		st, f.srv.operatorSecrets, f.srv.nodeApps, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -242,23 +242,27 @@ func TestNewServer_RefusesNilCollaborators(t *testing.T) {
 	logger := slog.New(&logCapture{})
 	ids := sequentialIDs()
 	ops := f.srv.operatorSecrets
+	rm := f.srv.nodeApps
 	for name, tc := range map[string]struct {
 		bus BusState
 		ops operatorSecretsService
+		rm  nodeAppRemover
 		log *slog.Logger
 		ids func() string
 	}{
-		"nil BusState":     {nil, ops, logger, ids},
-		"nil logger":       {key, ops, nil, ids},
-		"nil id generator": {key, ops, logger, nil},
+		"nil BusState":     {nil, ops, rm, logger, ids},
+		"nil logger":       {key, ops, rm, nil, ids},
+		"nil id generator": {key, ops, rm, logger, nil},
 		// TC-604-10: the operator secrets service is required too.
-		"nil operator secrets service": {key, nil, logger, ids},
+		"nil operator secrets service": {key, nil, rm, logger, ids},
+		// TC-783-56: and so is the node app remover.
+		"nil node app remover": {key, ops, nil, logger, ids},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 				f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 				f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
-				tc.bus, tc.ops, tc.log, tc.ids)
+				tc.bus, tc.ops, tc.rm, tc.log, tc.ids)
 			if err == nil || srv != nil {
 				t.Fatalf("NewServer = (%v, %v), want (nil, an error)", srv, err)
 			}

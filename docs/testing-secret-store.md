@@ -529,11 +529,13 @@ status 0, in under ten seconds: the audit-blocked step waits once for the client
 bound on the read that hangs, and once more for the refused deploy's probe read. With the binary
 absent and the switch set it fails, naming the variable, exactly as the smoke test does.
 
-## The app delete's functional test
+## The app secret deletes' functional test
 
 `TestDelete_AgainstTheRealStore`, in `api/internal/apps/deletesecrets_functional_test.go`,
-runs the `app.delete` saga against the real store, under the same switch, in the same CI step
-([geekdojo-brain#783](https://github.com/geekdojo/geekdojo-brain/issues/783)). Every delete,
+runs every path that destroys an app's secrets against the real store, under the same switch,
+in the same CI step ([geekdojo-brain#783](https://github.com/geekdojo/geekdojo-brain/issues/783)):
+the `app.delete` saga, the `release_secrets` step that ends `app.upgrade` and `app.edit`, and
+node removal. Every delete,
 whether it removes the app's volumes or keeps them, deletes every store entry the app had, every
 version and its metadata, on behalf of the operator who submitted the job. The unit tests in `api/internal/apps` run the saga over fakes; this test shows the
 real store, under the shipped policy, does what the fakes do.
@@ -557,8 +559,18 @@ the volume listing. The steps run in order on one store:
   as a delete with volumes does. App B has two entries, one replaced (versions 1 and 2). After
   the delete, every version and the metadata of each read not-found, each has one INFO
   `secrets.delete` record with the user and job, and the job's `remove` step result names both.
-- **Nothing leaks (TC-783-24).** No value written appears in any log record, job error, step
-  result or job event.
+- **A compose change (TC-783-58).** App E has `x` (versions 1 and 2) and `y`, with recorded
+  references. Its compose is written twice, each time without `x` and with `y`, and
+  `release_secrets` runs after each write. After the first, `x` still reads, because the
+  previous compose names it. After the second, every version and the metadata of `x` read
+  not-found, `y` reads unchanged, and `x` has one INFO `secrets.delete` record with the user and
+  job.
+- **Node removal (TC-783-59).** Apps P and R on node `m` have two entries each, one replaced;
+  app S on another node has one. After `NodeApps.CheckSecrets` passes and `NodeApps.Remove`
+  runs for `m`, every version and the metadata of P's and R's entries read not-found, each with
+  one INFO `secrets.delete` record carrying `user_id`, and S's entry reads its value.
+- **Nothing leaks (TC-783-24, TC-783-60).** No value written appears in any log record, job
+  error, step result, job event, job log line or node removal error.
 
 What it does not prove:
 
@@ -884,3 +896,6 @@ The cases for geekdojo-brain#783 that this document's tests check:
 | TC-783-22 | A new ULID starts empty, and the entry of an app not yet deleted is unchanged | `TestDelete_AgainstTheRealStore` |
 | TC-783-23 | A keep-volumes delete leaves no version or metadata readable, and the ledger names the entries | `TestDelete_AgainstTheRealStore` |
 | TC-783-24 | No value in any log record, error, event or result | `TestDelete_AgainstTheRealStore` |
+| TC-783-58 | A compose change releases a secret only once neither compose names it; the rest read unchanged | `TestDelete_AgainstTheRealStore` |
+| TC-783-59 | Node removal leaves no version or metadata of its apps' entries readable; another node's app keeps its entry | `TestDelete_AgainstTheRealStore` |
+| TC-783-60 | No value in any record, error or result of a release or a node removal | `TestDelete_AgainstTheRealStore` |

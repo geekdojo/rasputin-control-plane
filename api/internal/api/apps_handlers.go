@@ -777,7 +777,10 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 		stashedFor = jobID
 		return nil
 	}
-	j, err := s.runner.SubmitPrepared(r.Context(), kind, spec, creator(r), prepare)
+	// The session user, not creator's "user": release_secrets deletes
+	// secrets on this operator's behalf, and the store's audit names them
+	// (geekdojo/geekdojo-brain#783).
+	j, err := s.runner.SubmitPrepared(r.Context(), kind, spec, userName(r), prepare)
 	if err != nil {
 		// No job will run under that id, so no OnTerminal will discard what
 		// was held for it.

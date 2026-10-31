@@ -6,11 +6,25 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
+
+// nodeAppRemover removes a removed node's apps and every secret they had in
+// the store (geekdojo/geekdojo-brain#783). *apps.NodeApps satisfies it.
+type nodeAppRemover interface {
+	// CheckSecrets refuses, changing nothing, when the store cannot take
+	// the deletes; the error is an *apps.NodeSecretsError.
+	CheckSecrets(ctx context.Context, nodeID string) error
+	// Remove deletes the node's app rows and then their secrets, returning
+	// the removed app ids; an error of kind apps.ErrSecretsLeft comes with
+	// them.
+	Remove(ctx context.Context, user, nodeID string) ([]string, error)
+}
 
 // nodeRemovalImpact summarises what a DELETE /api/nodes/{id} would touch
 // besides the inventory row itself. The UI uses this to render a
@@ -57,12 +71,19 @@ func (s *Server) handleGetNodeRemovalImpact(w http.ResponseWriter, r *http.Reque
 // fresh inventory row is created. See backlog for blocklist + PKI
 // revocation.
 //
-// Order matters: Headscale first (external system; if it errors we want
-// to surface that before touching local DB), then the DB cascade in
-// app → firewall_state → inventory order, then the in-memory cleanup
-// and event emission inside Service.Remove. On a Headscale failure the
-// local DB is left untouched so the operator can retry once Headscale
-// is reachable again.
+// Order matters. The secret store preflight first: the removal destroys
+// every secret of the node's apps, and once their rows are gone nothing
+// could reach those entries, so a store that cannot take the deletes refuses
+// the removal with nothing changed (geekdojo/geekdojo-brain#783). Then
+// Headscale (external system; if it errors we want to surface that before
+// touching local DB), then firewall_state, the bus-token revoke and the
+// inventory row, so the node's access is revoked before anything slow runs
+// (F-783-22). Then the node's apps and their secrets, on a context the
+// request cannot cancel. On a Headscale failure the local DB is left
+// untouched so the operator can retry once Headscale is reachable again.
+//
+// When only secret deletes fail, the removal still completes, because it is
+// a revocation, and the answer names the entries left in the store.
 //
 // Returns the impact summary in the 200 body so the UI can show a
 // confirmation toast with what was removed.
@@ -95,6 +116,19 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.nodeApps.CheckSecrets(ctx, id); err != nil {
+		var nse *apps.NodeSecretsError
+		status, code, msg := http.StatusServiceUnavailable, codeNodeSecretsUnavailable, "The secrets of the node's apps could not be checked, so the node was not removed."
+		if errors.As(err, &nse) {
+			msg = nse.Sentence
+		}
+		if errors.Is(err, apps.ErrNodeSecretsUnreadable) {
+			status, code = http.StatusInternalServerError, codeNodeSecretsUnreadable
+		}
+		s.writeCodedError(w, r, status, code, msg, slog.String("node_id", id), slog.String("err", err.Error()))
+		return
+	}
+
 	if len(impact.MeshDeviceHSIDs) > 1 {
 		log.Printf("rasputin-api: removing node %q, which is bound to %d mesh devices (%q); deleting all of them",
 			n.ID, len(impact.MeshDeviceHSIDs), impact.MeshDeviceHSIDs)
@@ -109,15 +143,6 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-	}
-
-	deletedAppIDs, err := s.apps.DeleteByTargetNode(ctx, id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "delete apps: "+err.Error())
-		return
-	}
-	for _, appID := range deletedAppIDs {
-		s.publishAppDeleted(appID)
 	}
 
 	if _, err := s.fw.DeleteNodeState(ctx, id); err != nil {
@@ -147,6 +172,15 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The node's apps and their secrets, after its access is revoked. A store
+	// delete is one call per entry, each bounded by the store client's own
+	// timeout; a client that disconnects must not abandon them halfway
+	// (F-783-22).
+	deletedAppIDs, appsErr := s.nodeApps.Remove(context.WithoutCancel(ctx), userName(r), id)
+	for _, appID := range deletedAppIDs {
+		s.publishAppDeleted(appID)
+	}
+
 	// And its console root password record, so a removed node stops being
 	// counted as a fleet node that never took the password (#587).
 	if s.console != nil {
@@ -155,6 +189,16 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 			// this line only by matching a registered inventory row above.
 			log.Printf("rasputin-api: forget the console root password record for removed node %q: %v", id, err)
 		}
+	}
+
+	if appsErr != nil {
+		var nse *apps.NodeSecretsError
+		if errors.Is(appsErr, apps.ErrSecretsLeft) && errors.As(appsErr, &nse) {
+			s.writeCodedError(w, r, http.StatusInternalServerError, codeNodeSecretsLeft, nse.Sentence, slog.String("node_id", id))
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "delete apps: "+appsErr.Error())
+		return
 	}
 
 	writeJSON(w, http.StatusOK, impact)

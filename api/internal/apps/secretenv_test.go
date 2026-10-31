@@ -147,7 +147,7 @@ func TestSecretDeployRefusedForAnAgentBelowTheFloor(t *testing.T) {
 		{"app.upgrade", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, jobs.Workflow, any) {
 			store, inv := seedUpgradeApp(t, id)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return store, inv, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), testSource(t))), ComposeChangeSpec{AppID: id}
+			return store, inv, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), testSource(t), testSecretDeps())), ComposeChangeSpec{AppID: id}
 		}},
 	}
 	for _, saga := range sagas {

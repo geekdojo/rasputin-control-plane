@@ -33,23 +33,106 @@ type SecretStoreState interface {
 	State(ctx context.Context) (storestate.State, error)
 }
 
-// DeleteSecretsDeps are the app.delete saga's secret-store collaborators.
+// DeleteSecretsDeps are the secret-store collaborators of every path that
+// destroys an app's secrets: the app.delete saga, the release step of
+// app.upgrade and app.edit, and node removal (geekdojo/geekdojo-brain#783).
 type DeleteSecretsDeps struct {
 	Secrets AppSecretDeleter
 	Store   SecretStoreState
 	Log     *slog.Logger
 }
 
-func (d DeleteSecretsDeps) check() error {
+// check refuses a nil field, naming caller, the constructor refusing.
+func (d DeleteSecretsDeps) check(caller string) error {
 	switch {
 	case d.Secrets == nil:
-		return errors.New("apps: DeleteWorkflow: DeleteSecretsDeps.Secrets is nil")
+		return fmt.Errorf("apps: %s: DeleteSecretsDeps.Secrets is nil", caller)
 	case d.Store == nil:
-		return errors.New("apps: DeleteWorkflow: DeleteSecretsDeps.Store is nil")
+		return fmt.Errorf("apps: %s: DeleteSecretsDeps.Store is nil", caller)
 	case d.Log == nil:
-		return errors.New("apps: DeleteWorkflow: DeleteSecretsDeps.Log is nil")
+		return fmt.Errorf("apps: %s: DeleteSecretsDeps.Log is nil", caller)
 	}
 	return nil
+}
+
+// storeCheck is what the secret store can do about a set of deletes.
+type storeCheck int
+
+const (
+	// storeNothingStored: no store is configured and no reference is
+	// recorded, so every name was derived on each deploy and never stored.
+	storeNothingStored storeCheck = iota
+	// storeReady: the store reads Ready.
+	storeReady
+	// storeUnconfigured: no store is configured, but references are
+	// recorded, so entries exist that nothing can delete.
+	storeUnconfigured
+	// storeNotReady: the store is sealed, unreachable or quiesced, or its
+	// state could not be read.
+	storeNotReady
+)
+
+// checkStoreForDeletes reads whether the store can take deletes for an app's
+// (or a node's apps') secrets, of which recordedRefs are recorded. The state
+// is read only when a store is configured. Each caller words its own
+// sentence (ERR-MESSAGE). A state read that fails is storeNotReady with the
+// error.
+func checkStoreForDeletes(ctx context.Context, st SecretStoreState, recordedRefs int) (storeCheck, storestate.State, error) {
+	if !st.Configured() {
+		if recordedRefs > 0 {
+			return storeUnconfigured, "", nil
+		}
+		return storeNothingStored, "", nil
+	}
+	state, err := st.State(ctx)
+	if err != nil {
+		return storeNotReady, state, err
+	}
+	if state != storestate.Ready {
+		return storeNotReady, state, nil
+	}
+	return storeReady, state, nil
+}
+
+// destroyAppSecrets deletes every entry refs names, every version and its
+// metadata, on actor's behalf. Every ref is tried; it returns the refs that
+// failed, each with its cause at the same index.
+func destroyAppSecrets(ctx context.Context, d AppSecretDeleter, actor secrets.Actor, refs []SecretRef) (failed []SecretRef, causes []error) {
+	for _, r := range refs {
+		if err := destroyAppSecret(ctx, d, actor, r.AppID, r.Name); err != nil {
+			failed = append(failed, r)
+			causes = append(causes, err)
+		}
+	}
+	return failed, causes
+}
+
+// refNames is the Name of each ref.
+func refNames(refs []SecretRef) []string {
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Name
+	}
+	return out
+}
+
+// appRefs is name of app appID as SecretRefs.
+func appRefs(appID string, names []string) []SecretRef {
+	out := make([]SecretRef, len(names))
+	for i, n := range names {
+		out[i] = SecretRef{AppID: appID, Name: n}
+	}
+	return out
+}
+
+// causeText joins label i with cause i, for an ERROR record's err field:
+// store text and names, never a value.
+func causeText(labels []string, causes []error) string {
+	parts := make([]string, len(causes))
+	for i, c := range causes {
+		parts[i] = labels[i] + ": " + c.Error()
+	}
+	return strings.Join(parts, "; ")
 }
 
 // sentenceError is an error whose text is a sentence a person reads as the
@@ -59,45 +142,37 @@ type sentenceError string
 
 func (e sentenceError) Error() string { return string(e) }
 
-// The preflight's refusals that wrap a cause; the cause follows the sentence.
-const (
-	errRefsUnreadable sentenceError = "The app's recorded secrets could not be read, so nothing was deleted"
-	errScanRefused    sentenceError = "The app's compose could not be scanned for secrets, so nothing was deleted"
-)
+// errRefsUnreadable is the preflight's refusal when the app's references
+// cannot be read; the cause follows the sentence.
+const errRefsUnreadable sentenceError = "The app's recorded secrets could not be read, so nothing was deleted"
 
 // deleteSecretsPreflight refuses a delete, with or without volumes, whose
 // secrets the store cannot take the deletes for, before anything is stopped
 // or deleted (F-783-04, F-783-05). The runner never resumes a failed job, and once the row is gone
 // the delete cannot be submitted again, so a store that is down is found here
 // rather than after the app and its data are gone. The row is not touched.
+// A compose the scanner refuses names no secret (F-783-24).
 func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreState, app *App) error {
 	refs, err := store.SecretRefNames(ctx, app.ID)
 	if err != nil {
 		return fmt.Errorf("%s: %w", errRefsUnreadable, err)
 	}
-	names, err := secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)
-	if err != nil {
-		return fmt.Errorf("%s: %w", errScanRefused, err)
-	}
-	if len(names) == 0 {
+	if len(secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)) == 0 {
 		return nil
 	}
-	if !st.Configured() {
-		if len(refs) > 0 {
-			return sentenceError(fmt.Sprintf("No secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted.", len(refs), plural(len(refs), "secret", "secrets")))
+	check, state, err := checkStoreForDeletes(ctx, st, len(refs))
+	switch check {
+	case storeUnconfigured:
+		return sentenceError(fmt.Sprintf("No secret store is configured, so the app's %d stored %s cannot be deleted; nothing was deleted.", len(refs), plural(len(refs), "secret", "secrets")))
+	case storeNotReady:
+		sentence := "The secret store " + storestate.Clause(state) + ", so the app's secrets could not be deleted; nothing was deleted. Retry when the store is ready."
+		if err != nil {
+			return fmt.Errorf("%s Reading its state failed: %w", sentence, err)
 		}
-		// With no store and no recorded reference, the names were derived on
-		// every deploy and never stored: there is nothing to delete.
-		return nil
-	}
-	state, err := st.State(ctx)
-	sentence := "The secret store " + storestate.Clause(state) + ", so the app's secrets could not be deleted; nothing was deleted. Retry when the store is ready."
-	if err != nil {
-		return fmt.Errorf("%s Reading its state failed: %w", sentence, err)
-	}
-	if state != storestate.Ready {
 		return errors.New(sentence)
 	}
+	// Ready, or no store and no recorded reference: the names were derived
+	// on every deploy and never stored, so there is nothing to delete.
 	return nil
 }
 
@@ -140,15 +215,9 @@ func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 			return json.Marshal(map[string]string{"secrets": "none-stored"})
 		}
 		ctx := jobs.ContextWithJobID(sc.Ctx, sc.JobID)
-		actor := secrets.OperatorActor(sc.CreatedBy)
-		var failed, causes []string
-		for _, name := range names {
-			if err := destroyAppSecret(ctx, d.Secrets, actor, spec.AppID, name); err != nil {
-				failed = append(failed, name)
-				causes = append(causes, name+": "+err.Error())
-			}
-		}
-		if len(failed) > 0 {
+		failedRefs, causes := destroyAppSecrets(ctx, d.Secrets, secrets.OperatorActor(sc.CreatedBy), appRefs(spec.AppID, names))
+		if len(failedRefs) > 0 {
+			failed := refNames(failedRefs)
 			d.Log.LogAttrs(ctx, slog.LevelError, "app secrets not deleted from the secret store",
 				slog.String("component", "apps"),
 				slog.String("event", "apps.secrets_destroy_failed"),
@@ -156,7 +225,7 @@ func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 				slog.String("job_id", sc.JobID),
 				slog.String("user", sc.CreatedBy),
 				slog.Any("failed", failed),
-				slog.String("err", strings.Join(causes, "; ")))
+				slog.String("err", causeText(failed, causes)))
 			msg := fmt.Sprintf("The app was removed, but %d of its secrets could not be deleted from the secret store and are still in it: %s.",
 				len(failed), strings.Join(failed, ", "))
 			sc.Log("error", msg)

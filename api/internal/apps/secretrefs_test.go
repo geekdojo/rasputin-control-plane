@@ -56,7 +56,7 @@ func TestSecretRefs_RecordListCascade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DeleteByTargetNode(ctx, other.TargetNode); err != nil {
+	if _, err := s.DeleteByTargetNodeWithSecretNames(ctx, other.TargetNode); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := s.ListSecretRefs(ctx); err != nil || len(got) != 0 {
