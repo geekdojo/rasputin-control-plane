@@ -197,15 +197,17 @@ func volReport(apps int, recs ...VolumeRecord) AppVolumeReport {
 
 // The two installed apps the derivation cases read, and their tiles.
 func reconcileApps() ([]*apps.App, fakeTiles) {
-	return []*apps.App{
+	installed := []*apps.App{
 		testApp("app-vw", "vaultwarden", "n-1", "vaultwarden"),
 		testApp("app-im", "immich", "n-1", "immich"),
-	}, fakeTiles{
+	}
+	tiles := fakeTiles{
 		"vaultwarden": testTile("vaultwarden", vol("vaultwarden-data", tileschema.BackupCritical, tileschema.QuiesceStop)),
 		"immich": testTile("immich",
 			vol("immich-upload", tileschema.BackupState, tileschema.QuiesceStop),
 			vol("immich-library", tileschema.BackupBulk, tileschema.QuiesceNone)),
 	}
+	return installed, tiles
 }
 
 // statesAt derives every app's state over the fixture's ledger with the clock
