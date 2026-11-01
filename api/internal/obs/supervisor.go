@@ -1136,6 +1136,7 @@ var (
 	grafanaDatasourcesPath      = filepath.Join(grafanaConfigSubdir, "provisioning", "datasources", "all.yaml")
 	grafanaDashboardsPath       = filepath.Join(grafanaConfigSubdir, "provisioning", "dashboards", "all.yaml")
 	grafanaStarterDashboardPath = filepath.Join(grafanaConfigSubdir, "dashboards", "cluster-overview.json")
+	grafanaSecretStoreDashPath  = filepath.Join(grafanaConfigSubdir, "dashboards", "secret-store.json")
 )
 
 // defaultGrafanaProvisioning is every provisioned datasource and dashboard
@@ -1145,6 +1146,7 @@ var defaultGrafanaProvisioning = []grafanaFile{
 	{grafanaDatasourcesPath, grafanaDatasourcesYAML},
 	{grafanaDashboardsPath, grafanaDashboardsYAML},
 	{grafanaStarterDashboardPath, starterDashboardJSON},
+	{grafanaSecretStoreDashPath, secretStoreDashboardJSON},
 }
 
 func (s *DockerComposeSupervisor) grafanaProvisioningFiles() []grafanaFile {
@@ -1434,6 +1436,67 @@ const starterDashboardJSON = `{
       "targets": [{"refId": "A", "expr": "100 * rasputin_mem_used_bytes{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"} / ignoring(__name__) rasputin_mem_total_bytes{` + vmNodeLabel + `=~\"$` + dashboardNodeVar + `\"}", "legendFormat": "{{` + vmNodeLabel + `}}"}],
       "fieldConfig": {"defaults": {"unit": "percent", "min": 0, "max": 100}, "overrides": []},
       "gridPos": {"x": 6, "y": 8, "w": 18, "h": 8}
+    }
+  ]
+}
+`
+
+// secretStoreDashboardUID is the "Secret store" dashboard's fixed uid.
+const secretStoreDashboardUID = "rasputin-secret-store"
+
+// secretStoreDashboardJSON is the "Secret store" dashboard: the store-health
+// series StoreHealthSink writes for the control plane
+// (geekdojo/geekdojo-brain#939). Its copy says "secret store" and never names
+// the vendor. Every panel declares a unit. The store runs only on the control
+// plane, so there is no node variable; max() and sum() keep each panel to one
+// series even if the control plane's node id ever changes.
+//
+// Sealed has no value while the store's state is unknown (not set up, not
+// answering, paused): the sample leaves it out rather than plot a made-up 0.
+const secretStoreDashboardJSON = `{
+  "title": "Secret store",
+  "uid": "` + secretStoreDashboardUID + `",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "tags": ["rasputin"],
+  "panels": [
+    {
+      "type": "state-timeline",
+      "title": "Sealed",
+      "description": "Whether the secret store is sealed. No value while the control plane cannot tell: the store is not set up, not answering, or paused.",
+      "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
+      "targets": [{"refId": "A", "expr": "max(rasputin_` + MetricSecretStoreSealed + `)", "legendFormat": "Secret store"}],
+      "fieldConfig": {"defaults": {"unit": "none", "noValue": "No data from the secret store",
+        "mappings": [{"type": "value", "options": {"0": {"text": "Unsealed", "color": "green", "index": 0}, "1": {"text": "Sealed", "color": "red", "index": 1}}}]}, "overrides": []},
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 4}
+    },
+    {
+      "type": "timeseries",
+      "title": "Requests per second",
+      "description": "Requests the control plane sent to the secret store.",
+      "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
+      "targets": [{"refId": "A", "expr": "sum(rate(rasputin_` + MetricSecretStoreRequestsTotal + `[$__rate_interval]))", "legendFormat": "Requests"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "noValue": "No data from the secret store"}, "overrides": []},
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors per second",
+      "description": "Requests to the secret store that failed. The api log names the cause of each.",
+      "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
+      "targets": [{"refId": "A", "expr": "sum(rate(rasputin_` + MetricSecretStoreErrorsTotal + `[$__rate_interval]))", "legendFormat": "Errors"}],
+      "fieldConfig": {"defaults": {"unit": "reqps", "noValue": "No data from the secret store"}, "overrides": []},
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Storage used",
+      "description": "The size of the secret store's data on the control plane's disk.",
+      "datasource": {"type": "prometheus", "uid": "` + vmDatasourceUID + `"},
+      "targets": [{"refId": "A", "expr": "max(rasputin_` + MetricSecretStoreStorageBytes + `)", "legendFormat": "Storage used"}],
+      "fieldConfig": {"defaults": {"unit": "bytes", "noValue": "No data from the secret store"}, "overrides": []},
+      "gridPos": {"x": 0, "y": 12, "w": 24, "h": 8}
     }
   ]
 }

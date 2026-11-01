@@ -24,13 +24,13 @@ func (noAuditObserver) ObserveAudited(context.Context, error) {}
 
 // storeSessionWiring builds the api's login session at the store
 // (geekdojo/geekdojo-brain#759): login is storeWiring.login, store is the
-// observed store every consumer uses, and monitor, when a backend is
-// requested, is told each login's outcome. A nil monitor (nothing requested)
-// becomes noAuditObserver here, explicitly, so a typed-nil *Monitor never
-// reaches the session's interface.
+// observed store every consumer uses, and observer, when a backend is
+// requested, is told each login's outcome (readinessWiring.observer: the
+// monitor and the store-health counter, #939). A nil observer (nothing
+// requested) becomes noAuditObserver here, explicitly.
 //
 // It makes no store call: the first call that needs a token logs in.
-func storeSessionWiring(login storesession.Login, store storesession.Store, monitor *storestate.Monitor, logger *slog.Logger) (*storesession.Session, error) {
+func storeSessionWiring(login storesession.Login, store storesession.Store, observer storestate.Observer, logger *slog.Logger) (*storesession.Session, error) {
 	switch {
 	case login == nil:
 		return nil, errors.New("store session: the login is nil")
@@ -40,8 +40,8 @@ func storeSessionWiring(login storesession.Login, store storesession.Store, moni
 		return nil, errors.New("store session: the logger is nil")
 	}
 	var obs storesession.Observer = noAuditObserver{}
-	if monitor != nil {
-		obs = monitor
+	if observer != nil {
+		obs = observer
 	}
 	return storesession.New(storesession.Config{
 		Role: storeAPIRole, Login: login, Store: store, Observer: obs, Log: logger,

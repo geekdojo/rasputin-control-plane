@@ -17,6 +17,13 @@ import (
 type readinessWiring struct {
 	// monitor is nil when no store backend is requested.
 	monitor *storestate.Monitor
+	// counter counts the audited calls' outcomes for the store-health
+	// metrics (geekdojo/geekdojo-brain#939); nil exactly when monitor is.
+	counter *storestate.Counter
+	// observer is told every audited call's outcome, the store's logins
+	// included: the monitor and the counter, teed. Nil exactly when monitor
+	// is.
+	observer storestate.Observer
 	// alerts is the store's readiness alert source, or nil.
 	alerts func(ctx context.Context, now time.Time) []proto.Alert
 	// store is the store every consumer uses: the one passed in, or the
@@ -68,13 +75,15 @@ func storeReadinessWiring(requested string, switched bool, mode string, store se
 	if err != nil {
 		return readinessWiring{}, err
 	}
-	observed, err := storestate.NewObservedStore(store, monitor)
+	counter := &storestate.Counter{}
+	observer := storestate.Tee(monitor, counter)
+	observed, err := storestate.NewObservedStore(store, observer)
 	if err != nil {
 		return readinessWiring{}, err
 	}
 	logger.Info("secret store readiness gate on: secret-bearing deploys wait for the store",
 		"component", "secretstore", "requested", requested, "mode", mode)
-	return readinessWiring{monitor: monitor, alerts: monitor.Alerts, store: observed}, nil
+	return readinessWiring{monitor: monitor, counter: counter, observer: observer, alerts: monitor.Alerts, store: observed}, nil
 }
 
 // deploySourceWiring is the deploy family's secret source

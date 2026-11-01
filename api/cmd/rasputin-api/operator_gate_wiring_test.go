@@ -73,7 +73,7 @@ func TestOperatorGated_GatesBothModes(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sess, err := storeSessionWiring(w.login, r.store, r.monitor, log)
+			sess, err := storeSessionWiring(w.login, r.store, r.observer, log)
 			if err != nil {
 				t.Fatal(err)
 			}

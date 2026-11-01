@@ -73,7 +73,7 @@ func TestSecretsWiring(t *testing.T) {
 				t.Fatal(err)
 			}
 			login := &countingLogin{inner: w.login}
-			sess, err := storeSessionWiring(login, r.store, r.monitor, log)
+			sess, err := storeSessionWiring(login, r.store, r.observer, log)
 			if err != nil {
 				t.Fatal(err)
 			}
