@@ -57,6 +57,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/storeaudit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
@@ -1467,7 +1468,7 @@ func main() {
 	obsEnabled := func(ctx context.Context) (bool, error) {
 		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, obsEnabled)
+	obsSup, obsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, storeW.mode, obsEnabled)
 	defer func() {
 		// Only tear down what we brought up. Stop shells out to `docker
 		// compose stop`; on a never-started stack that's a pointless
@@ -3058,7 +3059,7 @@ func splitCSV(s string) []string {
 // Side effect: when the stored setting says on, this starts the stack in the
 // background and calls metricsSvc.SetSink so every received MetricsEvt fans
 // out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir, storeMode string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
@@ -3069,6 +3070,17 @@ func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID s
 		// failed already fails its own unit. Neither takes obs down.
 		logger.Info("obs journal source off",
 			"dir", filepath.Join(dataDir, journalStoreSubdir), "reason", "not a directory")
+	}
+	auditLog := storeAuditLog(storeMode, dataDir)
+	if auditLog == "" {
+		// No store, or a store whose audit directory is not there yet: there
+		// is nothing to ship, and Docker must not create the directory.
+		reason := "not a directory"
+		if storeMode != storeModeOpenBao {
+			reason = "store_mode=" + storeMode
+		}
+		logger.Info("obs store audit source off",
+			"dir", filepath.Join(dataDir, storeaudit.DirName), "reason", reason)
 	}
 	sup, err := obs.NewDockerComposeSupervisor(obs.DockerComposeSupervisorConfig{
 		StateDir:           stateDir,
@@ -3102,6 +3114,9 @@ func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID s
 		// The persistent journal, read by Alloy for the first-boot outcome
 		// lines only (obs.outcomeJournalIdentifiers).
 		JournalDir: journalDir,
+		// The secret store's live audit file, shipped to Loki with its values
+		// HMAC'd by the store (geekdojo/geekdojo-brain#802).
+		StoreAuditLog: auditLog,
 	})
 	if err != nil {
 		log.Fatalf("rasputin-api: obs supervisor: %v", err)
@@ -3168,6 +3183,22 @@ func journalStoreDir(dataDir string) string {
 		return ""
 	}
 	return p
+}
+
+// storeAuditLog returns the store's live audit file,
+// <dataDir>/openbao-audit/audit.log, when the store is OpenBao and its audit
+// directory is a directory, and "" otherwise. Like journalStoreDir it never
+// hands Docker a directory that is not there, which Docker would create as
+// root and the store would then find already made.
+func storeAuditLog(mode, dataDir string) string {
+	if mode != storeModeOpenBao {
+		return ""
+	}
+	dir := filepath.Join(dataDir, storeaudit.DirName)
+	if fi, err := os.Stat(dir); err != nil || !fi.IsDir() {
+		return ""
+	}
+	return filepath.Join(dir, storeaudit.LiveName)
 }
 
 // seedObsEnabled captures RASPUTIN_OBS_ENABLED as the initial value of the

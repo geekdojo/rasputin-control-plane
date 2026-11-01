@@ -493,10 +493,14 @@ jobs:
         # and Loki, reading this runner's own journal
         # (journal_pipe_functional_linux_test.go, geekdojo-brain#853);
         # RASPUTIN_JOURNAL_FUNCTIONAL=required makes it fail rather than skip.
+        # The same for the secret store's audit source, shipped and followed
+        # across a rotation and a recreate by the real Alloy and Loki
+        # (storeaudit_pipe_functional_linux_test.go, geekdojo-brain#802).
         run: |
           sudo env \
             RASPUTIN_GRAFANA_FUNCTIONAL=required \
             RASPUTIN_JOURNAL_FUNCTIONAL=required \
+            RASPUTIN_STOREAUDIT_FUNCTIONAL=required \
             PATH="$PATH" \
             "$RUNNER_TEMP/obs.test" -test.v -test.count=1 -test.timeout=25m
 

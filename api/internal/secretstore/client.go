@@ -31,12 +31,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // maxBody is the largest response body the client reads. Anything longer is
 // ErrProtocol; the store's answers here are a few kilobytes.
 const maxBody = 1 << 20
+
+// JobHeader carries the id of the job a store call is made for, when the
+// call's context has one (jobs.ContextWithJobID). The store writes it in plain
+// text into the call's audit entries once self-init has listed it as an
+// audited request header with hmac false, which joins an audit entry to the
+// operator's job (geekdojo/geekdojo-brain#802). A store not told to audit it
+// ignores it.
+const JobHeader = "X-Rasputin-Job-Id"
 
 // casMismatchText is how kv-v2 words a check-and-set mismatch in its 400. It
 // is the one place the client reads the store's text to decide a kind: kv-v2
@@ -577,6 +586,9 @@ func (c *Client) round(ctx context.Context, op string, p KVPath, method, rel str
 	}
 	if token != nil {
 		req.Header.Set("X-Vault-Token", string(token.Reveal()))
+	}
+	if id := jobs.JobIDFromContext(ctx); id != "" {
+		req.Header.Set(JobHeader, id)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
