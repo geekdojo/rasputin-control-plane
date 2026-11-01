@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 )
 
 // TC-853-19: journalStoreDir returns <dataDir>/journal only when that is a
@@ -68,7 +71,7 @@ func TestMustWireObs_JournalDir(t *testing.T) {
 			}
 			h := &recordsHandler{}
 			sup, _, _ := mustWireObs(context.Background(), slog.New(h), dataDir, "cp-1", nil,
-				filepath.Join(dataDir, "obs", "ids-alerts"), storeModeOpenBao, off)
+				filepath.Join(dataDir, "obs", "ids-alerts"), storeModeOpenBao, off, vmOnly)
 			if sup == nil {
 				t.Fatal("mustWireObs returned no supervisor")
 			}
@@ -170,7 +173,7 @@ func TestMustWireObs_StoreAuditLog(t *testing.T) {
 			}
 			h := &recordsHandler{}
 			sup, _, _ := mustWireObs(context.Background(), slog.New(h), dataDir, "cp-1", nil,
-				filepath.Join(dataDir, "obs", "ids-alerts"), tc.mode, off)
+				filepath.Join(dataDir, "obs", "ids-alerts"), tc.mode, off, vmOnly)
 			if sup == nil {
 				t.Fatal("mustWireObs returned no supervisor")
 			}
@@ -201,3 +204,7 @@ func TestMustWireObs_StoreAuditLog(t *testing.T) {
 		})
 	}
 }
+
+// vmOnly is mustWireObs's fanout for tests about the supervisor: the VM sink
+// as is.
+func vmOnly(vm *obs.VMSink) metrics.Sink { return vm }

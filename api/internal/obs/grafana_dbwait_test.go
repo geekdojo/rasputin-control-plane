@@ -34,24 +34,31 @@ const starterDashboardUID = "rasputin-cluster-overview"
 // the row at all; it reads <state>/grafana-data/grafana.db read-only.
 func waitForProvisionedDashboardRow(t *testing.T, stateDir string, within time.Duration) {
 	t.Helper()
+	waitForDashboardRow(t, stateDir, starterDashboardUID, within)
+}
+
+// waitForDashboardRow is waitForProvisionedDashboardRow for the dashboard
+// with uid.
+func waitForDashboardRow(t *testing.T, stateDir, uid string, within time.Duration) {
+	t.Helper()
 	dbPath := filepath.Join(stateDir, grafanaDataDir, "grafana.db")
 	deadline := time.Now().Add(within)
 	var lastErr error
 	for {
-		if found, err := dashboardRowExists(dbPath); err == nil && found {
+		if found, err := dashboardRowExists(dbPath, uid); err == nil && found {
 			return
 		} else if err != nil {
 			lastErr = err
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("Grafana never committed dashboard %q to %s within %s (last error: %v)",
-				starterDashboardUID, dbPath, within, lastErr)
+				uid, dbPath, within, lastErr)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-func dashboardRowExists(dbPath string) (bool, error) {
+func dashboardRowExists(dbPath, uid string) (bool, error) {
 	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return false, err
@@ -61,7 +68,7 @@ func dashboardRowExists(dbPath string) (bool, error) {
 	defer cancel()
 	var n int
 	err = db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM dashboard WHERE uid = ?`, starterDashboardUID).Scan(&n)
+		`SELECT COUNT(*) FROM dashboard WHERE uid = ?`, uid).Scan(&n)
 	if err != nil {
 		return false, err
 	}

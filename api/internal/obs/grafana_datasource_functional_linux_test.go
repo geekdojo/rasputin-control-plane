@@ -140,7 +140,14 @@ type panelQuery struct {
 // datasource the panel names.
 func dashboardPanelQueries(t *testing.T, sup *DockerComposeSupervisor, user string) []panelQuery {
 	t.Helper()
-	code, body := grafanaGet(t, sup, "/api/dashboards/uid/"+starterDashboardUID, user)
+	return dashboardPanelQueriesOf(t, sup, user, starterDashboardUID)
+}
+
+// dashboardPanelQueriesOf is dashboardPanelQueries for the dashboard with
+// uid.
+func dashboardPanelQueriesOf(t *testing.T, sup *DockerComposeSupervisor, user, uid string) []panelQuery {
+	t.Helper()
+	code, body := grafanaGet(t, sup, "/api/dashboards/uid/"+uid, user)
 	if code != http.StatusOK {
 		t.Fatalf("dashboard model = %d %.300s", code, body)
 	}

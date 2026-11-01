@@ -588,7 +588,7 @@ func main() {
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
 	// logs in on the first call that needs a token, not here. #761's
 	// repository is its first consumer.
-	storeSession, err := storeSessionWiring(storeW.login, readiness.store, readiness.monitor, logger)
+	storeSession, err := storeSessionWiring(storeW.login, readiness.store, readiness.observer, logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store session", "err", err.Error())
 		os.Exit(1)
@@ -1468,7 +1468,12 @@ func main() {
 	obsEnabled := func(ctx context.Context) (bool, error) {
 		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
-	obsSup, obsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, storeW.mode, obsEnabled)
+	// The fan-out adds the secret store's health to the node metrics while
+	// obs is on (geekdojo/geekdojo-brain#939).
+	fanout := func(vm *obs.VMSink) metrics.Sink {
+		return obsFanout(vm, readiness, selfNodeID, storeDataDir, logger)
+	}
+	obsSup, setObsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, storeW.mode, obsEnabled, fanout)
 	defer func() {
 		// Only tear down what we brought up. Stop shells out to `docker
 		// compose stop`; on a never-started stack that's a pointless
@@ -1488,13 +1493,6 @@ func main() {
 	// resolve at Submit time, so late registration is safe.
 	setObsEnabled := func(ctx context.Context, on bool) error {
 		return setupStore.SetBool(ctx, setup.KeyObsEnabled, on)
-	}
-	setObsSink := func(on bool) {
-		if on {
-			metricsSvc.SetSink(obsSink)
-			return
-		}
-		metricsSvc.SetSink(nil)
 	}
 	runner.Register(obs.EnableWorkflow(obsSup, setObsEnabled, setObsSink, func() bool {
 		return dockerBinAvailable(obsDockerBin())
@@ -3057,9 +3055,14 @@ func splitCSV(s string) []string {
 // socket and has no TCP listener to bind (geekdojo-brain#453).
 //
 // Side effect: when the stored setting says on, this starts the stack in the
-// background and calls metricsSvc.SetSink so every received MetricsEvt fans
-// out to VM after the SQLite insert.
-func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID string, metricsSvc *metrics.Service, idsLogDir, storeMode string, enabled obs.EnabledFn) (*obs.DockerComposeSupervisor, *obs.VMSink, *obs.Status) {
+// background and installs the fan-out so every received MetricsEvt goes to VM
+// after the SQLite insert.
+//
+// The fan-out installed is fanout(the VM sink): obsFanout, which adds the
+// secret store's health (geekdojo/geekdojo-brain#939). The returned switch
+// installs (on) or removes (off) that same value, and is what obs.enable and
+// obs.disable call, so boot and the toggle never install different sinks.
+func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID string, metricsSvc sinkSetter, idsLogDir, storeMode string, enabled obs.EnabledFn, fanout func(*obs.VMSink) metrics.Sink) (*obs.DockerComposeSupervisor, obs.SetSinkFn, *obs.Status) {
 	stateDir := envOr("RASPUTIN_OBS_STATE_DIR", filepath.Join(dataDir, "obs"))
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: obs state dir: %v", err)
@@ -3134,6 +3137,7 @@ func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID s
 	}
 	status := obs.NewStatus(sup, sink, logs)
 	status.SetEnabled(enabled)
+	setSink := obsSinkSwitch(metricsSvc, fanout(sink))
 
 	on, err := enabled(ctx)
 	if err != nil {
@@ -3145,7 +3149,7 @@ func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID s
 		// an always-installed sink would spam the log every 10s per node.
 		// obs.enable installs it as its last step.
 		log.Printf("rasputin-api: obs off (state=%s) — turn it on from Settings", stateDir)
-		return sup, sink, status
+		return sup, setSink, status
 	}
 	log.Printf("rasputin-api: obs supervisor = docker (state=%s, vm=%s)",
 		stateDir, sup.VMBaseURL())
@@ -3162,8 +3166,8 @@ func mustWireObs(ctx context.Context, logger *slog.Logger, dataDir, selfNodeID s
 			log.Printf("rasputin-api: obs supervisor up; VM at %s", sup.VMBaseURL())
 		}
 	}()
-	metricsSvc.SetSink(sink)
-	return sup, sink, status
+	setSink(true)
+	return sup, setSink, status
 }
 
 // journalStoreSubdir is the journal store under dataDir:

@@ -9,7 +9,6 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -60,7 +59,7 @@ func TestStoreSessionWiring(t *testing.T) {
 			t.Fatal(err)
 		}
 		login := &countingLogin{inner: w.login}
-		sess, err := storeSessionWiring(login, r.store, r.monitor, log)
+		sess, err := storeSessionWiring(login, r.store, r.observer, log)
 		if err != nil || sess == nil {
 			t.Fatalf("%q: storeSessionWiring = %v, %v; want a session", backend, sess, err)
 		}
@@ -88,12 +87,19 @@ func TestStoreSessionWiring(t *testing.T) {
 	})
 
 	t.Run("a nil monitor never reaches the session", func(t *testing.T) {
-		// A successful login is observed, and Monitor.ObserveAudited on a nil
-		// *Monitor dereferences it, so this call would panic if the typed nil
-		// reached the session's Observer.
+		// A successful login is observed. With no backend requested the
+		// readiness wiring has no monitor, and its observer must be a plain
+		// nil, never a typed nil around a nil *Monitor, whose ObserveAudited
+		// would dereference it and panic here.
 		m := secretstore.NewMock(time.Now)
-		var monitor *storestate.Monitor
-		sess, err := storeSessionWiring(m, m, monitor, log)
+		r, err := storeReadinessWiring("", false, storeModeOff, m, js, time.Now, notBlank, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.monitor != nil || r.counter != nil || r.observer != nil {
+			t.Fatalf("readiness with nothing requested = monitor %v counter %v observer %v, want all nil", r.monitor, r.counter, r.observer)
+		}
+		sess, err := storeSessionWiring(m, m, r.observer, log)
 		if err != nil {
 			t.Fatal(err)
 		}

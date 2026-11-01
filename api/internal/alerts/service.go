@@ -37,7 +37,10 @@
 //     seal-key rotation), at most one, from the source SetStoreAlerts wires
 //     (storestate.Monitor.Alerts, geekdojo/geekdojo-brain#760). It reads the
 //     store's sys/health on each List, so it raises and clears on the store's
-//     own answer. Under openbao the same source also carries
+//     own answer. It is not the only reader: while observability is on, the
+//     store-health metrics sample reads it about every 10s too
+//     (geekdojo/geekdojo-brain#939), so Since can predate the first List
+//     that shows the alert. Under openbao the same source also carries
 //     secret-store:seal-rotation-incomplete (crit), raised while a seal-key
 //     rotation has stopped part way (sealrotate.Rotator.Alerts, #830).
 //   - os outcomes → os-outcome:<kind> (crit), one per pre-api outcome record

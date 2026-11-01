@@ -398,17 +398,37 @@ func storeIdentityBytes(src IdentitySources) uint64 {
 }
 
 // treeBytes sums the regular files under dir; an unreadable subtree counts
-// zero, as MeasureIdentitySet's other terms do.
+// zero, as MeasureIdentitySet's other terms do. An unreadable dir counts
+// zero too: an estimate never fails.
 func treeBytes(dir string) uint64 {
+	n, _ := DirBytes(dir)
+	return n
+}
+
+// DirBytes sums the sizes of the regular files under dir. An unreadable
+// subtree below dir contributes zero; dir itself being unreadable (missing,
+// not permitted) is an error, so a caller that plots the size never shows a
+// false 0 (geekdojo/geekdojo-brain#939). It is the measure backup sizing
+// uses (treeBytes).
+func DirBytes(dir string) (uint64, error) {
 	var total uint64
-	_ = filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return nil //nolint:nilerr // an unreadable subtree contributes zero, it does not fail an estimate
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if p == dir {
+				return err
+			}
+			return nil //nolint:nilerr // an unreadable subtree contributes zero, it does not fail the sum
+		}
+		if d.IsDir() {
+			return nil
 		}
 		if info, ierr := d.Info(); ierr == nil && info.Mode().IsRegular() {
 			total += byteCount(info.Size())
 		}
 		return nil
 	})
-	return total
+	if err != nil {
+		return 0, fmt.Errorf("storage: sizing %s: %w", dir, err)
+	}
+	return total, nil
 }

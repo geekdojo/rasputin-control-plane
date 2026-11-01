@@ -4,8 +4,16 @@
 //
 //   - Monitor reads the store's readiness from sys/health at the moment a
 //     caller asks, remembers only the last state it saw and when it first saw
-//     it, and turns that into an alert. There is no probe loop and no period:
-//     the state changes only on an answer (ARCH-FACTS).
+//     it, and turns that into an alert. It owns no probe loop and no period:
+//     the state changes only on an answer (ARCH-FACTS). Its callers are the
+//     deploy gate, the alerts list, the store session, and, while
+//     observability is on, the store-health metrics sample
+//     (obs.StoreHealthSink, geekdojo/geekdojo-brain#939). That sample asks
+//     once per arrival of the control plane's own agent metrics sample (the
+//     agent's metrics.Interval, timer-audit K13), so with observability on
+//     the store is read about every 10s whether or not anyone is looking.
+//   - Counter counts the audited calls' outcomes for those metrics; the
+//     composition root tees it with the Monitor (Tee).
 //   - Gate is the deploy family's secret source while a store backend is
 //     requested. A compose with a ${secret:} token is refused with the stable
 //     code secret_store_not_ready unless the store reads ready; a compose
@@ -92,6 +100,21 @@ func (r QuiesceReason) phrase() string {
 		return "an OS update"
 	}
 	return "a backup"
+}
+
+// Sealed reports whether the state is sealed, and whether that is known.
+// Sealed is (true, true); Ready, AuditBlocked and Blank are (false, true),
+// as each is a 200 unsealed answer. Uninitialised, Unreachable and Quiesced
+// are not known: the store did not say, so no value is made up for it
+// (geekdojo/geekdojo-brain#939).
+func (s State) Sealed() (sealed, known bool) {
+	switch s {
+	case Sealed:
+		return true, true
+	case Ready, AuditBlocked, Blank:
+		return false, true
+	}
+	return false, false
 }
 
 // Store is the one store call the Monitor makes.
