@@ -380,3 +380,33 @@ func TestStoreProvisionerCapabilityRows(t *testing.T) {
 		}
 	}
 }
+
+// TC-802-14: the two upstream behaviours the store audit's shipping and its
+// job link rest on (geekdojo/geekdojo-brain#802) each keep a row, pinned to
+// the version the tree runs, so a bump of either fails the register test until
+// the row is re-verified.
+func TestStoreAuditCapabilityRows(t *testing.T) {
+	rows := readRegister(t, filepath.Join(root(t), capRegisterPath), capCols)
+	byID := map[string]map[string]string{}
+	for _, r := range rows {
+		byID[r["id"]] = r
+	}
+	for _, w := range []struct{ id, vendor, needle, pin, verifier string }{
+		{"T67", "OpenBao", "hmac false is written in plain text",
+			"go-const:api/internal/secretstoretest/pin.go#OpenBaoRelease", "TestClient_JobHeaderAudited"},
+		{"T68", "Grafana Alloy", "local.file_match over one exact path feeding loki.source.file",
+			"go-const:api/internal/obs/supervisor.go#defaultAlloyImage", "TestStoreAuditPipe_AgainstRealAlloyAndLoki"},
+	} {
+		r, ok := byID[w.id]
+		switch {
+		case !ok:
+			t.Errorf("%s: row %s (%s) is missing; the store audit relies on it", capRegisterPath, w.id, w.needle)
+		case r["vendor"] != w.vendor || !strings.Contains(r["capability"], w.needle):
+			t.Errorf("%s: row %s is %s %q, want the %s capability naming %q", capRegisterPath, w.id, r["vendor"], r["capability"], w.vendor, w.needle)
+		case r["pin"] != w.pin:
+			t.Errorf("%s: row %s is pinned by %q, want %s", capRegisterPath, w.id, r["pin"], w.pin)
+		case !strings.Contains(r["verified"], w.verifier):
+			t.Errorf("%s: row %s is verified by %q, want it to name %s", capRegisterPath, w.id, r["verified"], w.verifier)
+		}
+	}
+}

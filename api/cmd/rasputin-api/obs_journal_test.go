@@ -60,9 +60,15 @@ func TestMustWireObs_JournalDir(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			// The store's audit directory is present, so the store audit
+			// source is on and this test reads the journal source's records
+			// alone (TestMustWireObs_StoreAuditLog covers that source).
+			if err := os.Mkdir(filepath.Join(dataDir, "openbao-audit"), 0o700); err != nil {
+				t.Fatal(err)
+			}
 			h := &recordsHandler{}
 			sup, _, _ := mustWireObs(context.Background(), slog.New(h), dataDir, "cp-1", nil,
-				filepath.Join(dataDir, "obs", "ids-alerts"), off)
+				filepath.Join(dataDir, "obs", "ids-alerts"), storeModeOpenBao, off)
 			if sup == nil {
 				t.Fatal("mustWireObs returned no supervisor")
 			}
@@ -90,6 +96,107 @@ func TestMustWireObs_JournalDir(t *testing.T) {
 			}
 			if got := sup.JournalDir(); got != storeDir {
 				t.Errorf("supervisor JournalDir = %q, want %q", got, storeDir)
+			}
+		})
+	}
+}
+
+// TC-802-06: storeAuditLog returns <dataDir>/openbao-audit/audit.log only for
+// the openbao store with its audit directory present.
+func TestStoreAuditLog(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		setup func(t *testing.T, dataDir string)
+		want  bool
+	}{
+		{"openbao, directory", storeModeOpenBao, mkAuditDir, true},
+		{"mock, directory", storeModeMock, mkAuditDir, false},
+		{"off, directory", storeModeOff, mkAuditDir, false},
+		{"unset, directory", "", mkAuditDir, false},
+		{"openbao, missing", storeModeOpenBao, func(*testing.T, string) {}, false},
+		{"openbao, regular file", storeModeOpenBao, func(t *testing.T, dataDir string) {
+			if err := os.WriteFile(filepath.Join(dataDir, "openbao-audit"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			tc.setup(t, dataDir)
+			want := ""
+			if tc.want {
+				want = filepath.Join(dataDir, "openbao-audit", "audit.log")
+			}
+			if got := storeAuditLog(tc.mode, dataDir); got != want {
+				t.Errorf("storeAuditLog(%q) = %q, want %q", tc.mode, got, want)
+			}
+		})
+	}
+}
+
+func mkAuditDir(t *testing.T, dataDir string) {
+	t.Helper()
+	if err := os.Mkdir(filepath.Join(dataDir, "openbao-audit"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TC-802-06: with no audit file to ship, mustWireObs logs exactly one Info
+// "obs store audit source off" naming the dir and the reason, and builds the
+// supervisor with no StoreAuditLog. With one, it logs no such record and hands
+// the supervisor the path.
+func TestMustWireObs_StoreAuditLog(t *testing.T) {
+	t.Setenv("RASPUTIN_OBS_STATE_DIR", "")
+	off := func(context.Context) (bool, error) { return false, nil }
+
+	for _, tc := range []struct {
+		name       string
+		mode       string
+		dirPresent bool
+		wantReason string // "" means the source is on
+	}{
+		{"openbao, directory", storeModeOpenBao, true, ""},
+		{"openbao, missing", storeModeOpenBao, false, "not a directory"},
+		{"mock", storeModeMock, true, "store_mode=mock"},
+		{"off", storeModeOff, true, "store_mode=off"},
+		{"unset", "", true, "store_mode="},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dataDir := t.TempDir()
+			auditDir := filepath.Join(dataDir, "openbao-audit")
+			if tc.dirPresent {
+				mkAuditDir(t, dataDir)
+			}
+			h := &recordsHandler{}
+			sup, _, _ := mustWireObs(context.Background(), slog.New(h), dataDir, "cp-1", nil,
+				filepath.Join(dataDir, "obs", "ids-alerts"), tc.mode, off)
+			if sup == nil {
+				t.Fatal("mustWireObs returned no supervisor")
+			}
+			recs := h.matching(slog.LevelInfo, "obs store audit source off")
+			if tc.wantReason == "" {
+				if len(recs) != 0 {
+					t.Errorf("records %v, want no \"obs store audit source off\"", recs)
+				}
+				if want := filepath.Join(auditDir, "audit.log"); sup.StoreAuditLog() != want {
+					t.Errorf("supervisor StoreAuditLog = %q, want %q", sup.StoreAuditLog(), want)
+				}
+				return
+			}
+			if len(recs) != 1 {
+				t.Fatalf("%d records %v, want exactly one Info \"obs store audit source off\"", len(recs), recs)
+			}
+			attrs := map[string]string{}
+			recs[0].Attrs(func(a slog.Attr) bool {
+				attrs[a.Key] = a.Value.String()
+				return true
+			})
+			if attrs["dir"] != auditDir || attrs["reason"] != tc.wantReason || len(attrs) != 2 {
+				t.Errorf("attrs %v, want dir=%s reason=%q", attrs, auditDir, tc.wantReason)
+			}
+			if got := sup.StoreAuditLog(); got != "" {
+				t.Errorf("supervisor StoreAuditLog = %q, want \"\"", got)
 			}
 		})
 	}

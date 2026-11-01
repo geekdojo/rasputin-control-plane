@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -257,6 +258,19 @@ type DockerComposeSupervisorConfig struct {
 	// mounts it.
 	JournalDir string
 
+	// StoreAuditLog is the host path of the secret store's live audit file
+	// (<dataDir>/openbao-audit/audit.log on an appliance). Its parent
+	// directory is mounted read-only into Alloy at storeAuditContainerDir, so
+	// a rotation's unlink-and-recreate is followed, and local.file_match →
+	// loki.source.file ships that one file, and never a rotated copy, to Loki
+	// with labels {job=rasputin-store-audit, node_id=...}
+	// (geekdojo/geekdojo-brain#802). Empty (default) disables the source, and
+	// with Loki off it is neither mounted nor read (storeAuditSourceEnabled).
+	//
+	// The api wires it (storeAuditLog in main.go); the supervisor just mounts
+	// it.
+	StoreAuditLog string
+
 	// GrafanaImage overrides the Grafana image reference. Defaults to
 	// the pinned upstream tag. Grafana joins the stack at Slice 1.4
 	// and is reached via the api's auth-proxy at /observability/*.
@@ -417,6 +431,9 @@ const (
 	// window each time the config changes.
 	alloyDataDir          = "alloy-data"
 	alloyContainerDataDir = "/var/lib/alloy/data"
+	// storeAuditContainerDir is where the store's audit directory is mounted
+	// inside Alloy (StoreAuditLog).
+	storeAuditContainerDir = "/var/log/openbao-audit"
 
 	// lokiRejectOldSamplesMaxAge is the oldest entry Loki accepts
 	// (reject_old_samples_max_age) AND how far back the journal source reads
@@ -542,7 +559,7 @@ func NewDockerComposeSupervisor(cfg DockerComposeSupervisorConfig) (*DockerCompo
 	for _, d := range []struct {
 		name string
 		p    *string
-	}{{"IDSLogDir", &cfg.IDSLogDir}, {"JournalDir", &cfg.JournalDir}} {
+	}{{"IDSLogDir", &cfg.IDSLogDir}, {"JournalDir", &cfg.JournalDir}, {"StoreAuditLog", &cfg.StoreAuditLog}} {
 		if *d.p == "" {
 			continue
 		}
@@ -1024,6 +1041,18 @@ func (s *DockerComposeSupervisor) journalSourceEnabled() bool {
 // JournalDir is the host journal directory the supervisor was configured
 // with, or "" when it has none. Loki off still disables the source.
 func (s *DockerComposeSupervisor) JournalDir() string { return s.cfg.JournalDir }
+
+// storeAuditSourceEnabled reports whether Alloy should ship the store's audit
+// file. Requires Loki on AND a non-empty StoreAuditLog. The one accessor gates
+// both the config block and the compose mount, so the audit directory is never
+// mounted into a container that has nothing to send it to.
+func (s *DockerComposeSupervisor) storeAuditSourceEnabled() bool {
+	return s.lokiEnabled() && s.cfg.StoreAuditLog != ""
+}
+
+// StoreAuditLog is the host path of the store's audit file the supervisor was
+// configured with, or "" when it has none. Loki off still disables the source.
+func (s *DockerComposeSupervisor) StoreAuditLog() string { return s.cfg.StoreAuditLog }
 
 // cadvisorEnabled mirrors lokiEnabled — single-source-of-truth for the
 // "is this optional component on" question.
@@ -1555,6 +1584,10 @@ func (s *DockerComposeSupervisor) renderAlloyConfig() ([]byte, error) {
 		JournalMaxAge:  lokiRejectOldSamplesMaxAge,
 		NodeID:         s.cfg.ControlPlaneNodeID,
 	}
+	if s.storeAuditSourceEnabled() {
+		data.EnableStoreAudit = true
+		data.StoreAuditPath = path.Join(storeAuditContainerDir, filepath.Base(s.cfg.StoreAuditLog))
+	}
 	var buf bytes.Buffer
 	if err := alloyConfigTmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("render alloy config: %w", err)
@@ -1569,6 +1602,11 @@ type alloyConfigData struct {
 	EnableJournal  bool
 	JournalMatches string
 	JournalMaxAge  string
+	// EnableStoreAudit renders the store-audit source; StoreAuditPath is the
+	// live file's path inside the Alloy container, exact (no glob), so a
+	// rotated copy is never read.
+	EnableStoreAudit bool
+	StoreAuditPath   string
 	// NodeID, when set, tags every sample this controlplane Alloy writes with
 	// external_labels{node_id} so its containers filter uniformly with the
 	// per-node collectors (§3.10 piece 5).
@@ -1733,6 +1771,40 @@ loki.source.journal "outcomes" {
   forward_to    = [loki.write.local.receiver]
 }
 {{- end }}
+{{- if .EnableStoreAudit }}
+
+// ----- Secret store audit (OpenBao audit file → here → Loki) -----
+// The store's live audit file, by its exact path: never a glob, because a
+// rotated copy (audit.log.N) would be read again from its start. The store
+// HMACs every value before it writes the line, so nothing secret is in it.
+// local.file_match re-exports the target when the file comes and goes, which
+// a rotation's unlink-and-recreate does. Each entry keeps the time the store
+// wrote it; node_id comes from loki.write.local. The controlplane's Logs tab
+// shows these lines in its unfiltered view, as it does the IDS stream.
+local.file_match "store_audit" {
+  path_targets = [
+    {"__path__" = "{{.StoreAuditPath}}", "job" = "rasputin-store-audit"},
+  ]
+}
+
+loki.source.file "store_audit" {
+  targets    = local.file_match.store_audit.targets
+  forward_to = [loki.process.store_audit.receiver]
+}
+
+loki.process "store_audit" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.json {
+    expressions = {ts = "time"}
+  }
+
+  stage.timestamp {
+    source = "ts"
+    format = "RFC3339Nano"
+  }
+}
+{{- end }}
 {{- end }}
 `))
 
@@ -1845,6 +1917,8 @@ func (s *DockerComposeSupervisor) renderCompose() ([]byte, error) {
 		AlloyDataDir:         "./" + alloyDataDir,
 		EnableJournal:        s.journalSourceEnabled(),
 		JournalHostDir:       s.cfg.JournalDir,
+		EnableStoreAudit:     s.storeAuditSourceEnabled(),
+		StoreAuditHostDir:    filepath.Dir(s.cfg.StoreAuditLog),
 		LokiImage:            s.cfg.LokiImage,
 		LokiHost:             lokiHost,
 		LokiPort:             lokiPort,
@@ -1896,6 +1970,8 @@ type composeData struct {
 	AlloyDataDir       string
 	EnableJournal      bool
 	JournalHostDir     string // absolute host path, mounted into Alloy at /var/log/journal
+	EnableStoreAudit   bool
+	StoreAuditHostDir  string // absolute host path, mounted into Alloy at storeAuditContainerDir
 	LokiImage          string
 	LokiHost           string
 	LokiPort           string
@@ -2026,6 +2102,12 @@ services:
       # The host's persistent journal, for loki.source.journal (see
       # alloyConfigTmpl). Read-only: journald owns it.
       - {{.JournalHostDir}}:/var/log/journal:ro
+{{- end }}
+{{- if .EnableStoreAudit }}
+      # The secret store's audit directory, for the store_audit source (see
+      # alloyConfigTmpl). The directory, not the file: a bind of the file would
+      # keep the old inode after a rotation. Read-only: the store owns it.
+      - {{.StoreAuditHostDir}}:` + storeAuditContainerDir + `:ro
 {{- end }}
     depends_on:
       - victoriametrics

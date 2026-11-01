@@ -163,6 +163,69 @@ Expect `--- PASS: TestStoreAudit_RotateUnderLoad` with one `PASS` line per step,
 (A and B are the first and last write numbers checked; N is how many response entries
 those writes left), and exit status 0.
 
+## The store audit's shipping and job link
+
+[geekdojo-brain#802](https://github.com/geekdojo/geekdojo-brain/issues/802) ships the store's
+live audit file to Loki as one stream, `{job="rasputin-store-audit"}`, and links each entry to
+the operator's job. Two functional tests cover it.
+
+`TestClient_JobHeaderAudited`, in `api/internal/secretstore/jobheader_functional_test.go`, runs
+the api's store client against the same harness and binary, under the same switch, in the
+backend job. The harness starts the store with `Config.Audit` set, and its self-init creates
+the `rasputin-api` role with the real policy text and one test-only role whose policy grants
+`update` and `sudo` on exactly `sys/config/auditing/request-headers/x-rasputin-job-id`. That
+role stands in for the store's self-init, which lists the header in the rasputin-os
+`init.json`. The steps run in order on one store:
+
+- **Header not listed (TC-802-08).** A KV read made under a job succeeds, and neither of its
+  audit entries carries an `x-rasputin-job-id` key. This is a store initialised before the
+  rasputin-os change, which keeps working with no job link.
+- **Header listed (TC-802-07).** The test-only role lists the header with `hmac` false. A KV
+  read made under a job then carries the job id in plain text in both the request and the
+  response entry, the value starts `hmac-sha256:`, and the plain value occurs 0 times in the
+  audit file.
+
+`TestStoreAuditPipe_AgainstRealAlloyAndLoki`, in
+`api/internal/obs/storeaudit_pipe_functional_linux_test.go`, runs the api's own obs supervisor
+with the real pinned Alloy and Loki images. It runs in the grafana-obs-socket job, where
+`RASPUTIN_STOREAUDIT_FUNCTIONAL=required` turns its skips into failures. It writes
+v2.7.1-shaped audit lines itself, so it needs no store binary. One Loki serves three Alloy runs:
+
+- **Absent at start, and old lines (TC-802-10, TC-802-13).** The file is created after Alloy is
+  running, holding one line timed 8 days ago and one timed now, and a third line is appended
+  later. The two recent lines arrive once each. The old one is never in Loki, because Loki
+  refuses entries older than `reject_old_samples_max_age` (168h).
+- **Empty at start (TC-802-10).** Once Alloy reports it is tailing the file, nothing has been
+  shipped and no component is unhealthy. A line then appended arrives.
+- **Shipping, rotation and recreate (TC-802-09, TC-802-11, TC-802-12).** Lines in the file
+  before Alloy starts arrive, each at the time in its `time` field. A line that is not JSON
+  arrives too, timed 1ns after the line before it (Alloy's default for a time it cannot
+  parse). The file is rotated as storeaudit does: hard-linked to `audit.log.1`, removed and
+  created anew. The next line arrives, and nothing arrives twice. Alloy is then recreated by a
+  config change, as an api upgrade does, and the next line arrives with nothing shipped twice.
+  Over all three runs the only `filename` is `/var/log/openbao-audit/audit.log`.
+
+The stream carries `job`, `filename` and the controlplane's `node_id`, and no `container`
+label. The controlplane's Logs tab therefore shows the store audit lines in its unfiltered
+view, as it already shows the IDS stream, and not when a container is selected.
+
+Neither test proves the production route: the store under its systemd unit writing the
+image's audit file, Alloy reading it as 0600 990:990, or a deploy's job id from `/api/jobs`
+reaching Loki. That is the bench walk, kept in the bench skill. Lines the store writes to the
+old file after Alloy's last read of it and before the store reopens are not shipped; they stay
+in `audit.log.N` on disk.
+
+Run them with:
+
+```sh
+RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required go test -count=1 -v -run TestClient_JobHeaderAudited ./api/internal/secretstore
+sudo env RASPUTIN_STOREAUDIT_FUNCTIONAL=required PATH="$PATH" go test -count=1 -v -run TestStoreAuditPipe_ ./api/internal/obs
+```
+
+The second command runs only on Linux, with Docker, and must not run beside another obs stack,
+because the compose file pins container names. Expect `--- PASS:` for each test, with one
+`PASS` line per step, and exit status 0.
+
 ## The readiness gate's functional test
 
 `TestStoreGate_AgainstTheRealStore`, in `api/internal/apps/storegate_functional_test.go`, runs
@@ -899,3 +962,15 @@ The cases for geekdojo-brain#783 that this document's tests check:
 | TC-783-58 | A compose change releases a secret only once neither compose names it; the rest read unchanged | `TestDelete_AgainstTheRealStore` |
 | TC-783-59 | Node removal leaves no version or metadata of its apps' entries readable; another node's app keeps its entry | `TestDelete_AgainstTheRealStore` |
 | TC-783-60 | No value in any record, error or result of a release or a node removal | `TestDelete_AgainstTheRealStore` |
+
+The cases for geekdojo-brain#802 that this document's tests check:
+
+| ID | What | Where |
+|---|---|---|
+| TC-802-07 | A KV read under a job is audited with its job id in plain text and its value HMAC'd | `TestClient_JobHeaderAudited` |
+| TC-802-08 | Before the header is listed, the read succeeds and its entries carry no job id | `TestClient_JobHeaderAudited` |
+| TC-802-09 | The live file ships once, at each line's own time, and follows a rotation | `TestStoreAuditPipe_AgainstRealAlloyAndLoki` |
+| TC-802-10 | A file absent or empty at start ships once lines appear, with no unhealthy component | `TestStoreAuditPipe_AgainstRealAlloyAndLoki` |
+| TC-802-11 | A recreated Alloy ships nothing twice | `TestStoreAuditPipe_AgainstRealAlloyAndLoki` |
+| TC-802-12 | A line that is not JSON arrives, and the next line keeps its own time | `TestStoreAuditPipe_AgainstRealAlloyAndLoki` |
+| TC-802-13 | A line older than 168h is refused; newer lines still arrive | `TestStoreAuditPipe_AgainstRealAlloyAndLoki` |
