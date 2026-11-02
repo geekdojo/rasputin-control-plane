@@ -58,7 +58,7 @@ func TestBuildCollectorCompose_WellFormed(t *testing.T) {
 		t.Fatalf("no alloy service in compose:\n%s", out)
 	}
 	if svc.NetworkMode != "host" {
-		t.Errorf("network_mode: got %q, want host (mDNS resolution needs it)", svc.NetworkMode)
+		t.Errorf("network_mode: got %q, want host (the collector resolves the control plane through the node's own resolver)", svc.NetworkMode)
 	}
 	if svc.Image != defaultAlloyImage {
 		t.Errorf("image: got %q, want %q", svc.Image, defaultAlloyImage)

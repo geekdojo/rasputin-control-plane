@@ -86,6 +86,35 @@ func TestBuildIOSMobileConfig_ProducesValidXML(t *testing.T) {
 	}
 }
 
+// The profile's description is operator-visible: iOS shows it on the install
+// screen and in Settings. Operator-visible copy never names the backend
+// technology (design/principles.md, "User-facing UI copy is vendor-neutral"),
+// and this one used to name two.
+func TestBuildIOSMobileConfig_DescriptionIsVendorNeutral(t *testing.T) {
+	body, err := BuildIOSMobileConfig(freshSelfSignedCertPEM(t, "Rasputin Test CA"), "Rasputin Mesh TLS CA", "Rasputin")
+	if err != nil {
+		t.Fatalf("BuildIOSMobileConfig: %v", err)
+	}
+	const key = "<key>PayloadDescription</key>"
+	_, after, ok := strings.Cut(string(body), key)
+	if !ok {
+		t.Fatalf("body has no %s", key)
+	}
+	_, after, ok = strings.Cut(after, "<string>")
+	if !ok {
+		t.Fatalf("no <string> follows %s", key)
+	}
+	desc, _, ok := strings.Cut(after, "</string>")
+	if !ok || strings.TrimSpace(desc) == "" {
+		t.Fatalf("PayloadDescription is empty or unterminated: %q", after)
+	}
+	for _, backend := range []string{"Tailscale", "Headscale", "OpenWrt", "Docker", "RAUC", "OpenBao"} {
+		if strings.Contains(strings.ToLower(desc), strings.ToLower(backend)) {
+			t.Errorf("PayloadDescription names %s: %q", backend, desc)
+		}
+	}
+}
+
 func TestBuildIOSMobileConfig_RoundTripsCertBytes(t *testing.T) {
 	certPEM := freshSelfSignedCertPEM(t, "Rasputin Round Trip")
 	block, _ := pem.Decode(certPEM)

@@ -167,8 +167,14 @@ func (s *Service) Replace(ctx context.Context, a Actor, r Ref, value secret.Valu
 
 // Delete removes r with every version. A secret that is already absent is
 // success: the end state holds either way. A caller deletes the database
-// row that references r before it deletes r (S15 part 2), so no captured
-// row ever names an entry the store copy lacks.
+// row that references r before it deletes r (S15 part 2). That narrows the
+// backup's gap without closing it: a backup snapshots the database first
+// (VACUUM INTO) and copies the store after, and nothing holds a delete off
+// between the two, since only backups, the OS-update copy and seal rotation
+// take the capture lock. A delete that commits both its row removal and this
+// call inside that gap leaves a captured row naming an entry the store copy
+// lacks. After a restore, store.reference_check (appsecret/refcheck.go)
+// reports such a reference.
 func (s *Service) Delete(ctx context.Context, a Actor, r Ref) error {
 	if err := s.authorize(ctx, opDelete, a, r); err != nil {
 		return err

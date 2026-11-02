@@ -26,8 +26,9 @@ type UpdateSpec struct {
 // Config controls the saga's environment-dependent knobs.
 type Config struct {
 	// PublicBaseURL is the URL prefix the agent uses to fetch bundles.
-	// In dev: "http://localhost:8080". In production: the api's tailnet
-	// hostname. The saga appends "/api/bundles/{sha256}".
+	// In dev: "http://localhost:8080". On an appliance:
+	// "https://<cluster-id>.local", reached over the LAN. The saga appends
+	// "/api/bundles/{sha256}".
 	PublicBaseURL string
 	// SelfNodeID is the control plane's own node id (RASPUTIN_SELF_NODE_ID),
 	// or "" in dev. A non-empty value marks a provisioned appliance and lets

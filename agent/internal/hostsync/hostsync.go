@@ -4,11 +4,11 @@
 //
 // The motivating case is the OpenWrt firewall: musl has no nss-mdns, so
 // tailscaled (a pure-Go binary reading /etc/resolv.conf → dnsmasq) can't
-// resolve rasputin.local, which is the mesh login server. This surfaces the
-// control plane's address to the whole box by writing it into a dnsmasq
-// `hostsdir` file, so every local client (tailscaled included) can resolve the
-// name. It self-heals when the control plane's address changes — no DHCP
-// reservation, no hard-coded IP, works on any network (see the "no
+// resolve <cluster>.local (ADR-0003), which is the mesh login server. This
+// surfaces the control plane's address to the whole box by writing it into a
+// dnsmasq `hostsdir` file, so every local client (tailscaled included) can
+// resolve the name. It self-heals when the control plane's address changes —
+// no DHCP reservation, no hard-coded IP, works on any network (see the "no
 // chicken-and-egg deps" principle).
 //
 // # WHERE THE ADDRESS COMES FROM, AND WHY IT IS NOT mDNS
@@ -26,11 +26,11 @@
 // cached, distributed and given the authority of the network's own resolver
 // (geekdojo/geekdojo-brain#547, F13).
 //
-// The bus connection cannot be forged that way: it is TLS-pinned (or, on a
-// cluster still migrating, at least bound to the control plane that accepted
-// this node's join token), and the address is the peer of that socket. mDNS
-// still gets used to DIAL the bus — that is its one remaining job, and the pin
-// is what authenticates the result. DNS is never a source of trust.
+// The bus connection cannot be forged that way: it is TLS-pinned (the bus
+// accepts only TLS, geekdojo/geekdojo-brain#517), and the address is the peer
+// of that socket. mDNS still gets used to DIAL the bus — that is its one
+// remaining job, and the pin is what authenticates the result. DNS is never a
+// source of trust.
 //
 // It is opt-in via RASPUTIN_CP_HOSTS_DIR and a no-op everywhere the variable is
 // unset (e.g. rasputin-os, where systemd-resolved does mDNS natively).
@@ -49,8 +49,9 @@ import (
 
 // ServerIP returns the control plane's CURRENT address, or "" when the bus is
 // not connected and so cannot say. A function, not a string, because the
-// control plane's address moves: these clusters run without DHCP reservations
-// by design, so the CP takes a new lease on every reboot.
+// control plane's address can move: these clusters run without DHCP
+// reservations by design, and a MAC-keyed lease (rasputin-os ae3ec7d) keeps
+// the address across a reboot only normally, not by guarantee.
 //
 // The same shape, and the same contract, as clusterdns.Config.ServerIP. The
 // agent wires both from the live bus client.
