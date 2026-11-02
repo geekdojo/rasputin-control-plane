@@ -192,9 +192,11 @@ loki.source.docker "containers" {
 // as the agent does for NATS. The reason first given here, that a
 // bridge-network container cannot resolve that name because Docker's DNS
 // forwarder bypasses the host's nss-mdns, has no measurement behind it, and
-// the code path says otherwise: on a user-defined network Docker forwards to
-// the host's systemd-resolved stub (127.0.0.53), and resolved does mDNS
-// itself. Whether a bridge-network collector resolves the name has not been
+// the code path says otherwise: without host networking Compose puts the
+// collector on its project's user-defined network, where Docker's embedded
+// DNS forwards to the server in the host's /etc/resolv.conf, which on
+// rasputin-os is the systemd-resolved stub (127.0.0.53), and resolved does
+// mDNS itself. Whether such a collector resolves the name has not been
 // measured on a node, so host networking stays until it is. The answer bears
 // on the loopback exposure tracked in geekdojo-brain#452. Host networking also
 // gives cAdvisor its usual view; the config/cert bind-in via `configs` is
