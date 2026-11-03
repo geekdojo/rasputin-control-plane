@@ -278,6 +278,63 @@ func deadlineNamed(t *testing.T, msg string) time.Duration {
 	return d
 }
 
+// namedDeadlineFits reports whether the deadline an error names can be the
+// budget the caller set. Enroll measures what is left of that budget from
+// its own start, so the true value lies in [budget-startSlack, budget], and
+// the message renders it with tidyDuration. tidyDuration never decreases as
+// its input grows, so the rendered value lies in
+// [tidyDuration(budget-startSlack), tidyDuration(budget)]. Comparing against
+// the raw budget instead is wrong in both directions: a budget whose
+// remainder past the 10ms step is 5ms or more renders ABOVE itself (698.09ms
+// is "700ms", the CI failure on 2026-11-02), and the low end can render
+// below budget-startSlack.
+func namedDeadlineFits(named, budget, startSlack time.Duration) bool {
+	return named >= tidyDuration(budget-startSlack) && named <= tidyDuration(budget)
+}
+
+// The bound the two deadline tests apply, over every kind of remainder a
+// measured budget can have past tidyDuration's 10ms step. The budget is
+// derived from a timing, so its remainder is whatever the runner measured;
+// each row must pass whether Enroll measured the budget at its very start or
+// a whole startSlack later, and a value one rounding step outside either end
+// must still be refused, so the bound has not simply been loosened.
+func TestNamedDeadlineFits_EveryRemainder(t *testing.T) {
+	const step = 10 * time.Millisecond
+	for _, tc := range []struct {
+		name               string
+		budget, startSlack time.Duration
+	}{
+		{"on the step", 690 * time.Millisecond, 345 * time.Millisecond},
+		{"just past the step", 691 * time.Millisecond, 345 * time.Millisecond},
+		{"just under half a step", 694990 * time.Microsecond, 345 * time.Millisecond},
+		{"half a step, which rounds up", 695 * time.Millisecond, 345 * time.Millisecond},
+		// The CI failure: a 69.809646ms spawn gave this budget and the
+		// message named 700ms.
+		{"8.09ms past the step (CI, 2026-11-02)", 698096460 * time.Nanosecond, 349048230 * time.Nanosecond},
+		{"just under a whole step", 699990 * time.Microsecond, 345 * time.Millisecond},
+		{"the production budget", proto.MeshEnrollWork, 3 * time.Second},
+		{"seconds, rounding up", 1600 * time.Millisecond, 400 * time.Millisecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, measured := range []time.Duration{tc.budget, tc.budget - time.Microsecond, tc.budget - tc.startSlack} {
+				if named := tidyDuration(measured); !namedDeadlineFits(named, tc.budget, tc.startSlack) {
+					t.Errorf("Enroll measured %s of a %s budget and named %s, which the bound refuses", measured, tc.budget, named)
+				}
+			}
+			unit := step
+			if tc.budget >= time.Second {
+				unit = time.Second
+			}
+			if over := tidyDuration(tc.budget) + unit; namedDeadlineFits(over, tc.budget, tc.startSlack) {
+				t.Errorf("the bound accepts %s for a %s budget, a rounding step above anything Enroll can name", over, tc.budget)
+			}
+			if under := tidyDuration(tc.budget-tc.startSlack) - step; namedDeadlineFits(under, tc.budget, tc.startSlack) {
+				t.Errorf("the bound accepts %s for a %s budget, below anything Enroll can name", under, tc.budget)
+			}
+		})
+	}
+}
+
 // The reproduction of geekdojo/geekdojo-brain#402 (e3bench-compute1, agent
 // dev.142, 2026-09-05 00:19:54Z): `tailscale up` outlives the enroll
 // deadline and the agent reports `tailscale up: signal: killed (stderr=)`.
@@ -340,7 +397,7 @@ func TestRealBackend_EnrollKilledByDeadlineIsNamed(t *testing.T) {
 	}
 	// The deadline it names is the one that was set, within tidyDuration's
 	// rounding and the moment Enroll took to start measuring.
-	if named := deadlineNamed(t, msg); named > deadline || named < deadline-killTimeBudget(cost) {
+	if named := deadlineNamed(t, msg); !namedDeadlineFits(named, deadline, killTimeBudget(cost)) {
 		t.Errorf("error names a %s deadline, but the budget was %s", named, deadline)
 	}
 	if strings.Contains(msg, key) {
@@ -595,7 +652,7 @@ func TestHandleEnroll_DeadlineKillReachesTheAck(t *testing.T) {
 	// The ack names the budget the handler ran under — the value, not a
 	// literal copied into the test, and within the rounding the message
 	// applies to it.
-	if named := deadlineNamed(t, ack.Detail); named > budget || named < budget-killTimeBudget(cost) {
+	if named := deadlineNamed(t, ack.Detail); !namedDeadlineFits(named, budget, killTimeBudget(cost)) {
 		t.Errorf("ack names a %s deadline, but the handler's budget was %s", named, budget)
 	}
 	if strings.Contains(ack.Detail, "signal: killed") || strings.Contains(ack.Detail, key) {
