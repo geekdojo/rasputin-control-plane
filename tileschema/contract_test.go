@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// TC-897-01: one contract version, 1.5.0, and the two old integers are aliases
-// of its major rather than versions of their own.
+// TC-897-01: one contract version (1.6.0 since geekdojo/geekdojo-brain#551),
+// and the two old integers are aliases of its major rather than versions of
+// their own.
 func TestContractVersion(t *testing.T) {
-	if ContractMajor != 1 || ContractMinor != 5 || ContractPatch != 0 {
-		t.Fatalf("contract is %d.%d.%d, want 1.5.0", ContractMajor, ContractMinor, ContractPatch)
+	if ContractMajor != 1 || ContractMinor != 6 || ContractPatch != 0 {
+		t.Fatalf("contract is %d.%d.%d, want 1.6.0", ContractMajor, ContractMinor, ContractPatch)
 	}
 	if SchemaVersion != ContractMajor {
 		t.Errorf("SchemaVersion = %d, want ContractMajor (%d)", SchemaVersion, ContractMajor)

@@ -18,6 +18,9 @@ tiles[].safety.hostNetwork bool
 tiles[].safety.hostPidOrIpc bool
 tiles[].safety.images []string
 tiles[].safety.namespaceJoins []string
+tiles[].safety.portBindings []tileschema.PortBinding
+tiles[].safety.portBindings[].hostIp string
+tiles[].safety.portBindings[].published int
 tiles[].safety.privileged bool
 tiles[].safety.reservedDevices []string
 tiles[].safety.securityOpt []string
