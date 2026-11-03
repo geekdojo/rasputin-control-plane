@@ -318,6 +318,24 @@ type SafetyFacts struct {
 
 	// Ulimits is every resource limit a service overrides, as "name=value".
 	Ulimits []string `json:"ulimits,omitempty"`
+
+	// --- Added 2026-11-03 (geekdojo/geekdojo-brain#551). ---
+
+	// PortBindings is every host port the stack publishes and the host address
+	// it binds, sorted by (Published, HostIP) so the signed bytes reproduce.
+	// ValidateWebPortBind reads it to keep the web port on loopback, where only
+	// the node proxy reaches it.
+	PortBindings []PortBinding `json:"portBindings,omitempty"`
+}
+
+// PortBinding is one host-side publish from a compose `ports:` entry.
+type PortBinding struct {
+	// HostIP is the host address the port binds. Empty means every interface,
+	// which is what compose does when the entry names no address.
+	HostIP string `json:"hostIp,omitempty"`
+	// Published is the host port. Always a real port: the extractor refuses
+	// any form without one.
+	Published int `json:"published"`
 }
 
 // DeclaredPrivilege is the tile's declaration, or the zero value — routine,

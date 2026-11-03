@@ -322,7 +322,7 @@ func TestBundle_EnvelopeStaysReadableByMajorOneReaders(t *testing.T) {
 	b.SchemaMinor = ContractMinor
 	raw := mustJSON(t, b)
 
-	for _, want := range []string{`"schemaVersion":1,`, `"schemaMinor":5,`} {
+	for _, want := range []string{`"schemaVersion":1,`, `"schemaMinor":6,`} {
 		if !strings.Contains(string(raw), want) {
 			t.Errorf("marshalled envelope lacks %s: %s", want, raw)
 		}
@@ -402,7 +402,7 @@ func TestParseFetchedBundle_UnknownCapabilityReasonIsASentence(t *testing.T) {
 	if len(got.Tiles) != 1 || got.Tiles[0].Tile.ID != okBundleTile().Tile.ID {
 		t.Fatalf("want only the other tile kept, got %+v", got.Tiles)
 	}
-	want := `Requires unknown capability "tile.future", which this control plane (contract 1.5) does not know: refusing this tile rather than loading it without it.`
+	want := `Requires unknown capability "tile.future", which this control plane (contract 1.6) does not know: refusing this tile rather than loading it without it.`
 	if len(rejected) != 1 || rejected[0].ID != "from-the-future" || rejected[0].Reason != want {
 		t.Fatalf("want one rejection with Reason\n%q\ngot %+v", want, rejected)
 	}
@@ -419,5 +419,46 @@ func TestSentence(t *testing.T) {
 		if got := sentence(errors.New(in)); got != want {
 			t.Errorf("sentence(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TC-551-08: the reader never enforces ValidateWebPortBind. A tile whose web
+// port is bound on every interface, and a v14-shaped tile with no portBindings
+// at all, both load through ParseBundle and ParseFetchedBundle, so the
+// embedded floor and cached bundles signed before the rule keep loading.
+func TestParseBundle_DoesNotEnforceWebPortBind(t *testing.T) {
+	allInterfaces := okBundleTile()
+	allInterfaces.Safety.PortBindings = []PortBinding{{HostIP: "", Published: allInterfaces.Tile.WebPort()}}
+	if ValidateWebPortBind(allInterfaces.Tile, allInterfaces.Safety) == nil {
+		t.Fatal("test setup: the all-interface tile must break the publisher rule")
+	}
+	v14Shape := okBundleTile()
+	v14Shape.Safety.PortBindings = nil
+
+	for name, bt := range map[string]BundleTile{"all interfaces": allInterfaces, "no portBindings": v14Shape} {
+		t.Run(name, func(t *testing.T) {
+			b := okBundle()
+			b.Tiles = []BundleTile{bt}
+			raw := mustJSON(t, b)
+
+			got, err := ParseBundle(raw)
+			if err != nil {
+				t.Fatalf("ParseBundle refused: %v", err)
+			}
+			if len(got.Tiles) != 1 || got.Tiles[0].Tile.ID != bt.Tile.ID {
+				t.Fatalf("ParseBundle lost the tile: %+v", got.Tiles)
+			}
+
+			got, rejected, err := ParseFetchedBundle(raw)
+			if err != nil {
+				t.Fatalf("ParseFetchedBundle refused: %v", err)
+			}
+			if len(rejected) != 0 {
+				t.Fatalf("ParseFetchedBundle rejected tiles: %+v", rejected)
+			}
+			if len(got.Tiles) != 1 || got.Tiles[0].Tile.ID != bt.Tile.ID {
+				t.Fatalf("ParseFetchedBundle lost the tile: %+v", got.Tiles)
+			}
+		})
 	}
 }

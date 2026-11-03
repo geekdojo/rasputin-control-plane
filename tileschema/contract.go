@@ -38,7 +38,7 @@ package tileschema
 // not bump the minor over the latest tileschema tag.
 const (
 	ContractMajor = 1
-	ContractMinor = 5
+	ContractMinor = 6
 	ContractPatch = 0
 )
 
