@@ -60,13 +60,17 @@ const (
 	tagPrefix   = "catalog-v"
 )
 
+// DefaultRepo is Geekdojo's signed app catalog: the catalog every release
+// build fetches (geekdojo/geekdojo-brain#529), and the default Repo.
+const DefaultRepo = "geekdojo/rasputin-app-catalog"
+
 // githubAPIBase is public GitHub's API root, and the default APIBase.
 const githubAPIBase = "https://api.github.com"
 
 // NewFetcher applies the defaults a control plane should run with.
 func NewFetcher(repo, apiBase, channel string) *Fetcher {
 	if repo == "" {
-		repo = "geekdojo/rasputin-app-catalog"
+		repo = DefaultRepo
 	}
 	if apiBase == "" {
 		apiBase = githubAPIBase

@@ -701,7 +701,7 @@ func TestWireMesh_ExplicitMockIsHonoured(t *testing.T) {
 
 // ⚠️ The api half of "an absent trust root is a refusal, not a downgrade".
 //
-// A missing <trustDir>/root-ca.pem used to select a permissive updater.Verifier
+// A missing publisher root (before #529, <trustDir>/root-ca.pem) used to select a permissive updater.Verifier
 // all by itself: bundle signatures were parsed but never chain-verified, and
 // every bundle was recorded SignedBy "<unverified>". That is a fail-open on the
 // artifact that decides what code a node boots, signalled only by a string
@@ -711,7 +711,7 @@ func TestWireMesh_ExplicitMockIsHonoured(t *testing.T) {
 func TestWireBundleVerifier_MissingTrustRootIsNeverPermissive(t *testing.T) {
 	for _, mode := range []string{"", "require", "REQUIRE", "dev-permissive", "permissive", "yes", "1"} {
 		t.Setenv(updateTrustEnv, mode)
-		v := wireBundleVerifier(t.TempDir()) // no root-ca.pem anywhere in it
+		v := wireBundleVerifier(slog.New(slog.DiscardHandler), filepath.Join(t.TempDir(), "root-ca.pem")) // absent
 		if v.Available() {
 			t.Errorf("%s=%q produced a usable verifier with no trust root — no value of this "+
 				"variable may select a mode that skips the check", updateTrustEnv, mode)
@@ -740,7 +740,7 @@ func TestWireBundleVerifier_LoadsTheTrustRootWhenPresent(t *testing.T) {
 		t.Fatalf("write root-ca.pem: %v", err)
 	}
 	t.Setenv(updateTrustEnv, "")
-	v := wireBundleVerifier(dir)
+	v := wireBundleVerifier(slog.New(slog.DiscardHandler), filepath.Join(dir, "root-ca.pem"))
 	if got := v.Mode(); got != updater.TrustEnforced {
 		t.Errorf("mode = %q, want %q", got, updater.TrustEnforced)
 	}

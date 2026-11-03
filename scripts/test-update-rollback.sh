@@ -11,7 +11,8 @@
 #     authenticated API calls (use scripts/dev-login.sh or curl the auth
 #     endpoints to populate it)
 #   - the PKI bootstrapped + a leaf cert available
-#   - root-ca.pem copied to data/trust/root-ca.pem so the api verifies
+#   - the api started with RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem
+#     (the pki-init.sh root) so it verifies
 #
 # Each scenario:
 #   1. builds a fresh mock bundle with a unique version

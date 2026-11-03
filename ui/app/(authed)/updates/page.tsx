@@ -146,11 +146,12 @@ export default function UpdatesPage() {
       <PageBody>
         {trustMode === 'unavailable' && (
           <Hint warn style={{ marginBottom: 14 }}>
-            ⚠ No root CA at <Tok>data/trust/root-ca.pem</Tok>, so OS updates cannot be verified and are{' '}
+            ⚠ No update trust root CA, so OS updates cannot be verified and are{' '}
             <strong>refused</strong> — nothing stages or installs until it is in place. On Rasputin hardware
             this ships in the OS image; if you&apos;re seeing this on an appliance, re-flash. Developing
-            locally? Run <Tok>./scripts/pki-init.sh</Tok>, copy <Tok>root-ca.pem</Tok> into the trust dir and
-            restart the api. There is no mode that skips the check.
+            locally? Run <Tok>./scripts/pki-init.sh</Tok> and restart the api with{' '}
+            <Tok>RASPUTIN_TRUST_ROOT</Tok> set to the <Tok>root-ca.pem</Tok> it writes. There is no mode that
+            skips the check.
           </Hint>
         )}
         {err && <div style={{ color: '#f87171', fontSize: 10, fontFamily: MONO, marginBottom: 12 }}>{err}</div>}

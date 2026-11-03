@@ -69,10 +69,10 @@ func trustFixtureRoot(t *testing.T, f *apiFixture, fx fwManifestFixture) *update
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(f.dir, updater.RootCAName), pemBytes, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(f.dir, "root-ca.pem"), pemBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	v := updater.NewVerifier(f.dir)
+	v := updater.NewVerifier(filepath.Join(f.dir, "root-ca.pem"))
 	if !v.TrustConfigured() {
 		t.Fatalf("fixture root CA did not load from %s", f.dir)
 	}

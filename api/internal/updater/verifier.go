@@ -1,11 +1,9 @@
 package updater
 
 import (
-	"crypto/x509"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
 
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 )
@@ -57,12 +55,12 @@ import (
 //
 // The zero value fails closed: no roots means refuse.
 type Verifier struct {
+	// rootPath is the publisher root CA file this verifier was built on,
+	// whether or not it loaded. Kept so callers can log where trust comes from.
+	rootPath string
 	// trustRoot is the root CA file artifactsig verifies against. Empty when
 	// none loaded.
 	trustRoot string
-	// trustDir is the directory we read the root CA from. Kept so callers can
-	// log where trust came from.
-	trustDir string
 	// reason says why no root CA was loaded, in the operator's terms. Carried
 	// into every refusal so the fix does not require reading this file.
 	reason string
@@ -82,40 +80,36 @@ const (
 	TrustUnavailable = "unavailable"
 )
 
-// RootCAName is the file, inside the trust dir, that holds the publisher root.
-// The same name the OS image bakes at artifactsig.DefaultTrustRoot.
-const RootCAName = "root-ca.pem"
-
-// NewVerifier loads the root CA cert from <dir>/root-ca.pem.
+// NewVerifier loads the publisher root CA from rootPath, the file the
+// composition root resolved through artifactsig.TrustRootPath — the same file
+// the catalog verifier and the node's agent use (geekdojo/geekdojo-brain#529).
 //
 // It always returns a usable *Verifier and never an error, deliberately: there
 // is no error path a caller can mishandle back into permissiveness. When the
 // root CA is missing, unreadable or unparseable the verifier comes back
 // UNAVAILABLE — it refuses every artifact, carrying the reason — instead of
 // downgrading to an unverified mode or killing the process.
-func NewVerifier(dir string) *Verifier {
-	path := filepath.Join(dir, RootCAName)
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return &Verifier{trustDir: dir, reason: fmt.Sprintf(
+//
+// The root is parsed here, through the same artifactsig.LoadTrustRoot every
+// verification uses, so an unusable root is reported once, at startup, as a
+// configuration fault — rather than once per upload as a verification failure,
+// which reads like a bad artifact.
+func NewVerifier(rootPath string) *Verifier {
+	if _, err := artifactsig.LoadTrustRoot(rootPath); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return &Verifier{rootPath: rootPath, reason: fmt.Sprintf(
 				"no update trust root at %s. On Rasputin hardware it ships in the OS image at "+
-					"%s — if this is an appliance, re-flash. On a dev box "+
-					"run scripts/pki-init.sh and copy root-ca.pem into %s",
-				path, artifactsig.DefaultTrustRoot, dir)}
+					"%s — if this is an appliance, re-flash. On a dev box run scripts/pki-init.sh "+
+					"and set %s to the root-ca.pem it writes",
+				rootPath, artifactsig.DefaultTrustRoot, artifactsig.TrustRootEnv)}
 		}
-		return &Verifier{trustDir: dir, reason: fmt.Sprintf("cannot read the update trust root at %s: %v", path, err)}
+		return &Verifier{rootPath: rootPath, reason: fmt.Sprintf(
+			"the update trust root at %s is unusable (%v). On Rasputin hardware it ships in the OS "+
+				"image at %s — if this is an appliance, re-flash. On a dev box set %s to the "+
+				"root-ca.pem scripts/pki-init.sh writes",
+			rootPath, err, artifactsig.DefaultTrustRoot, artifactsig.TrustRootEnv)}
 	}
-	// Parsed here as well as inside artifactsig so an unusable root is reported
-	// once, at startup, as a configuration fault — rather than once per upload
-	// as a verification failure, which reads like a bad artifact.
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(raw) {
-		return &Verifier{trustDir: dir, reason: fmt.Sprintf(
-			"no certificates parsed from %s — the update trust root is present but not a PEM "+
-				"certificate; replace it with the root-ca.pem from scripts/pki-init.sh", path)}
-	}
-	return &Verifier{trustRoot: path, trustDir: dir}
+	return &Verifier{rootPath: rootPath, trustRoot: rootPath}
 }
 
 // TrustConfigured reports whether the verifier was loaded with a real root
@@ -152,8 +146,9 @@ func (v *Verifier) Mode() string {
 	return TrustUnavailable
 }
 
-// TrustDir is where the root CA is read from. For logs and the setup page.
-func (v *Verifier) TrustDir() string { return v.trustDir }
+// TrustRoot is the publisher root CA file the verifier was built on, whether or
+// not it loaded. For logs.
+func (v *Verifier) TrustRoot() string { return v.rootPath }
 
 // VerifyArtifact checks the artifact at artifactPath against the detached CMS
 // signature at sigPath, requiring a leaf that chains to the loaded trust root

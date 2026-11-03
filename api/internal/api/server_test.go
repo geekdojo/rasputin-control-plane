@@ -277,7 +277,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	// bundle — the production posture for an unprovisioned box. Tests that need
 	// to ingest a bundle call buildBundleFixture, which installs a real root CA
 	// and re-inits the verifier.
-	verifier := updater.NewVerifier(dir)
+	verifier := updater.NewVerifier(filepath.Join(dir, "root-ca.pem"))
 	runner := jobs.NewRunner(jobStore, nc)
 
 	trustDir := dir
