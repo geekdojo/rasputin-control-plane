@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats.go"
 )
@@ -126,6 +129,142 @@ func TestDelete_MissingAppIsIdempotent(t *testing.T) {
 	}
 	if _, err := deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+missingAppID+`"}`, nc)); err != nil {
 		t.Errorf("deleteRemove on a missing app should succeed, got %v", err)
+	}
+}
+
+// geekdojo/geekdojo-brain#1059: the rack's stranded delete. The stop removed
+// the containers and the compose, then remove failed with "database is
+// locked", leaving the row at stopping with its secrets.
+//
+// TC-1059-03: remove fails on a write lock another pool on the same file
+// holds, and the app stays recoverable: the step fails "delete app: … database
+// is locked", the row is still at stopping, its app_secret_refs are unchanged,
+// and no deleted event is sent.
+//
+// TC-1059-04: with the lock released, a keep-volumes delete re-run in saga
+// order (stop, teardown_leaf, remove, destroy_secrets) completes: one stop
+// with deleteVolumes false and removeCompose true, no volume listing, the row
+// and its refs gone, one deleted event, and each recorded secret deleted.
+func TestDelete_RerunAfterRemoveFailedCompletes(t *testing.T) {
+	ctx := context.Background()
+	nc := startNATS(t)
+	store, inv := seedOnlineApp(t, "n", delAppID, "immich")
+	withSecrets(t, store, delAppID, composeNaming("a", "b"), "", "a", "b")
+	if err := store.RecordStatus(ctx, delAppID, proto.AppStatusStopping, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	refsBefore, err := store.SecretRefNames(ctx, delAppID)
+	if err != nil || len(refsBefore) != 2 {
+		t.Fatalf("seeded refs = %v, %v; want two", refsBefore, err)
+	}
+	deletedSub, err := nc.SubscribeSync(proto.AppChangeSubject(delAppID, proto.AppDeleted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = deletedSub.Unsubscribe() })
+	// deletedEvents is how many deleted events reached deletedSub. emitChange
+	// publishes on nc, so a Flush round trip orders every earlier publish's
+	// delivery before it returns.
+	deletedEvents := func() int {
+		t.Helper()
+		if err := nc.Flush(); err != nil {
+			t.Fatal(err)
+		}
+		n, _, err := deletedSub.Pending()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+
+	// A second pool on the apps store's own file holds a write transaction,
+	// and the store's connection waits for nothing.
+	var path string
+	var seq int
+	var name string
+	if err := store.db.QueryRowContext(ctx, `PRAGMA database_list`).Scan(&seq, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := dbutil.Open(ctx, path, schema, "holder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Close() })
+	held, err := holder.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := held.ExecContext(ctx, `UPDATE apps SET name = name WHERE id = ?`, delAppID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `PRAGMA busy_timeout = 0`); err != nil {
+		t.Fatal(err)
+	}
+
+	// TC-1059-03.
+	_, err = deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
+	if err == nil || !strings.HasPrefix(err.Error(), "delete app:") || !strings.Contains(err.Error(), "database is locked") {
+		t.Fatalf("remove under a held write lock: err = %v; want delete app: … database is locked", err)
+	}
+	if err := held.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Get(ctx, delAppID)
+	if err != nil || got == nil || got.LastStatus != proto.AppStatusStopping {
+		t.Fatalf("after the failed remove: app = %+v, %v; want the row at stopping", got, err)
+	}
+	if refs, err := store.SecretRefNames(ctx, delAppID); err != nil || !slices.Equal(refs, refsBefore) {
+		t.Fatalf("after the failed remove: refs = %v, %v; want %v", refs, err, refsBefore)
+	}
+	if n := deletedEvents(); n != 0 {
+		t.Fatalf("after the failed remove: %d deleted events; want none", n)
+	}
+
+	// TC-1059-04: the operator re-runs the delete, keeping volumes (the node
+	// has none left to name).
+	agent := fakeDeleteAgent(t, nc, "n")
+	spec := `{"appId":"` + delAppID + `"}`
+	if _, err := deleteStop(store, inv, nc, &fakeStoreState{})(newStepCtxNATS(spec, nc)); err != nil {
+		t.Fatalf("re-run stop: %v", err)
+	}
+	if _, err := deleteLeaf(store, inv, nc, nil)(newStepCtxNATS(spec, nc)); err != nil {
+		t.Fatalf("re-run teardown_leaf: %v", err)
+	}
+	out, err := deleteRemove(store, nc)(newStepCtxNATS(spec, nc))
+	if err != nil {
+		t.Fatalf("re-run remove: %v", err)
+	}
+	del := &fakeSecretDeleter{}
+	sc := newStepCtxNATS(spec, nc)
+	sc.PriorResults = map[string]json.RawMessage{"remove": out}
+	if _, err := deleteDestroySecrets(DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()})(sc); err != nil {
+		t.Fatalf("re-run destroy_secrets: %v", err)
+	}
+
+	if got := agent.stops(); len(got) != 1 || got[0] {
+		t.Errorf("stops (deleteVolumes) = %v; want one, false", got)
+	}
+	if got := agent.removeComposes(); len(got) != 1 || !got[0] {
+		t.Errorf("stops (removeCompose) = %v; want one, true", got)
+	}
+	if n := agent.lists(); n != 0 {
+		t.Errorf("volume listings = %d; want none", n)
+	}
+	if got, err := store.Get(ctx, delAppID); got != nil {
+		t.Errorf("app row should be gone, got %+v, %v", got, err)
+	}
+	if refs, err := store.SecretRefNames(ctx, delAppID); err != nil || len(refs) != 0 {
+		t.Errorf("refs after the re-run = %v, %v; want none", refs, err)
+	}
+	if n := deletedEvents(); n != 1 {
+		t.Errorf("deleted events = %d; want one", n)
+	}
+	var deleted []secrets.Ref
+	for _, c := range del.recorded() {
+		deleted = append(deleted, c.ref)
+	}
+	if want := []secrets.Ref{mustRef(t, delAppID, "a"), mustRef(t, delAppID, "b")}; !slices.Equal(deleted, want) {
+		t.Errorf("secrets deleted = %v; want %v", deleted, want)
 	}
 }
 

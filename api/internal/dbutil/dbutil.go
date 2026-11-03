@@ -21,6 +21,12 @@ import (
 // *sql.DB. name prefixes error messages so callers can tell which store
 // failed to open. On any error the partially-opened handle is closed.
 //
+// A write transaction begins IMMEDIATE (_txlock=immediate), so it takes the
+// write lock at BEGIN and the busy timeout applies to it; a deferred one that
+// reads and then writes fails at once with SQLITE_BUSY when another store's
+// pool on the same file wrote in between (geekdojo/geekdojo-brain#1059). A
+// read-only transaction (sql.TxOptions{ReadOnly: true}) keeps a plain BEGIN.
+//
 // The database holds session tokens, passkey credentials and the bus-token
 // store, so it is owner-only: the file is pre-created 0600 before SQLite
 // opens it (SQLite would create it 0644 less the umask), an existing one is
@@ -32,7 +38,7 @@ func Open(ctx context.Context, path, schema, name string) (*sql.DB, error) {
 	if err := secureFiles(path); err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)"
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(on)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("%s: open sqlite: %w", name, err)
