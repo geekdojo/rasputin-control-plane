@@ -83,7 +83,7 @@ func VerifyRAUCBundleSigner(bundlePath string) (*Result, error) {
 // inactive slot, and `rauc install` then applies its own verification to the
 // same bytes. Passing here is necessary and not sufficient.
 func VerifyRAUCBundleSignerForPurpose(bundlePath, trustRootPath string, purpose asn1.ObjectIdentifier) (*Result, error) {
-	roots, err := loadTrustRoot(trustRootPath)
+	roots, err := LoadTrustRoot(trustRootPath)
 	if err != nil {
 		return nil, err
 	}

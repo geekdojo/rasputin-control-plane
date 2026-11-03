@@ -60,6 +60,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storeaudit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -715,15 +716,21 @@ func main() {
 	_ = meshSvc.Start(ctx)
 	defer meshSvc.Stop()
 
-	// Bundles live on disk; the api streams them to agents. The
-	// bundle-signing root-ca.pem lives at <trustDir>/root-ca.pem and is
-	// owned by Rasputin Inc. (separate CA from the controlplane TLS CA above —
-	// see certificates.md for why).
+	// Bundles live on disk; the api streams them to agents. The publisher
+	// root that signs them is resolved ONCE, through the same resolver the
+	// node's agent uses: the root the OS image bakes, and on a non-release
+	// build RASPUTIN_TRUST_ROOT. It is owned by Rasputin Inc. (a separate CA
+	// from the controlplane TLS CA above — see certificates.md for why), and
+	// both the updater and the catalog verify against this one file
+	// (geekdojo/geekdojo-brain#529).
 	bundleDir := envOr("RASPUTIN_BUNDLE_DIR", filepath.Join(dataDir, "bundles"))
 	if err := os.MkdirAll(bundleDir, 0o755); err != nil {
 		log.Fatalf("rasputin-api: bundle dir: %v", err)
 	}
-	verifier := wireBundleVerifier(trustDir)
+	publisherRoot := artifactsig.TrustRootPath()
+	warnIgnoredReleaseSettings(logger, artifactsig.ReleaseBuild(), os.Getenv)
+	warnLegacyTrustRoot(logger, trustDir, publisherRoot)
+	verifier, catalogVerifier := wirePublisherTrust(logger, publisherRoot)
 	// Public URL the agent uses to fetch bundles. In dev the api is at
 	// :8080; in production this is the api's tailnet hostname.
 	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", applianceOr(
@@ -1017,7 +1024,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: %v", err)
 	}
-	catalogStore, err := catalogsync.New(dataDir, catalogsync.NewVerifier(filepath.Join(trustDir, "root-ca.pem")), catalogFloor)
+	catalogStore, err := catalogsync.New(dataDir, catalogVerifier, catalogFloor)
 	if err != nil {
 		log.Fatalf("rasputin-api: catalog store: %v", err)
 	}
@@ -1878,12 +1885,11 @@ func main() {
 	// App catalog polling (ADR-0006). catalogStore itself is built above,
 	// before the backup workflow registers, because the fan-out reads it; the
 	// poller replaces its floor with the newest signed catalog it can verify.
+	// A release build fetches only Geekdojo's catalog; the variables it
+	// ignores were reported at startup by warnIgnoredReleaseSettings.
+	catalogRepo, catalogAPIBase, _ := catalogSource(releaseAPIBase)
 	catalogPoller := catalogsync.NewPoller(
-		catalogsync.NewFetcher(
-			envOr("RASPUTIN_CATALOG_REPO", ""),
-			envOr("RASPUTIN_CATALOG_API_BASE", releaseAPIBase),
-			releaseChannel,
-		),
+		catalogsync.NewFetcher(catalogRepo, catalogAPIBase, releaseChannel),
 		catalogStore,
 	)
 	srv.SetCatalogSync(catalogStore, catalogPoller)
@@ -2702,10 +2708,10 @@ func envBoolPtr(key string) *bool {
 // stopped doing what it used to.
 const updateTrustEnv = "RASPUTIN_UPDATE_TRUST"
 
-// wireBundleVerifier builds the OS-update signature verifier.
+// wireBundleVerifier builds the OS-update signature verifier on publisherRoot.
 //
-// There is exactly one posture now: <trustDir>/root-ca.pem must load, and if
-// it does not the verifier is UNAVAILABLE and every artifact is refused.
+// There is exactly one posture now: publisherRoot must load, and if it does
+// not the verifier is UNAVAILABLE and every artifact is refused.
 //
 // ⚠️ THERE USED TO BE A SECOND, and before that the missing file selected it by
 // itself — the same class of bug as the 2026-09-01 storage incident and the
@@ -2721,18 +2727,19 @@ const updateTrustEnv = "RASPUTIN_UPDATE_TRUST"
 // NOT log.Fatalf, for the reason #89 settled: an appliance that will not start
 // is unreachable and unfixable. The api boots, /healthz answers, every other
 // page works; only bundle upload and staging refuse, naming the missing file.
-func wireBundleVerifier(trustDir string) *updater.Verifier {
+func wireBundleVerifier(logger *slog.Logger, publisherRoot string) *updater.Verifier {
 	if mode := strings.ToLower(strings.TrimSpace(os.Getenv(updateTrustEnv))); mode != "" && mode != "require" {
-		log.Printf("rasputin-api: ⚠️  %s=%q is ignored — OS update artifacts are verified against "+
-			"%s/root-ca.pem and there is no longer any mode that skips the check. Run scripts/pki-init.sh "+
-			"on a dev box with no PKI, and drop the variable.", updateTrustEnv, mode, trustDir)
+		logger.Warn("setting ignored: OS update artifacts are always verified and no mode skips the check",
+			"var", updateTrustEnv, "value", mode, "root", publisherRoot,
+			"fix", "remove "+updateTrustEnv+"; on a dev box with no PKI run scripts/pki-init.sh")
 	}
-	v := updater.NewVerifier(trustDir)
+	v := updater.NewVerifier(publisherRoot)
 	if !v.Available() {
-		log.Printf("rasputin-api: ⚠️  OS UPDATE VERIFICATION UNAVAILABLE: %s. No unverified mode was "+
-			"substituted — an update artifact nobody checked is the one thing that decides what code a "+
-			"node boots. The api is starting anyway so this control plane stays reachable and fixable; "+
-			"bundle upload and staging refuse until the trust root is in place.", v.UnavailableReason())
+		// No unverified mode is substituted: an update artifact nobody checked
+		// decides what code a node boots. The api starts anyway so this control
+		// plane stays reachable and fixable; bundle upload and staging refuse
+		// until the root is in place.
+		logger.Error("OS update verification unavailable", "root", publisherRoot, "err", v.UnavailableReason())
 	}
 	return v
 }

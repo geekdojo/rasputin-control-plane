@@ -84,9 +84,14 @@ unless `RASPUTIN_SECRETSTORE_BACKEND` names one; to opt in, see
 [Local secret store](#local-secret-store) below.
 
 Run `scripts/pki-init.sh` and copy its `root-ca.pem` into `data/trust/` if it
-is not there: as of 2026-09-01 a missing bundle-signing root CA makes the api
-REFUSE every OS update artifact instead of accepting it unverified, so the
-Updates page's upload and staging paths return 503 until it is in place.
+is not there, and put `RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem` in
+front of the local-stack command: as of 2026-09-01 a missing bundle-signing
+root CA makes the api REFUSE every OS update artifact instead of accepting it
+unverified, so the Updates page's upload and staging paths return 503 until it
+is in place. The api reads its publisher root only through
+`RASPUTIN_TRUST_ROOT`, which a dev build honours, else the baked
+`/etc/rasputin/trust/root-ca.pem`; it no longer uses `data/trust/root-ca.pem`
+for trust (geekdojo/geekdojo-brain#529). A release build ignores the variable.
 
 As of geekdojo/geekdojo-brain#527 that same root also gates the release
 MANIFEST the update check reads, so on a dev box "Check for updates" and the

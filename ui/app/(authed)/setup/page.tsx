@@ -282,8 +282,8 @@ function StepBody({
           refused: nothing stages or installs until it is in place. On Rasputin hardware this is
           preinstalled — if you&apos;re seeing this on a real system, re-flash the OS image
           (images from 2026.06.0-dev.12 onward wire it up automatically). Developing locally? Run{' '}
-          <Mono>./scripts/pki-init.sh</Mono> and copy <Mono>root-ca.pem</Mono> into <Mono>data/trust/</Mono>,
-          then restart the api. There is no mode that skips the check.
+          <Mono>./scripts/pki-init.sh</Mono> and restart the api with <Mono>RASPUTIN_TRUST_ROOT</Mono> set to
+          the <Mono>root-ca.pem</Mono> it writes. There is no mode that skips the check.
         </Hint>
       );
     default:

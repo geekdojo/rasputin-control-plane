@@ -61,7 +61,7 @@ func buildSignedArtifactFixture(t *testing.T, f *apiFixture) artifactFixture {
 	if err := os.WriteFile(filepath.Join(f.dir, "root-ca.pem"), rootPEM, 0o600); err != nil {
 		t.Fatalf("write root: %v", err)
 	}
-	v := updater.NewVerifier(f.dir)
+	v := updater.NewVerifier(filepath.Join(f.dir, "root-ca.pem"))
 	if !v.TrustConfigured() {
 		t.Fatalf("fixture root CA did not load from %s", f.dir)
 	}
@@ -319,7 +319,7 @@ func TestHandleUploadBundle_NoTrustRootRefusesAndStoresNothing(t *testing.T) {
 	if err := os.Remove(filepath.Join(f.dir, "root-ca.pem")); err != nil {
 		t.Fatalf("remove root: %v", err)
 	}
-	f.srv.updaterVerifier = updater.NewVerifier(f.dir)
+	f.srv.updaterVerifier = updater.NewVerifier(filepath.Join(f.dir, "root-ca.pem"))
 
 	w := uploadArtifact(t, f, c, af.sig, af.artifact, defaultUploadFields())
 

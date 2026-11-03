@@ -10,7 +10,8 @@
 #   leaf-001.pem
 #
 # After this script completes:
-#   1. Copy root-ca.pem to the api: <data-dir>/trust/root-ca.pem
+#   1. Dev api: start it with RASPUTIN_TRUST_ROOT=<path to this root-ca.pem>
+#      (a release build ignores the variable and uses the baked root)
 #   2. Copy root-ca.pem into your OS image build so every node's rootfs
 #      ships with it under /etc/rasputin/trust/root-ca.pem
 #   3. MOVE root-ca.key OFFLINE — a YubiKey, a 1Password vault entry, or
@@ -385,6 +386,7 @@ cat <<EOF
 
 Next steps:
     cp $OUT_DIR/root-ca.pem ../data/trust/root-ca.pem
+    # start the dev api with RASPUTIN_TRUST_ROOT=\$PWD/data/trust/root-ca.pem
     # ... and bake the same file into the OS image build (/etc/rasputin/trust/)
 
 For rotation:

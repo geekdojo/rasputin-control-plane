@@ -34,7 +34,7 @@ incident that settled this):
 | Variable | Default | Dev value | Without it |
 |---|---|---|---|
 | `RASPUTIN_MESH_BACKEND` | `auto` | `mock` | With no Headscale and no Docker the mesh is *unavailable*; the api boots, mesh verbs refuse |
-| `RASPUTIN_UPDATE_TRUST` | *(ignored)* | *(unset)* | With no `$RASPUTIN_TRUST_DIR/root-ca.pem` OS update artifacts are *refused* (503); the api boots, everything else works |
+| `RASPUTIN_UPDATE_TRUST` | *(ignored)* | *(unset)* | With no publisher root (`/etc/rasputin/trust/root-ca.pem`, or `$RASPUTIN_TRUST_ROOT` on a non-release build) OS update artifacts are *refused* (503); the api boots, everything else works |
 
 `RASPUTIN_UPDATE_TRUST` no longer selects anything. It used to name a
 `dev-permissive` mode that accepted bundles without checking any signature and

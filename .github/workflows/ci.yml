@@ -337,6 +337,14 @@ jobs:
           git fetch --depth=1 origin tag v2026.09.5
           ./scripts/test-bus-tls.sh --compat
 
+      # The release-build branch (geekdojo/geekdojo-brain#529): the tests
+      # compiled only under -tags release, which shipped binaries carry, and
+      # the assertion build-release.sh runs on each binary before packing it.
+      - name: release build tag
+        run: |
+          go test -tags release -run 'ReleaseBuild' -v ./artifactsig/... ./api/cmd/rasputin-api/...
+          ./scripts/test-assert-release-tag.sh
+
       - name: coverage summary
         run: |
           go tool cover -func=api.coverage.out | tail -1

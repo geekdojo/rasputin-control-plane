@@ -5,6 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 )
 
 // The api's security-setting resolvers (geekdojo/geekdojo-brain#591). Each one
@@ -19,7 +22,8 @@ import (
 // resolver, stays in main.go beside the derivation it documents.
 
 // trustDirFromEnv resolves RASPUTIN_TRUST_DIR, the directory holding the
-// bundle-signing root and the controlplane CA. A blank value gives <dataDir>/trust and
+// per-install controlplane, mesh and store CAs. It no longer reaches publisher
+// trust: the publisher root is artifactsig.TrustRootPath (#529). A blank value gives <dataDir>/trust and
 // padding is trimmed, so the result is never empty.
 func trustDirFromEnv(dataDir string) string {
 	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_TRUST_DIR")), filepath.Join(dataDir, "trust"))
@@ -73,4 +77,45 @@ const defaultSecretStoreAddr = "https://127.0.0.1:8200"
 // secretstore.ParseAddr in wireSecretStore.
 func secretStoreAddrFromEnv() string {
 	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_SECRETSTORE_ADDR")), defaultSecretStoreAddr)
+}
+
+// The app catalog's source, which a non-release build lets the environment
+// re-point (the local-stack app-upgrade test serves a stub catalog through it).
+const (
+	catalogRepoEnv    = "RASPUTIN_CATALOG_REPO"
+	catalogAPIBaseEnv = "RASPUTIN_CATALOG_API_BASE"
+)
+
+// catalogSourceFromEnv resolves the app catalog's repo and API base
+// (geekdojo/geekdojo-brain#529).
+//
+// A release build is fixed to Geekdojo's signed catalog at releaseAPIBase:
+// the operator-supplied catalog is not supported, so RASPUTIN_CATALOG_REPO
+// and RASPUTIN_CATALOG_API_BASE are ignored, and each one that is set is
+// returned in ignored for the startup warning.
+//
+// A non-release build keeps the behaviour the api had before: each variable
+// verbatim when non-empty, otherwise the fetcher's default repo ("" here) and
+// releaseAPIBase. A malformed repo is refused by the fetcher, one layer down.
+func catalogSourceFromEnv(release bool, getenv func(string) string, releaseAPIBase string) (repo, apiBase string, ignored []string) {
+	if release {
+		return catalogsync.DefaultRepo, releaseAPIBase, setVars(getenv, catalogRepoEnv, catalogAPIBaseEnv)
+	}
+	return getenv(catalogRepoEnv), cmp.Or(getenv(catalogAPIBaseEnv), releaseAPIBase), nil
+}
+
+// catalogSource is catalogSourceFromEnv for this binary and this process.
+func catalogSource(releaseAPIBase string) (repo, apiBase string, ignored []string) {
+	return catalogSourceFromEnv(artifactsig.ReleaseBuild(), os.Getenv, releaseAPIBase)
+}
+
+// setVars returns the names, in order, whose value is not blank.
+func setVars(getenv func(string) string, names ...string) []string {
+	var out []string
+	for _, n := range names {
+		if strings.TrimSpace(getenv(n)) != "" {
+			out = append(out, n)
+		}
+	}
+	return out
 }

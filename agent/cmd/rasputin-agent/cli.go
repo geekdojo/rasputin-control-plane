@@ -122,7 +122,8 @@ Options for verify-artifact:
   --sig <path>          Detached signature to check.
                         Default: <artifact>.sig
   --trust-root <path>   Publisher root CA to verify the chain against.
-                        Default: $RASPUTIN_TRUST_ROOT, or `+artifactsig.DefaultTrustRoot+`
+                        Default: `+artifactsig.DefaultTrustRoot+`; a
+                        non-release build honours $RASPUTIN_TRUST_ROOT
 
 The daemon itself takes no flags — it is configured through the environment,
 which both shipping unit files set:
@@ -136,7 +137,8 @@ which both shipping unit files set:
                             /var/lib/rasputin/bus/agent.token)
   RASPUTIN_CLUSTER_ID       cluster name, used for <cluster-id>.local
   RASPUTIN_AGENT_STATE_DIR  agent state (updater bookkeeping)
-  RASPUTIN_TRUST_ROOT       publisher root CA (see verify-artifact above)
+  RASPUTIN_TRUST_ROOT       publisher root CA, non-release builds only; a
+                            release build always uses `+artifactsig.DefaultTrustRoot+`
   RASPUTIN_MESH_CA_BUNDLE   per-installation controlplane CA for tailscaled
   RASPUTIN_UPDATE_BACKEND   force an updater backend: rauc | openwrt-ab | mock
   RASPUTIN_STORAGE_BACKEND  force a backup-target backend: blockdev | mock
@@ -159,7 +161,7 @@ func runVerifyArtifact(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("verify-artifact", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	sigPath := fs.String("sig", "", "detached signature path (default <artifact>.sig)")
-	trustRoot := fs.String("trust-root", "", "publisher root CA (default $RASPUTIN_TRUST_ROOT)")
+	trustRoot := fs.String("trust-root", "", "publisher root CA (default "+artifactsig.DefaultTrustRoot+"; $RASPUTIN_TRUST_ROOT on non-release builds)")
 	fs.Usage = func() { printShortUsage(stderr) }
 
 	// Go's flag package stops parsing at the first non-flag argument, so the

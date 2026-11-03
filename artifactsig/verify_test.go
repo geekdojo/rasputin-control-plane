@@ -361,14 +361,58 @@ func TestSigPathFor(t *testing.T) {
 	}
 }
 
+// envStub is a getenv that knows only the variables in m. A key missing from m
+// is absent, which a real environment cannot distinguish from empty: both
+// give "".
+func envStub(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+// TC-529-04: in a non-release build trustRootPath honours RASPUTIN_TRUST_ROOT,
+// trimmed, and every blank shape gives the baked default. This is the dev-box
+// and local-stack behaviour (security-resolvers R12).
 func TestTrustRootPath(t *testing.T) {
-	t.Setenv(TrustRootEnv, "")
-	if got := TrustRootPath(); got != DefaultTrustRoot {
-		t.Errorf("unset %s: got %q, want the baked default %q", TrustRootEnv, got, DefaultTrustRoot)
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"absent", nil, DefaultTrustRoot},
+		{"empty", map[string]string{TrustRootEnv: ""}, DefaultTrustRoot},
+		{"whitespace only", map[string]string{TrustRootEnv: " \t "}, DefaultTrustRoot},
+		{"set", map[string]string{TrustRootEnv: "/somewhere/else.pem"}, "/somewhere/else.pem"},
+		{"padded is trimmed", map[string]string{TrustRootEnv: " /x.pem "}, "/x.pem"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trustRootPath(false, envStub(tc.env)); got != tc.want {
+				t.Errorf("non-release, %s: got %q, want %q", tc.name, got, tc.want)
+			}
+		})
 	}
-	t.Setenv(TrustRootEnv, "/somewhere/else.pem")
-	if got := TrustRootPath(); got != "/somewhere/else.pem" {
-		t.Errorf("set %s: got %q", TrustRootEnv, got)
+}
+
+// TC-529-05: in a release build trustRootPath never honours the environment.
+// Every shape, a malformed relative path and the firewall init script's own
+// value included, gives the baked root. `release` is a parameter, so this runs
+// in the default CI build; TestReleaseBuild_TrustRootPathIgnoresTheEnvironment
+// proves the compiled-in branch under -tags release.
+func TestTrustRootPath_ReleaseBuildIgnoresTheEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"absent", nil},
+		{"empty", map[string]string{TrustRootEnv: ""}},
+		{"whitespace only", map[string]string{TrustRootEnv: "   "}},
+		{"set", map[string]string{TrustRootEnv: "/somewhere/else.pem"}},
+		{"malformed relative path", map[string]string{TrustRootEnv: "../../tmp/x.pem"}},
+		{"the firewall init script's value", map[string]string{TrustRootEnv: "/etc/rasputin/trust/root-ca.pem"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trustRootPath(true, envStub(tc.env)); got != DefaultTrustRoot {
+				t.Errorf("release, %s: got %q, want the baked root %q", tc.name, got, DefaultTrustRoot)
+			}
+		})
 	}
 }
 

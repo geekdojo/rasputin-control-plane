@@ -21,6 +21,7 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
    ```sh
    ./scripts/pki-init.sh --out-dir ./pki-out
    cp ./pki-out/root-ca.pem ./data/trust/root-ca.pem
+   export RASPUTIN_TRUST_ROOT="$PWD/data/trust/root-ca.pem"   # in the api's shell
    ```
 
    This step is not optional: there is no mode that accepts an artifact

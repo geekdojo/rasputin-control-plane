@@ -53,6 +53,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/smallstep/pkcs7"
@@ -64,9 +65,9 @@ import (
 // files/etc/rasputin/trust/ and names it in RASPUTIN_TRUST_ROOT.
 const DefaultTrustRoot = "/etc/rasputin/trust/root-ca.pem"
 
-// TrustRootEnv is the environment variable both images set to the trust root.
-// It has been set on the firewall since the agent's init script was written
-// (files/etc/init.d/rasputin-agent) and, until #154, nothing read it.
+// TrustRootEnv names an alternative trust root for NON-RELEASE builds only
+// (see trustRootPath). The firewall's init script sets it to DefaultTrustRoot,
+// which a release build reads anyway.
 const TrustRootEnv = "RASPUTIN_TRUST_ROOT"
 
 // maxSigBytes caps the detached signature read. A real one is ~1.6 KiB (leaf +
@@ -110,12 +111,27 @@ type Result struct {
 	DigestAlg string
 }
 
-// TrustRootPath returns the trust root to verify against: RASPUTIN_TRUST_ROOT
-// when the image set it, DefaultTrustRoot otherwise. The fallback is what makes
-// this work identically on Rasputin OS, whose systemd unit does not export the
-// variable but bakes the file to the same path.
-func TrustRootPath() string {
-	if p := os.Getenv(TrustRootEnv); p != "" {
+// TrustRootPath returns the publisher trust root this binary verifies against.
+// It is the one place the process environment and the build mode reach the
+// choice; trustRootPath holds the rule.
+func TrustRootPath() string { return trustRootPath(ReleaseBuild(), os.Getenv) }
+
+// trustRootPath is the rule behind TrustRootPath (security-resolvers R12).
+//
+// A release build always returns DefaultTrustRoot: the root the image bakes
+// read-only is the only publisher trust a shipped binary has, so nothing in
+// node.env can re-point it (geekdojo/geekdojo-brain#529). On the firewall,
+// whose init script sets RASPUTIN_TRUST_ROOT to the same path, ignoring it
+// reads the same file.
+//
+// A non-release build (a dev box, CI, a local stack) honours
+// RASPUTIN_TRUST_ROOT, trimmed, because a dev Mac has no /etc/rasputin. A
+// blank value is unset and gives DefaultTrustRoot.
+func trustRootPath(release bool, getenv func(string) string) string {
+	if release {
+		return DefaultTrustRoot
+	}
+	if p := strings.TrimSpace(getenv(TrustRootEnv)); p != "" {
 		return p
 	}
 	return DefaultTrustRoot
@@ -157,7 +173,7 @@ func Verify(artifactPath, sigPath, trustRootPath string) (*Result, error) {
 // could sign every artifact class and "a separate leaf for the catalog" bought
 // nothing at all.
 func VerifyForPurpose(artifactPath, sigPath, trustRootPath string, purpose asn1.ObjectIdentifier) (*Result, error) {
-	roots, err := loadTrustRoot(trustRootPath)
+	roots, err := LoadTrustRoot(trustRootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -220,10 +236,15 @@ func VerifyForPurpose(artifactPath, sigPath, trustRootPath string, purpose asn1.
 	}, nil
 }
 
-func loadTrustRoot(path string) (*x509.CertPool, error) {
+// LoadTrustRoot reads and parses the publisher root CA at path. It is the one
+// parser of a publisher root: every verifier, in the agent and the api, loads
+// its root through it. Every failure wraps ErrNoTrustRoot; a read failure also
+// wraps the underlying error, so a caller can tell a missing file
+// (fs.ErrNotExist) from an unreadable or unparseable one.
+func LoadTrustRoot(path string) (*x509.CertPool, error) {
 	pemBytes, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: %v", ErrNoTrustRoot, path, err)
+		return nil, fmt.Errorf("%w: %s: %w", ErrNoTrustRoot, path, err)
 	}
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemBytes) {

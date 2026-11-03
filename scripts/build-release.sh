@@ -76,6 +76,10 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 "$ROOT/scripts/pack-store-policy.sh" "$ROOT/api/internal/secretstore/storepolicy" "$DIST/openbao-policy"
 
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
+# -tags release compiles in artifactsig.ReleaseBuild() = true: a release binary
+# ignores RASPUTIN_TRUST_ROOT and the app-catalog source overrides, so node.env
+# cannot re-point publisher trust or the catalog (geekdojo/geekdojo-brain#529).
+# assert-release-tag.sh checks every binary for it before packing.
 # -X stamps the version into the agent binary (reported as the node's
 # control-plane software version). main.AgentVersion must be a var, not a const,
 # for this to take — the api has no such symbol, so the flag is a harmless no-op
@@ -99,7 +103,10 @@ for comp in $COMPONENTS; do
 		out="$DIST/$bin"
 		( cd "$moddir" && \
 		  CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
-		  go build -trimpath -ldflags "$LDFLAGS" -o "$out" "$pkg" )
+		  go build -trimpath -tags release -ldflags "$LDFLAGS" -o "$out" "$pkg" )
+		# Before packing: a binary without the release tag honours development
+		# overrides from node.env, so it must never become a tarball.
+		"$ROOT/scripts/assert-release-tag.sh" "$out"
 
 		tarball="$DIST/$bin-$VERSION-linux-$arch.tar.gz"
 		if [ "$name" = "api" ]; then

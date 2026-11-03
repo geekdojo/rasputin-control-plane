@@ -8,7 +8,7 @@ Rasputin signs every OS update bundle with a PKI we own. The keys, in increasing
 | **Intermediate CA** | Release machine or sealed CI secret | Quarterly, to issue leafs | Revoke + reissue leaf set |
 | **Leaf** | Build pipeline (release machine or sealed CI) | Every bundle build | Issue new leaf, ship in next OS update |
 
-Trust on the device side: `/etc/rasputin/trust/root-ca.pem`. The api reads the same file from `$RASPUTIN_TRUST_DIR/root-ca.pem` (default `./data/trust/root-ca.pem`).
+Trust on the device side: `/etc/rasputin/trust/root-ca.pem`. The api and the agent read that same file, resolved once through `artifactsig.TrustRootPath`. A release build always uses it; a non-release build (a dev box, CI) honours `RASPUTIN_TRUST_ROOT` instead, for example `RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem`. The api never uses `$RASPUTIN_TRUST_DIR/root-ca.pem` for trust (geekdojo/geekdojo-brain#529).
 
 ## The trust root is required
 
@@ -18,7 +18,7 @@ Without it the api **refuses every OS update artifact** — upload and staging r
 
 The api still **starts** with no trust root — it serves `/healthz`, the UI and every other subsystem, because a control plane that won't start can't be used to fix anything (#89). Only the update path refuses.
 
-On Rasputin hardware nothing is needed: the OS image bakes the public root at `/etc/rasputin/trust/root-ca.pem` (CI injects `vars.RASPUTIN_ROOT_CA_PEM`) and `rasputin-os`'s `tmpfiles.d` symlinks it into `/var/lib/rasputin/trust/root-ca.pem` before the api starts.
+On Rasputin hardware nothing is needed: the OS image bakes the public root at `/etc/rasputin/trust/root-ca.pem` (CI injects `vars.RASPUTIN_ROOT_CA_PEM`), and the release-built api reads it there. `rasputin-os`'s `tmpfiles.d` still symlinks it into `/var/lib/rasputin/trust/root-ca.pem`, which the api no longer uses for trust; a regular file at that path whose bytes differ from the baked root is ignored, with one WARN at startup naming it.
 
 ## What an operator uploads
 
@@ -47,7 +47,7 @@ This produces five files in `./pki-out/`:
 
 Then, immediately:
 
-1. `cp ./pki-out/root-ca.pem ./data/trust/root-ca.pem` so the api trusts it.
+1. `cp ./pki-out/root-ca.pem ./data/trust/root-ca.pem`, and start the dev api with `RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem` so it trusts it.
 2. Bake `root-ca.pem` into your OS image build at `/etc/rasputin/trust/root-ca.pem`. Every node ships with this same file.
 3. **Move `root-ca.key` offline.** Air-gapped USB, YubiKey, 1Password — anything that's not the same machine as the build pipeline. The api never needs the root key.
 4. `intermediate-ca.key` can stay on the release machine (or a sealed CI secret). It's used by `pki-init.sh --rotate-leaf` to issue new leafs.
