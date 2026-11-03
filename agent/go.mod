@@ -8,16 +8,16 @@ require (
 	github.com/geekdojo/rasputin-control-plane/logkit v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
-	github.com/nats-io/nats-server/v2 v2.15.1
-	github.com/nats-io/nats.go v1.54.0
-	github.com/shirou/gopsutil/v4 v4.26.9
-	golang.org/x/net v0.61.0
+	github.com/nats-io/nats-server/v2 v2.15.2
+	github.com/nats-io/nats.go v1.55.0
+	github.com/shirou/gopsutil/v4 v4.26.10
+	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.49.0
 )
 
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
-	github.com/ebitengine/purego v0.11.1 // indirect
+	github.com/ebitengine/purego v0.11.2 // indirect
 	github.com/geekdojo/rasputin-control-plane/secret v0.0.0-00010101000000-000000000000 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
