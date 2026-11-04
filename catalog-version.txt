@@ -18,6 +18,7 @@
 # than shipping a floor whose contents disagree with its label.
 #
 # History:
+#   34 2026-11-04  17 tiles
 #   14 2026-08-30  16 tiles
 #   1  2026-08-21  first published catalog (23 tiles, 5 available)
-14
+34
