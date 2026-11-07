@@ -100,8 +100,13 @@ export default function LoginPage() {
         {!status ? (
           err ? (
             <>
+              {/* On an appliance the api serves this page from the same
+                  origin (next.config.mjs), so the old question about
+                  rasputin-api on localhost:8080 only ever fit a dev box. The
+                  raw error below still shows what failed. */}
               <p style={{ color: '#facc15', fontSize: 11, lineHeight: 1.6, margin: 0 }}>
-                Couldn&apos;t reach the api. Is rasputin-api running on localhost:8080?
+                The sign-in check failed. Reload this page, and if it keeps failing, check that the control plane
+                is powered on and has finished starting.
               </p>
               <ErrLine>{err}</ErrLine>
             </>

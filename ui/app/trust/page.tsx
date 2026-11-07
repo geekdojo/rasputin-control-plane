@@ -1,7 +1,7 @@
 'use client';
 
 // /trust — unauthenticated first-run landing page, served over plain HTTP
-// by the api's bootstrap listener (an operator browsing http://rasputin.local
+// by the api's bootstrap listener (an operator browsing http://<cluster>.local
 // is 302'd here). Walks the operator through installing this installation's
 // certificate once per device, then hands off to the HTTPS login page where
 // the passkey ceremony has the secure context it needs.
@@ -50,9 +50,12 @@ export default function TrustPage() {
   const secureHome = `https://${host}/login`;
   // "Reach this system" address. The QR encodes the cluster's .local name — the
   // identity that works end-to-end (CA install AND the later passkey, whose RP ID
-  // is <cluster>.local). A same-segment phone resolves it over mDNS, and off-
-  // segment it resolves by unicast once the control plane's nameserver answers
-  // <cluster>.local (E3) — so the old "reach it by IP" fallback is gone. Falls
+  // is <cluster>.local) — and never an IP; the old "reach it by IP" fallback is
+  // retired. A same-segment phone resolves the name over mDNS. Off-segment it
+  // resolves by unicast only for a client that sends .local to unicast DNS at all
+  // (Android 13+ after an mDNS miss; never Apple, which keeps .local on mDNS) and
+  // whose DNS server answers it: the control plane's nameserver (E3), or the
+  // dnsmasq of a Rasputin firewall that hands out the client's address. Falls
   // back to the reached host on a dev box with no cluster name.
   const qrURL = `http://${clusterHostname || host}/`;
 
@@ -107,11 +110,13 @@ export default function TrustPage() {
         </div>
 
         {/* Reach-this-system: the name + a QR to open on another device.
-            The control plane's nameserver now answers <cluster>.local by unicast
-            (E3), so the name resolves off-segment too and the old IP fallback is
-            retired — the QR carries the name unconditionally. The passkey RP ID
-            stays <cluster>.local (ADR-0003 lock); DNS only makes .local resolve
-            wider, it never moves passkey off the name. */}
+            The QR carries the name unconditionally and the old IP fallback is
+            retired. Off the control plane's segment the name resolves by unicast
+            only for a client whose DNS reaches the control plane's nameserver
+            (E3) or a Rasputin firewall's dnsmasq, and never on Apple devices,
+            which resolve .local over mDNS alone (see qrURL above). The passkey
+            RP ID stays <cluster>.local (ADR-0003); DNS only makes .local
+            resolve wider, it never moves passkey off the name. */}
         <section
           style={{
             border: `1px solid ${HAIR}`,

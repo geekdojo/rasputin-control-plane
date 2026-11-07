@@ -61,7 +61,7 @@ func BuildIOSMobileConfig(rootPEM []byte, displayName, organization string) ([]b
 	<key>PayloadDisplayName</key>
 	<string>%s</string>
 	<key>PayloadDescription</key>
-	<string>Installs the Rasputin internal root CA so iOS apps (e.g. Tailscale) trust the Headscale TLS endpoint.</string>
+	<string>Installs the certificate your Rasputin created when it first powered on, so this device trusts secure connections to your Rasputin and its apps.</string>
 	<key>PayloadOrganization</key>
 	<string>%s</string>
 	<key>PayloadContent</key>
