@@ -1,6 +1,7 @@
 package tlsca
 
 import (
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/x509"
@@ -78,6 +79,11 @@ type LeafSpec struct {
 	// Lifetime — defaults to 365d if zero. The auto-rotation path only
 	// kicks in when an existing leaf has less than `renewWindow` left.
 	Lifetime time.Duration
+	// NotAfter, when set, is the leaf's exact expiry and replaces
+	// now+Lifetime. It may not be later than the CA's own NotAfter. A leaf
+	// that cannot be renewed (a device seeded once by hand) sets it to the
+	// CA's, so it lives exactly as long as the CA that vouches for it.
+	NotAfter time.Time
 	// ExactDNSNames requires the on-disk leaf's SAN set to EQUAL DNSNames
 	// rather than merely contain it, so a name being REMOVED forces a
 	// re-mint the same way adding one does.
@@ -138,56 +144,21 @@ func (ca *CA) MintLeafToDisk(outDir string, spec LeafSpec) (LeafPaths, error) {
 // idempotent-with-on-disk-state path. A failure returns the zero Value.
 //
 // It refuses a zero or unknown Usage, a Usage this instance does not issue,
-// an empty CommonName, and a server leaf with no SAN.
+// an empty CommonName, a server leaf with no SAN, and a NotAfter later than
+// the CA's own.
 func (ca *CA) MintLeaf(spec LeafSpec) (certPEM []byte, key secret.Value, err error) {
 	if ca == nil {
 		return nil, secret.Value{}, errors.New("tlsca: MintLeaf: nil CA")
-	}
-	eku, err := ca.checkSpec(spec)
-	if err != nil {
-		return nil, secret.Value{}, err
-	}
-	lifetime := spec.Lifetime
-	if lifetime <= 0 {
-		lifetime = defaultLeafLifetime
-	}
-	// Don't date a certificate against a clock nobody has checked. The gate
-	// blocks until the clock is trustworthy, within its own budget; when that
-	// budget runs out it says so and the mint proceeds, because a node with no
-	// reachable NTP still has to serve TLS. The gate owns the warning — this
-	// path mints once per leaf per renewal, and a line per mint would either
-	// be silence or a flood depending on the fleet.
-	if ca.deps.LeafClock != nil {
-		ca.deps.LeafClock()
 	}
 	// GenerateKey ignores its reader since Go 1.26; see create.
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), ca.deps.Rand)
 	if err != nil {
 		return nil, secret.Value{}, fmt.Errorf("tlsca %s: generate leaf key: %w", ca.cfg.Name, err)
 	}
-	serial, err := randomSerial(ca.deps.Rand)
+	certPEM, err = ca.sign(spec, &leafKey.PublicKey)
 	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("tlsca %s: %w", ca.cfg.Name, err)
+		return nil, secret.Value{}, err
 	}
-	now := ca.deps.Now().UTC()
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName:   spec.CommonName,
-			Organization: []string{"Rasputin"},
-		},
-		NotBefore:   now.Add(-time.Hour),
-		NotAfter:    now.Add(lifetime),
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{eku},
-		DNSNames:    append([]string(nil), spec.DNSNames...),
-		IPAddresses: append([]net.IP(nil), spec.IPAddresses...),
-	}
-	der, err := x509.CreateCertificate(ca.deps.Rand, tmpl, ca.Cert, &leafKey.PublicKey, ca.key)
-	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("tlsca %s: sign leaf: %w", ca.cfg.Name, err)
-	}
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyDER, err := x509.MarshalECPrivateKey(leafKey)
 	if err != nil {
 		return nil, secret.Value{}, fmt.Errorf("tlsca %s: marshal leaf key: %w", ca.cfg.Name, err)
@@ -199,7 +170,75 @@ func (ca *CA) MintLeaf(spec LeafSpec) (certPEM []byte, key secret.Value, err err
 	return certPEM, key, nil
 }
 
-// checkSpec is MintLeaf's refusals, and the EKU the leaf will carry.
+// SignLeaf signs a leaf under ca over a public key the caller supplies, for a
+// key that was generated somewhere else (a device's certificate request). It
+// returns the certificate as PEM bytes; there is no private key to return.
+//
+// The certificate is built from spec alone, exactly as MintLeaf's is: the
+// caller decides which name and usage the key is certified for, so nothing
+// from a request's subject or extensions can reach it. It refuses a nil pub
+// and everything MintLeaf refuses.
+func (ca *CA) SignLeaf(spec LeafSpec, pub crypto.PublicKey) (certPEM []byte, err error) {
+	if ca == nil {
+		return nil, errors.New("tlsca: SignLeaf: nil CA")
+	}
+	if pub == nil {
+		return nil, fmt.Errorf("tlsca %s: SignLeaf: public key required", ca.cfg.Name)
+	}
+	return ca.sign(spec, pub)
+}
+
+// sign is the one path every leaf is signed through: the spec's refusals, the
+// clock gate, the serial and the template.
+func (ca *CA) sign(spec LeafSpec, pub crypto.PublicKey) ([]byte, error) {
+	eku, err := ca.checkSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	// Don't date a certificate against a clock nobody has checked. The gate
+	// blocks until the clock is trustworthy, within its own budget; when that
+	// budget runs out it says so and the mint proceeds, because a node with no
+	// reachable NTP still has to serve TLS. The gate owns the warning — this
+	// path mints once per leaf per renewal, and a line per mint would either
+	// be silence or a flood depending on the fleet.
+	if ca.deps.LeafClock != nil {
+		ca.deps.LeafClock()
+	}
+	serial, err := randomSerial(ca.deps.Rand)
+	if err != nil {
+		return nil, fmt.Errorf("tlsca %s: %w", ca.cfg.Name, err)
+	}
+	now := ca.deps.Now().UTC()
+	notAfter := spec.NotAfter
+	if notAfter.IsZero() {
+		lifetime := spec.Lifetime
+		if lifetime <= 0 {
+			lifetime = defaultLeafLifetime
+		}
+		notAfter = now.Add(lifetime)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			CommonName:   spec.CommonName,
+			Organization: []string{"Rasputin"},
+		},
+		NotBefore:   now.Add(-time.Hour),
+		NotAfter:    notAfter,
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{eku},
+		DNSNames:    append([]string(nil), spec.DNSNames...),
+		IPAddresses: append([]net.IP(nil), spec.IPAddresses...),
+	}
+	der, err := x509.CreateCertificate(ca.deps.Rand, tmpl, ca.Cert, pub, ca.key)
+	if err != nil {
+		return nil, fmt.Errorf("tlsca %s: sign leaf: %w", ca.cfg.Name, err)
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
+}
+
+// checkSpec is the refusals every leaf goes through (MintLeaf and SignLeaf),
+// and the EKU the leaf will carry.
 func (ca *CA) checkSpec(spec LeafSpec) (x509.ExtKeyUsage, error) {
 	eku, ok := spec.Usage.extKeyUsage()
 	if !ok {
@@ -213,6 +252,12 @@ func (ca *CA) checkSpec(spec LeafSpec) (x509.ExtKeyUsage, error) {
 	}
 	if spec.Usage == UsageServer && len(spec.DNSNames) == 0 && len(spec.IPAddresses) == 0 {
 		return 0, fmt.Errorf("tlsca %s: MintLeaf: a server leaf needs at least one DNS or IP SAN", ca.cfg.Name)
+	}
+	// A leaf never outlives the CA that signed it: a verifier would refuse
+	// it past the CA's expiry anyway, so a later date is a caller's mistake.
+	if spec.NotAfter.After(ca.Cert.NotAfter) {
+		return 0, fmt.Errorf("tlsca %s: MintLeaf: NotAfter %s is later than the CA's %s", ca.cfg.Name,
+			spec.NotAfter.UTC().Format(time.RFC3339), ca.Cert.NotAfter.UTC().Format(time.RFC3339))
 	}
 	return eku, nil
 }

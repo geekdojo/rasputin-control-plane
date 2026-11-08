@@ -16,6 +16,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bmccert"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
@@ -27,6 +28,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/nats-io/nats-server/v2/server"
@@ -65,7 +67,10 @@ func embeddedNATS(t *testing.T) *nats.Conn {
 // ============================================================================
 
 type apiFixture struct {
-	ctx             context.Context
+	ctx context.Context
+	// bmcCA is the controlplane CA the real BMC certificate request signer
+	// signs under (geekdojo/geekdojo-brain#1065).
+	bmcCA           *tlsca.CA
 	dir             string
 	srv             *Server
 	handler         http.Handler
@@ -306,10 +311,18 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	if err != nil {
 		t.Fatalf("NewNodeApps: %v", err)
 	}
+	// The real BMC certificate request signer, over a real controlplane CA
+	// (geekdojo/geekdojo-brain#1065).
+	bmcCA := tlscatest.Controlplane(t, filepath.Join(dir, "bmc-ca"))
+	bmcCSR, err := bmccert.New(bmcCA, bmcCA.Cert, bmcCA.CertPEM, slog.New(logs))
+	if err != nil {
+		t.Fatalf("bmccert New: %v", err)
+	}
+	f.bmcCA = bmcCA
 	srv, err := NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appStore,
 		mtrStore, updStore, verifier, bundleDir, trustDir,
 		meshSvc, bmcSvc, setupSvc, authSvc, nil /* obsStatus */, busTokenStore, nc,
-		bustls.Available(busKey), opSecrets, nodeApps, slog.New(logs), sequentialIDs())
+		bustls.Available(busKey), opSecrets, nodeApps, bmcCSR, slog.New(logs), sequentialIDs())
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -1681,7 +1694,7 @@ func TestHandleMeshState_SurfacesHeadplaneURL(t *testing.T) {
 		f.fw, f.fwSvc, f.appsStore,
 		f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		meshSvc, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		f.srv.bus, f.srv.operatorSecrets, f.srv.nodeApps, f.srv.log, f.srv.newCorrelationID)
+		f.srv.bus, f.srv.operatorSecrets, f.srv.nodeApps, f.srv.bmcCSR, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}

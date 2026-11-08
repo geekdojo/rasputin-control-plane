@@ -77,7 +77,7 @@ func (f *apiFixture) useBusState(t *testing.T, st BusState) {
 	srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 		f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 		f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil /* obsStatus */, f.srv.busTokens, f.nc,
-		st, f.srv.operatorSecrets, f.srv.nodeApps, f.srv.log, f.srv.newCorrelationID)
+		st, f.srv.operatorSecrets, f.srv.nodeApps, f.srv.bmcCSR, f.srv.log, f.srv.newCorrelationID)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
@@ -243,28 +243,38 @@ func TestNewServer_RefusesNilCollaborators(t *testing.T) {
 	ids := sequentialIDs()
 	ops := f.srv.operatorSecrets
 	rm := f.srv.nodeApps
+	csr := f.srv.bmcCSR
 	for name, tc := range map[string]struct {
 		bus BusState
 		ops operatorSecretsService
 		rm  nodeAppRemover
+		csr bmcCSRSigner
 		log *slog.Logger
 		ids func() string
+		// want, when set, is text the error must carry.
+		want string
 	}{
-		"nil BusState":     {nil, ops, rm, logger, ids},
-		"nil logger":       {key, ops, rm, nil, ids},
-		"nil id generator": {key, ops, rm, logger, nil},
+		"nil BusState":     {bus: nil, ops: ops, rm: rm, csr: csr, log: logger, ids: ids},
+		"nil logger":       {bus: key, ops: ops, rm: rm, csr: csr, log: nil, ids: ids},
+		"nil id generator": {bus: key, ops: ops, rm: rm, csr: csr, log: logger, ids: nil},
 		// TC-604-10: the operator secrets service is required too.
-		"nil operator secrets service": {key, nil, rm, logger, ids},
+		"nil operator secrets service": {bus: key, ops: nil, rm: rm, csr: csr, log: logger, ids: ids},
 		// TC-783-56: and so is the node app remover.
-		"nil node app remover": {key, ops, nil, logger, ids},
+		"nil node app remover": {bus: key, ops: ops, rm: nil, csr: csr, log: logger, ids: ids},
+		// TC-1065-18: and the BMC certificate request signer, named in the error.
+		"nil BMC certificate request signer": {bus: key, ops: ops, rm: rm, csr: nil, log: logger, ids: ids,
+			want: "BMC certificate request signer"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv, err := NewServer(f.jobsStore, f.runner, f.inv, inventory.NewService(f.inv, f.nc, slog.New(slog.DiscardHandler)),
 				f.fw, f.fwSvc, f.appsStore, f.metricsStore, f.updStore, f.verifier, f.bundleDir, f.srv.trustDir,
 				f.mesh, f.bmcSvc, f.setupSvc, f.authSvc, nil, f.srv.busTokens, f.nc,
-				tc.bus, tc.ops, tc.rm, tc.log, tc.ids)
+				tc.bus, tc.ops, tc.rm, tc.csr, tc.log, tc.ids)
 			if err == nil || srv != nil {
 				t.Fatalf("NewServer = (%v, %v), want (nil, an error)", srv, err)
+			}
+			if tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
 			}
 		})
 	}

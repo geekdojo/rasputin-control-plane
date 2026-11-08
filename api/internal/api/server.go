@@ -38,7 +38,10 @@ type Server struct {
 	operatorSecrets operatorSecretsService
 	// nodeApps removes a removed node's apps and their secrets
 	// (geekdojo/geekdojo-brain#783).
-	nodeApps        nodeAppRemover
+	nodeApps nodeAppRemover
+	// bmcCSR signs a Super4C BMC's certificate request for POST
+	// /api/bmc/csr (geekdojo/geekdojo-brain#1065).
+	bmcCSR          bmcCSRSigner
 	store           *jobs.Store
 	runner          *jobs.Runner
 	inv             *inventory.Store
@@ -207,13 +210,14 @@ func (s *Server) SetHostLANInfo(fn func() (ip string, mac string)) {
 // configured with an "allow-all" middleware in a future refactor — for v0
 // auth is always on.
 //
-// fwState, bus, operatorSecrets, nodeApps, logger and newCorrelationID are required,
+// fwState, bus, operatorSecrets, nodeApps, bmcCSR, logger and newCorrelationID are required,
 // and NewServer returns an error rather than a Server that would fail on its
 // first use: fwState is the firewall service the state route reads, bus is
 // the bus TLS state (bustls.Available or bustls.Unavailable), operatorSecrets
 // the business service behind the operator secret routes
 // (geekdojo/geekdojo-brain#604), nodeApps what removes a removed node's apps
-// and their secrets (geekdojo/geekdojo-brain#783), logger the process logger, and
+// and their secrets (geekdojo/geekdojo-brain#783), bmcCSR what signs a Super4C
+// BMC's certificate request (geekdojo/geekdojo-brain#1065), logger the process logger, and
 // newCorrelationID the source of the id a coded error carries.
 func NewServer(
 	store *jobs.Store,
@@ -238,6 +242,7 @@ func NewServer(
 	bus BusState,
 	operatorSecrets operatorSecretsService,
 	nodeApps nodeAppRemover,
+	bmcCSR bmcCSRSigner,
 	logger *slog.Logger,
 	newCorrelationID func() string,
 ) (*Server, error) {
@@ -250,6 +255,8 @@ func NewServer(
 		return nil, errors.New("api: NewServer: an operator secrets service is required")
 	case nodeApps == nil:
 		return nil, errors.New("api: NewServer: a node app remover is required")
+	case bmcCSR == nil:
+		return nil, errors.New("api: NewServer: a BMC certificate request signer is required")
 	case logger == nil:
 		return nil, errors.New("api: NewServer: a logger is required")
 	case newCorrelationID == nil:
@@ -282,7 +289,7 @@ func NewServer(
 		// caller for a process-wide constant; reading it here keeps the one
 		// source without disturbing the signature.
 		selfNodeID: os.Getenv("RASPUTIN_SELF_NODE_ID"),
-		bus:        bus, operatorSecrets: operatorSecrets, nodeApps: nodeApps, log: logger, newCorrelationID: newCorrelationID,
+		bus:        bus, operatorSecrets: operatorSecrets, nodeApps: nodeApps, bmcCSR: bmcCSR, log: logger, newCorrelationID: newCorrelationID,
 	}, nil
 }
 
@@ -489,6 +496,7 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /api/bmc/config", reqd(s.handleBMCGetConfig))
 	mux.HandleFunc("POST /api/bmc/config", reqd(s.handleBMCSetConfig))
 	mux.HandleFunc("POST /api/bmc/probe", reqd(s.handleBMCProbe))
+	mux.HandleFunc("POST /api/bmc/csr", reqd(s.handleBMCSignCSR))
 	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
 	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
 	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))

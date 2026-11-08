@@ -30,6 +30,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bmccert"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
@@ -1627,10 +1628,18 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: node app remover", "err", err.Error())
 		os.Exit(1)
 	}
+	// POST /api/bmc/csr signs a Super4C BMC's certificate request under the
+	// controlplane CA (geekdojo/geekdojo-brain#1065). ensureCAs exits when that
+	// CA will not load, so it is never nil here.
+	bmcCSR, err := bmccert.New(cpCA, cpCA.Cert, cpCA.CertPEM, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: bmc certificate signer", "err", err.Error())
+		os.Exit(1)
+	}
 	// busState is a value, never nil: bustls.Available or bustls.Unavailable.
 	// The correlation id a coded error carries is crypto/rand's Text.
 	srv, err := apipkg.NewServer(jobStore, runner, invStore, invSvc, fwStore, fwSvc, appsStore, metricsStore, updaterStore, verifier, bundleDir, trustDir, meshSvc, bmcSvc, setupSvc, authSvc, obsStatus, busTokenStore, busSrv.Conn(),
-		busState, operatorSecrets, nodeApps, logger, cryptorand.Text)
+		busState, operatorSecrets, nodeApps, bmcCSR, logger, cryptorand.Text)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: api server", "err", err.Error())
 		os.Exit(1)
