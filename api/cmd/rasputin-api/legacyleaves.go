@@ -24,8 +24,11 @@ func legacyCollectorLeafDir(dataDir string) string {
 //
 // It runs once at start. An absent directory is the steady state and writes
 // nothing. A directory that cannot be read or removed is a WARN, and start-up
-// continues: nothing verifies a Mesh client chain, so a leaf left behind
-// admits no one.
+// continues, because a leaf left behind still admits no one. The one verifier
+// of controlplane-CA client chains is the Super4C BMC firmware
+// (geekdojo/rasputin-super4c-bmc), and it admits only a leaf whose CN is
+// exactly rasputin-bmc-client with the clientAuth EKU; a collector leaf's CN
+// is its node's id.
 //
 // Lifetime: delete this function and its call once every known cluster has
 // started an api of a release that carries it. That is a checkable fact, the
