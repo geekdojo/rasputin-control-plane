@@ -49,6 +49,15 @@ const (
 	// codeNodeSecretsLeft: the node was removed, but some of its apps'
 	// secrets are still in the secret store.
 	codeNodeSecretsLeft = "node_secrets_left"
+	// codeBMCCSRInvalid: POST /api/bmc/csr carried no single parseable PEM
+	// certificate request (geekdojo/geekdojo-brain#1065).
+	codeBMCCSRInvalid = "bmc_csr_invalid"
+	// codeBMCCSRRefused: the certificate request parsed, but the BMC signing
+	// policy refused it, or no operator was signed in.
+	codeBMCCSRRefused = "bmc_csr_refused"
+	// codeBMCCSRSignFailed: the request passed the policy, but the
+	// controlplane CA could not sign it.
+	codeBMCCSRSignFailed = "bmc_csr_sign_failed"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

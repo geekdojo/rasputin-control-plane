@@ -245,7 +245,9 @@ usually gets its internet *through* the firewall it's bootstrapping.
 The api holds two TLS CAs, both created by one code path (`api/internal/tlsca`)
 and kept in `trust/`. The **controlplane CA** signs every HTTPS leaf the
 controlplane serves (the api, Headscale, the app leaves); operator devices
-install it once, and every node is given it. The **store CA** is trusted by the
+install it once, and every node is given it. It also signs a Super4C BMC's
+server leaf over the board's own key: `POST /api/bmc/csr` takes the board's
+certificate request, and `api/internal/bmccert` checks it before the CA signs. The **store CA** is trusted by the
 secret store's listener alone and enters no node, browser or collector trust.
 It signs the store's server leaf and the api's client leaf at the store, which
 the api's store client (`api/internal/secretstore`, selected by
