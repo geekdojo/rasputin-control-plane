@@ -79,14 +79,56 @@ func buildAPI(t *testing.T) string {
 	return apiBin
 }
 
-func freePort(t *testing.T) int {
+// freePorts returns n distinct free loopback ports, none of them in taken.
+// Every listener stays open until all n are chosen, so the kernel cannot hand
+// the same port out twice: on Linux, two back-to-back listen-and-close calls
+// on 127.0.0.1:0 return the same port about once in 7,000 pairs. When the bus
+// port and the obs ingest port came out equal, the api's node listener
+// answered on the "bus" port and TestFunctional_RealAPIProcess_BusCertDown
+// reported a bus listener that did not exist. A port in taken (one a stopped
+// api used and the next one reuses) is held and skipped, never returned.
+func freePorts(t *testing.T, n int, taken ...int) []int {
 	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	skip := make(map[int]bool, len(taken))
+	for _, p := range taken {
+		skip[p] = true
 	}
-	defer func() { _ = l.Close() }()
-	return l.Addr().(*net.TCPAddr).Port
+	var held []net.Listener
+	defer func() {
+		for _, l := range held {
+			_ = l.Close()
+		}
+	}()
+	ports := make([]int, 0, n)
+	for len(ports) < n {
+		l, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, l)
+		if p := l.Addr().(*net.TCPAddr).Port; !skip[p] {
+			skip[p] = true
+			ports = append(ports, p)
+		}
+	}
+	return ports
+}
+
+// TestFreePortsDistinct pins the guarantee runAPI relies on: every port
+// freePorts returns is distinct and none is a port it was told is taken.
+func TestFreePortsDistinct(t *testing.T) {
+	taken := freePorts(t, 2)
+	got := freePorts(t, 200, taken...)
+	if len(got) != 200 {
+		t.Fatalf("freePorts returned %d ports, want 200", len(got))
+	}
+	seen := map[int]bool{taken[0]: true, taken[1]: true}
+	for _, p := range got {
+		if p <= 0 || seen[p] {
+			t.Fatalf("freePorts returned %d, a repeat, a taken port or not a port (taken %v, got %v)", p, taken, got)
+		}
+		seen[p] = true
+	}
 }
 
 // apiProc is one running rasputin-api, with its log captured.
@@ -269,13 +311,16 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 	t.Helper()
 	httpPort, natsPort := o.httpPort, o.natsPort
+	// One draw for every port this api needs, so no two are the same and none
+	// repeats a port carried over from the previous api.
+	fresh := freePorts(t, 3, httpPort, natsPort)
 	if httpPort == 0 {
-		httpPort = freePort(t)
+		httpPort = fresh[1]
 	}
 	if natsPort == 0 {
-		natsPort = freePort(t)
+		natsPort = fresh[2]
 	}
-	ingestPort := freePort(t)
+	ingestPort := fresh[0]
 	a := &apiProc{
 		dataDir:  dataDir,
 		httpBase: fmt.Sprintf("http://127.0.0.1:%d", httpPort),
