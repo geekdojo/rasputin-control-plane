@@ -307,13 +307,13 @@ func TestCopyStore_AFailedCopyRefusesTheUpdate(t *testing.T) {
 // TC-800-07: a successful copy is called once with the job's id, its result
 // is the step's, and install runs next.
 func TestCopyStore_SuccessThenInstall(t *testing.T) {
-	cp := &fakeCopier{result: json.RawMessage(`{"copied":true,"version":"2.7.1","files":3,"sizeBytes":4096}`)}
+	cp := &fakeCopier{result: json.RawMessage(`{"copied":true,"version":"2.7.2","files":3,"sizeBytes":4096}`)}
 	r := newSagaRig(t, map[string]proto.NodeRole{sagaSelf: proto.RoleControlPlane}, Config{SelfNodeID: sagaSelf, StoreCopy: cp})
 	j := r.run(t, sagaSelf)
 	if got := cp.calls(); !reflect.DeepEqual(got, []string{j.ID}) {
 		t.Errorf("copier calls %v, want [%s]", got, j.ID)
 	}
-	want := map[string]any{"copied": true, "version": "2.7.1", "files": float64(3), "sizeBytes": float64(4096)}
+	want := map[string]any{"copied": true, "version": "2.7.2", "files": float64(3), "sizeBytes": float64(4096)}
 	if got := r.copyResult(t, j.ID); !reflect.DeepEqual(got, want) {
 		t.Errorf("copy_store result %v", got)
 	}

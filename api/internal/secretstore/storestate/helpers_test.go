@@ -15,7 +15,7 @@ import (
 )
 
 // readyHealth is a 200 initialised, unsealed answer.
-var readyHealth = secretstore.Health{Initialized: true, Version: "2.7.1"}
+var readyHealth = secretstore.Health{Initialized: true, Version: "2.7.2"}
 
 // healthErr is the client's error for a failed Health call of kind.
 func healthErr(kind error) error { return &secretstore.Error{Op: "health", Kind: kind} }

@@ -45,7 +45,7 @@ func TestStartWith_RendersTwoRoles(t *testing.T) {
 	cfg := validConfig(t)
 	// $3 is main.hcl, $5 init.json; both sit in the root.
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) cp -R "$(dirname "$5")" "`+out+`"; echo "init.json is $5" >&2; exit 3 ;;
 esac
 `)
@@ -226,7 +226,7 @@ func TestStartWith_RendersPoliciesWithNoRole(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "seen")
 	cfg := validConfig(t)
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) cp -R "$(dirname "$5")" "`+out+`"; exit 3 ;;
 esac
 `)

@@ -27,7 +27,7 @@ functional tests share under their own variables.
 
 ## What it proves
 
-On the CI runner (linux/amd64), against OpenBao v2.7.1 as pinned in
+On the CI runner (linux/amd64), against OpenBao v2.7.2 as pinned in
 `api/internal/secretstoretest/pin.go`:
 
 - The store starts with S8's transport: one TCP listener on 127.0.0.1, TLS, a required and
@@ -289,7 +289,7 @@ is missing or differs. rasputin-os installs them, and the image's self-init read
 file, each role admitting only its own CommonName, carrying only its own policy, with
 `token_no_default_policy` set. Two test-only roles hold half of the rotation policy each.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **Self-init leaves no recovery material.** `sys/seal-status` shows t=0 and n=0 (T35,
   TC-804-08).
@@ -327,7 +327,7 @@ through `Bootstrap.Policies` with no role, as the image's `init.json` loads it. 
 roles, each labelled in the test, let it read what must not change, show `required_parameters` is
 checked on a read, and show the `policies` alias is honoured.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **The positive path, with no root token.** The provisioner mounts `rasputin-rel-t` as `kv-v2`,
   reads it back as kv version 2, lists the roles, and writes the role `rasputin-rel-t` with string
@@ -374,7 +374,7 @@ leaf for the rotation role on every handshake through the api's own mint,
 `sealrotate.MintRotationLeaf`. The harness stands in for systemd: a restart is
 `Stop` and then `StartNoWait`, and the rotator waits on `sys/health` itself.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **Rotation and re-wrap (TC-830-17).** Two rotations in a row each succeed as `rotated`, change
   the key id, leave `rotation/` empty and the fragment naming `seal-key` alone, and survive a cold
@@ -441,7 +441,7 @@ shipped `storepolicy` text; a test-only `revoker`, whose only grant is `update` 
 client, a real readiness `Monitor` and `ObservedStore`, a login counter, and a store wrapper that
 keeps the token each call carried.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **One login serves many calls.** A write and then a read make one login; a second read makes
   none.
@@ -497,7 +497,7 @@ Self-init creates the `rasputin-secrets` mount and the `rasputin-api` cert role 
 `ObservedStore`, the login session, the repository and the service. Only the apps table is a
 fake, holding one app and its target node.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **Deploy round trip (TC-761-22).** A deploy job for the app, on its target node, creates
   `apps/<app ID>/db-pass` at version 1 and reads the same bytes back. A second create is
@@ -668,7 +668,7 @@ restore is the real `PrepareRestore` and `ApplyPendingRestore`. A second store p
 node: `Store.Adopt` takes the staged data, seal key, seal fragment and store CA, as #766's
 store-unit step and the api's leaf re-mint will, and restarts on them.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **The round trip (TC-765-34).** An app secret written through the secrets service survives a
   backup that stops and starts the real store, with the watcher reading `secret-store:quiesced`
@@ -714,7 +714,7 @@ seal-rotation gate and a `SecretStore` like the backup test's whose quiesce is f
 App secrets are resolved by the real `appsecret.StoreSource` over the real secrets service, and
 recorded in a real apps table. The check is the real `store.reference_check` workflow.
 
-What it proves, against OpenBao v2.7.1:
+What it proves, against OpenBao v2.7.2:
 
 - **The copy (TC-800-22).** App X's secret is resolved and recorded. The copy stops the store,
   copies it and gets it back ready; the copy's `store/openbao-version` equals sys/health's
@@ -743,15 +743,15 @@ Expect `--- PASS: TestPreUpdateCopy_AgainstTheRealStore` and exit status 0, in a
 
 ## The pin, and bumping it
 
-`pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.1`) and `OpenBaoLinuxAMD64SHA256`, the
-sha256 of `openbao_2.7.1_linux_amd64.tar.gz`.
+`pin.go` holds `OpenBaoRelease` (`openbao/openbao:v2.7.2`) and `OpenBaoLinuxAMD64SHA256`, the
+sha256 of `openbao_2.7.2_linux_amd64.tar.gz`.
 
 - **Provenance.** The hash is copied only from an upstream `checksums.txt` whose signature has
   been verified with both GPG and cosign, as geekdojo-brain#678's `verify-signatures.sh` does.
-  For v2.7.1 that record is geekdojo-brain
-  `projects/rasputin/research/openbao-evidence/798/raw/signature-verification-v2.7.1.txt`, the
-  #678 script run with `V=2.7.1`
-  ([geekdojo-brain#798](https://github.com/geekdojo/geekdojo-brain/issues/798)). A hash taken
+  For v2.7.2 that record is geekdojo-brain
+  `projects/rasputin/research/openbao-evidence/rasputin-os-197/raw/signature-verification-v2.7.2.txt`,
+  the #678 script run with `V=2.7.2` for the pin bump that answers the CVE watch
+  ([rasputin-os#197](https://github.com/geekdojo/rasputin-os/issues/197)). A hash taken
   from an unverified `checksums.txt` proves only that the bytes match what the download host
   served, and gatereg fires on the tag, not on the hash, so nothing else catches it.
 - **A bump** changes both constants together, re-runs that signature verification for the new
@@ -773,9 +773,9 @@ install it with the script CI uses; it refuses any other platform:
 ./scripts/install-openbao.sh "$HOME/.cache/openbao"
 ```
 
-It prints the download URL, `openbao_2.7.1_linux_amd64.tar.gz: OK` from `sha256sum -c`, and
-`OpenBao v2.7.1 (...)`. On another platform, fetch that release's binary for your platform
-yourself; the harness refuses any binary whose `bao version` is not exactly `OpenBao v2.7.1`.
+It prints the download URL, `openbao_2.7.2_linux_amd64.tar.gz: OK` from `sha256sum -c`, and
+`OpenBao v2.7.2 (...)`. On another platform, fetch that release's binary for your platform
+yourself; the harness refuses any binary whose `bao version` is not exactly `OpenBao v2.7.2`.
 
 **Positive: binary present, switch set.** This is what CI runs.
 

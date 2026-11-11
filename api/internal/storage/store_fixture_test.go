@@ -16,7 +16,7 @@ import (
 const (
 	fixtureKeyID  = "rasputin-11111111-1111-4111-8111-111111111111"
 	fixtureKeyID2 = "rasputin-22222222-2222-4222-8222-222222222222"
-	fixtureBaoVer = "2.7.1"
+	fixtureBaoVer = "2.7.2"
 	// fixtureDataCanary is in a store data file, for the no-content scans.
 	fixtureDataCanary = "STORE-DATA-CANARY-7f3a"
 )

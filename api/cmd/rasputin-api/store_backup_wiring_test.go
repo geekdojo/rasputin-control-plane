@@ -365,7 +365,7 @@ func TestStoreBackupControl(t *testing.T) {
 	if _, err := ss.SealKeyID(); err == nil {
 		t.Error("an unreadable tree gave a key id")
 	}
-	if v, err := ss.Version(ctx); err != nil || v != "2.7.1" {
+	if v, err := ss.Version(ctx); err != nil || v != "2.7.2" {
 		t.Errorf("Version = (%q, %v)", v, err)
 	}
 	if err := ss.Stop(ctx); err != nil {
@@ -400,5 +400,5 @@ func TestStoreBackupControl(t *testing.T) {
 type versionedStore struct{ secretStore }
 
 func (versionedStore) Health(context.Context) (secretstore.Health, error) {
-	return secretstore.Health{Initialized: true, Version: "2.7.1"}, nil
+	return secretstore.Health{Initialized: true, Version: "2.7.2"}, nil
 }

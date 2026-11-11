@@ -134,8 +134,8 @@ func TestMonitor_SinceAndTransitionLogging(t *testing.T) {
 	if len(infos) != 1 {
 		t.Fatalf("%d ready records, want 1", len(infos))
 	}
-	if v, _ := logkittest.Attr(infos[0], "version"); v != "2.7.1" {
-		t.Errorf("ready record version = %q, want 2.7.1", v)
+	if v, _ := logkittest.Attr(infos[0], "version"); v != "2.7.2" {
+		t.Errorf("ready record version = %q, want 2.7.2", v)
 	}
 	for _, r := range f.rec.Records() {
 		if strings.Contains(r.Message, "STORE-TEXT") {

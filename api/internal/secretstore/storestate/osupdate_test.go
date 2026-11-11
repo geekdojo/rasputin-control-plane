@@ -75,7 +75,7 @@ func TestMonitor_OnFirstReady(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	f.store.set(secretstore.Health{Initialized: true, Version: "2.7.1"}, nil)
+	f.store.set(secretstore.Health{Initialized: true, Version: "2.7.2"}, nil)
 	if st := f.state(t); st != Ready {
 		t.Fatalf("state = %s", st)
 	}

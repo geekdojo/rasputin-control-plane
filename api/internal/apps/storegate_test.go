@@ -163,7 +163,7 @@ func (h *healthStore) Health(context.Context) (secretstore.Health, error) {
 	if h.err != nil {
 		return secretstore.Health{}, h.err
 	}
-	return secretstore.Health{Initialized: true, Version: "2.7.1"}, nil
+	return secretstore.Health{Initialized: true, Version: "2.7.2"}, nil
 }
 
 // TC-760-23: a deploy refused while the store is sealed, then the same deploy
