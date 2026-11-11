@@ -99,7 +99,7 @@ type raceHarness struct {
 
 // startProxy calls StartNodeProxy as main does, with the admin socket and state
 // under the harness dir. Cleanup cancels its context and waits until its Caddy
-// is gone, so the next subtest starts with :443 free.
+// has released :443 (caddyReleased), so the next subtest starts with :443 free.
 func (h *raceHarness) startProxy() (*Reconciler, string) {
 	t := h.t
 	logger, logs := logkittest.New()
@@ -108,8 +108,8 @@ func (h *raceHarness) startProxy() (*Reconciler, string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() {
 		cancel()
-		waitFor(t, convergeWithin, "every caddy this subtest started exiting after its context was cancelled", func() bool {
-			return len(caddyPIDs(h.caddyBin)) == 0
+		waitFor(t, convergeWithin, "every caddy this subtest started exiting after its context was cancelled, and "+apiAddr+" free to bind", func() bool {
+			return caddyReleased(h.caddyBin, apiAddr)
 		})
 	})
 	r := StartNodeProxy(ctx, h.role, NodeProxyConfig{
@@ -123,6 +123,27 @@ func (h *raceHarness) startProxy() (*Reconciler, string) {
 		Logger:      logger,
 	})
 	return r, sock
+}
+
+// caddyReleased reports whether this test process has no live Caddy left AND
+// addr is free to bind. No process left is not enough on its own. caddyPIDs
+// skips a zombie and a child whose /proc/<pid>/exe can no longer be read, and
+// a Caddy killed on cancel still holds its listening sockets in that state
+// until the supervisor's cmd.Wait reaps it. StartNodeProxy gives the test no
+// handle on that Wait, so the next subtest's bind of :443 raced the reap and
+// failed with EADDRINUSE (TC-831-05 to TC-831-07 on rasputin-control-plane
+// PR 536's run 43071643662). Whether the port is free is the fact the next
+// subtest needs, so that is what is checked.
+func caddyReleased(caddyBin, addr string) bool {
+	if len(caddyPIDs(caddyBin)) != 0 {
+		return false
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	_ = ln.Close()
+	return true
 }
 
 // proxyFirst starts the proxy, lets it take the port if it runs, then binds
