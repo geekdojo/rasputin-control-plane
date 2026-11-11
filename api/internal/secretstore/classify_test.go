@@ -220,7 +220,7 @@ func TestHealth(t *testing.T) {
 			})
 			h, err := f.client.Health(t.Context())
 			if tc.want == nil {
-				if err != nil || !h.Initialized || h.Sealed || h.Version != "2.7.1" {
+				if err != nil || !h.Initialized || h.Sealed || h.Version != "2.7.2" {
 					t.Fatalf("Health = %+v, %v; want initialised and unsealed", h, err)
 				}
 				return

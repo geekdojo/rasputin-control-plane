@@ -114,7 +114,7 @@ func TestRedaction_HealthAndTransport(t *testing.T) {
 			t.Run(fmt.Sprintf("health %d sealed=%t", status, sealed), func(t *testing.T) {
 				f := newFixture(t, func(w http.ResponseWriter, _ *http.Request) {
 					writeJSON(w, status, map[string]any{"initialized": status != 501, "sealed": sealed,
-						"version": "2.7.1", "errors": []string{storeMarker}, "cluster_name": sentinelValue})
+						"version": "2.7.2", "errors": []string{storeMarker}, "cluster_name": sentinelValue})
 				})
 				h, err := f.client.Health(t.Context())
 				assertRedacted(t, f.rec, []any{h}, []error{err})

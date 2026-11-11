@@ -414,7 +414,7 @@ func TestStoreClientLeafReload_ClosesIdleConnections(t *testing.T) {
 		seen = append(seen, r.TLS.PeerCertificates[0].SerialNumber)
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"initialized":true,"sealed":false,"standby":false,"version":"2.7.1"}`)
+		_, _ = io.WriteString(w, `{"initialized":true,"sealed":false,"standby":false,"version":"2.7.2"}`)
 	}))
 	srv.TLS = &tls.Config{
 		Certificates: []tls.Certificate{serverCert},

@@ -523,7 +523,7 @@ func TestStoreSource_RefusalSentenceAndTheGate(t *testing.T) {
 type readyHealth struct{}
 
 func (readyHealth) Health(context.Context) (secretstore.Health, error) {
-	return secretstore.Health{Initialized: true, Version: "2.7.1"}, nil
+	return secretstore.Health{Initialized: true, Version: "2.7.2"}, nil
 }
 
 // TC-762-08: failures that are not store errors fail closed: no value, an

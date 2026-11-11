@@ -256,7 +256,7 @@ func TestStart_AuditPathUnderRoot(t *testing.T) {
 	cfg := validConfig(t)
 	cfg.Audit = true
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) cp "$3" "`+copied+`"; stat -c %a "$(dirname "$3")/audit" > "`+dirMode+`" 2>/dev/null || stat -f %Lp "$(dirname "$3")/audit" > "`+dirMode+`"; exit 3 ;;
 esac
 `)
@@ -424,10 +424,10 @@ func TestRenderInitJSON(t *testing.T) {
 // TC-753-04: Start refuses a binary whose version is not exactly the pinned
 // release, before it runs `server` or makes anything under TempParent.
 func TestStart_RefusesAnUnpinnedRelease(t *testing.T) {
-	if pinnedVersion() != "v2.7.1" {
+	if pinnedVersion() != "v2.7.2" {
 		t.Fatalf("pinnedVersion() = %q, want the tag after the last ':' of %q", pinnedVersion(), OpenBaoRelease)
 	}
-	for _, got := range []string{"OpenBao v2.7.0 (fake)", "OpenBao v2.7.10 (fake)"} {
+	for _, got := range []string{"OpenBao v2.7.0 (fake)", "OpenBao v2.7.20 (fake)"} {
 		t.Run(got, func(t *testing.T) {
 			marker := filepath.Join(t.TempDir(), "server-ran")
 			cfg := validConfig(t)
@@ -444,8 +444,8 @@ esac
 			if s != nil || err == nil {
 				t.Fatalf("Start = %v, %v; want a refusal", s, err)
 			}
-			if !strings.Contains(err.Error(), "want OpenBao v2.7.1") || !strings.Contains(err.Error(), got) {
-				t.Errorf("err = %v, want it to name v2.7.1 and %q", err, got)
+			if !strings.Contains(err.Error(), "want OpenBao v2.7.2") || !strings.Contains(err.Error(), got) {
+				t.Errorf("err = %v, want it to name v2.7.2 and %q", err, got)
 			}
 			if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("the fake's server subcommand ran (stat %v)", err)
@@ -462,7 +462,7 @@ func TestStart_StoreExitsEarly(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "pid")
 	cfg := validConfig(t)
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) echo $$ > "`+pidFile+`"; echo "bind: address already in use" >&2; exit 3 ;;
 esac
 `)
@@ -494,7 +494,7 @@ func TestStart_CtxEndsBeforeHealthy(t *testing.T) {
 	cfg.Logger = slog.New(&signalOn{inner: log.Handler(), msg: "secret store not healthy yet",
 		attr: "connection refused", ch: refused})
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) echo $$ > "`+pidPipe+`"; exec tail -f /dev/null ;;
 esac
 `)
@@ -969,7 +969,7 @@ func TestAuditStdout_RenderAndRefusal(t *testing.T) {
 	cfg = validConfig(t)
 	cfg.AuditStdout = true
 	cfg.BinaryPath = writeFake(t, `case "$1" in
-version) echo "OpenBao v2.7.1 (fake)" ;;
+version) echo "OpenBao v2.7.2 (fake)" ;;
 server) cp "$3" "`+copied+`"; exit 3 ;;
 esac
 `)

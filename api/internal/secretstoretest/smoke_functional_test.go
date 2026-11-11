@@ -100,8 +100,8 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 	if got, _ := logkittest.Attr(started[0], "pid"); got != strconv.Itoa(pid) {
 		t.Errorf("started pid = %q, want %d", got, pid)
 	}
-	if got, _ := logkittest.Attr(started[0], "version"); got != "v2.7.1" {
-		t.Errorf("started version = %q, want v2.7.1", got)
+	if got, _ := logkittest.Attr(started[0], "version"); got != "v2.7.2" {
+		t.Errorf("started version = %q, want v2.7.2", got)
 	}
 	if got, _ := logkittest.Attr(started[0], "dir"); got != root {
 		t.Errorf("started dir = %q, want %q", got, root)

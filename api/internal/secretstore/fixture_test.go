@@ -153,7 +153,7 @@ func kvBody(version int, data map[string]any) map[string]any {
 }
 
 func healthBody(initialized, sealed bool) map[string]any {
-	return map[string]any{"initialized": initialized, "sealed": sealed, "standby": false, "version": "2.7.1"}
+	return map[string]any{"initialized": initialized, "sealed": sealed, "standby": false, "version": "2.7.2"}
 }
 
 func tok(s string) secret.Value { return secret.New([]byte(s)) }
