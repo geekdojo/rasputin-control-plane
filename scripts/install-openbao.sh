@@ -3,7 +3,7 @@
 # install-openbao.sh — install the pinned secret store binary for the
 # functional tests (docs/testing-secret-store.md).
 #
-# Usage: scripts/install-openbao.sh <dest-dir>
+# Usage: scripts/install-openbao.sh <dest-dir> [<download-dir>]
 #
 # Downloads the OpenBao linux_amd64 release tarball that
 # api/internal/secretstoretest/pin.go pins, checks it against the pinned
@@ -17,13 +17,21 @@
 # The hash in pin.go comes only from a signature-verified checksums.txt (see
 # the comment there). This script checks the tarball against that hash; it
 # does not verify signatures itself.
+#
+# With <download-dir>, the tarball is kept there, and a tarball already there
+# is used instead of downloading it again. CI restores that directory from the
+# Actions cache, so a github.com release-download outage does not fail the job
+# (on 2026-11-09 GitHub served 504s to anonymous release downloads for three
+# hours). A kept tarball gets the same sha256 check as a fresh download, and
+# one that fails it is refused, never replaced.
 set -euo pipefail
 
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
-  echo "usage: $0 <dest-dir>" >&2
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ -z "$1" ]; then
+  echo "usage: $0 <dest-dir> [<download-dir>]" >&2
   exit 2
 fi
 dest="$1"
+keep="${2:-}"
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 pin="$repo_root/api/internal/secretstoretest/pin.go"
@@ -58,11 +66,21 @@ version="${tag#v}"           # 2.7.1
 tarball="openbao_${version}_linux_amd64.tar.gz"
 url="https://github.com/${owner_repo}/releases/download/${tag}/${tarball}"
 
-work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+if [ -n "$keep" ]; then
+  mkdir -p "$keep"
+  work="$keep"
+else
+  work="$(mktemp -d)"
+  trap 'rm -rf "$work"' EXIT
+fi
 
-echo "install-openbao: downloading $url"
-curl -fsSL -o "$work/$tarball" "$url"
+if [ -f "$work/$tarball" ]; then
+  echo "install-openbao: using the kept $work/$tarball"
+else
+  echo "install-openbao: downloading $url"
+  curl -fsSL -o "$work/$tarball.part" "$url"
+  mv "$work/$tarball.part" "$work/$tarball"
+fi
 (cd "$work" && echo "${sha256}  ${tarball}" | sha256sum -c -)
 
 mkdir -p "$dest"

@@ -280,8 +280,28 @@ jobs:
       # The real secret store for TestSecretStore_SmokeWriteReadKV: the release
       # and sha256 are read from api/internal/secretstoretest/pin.go, so this
       # downloads exactly what the Go const pins (docs/testing-secret-store.md).
+      # The tarball comes from the Actions cache when it holds one, so a
+      # github.com release-download outage cannot fail this job: on 2026-11-09
+      # GitHub served 504s to anonymous release downloads for three hours and
+      # every PR's backend job went red at this step. The script checks a
+      # cached tarball against the pinned sha256 exactly as it checks a fresh
+      # download, and the cache is saved only after that check has passed.
+      - name: restore the pinned secret store tarball
+        id: openbao-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/openbao-download
+          key: openbao-${{ runner.os }}-${{ hashFiles('api/internal/secretstoretest/pin.go') }}
+
       - name: install the pinned secret store
-        run: ./scripts/install-openbao.sh "$RUNNER_TEMP/openbao"
+        run: ./scripts/install-openbao.sh "$RUNNER_TEMP/openbao" "$RUNNER_TEMP/openbao-download"
+
+      - name: save the pinned secret store tarball
+        if: steps.openbao-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/openbao-download
+          key: ${{ steps.openbao-cache.outputs.cache-primary-key }}
 
       # Coverage profile only for api — it remains the module whose coverage we
       # trend, and that choice is deliberate rather than a list that drifts.
@@ -405,16 +425,42 @@ jobs:
           check-latest: true
           cache-dependency-path: "*/go.sum"
 
+      # The tarball comes from the Actions cache when it holds one, for the
+      # reason the backend job caches the secret store's: a github.com
+      # release-download outage (504s on 2026-11-09) must not fail this job.
+      # A cached tarball gets the same sha512 check as a fresh download, and
+      # the cache is saved only after that check has passed.
+      - name: restore the pinned caddy tarball
+        id: caddy-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/caddy-download
+          key: caddy-${{ runner.os }}-${{ env.CADDY_VERSION }}-${{ env.CADDY_SHA512 }}
+
       - name: install the pinned caddy
         run: |
           set -eu
           tarball="caddy_${CADDY_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o "$RUNNER_TEMP/$tarball" \
-            "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${tarball}"
-          echo "${CADDY_SHA512}  $RUNNER_TEMP/$tarball" | sha512sum -c -
+          dl="$RUNNER_TEMP/caddy-download"
+          mkdir -p "$dl"
+          if [ -f "$dl/$tarball" ]; then
+            echo "using the cached $dl/$tarball"
+          else
+            curl -fsSL -o "$dl/$tarball.part" \
+              "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/${tarball}"
+            mv "$dl/$tarball.part" "$dl/$tarball"
+          fi
+          echo "${CADDY_SHA512}  $dl/$tarball" | sha512sum -c -
           mkdir -p "$RUNNER_TEMP/caddy"
-          tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP/caddy" caddy
+          tar -xzf "$dl/$tarball" -C "$RUNNER_TEMP/caddy" caddy
           "$RUNNER_TEMP/caddy/caddy" version
+
+      - name: save the pinned caddy tarball
+        if: steps.caddy-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/caddy-download
+          key: ${{ steps.caddy-cache.outputs.cache-primary-key }}
 
       - name: build the proxy test binary
         run: go test -c -race -o "$RUNNER_TEMP/proxy.test" ./agent/internal/proxy
