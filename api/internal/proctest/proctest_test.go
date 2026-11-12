@@ -171,38 +171,44 @@ func TestStop_SIGTERMIsEnough(t *testing.T) {
 	}
 }
 
-// aliveFifo makes a named pipe a process holds open for writing while it
-// lives. The test opens the read end, which returns once the process has
-// opened it; a read then reaches EOF only when every writer has closed it,
-// which a process does when it dies, whether or not anything has reaped it.
-// That is the fact the tests below wait on: an orphan that died stays a
-// zombie until init reaps it, and kill(2) cannot tell a zombie from a live
-// process.
-func aliveFifo(t *testing.T) string {
+// alivePipe is an anonymous pipe whose write end the child inherits as fd 3.
+// A process that keeps fd 3 holds the pipe open while it lives; reading the
+// read end to EOF then means every holder has closed it, which a process
+// does when it dies, whether or not anything has reaped it. That is the fact
+// the tests below wait on: an orphan that died stays a zombie until init
+// reaps it, and kill(2) cannot tell a zombie from a live process.
+//
+// It is an anonymous pipe, not a named one: on macOS a read on a FIFO can
+// stay blocked after its last writer has exited (F-966-13), and a pipe's EOF
+// does not depend on that.
+func alivePipe(t *testing.T) (r, w *os.File) {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "alive.fifo")
-	if err := syscall.Mkfifo(p, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-// openAlive opens the read end, which blocks until the process has opened
-// the write end.
-func openAlive(t *testing.T, path string) *os.File {
-	t.Helper()
-	f, err := os.Open(path)
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = f.Close() })
-	return f
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	return r, w
+}
+
+// awaitReady reads the line the member writes to fd 3 once it is set up, so
+// a test signals it only after that fact. It closes this process's copy of
+// the write end first, so the pipe's only writers are the child's.
+func awaitReady(t *testing.T, r, w *os.File) {
+	t.Helper()
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len("ready\n"))
+	if _, err := io.ReadFull(r, buf); err != nil || string(buf) != "ready\n" {
+		t.Fatalf("ready line = %q, %v", buf, err)
+	}
 }
 
 // assertDead reads the alive pipe to EOF: every holder has closed it.
-func assertDead(t *testing.T, f *os.File) {
+func assertDead(t *testing.T, r *os.File) {
 	t.Helper()
-	if _, err := io.ReadAll(f); err != nil {
+	if _, err := io.ReadAll(r); err != nil {
 		t.Errorf("read the alive pipe: %v", err)
 	}
 }
@@ -211,49 +217,52 @@ func assertDead(t *testing.T, f *os.File) {
 // not exec (kc.sh runs java in the background and waits) is stopped whole:
 // the SIGTERM reaches the child too.
 func TestStop_GroupStopsTheChild(t *testing.T) {
-	alive := aliveFifo(t)
-	// The child is an exec'd sh that opens the alive pipe and then execs
-	// tail, so by the time the test's open returns it is a process with the
-	// default SIGTERM disposition. A bare "tail &" is not: bash's forked child
-	// drops a SIGTERM that arrives before its exec, and the tail lives on.
-	bin := writeFake(t, `sh -c 'exec 3>"`+alive+`"; exec tail -f /dev/null' &
+	r, w := alivePipe(t)
+	// The child is an exec'd sh that says it is ready and then execs tail,
+	// so by the time the test reads the line it is a process with the
+	// default SIGTERM disposition. A bare "tail &" is not: bash's forked
+	// child drops a SIGTERM that arrives before its exec, and the tail lives
+	// on. The launcher closes its own fd 3, so only the child holds it.
+	bin := writeFake(t, `sh -c 'echo ready >&3; exec tail -f /dev/null' &
+exec 3>&-
 wait
 `)
-	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true})
+	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true, ExtraFiles: []*os.File{w}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := openAlive(t, alive)
+	awaitReady(t, r, w)
 	if err := p.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop = %v", err)
 	}
 	assertReaped(t, p.Pid())
-	assertDead(t, f)
+	assertDead(t, r)
 }
 
 // F-966-01: a group member that outlives its leader (it ignores SIGTERM, and
 // the leader does not wait for it) is killed with the group once the leader
 // has exited.
 func TestStop_GroupKillsAMemberThatOutlivesItsLeader(t *testing.T) {
-	alive := aliveFifo(t)
+	r, w := alivePipe(t)
 	// The member's output goes elsewhere, as a daemonised helper's does; one
 	// still holding the pipe keeps Exited open, and Stop's ctx ends that. It
-	// opens the alive pipe only after its trap is set, so the signal can only
+	// says it is ready only after its trap is set, so the signal can only
 	// arrive once it has its disposition.
 	bin := writeFake(t, `trap 'exit 0' TERM
-(trap '' TERM; exec 3>"`+alive+`"; exec tail -f /dev/null >/dev/null 2>&1) &
+(trap '' TERM; echo ready >&3; exec tail -f /dev/null >/dev/null 2>&1) &
+exec 3>&-
 wait
 `)
-	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true})
+	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true, ExtraFiles: []*os.File{w}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := openAlive(t, alive)
+	awaitReady(t, r, w)
 	if err := p.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop = %v", err)
 	}
 	assertReaped(t, p.Pid())
-	assertDead(t, f)
+	assertDead(t, r)
 }
 
 // TC-966-16: Await returns nil as soon as the check answers true, and notes

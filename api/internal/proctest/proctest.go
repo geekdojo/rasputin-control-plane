@@ -64,6 +64,9 @@ type Spec struct {
 	// goroutines. A harness reads a fact the process prints (a bound port)
 	// through it.
 	Watch func(line string)
+	// ExtraFiles are open files the child inherits as fd 3 onward, as
+	// exec.Cmd's ExtraFiles are.
+	ExtraFiles []*os.File
 }
 
 // Proc is one started process. Its methods are safe for concurrent use.
@@ -87,6 +90,7 @@ func Start(spec Spec) (*Proc, error) {
 	cmd := exec.Command(spec.Bin, spec.Args...)
 	cmd.Env = spec.Env
 	cmd.Dir = spec.Dir
+	cmd.ExtraFiles = spec.ExtraFiles
 	if spec.Group {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	}
