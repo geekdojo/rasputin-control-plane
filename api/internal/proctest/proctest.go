@@ -174,7 +174,8 @@ func (e *ExitedError) Error() string { return e.msg }
 func (e *ExitedError) Unwrap() error { return e.Err }
 
 // Stop ends the process and proves it: it returns an error unless the process
-// has been reaped and, with Spec.Group, its group is empty.
+// has been reaped. With Spec.Group, the whole group is signalled, and once the
+// leader has exited the group is sent SIGKILL, so no member outlives it.
 //
 // It sends SIGTERM and waits for the exit. Only if ctx ends first is SIGKILL
 // sent, with one WARN "<Name> ignored SIGTERM; killed", so a caller that wants
@@ -200,11 +201,14 @@ func (p *Proc) Stop(ctx context.Context) error {
 		}
 	}
 	if p.spec.Group {
-		// The leader is gone; a member that outlived it (a forked server, a
-		// helper) is killed and named, so a leak is an error, never silent.
-		if err := syscall.Kill(-pid, 0); err == nil {
-			_ = syscall.Kill(-pid, syscall.SIGKILL)
-			errs = append(errs, fmt.Errorf("process group %d still had members after its leader exited; killed", pid))
+		// The leader is gone. A member that outlived it (a forked server, a
+		// helper) is killed with the group. Whether one was left is not judged
+		// here: a member that died but was orphaned stays a zombie until init
+		// reaps it, and kill(2) cannot tell a zombie from a live process. The
+		// proof that nothing is left is the caller's (identitytest scans
+		// /proc, where a zombie names nothing).
+		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			errs = append(errs, fmt.Errorf("SIGKILL process group %d: %w", pid, err))
 		}
 	}
 	if p.cmd.ProcessState == nil {

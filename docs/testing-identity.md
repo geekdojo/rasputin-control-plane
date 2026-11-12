@@ -66,7 +66,7 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
 - No record the harness or the client logged, Keycloak's own output lines included, holds the
   user password, the database password, an authorization code or token bytes
   (`TestIdentity_NoSecretInLogs`).
-- Teardown leaves nothing: Keycloak and its whole process group are reaped, the containers are
+- Teardown leaves nothing: Keycloak is reaped and its process group, like Chrome's, is killed, the containers are
   gone from `docker ps -a`, no live process's command line or working directory names the
   harness's temporary root (java, `kc.sh`, Chrome and its helpers included), and the root is
   gone. A failed proof is written to stderr and turns the package red.
@@ -149,6 +149,12 @@ apart unseen.
 | `webauthn.assertion`, `webauthn.registration` | #959's soft-passkey vectors, unchanged | Checked equal to #959's; the client has no passkey verb yet |
 | `pages` | Each of #959's 12 fixtures (`testdata/pages/<id>.html`): its id, sha256, and forms with their field names, as #959's Python parser reads them | Yes (`TestParsePage_Fixtures`) |
 | `flows` | Each verb of #959's run: step, verb, arguments, door and the page ids it saw | FL2 (`TestIdentity_PasswordCodeFlowPKCE`) |
+
+The fixtures under `testdata/pages/` are Keycloak 26.8.2's own pages, byte for byte, script
+included, and the vector file pins each one's sha256. They are only ever parsed as data: no
+browser loads them (the self-test's Chrome renders the real Keycloak's pages). CodeQL's
+JavaScript scan flags the theme's recovery-code copy script in one of them; the verdict and its
+trip-wire are in `.github/codeql-register.tsv`.
 
 ## The pins, and bumping them
 

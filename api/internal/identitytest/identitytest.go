@@ -571,8 +571,8 @@ func (e *Env) serveFront(httpsPort int) error {
 
 // Close stops everything the Env started, in the order browser, Headscale,
 // front, Keycloak, PostgreSQL, then removes the root, and proves teardown: it
-// returns the joined errors unless Keycloak was reaped with its whole process
-// group, each container is gone, no live process names the root, and the
+// returns the joined errors unless Keycloak was reaped (its process group is
+// then killed), each container is gone, no live process names the root, and the
 // root is gone.
 //
 // Keycloak gets SIGTERM; only if ctx ends first does it get SIGKILL, with a

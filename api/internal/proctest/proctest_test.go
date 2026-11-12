@@ -3,7 +3,6 @@ package proctest
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -172,54 +171,89 @@ func TestStop_SIGTERMIsEnough(t *testing.T) {
 	}
 }
 
-// F-966-01: with Spec.Group, a launcher whose real server is a child it does
-// not exec (kc.sh runs java in the background and waits) is stopped whole:
-// the SIGTERM reaches the child too, and Stop proves the group is empty.
-func TestStop_GroupStopsTheChild(t *testing.T) {
-	pids := fifo(t)
-	bin := writeFake(t, `tail -f /dev/null &
-echo $$ $! > "`+pids+`"
-wait
-`)
-	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true})
+// aliveFifo makes a named pipe a process holds open for writing while it
+// lives. The test opens the read end, which returns once the process has
+// opened it; a read then reaches EOF only when every writer has closed it,
+// which a process does when it dies, whether or not anything has reaped it.
+// That is the fact the tests below wait on: an orphan that died stays a
+// zombie until init reaps it, and kill(2) cannot tell a zombie from a live
+// process.
+func aliveFifo(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "alive.fifo")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// openAlive opens the read end, which blocks until the process has opened
+// the write end.
+func openAlive(t *testing.T, path string) *os.File {
+	t.Helper()
+	f, err := os.Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := readInts(t, pids)
-	if len(got) != 2 || got[0] != p.Pid() {
-		t.Fatalf("pids = %v, want the leader %d and its child", got, p.Pid())
-	}
-	if err := p.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop = %v", err)
-	}
-	assertReaped(t, got[0])
-	assertReaped(t, got[1])
-	if err := syscall.Kill(-p.Pid(), 0); !errors.Is(err, syscall.ESRCH) {
-		t.Errorf("kill -0 -%d = %v, want ESRCH: the group still has members", p.Pid(), err)
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+// assertDead reads the alive pipe to EOF: every holder has closed it.
+func assertDead(t *testing.T, f *os.File) {
+	t.Helper()
+	if _, err := io.ReadAll(f); err != nil {
+		t.Errorf("read the alive pipe: %v", err)
 	}
 }
 
-// F-966-01: a group member that outlives its leader (it ignores SIGTERM, and
-// the leader does not wait for it) is a named error, and it is killed.
-func TestStop_GroupMemberLeftBehindIsAnError(t *testing.T) {
-	pids := fifo(t)
-	// The member's output goes elsewhere, as a daemonised helper's does; one
-	// still holding the pipe keeps Exited open, and Stop's ctx ends that.
-	// Both traps are set before the pipe is written, so the signal can only
-	// arrive once each has its disposition.
-	bin := writeFake(t, `trap 'exit 0' TERM
-(trap '' TERM; echo $$ > "`+pids+`"; exec tail -f /dev/null >/dev/null 2>&1) &
+// F-966-01: with Spec.Group, a launcher whose real server is a child it does
+// not exec (kc.sh runs java in the background and waits) is stopped whole:
+// the SIGTERM reaches the child too.
+func TestStop_GroupStopsTheChild(t *testing.T) {
+	alive := aliveFifo(t)
+	// The child is an exec'd sh that opens the alive pipe and then execs
+	// tail, so by the time the test's open returns it is a process with the
+	// default SIGTERM disposition. A bare "tail &" is not: bash's forked child
+	// drops a SIGTERM that arrives before its exec, and the tail lives on.
+	bin := writeFake(t, `sh -c 'exec 3>"`+alive+`"; exec tail -f /dev/null' &
 wait
 `)
 	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	readInts(t, pids)
-	err = p.Stop(context.Background())
-	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("process group %d still had members", p.Pid())) {
-		t.Fatalf("Stop = %v, want the leftover group member named", err)
+	f := openAlive(t, alive)
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop = %v", err)
 	}
+	assertReaped(t, p.Pid())
+	assertDead(t, f)
+}
+
+// F-966-01: a group member that outlives its leader (it ignores SIGTERM, and
+// the leader does not wait for it) is killed with the group once the leader
+// has exited.
+func TestStop_GroupKillsAMemberThatOutlivesItsLeader(t *testing.T) {
+	alive := aliveFifo(t)
+	// The member's output goes elsewhere, as a daemonised helper's does; one
+	// still holding the pipe keeps Exited open, and Stop's ctx ends that. It
+	// opens the alive pipe only after its trap is set, so the signal can only
+	// arrive once it has its disposition.
+	bin := writeFake(t, `trap 'exit 0' TERM
+(trap '' TERM; exec 3>"`+alive+`"; exec tail -f /dev/null >/dev/null 2>&1) &
+wait
+`)
+	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := openAlive(t, alive)
+	if err := p.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop = %v", err)
+	}
+	assertReaped(t, p.Pid())
+	assertDead(t, f)
 }
 
 // TC-966-16: Await returns nil as soon as the check answers true, and notes
