@@ -1,5 +1,5 @@
 // Package mdns is a minimal, dependency-free multicast-DNS A-record resolver —
-// just enough for an agent to find the control plane at rasputin.local on a LAN
+// just enough for an agent to find the control plane at <cluster>.local on a LAN
 // where the OS has no .local resolver (the OpenWrt firewall image). It is NOT a
 // general mDNS stack: one-shot A query, first answer wins.
 //

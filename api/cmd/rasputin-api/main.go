@@ -733,7 +733,9 @@ func main() {
 	warnLegacyTrustRoot(logger, trustDir, publisherRoot)
 	verifier, catalogVerifier := wirePublisherTrust(logger, publisherRoot)
 	// Public URL the agent uses to fetch bundles. In dev the api is at
-	// :8080; in production this is the api's tailnet hostname.
+	// :8080; on an appliance it is https://<cluster-id>.local, the control
+	// plane's own name on the LAN (applianceOr), unless
+	// RASPUTIN_PUBLIC_BASE_URL overrides it.
 	publicBaseURL := envOr("RASPUTIN_PUBLIC_BASE_URL", applianceOr(
 		func(h string) string { return "https://" + h }, "http://localhost:8080"))
 	// The control plane's own LAN IPv4, followed from kernel address events
@@ -2177,10 +2179,14 @@ func ensureAPILeaf(cpCA *tlsca.CA, dataDir string, lanIP net.IP) (tlsca.LeafPath
 
 // apiLeafSpec builds the SAN set for the api's HTTPS leaf:
 //
-//	DNS: rasputin.local (the mDNS name the OS image advertises via
-//	     systemd-resolved), localhost (same-host curl/debug, and
+//	DNS: rasputin.local (a fixed name every api leaf carries; it is the
+//	     name the OS image advertises only when the cluster id is the
+//	     default, "rasputin"), localhost (same-host curl/debug, and
 //	     symmetric with the Headscale leaf), the machine hostname, and
-//	     <hostname>.local when the hostname is a bare label.
+//	     <hostname>.local when the hostname is a bare label. On a control
+//	     plane the hostname is the cluster id (ADR-0003), so that last name
+//	     is <cluster-id>.local, the mDNS name the OS image advertises via
+//	     systemd-resolved.
 //	IP:  127.0.0.1 plus the discovered primary LAN IP, so operators who
 //	     browse by address before mDNS resolves still get a clean lock.
 //

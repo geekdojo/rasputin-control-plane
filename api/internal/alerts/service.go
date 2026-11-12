@@ -1,11 +1,13 @@
-// Package alerts is the v0 "current concerns" aggregator. It does NOT
-// implement a rules engine, persistence, or ack/dismiss — it derives a
-// snapshot from the existing subsystem stores on every read.
+// Package alerts serves the "current concerns" the UI shows. It evaluates no
+// rules itself. Most of its alerts are computed on read: List derives a
+// snapshot from the existing subsystem stores on every call, and those alerts
+// are not persisted and cannot be acknowledged or dismissed. The rules engine's
+// alerts (vmalert) are persisted: RunRuleSync copies the firing set into the
+// persisted_alerts table (store.go), and those can be acknowledged (Ack) and
+// dismissed (Dismiss).
 //
 // The shape of the returned []proto.Alert is the public contract that the
-// UI (TopBar count, sidebar Bell, /alerts page) consumes. A future
-// rules-engine + alerts-table implementation can replace this aggregator
-// without changing that contract.
+// UI (TopBar count, sidebar Bell, /alerts page) consumes, for both kinds.
 //
 // Sources and the alerts they produce:
 //

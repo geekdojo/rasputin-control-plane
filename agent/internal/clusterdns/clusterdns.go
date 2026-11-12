@@ -46,12 +46,19 @@
 // (geekdojo/geekdojo-brain#202).
 //
 // The fix is to stop asking mDNS. We write a systemd-resolved drop-in that
-// routes *only* the cluster's own domains at the control plane's nameserver,
-// leaving every other query on the DHCP-provided servers where it belongs.
-// Two properties make this safe to apply everywhere:
+// routes the cluster's own domains at the control plane's nameserver, and
+// only there. It does not keep other queries off that server, though: the
+// drop-in's DNS= is resolved's global scope, which resolved always treats as
+// a default route, whatever its domains say (dns_scope_is_default_route in
+// systemd v258's resolved-dns-scope.c). So a query for `example.com` goes to
+// the control plane's nameserver as well as to the DHCP-provided servers, and
+// the first successful answer wins. The control plane answers it only while
+// its DNS forwarding is on; otherwise it refuses, and the DHCP-provided
+// servers' answer is the one used. Two properties make this safe to apply
+// everywhere:
 //
-//   - The domains are routing-only ("~name"), so this is not a general
-//     resolver override. `example.com` still goes wherever DHCP said.
+//   - The domains are routing-only ("~name"): they add no search suffix, so a
+//     bare name is never completed into one of the cluster's domains.
 //   - The address is the one the bus is already connected to, read off the
 //     socket rather than resolved. No name lookup can fail on the way to
 //     fixing name lookup.
@@ -66,9 +73,12 @@
 // e3bench:
 //
 //   - The control plane's address is RE-READ every look, never captured. These
-//     clusters run without DHCP reservations by design, so the CP takes a new
-//     lease on every reboot — and a rollout reboots it LAST, right after every
-//     other node has just pinned its old address.
+//     clusters run without DHCP reservations by design. On that afternoon the
+//     CP took a new lease on every reboot; since rasputin-os ae3ec7d
+//     (2026-09-22) the lease is keyed on the MAC and a reboot normally gets the
+//     same address back, but no reservation guarantees it — and a rollout
+//     reboots the CP LAST, right after every other node has just pinned its
+//     old address.
 //   - A pin that does not answer is WITHDRAWN. The domains are routing-only, so
 //     a stale pin does not degrade to mDNS, it black-holes the cluster's own
 //     names — strictly worse than never having written anything. Withdrawing
@@ -197,10 +207,11 @@ type Config struct {
 
 	// ServerIP returns the control plane's CURRENT address, or "" when the
 	// bus is not connected and so cannot say. A function, not a string,
-	// because the control plane's address moves: these clusters run without
-	// DHCP reservations by design, so the CP takes a new lease on every
-	// reboot — and a rollout reboots the CP LAST, immediately after this
-	// package has pinned its old address on every other node.
+	// because the control plane's address can move: these clusters run
+	// without DHCP reservations by design. The lease is keyed on the MAC
+	// (rasputin-os ae3ec7d), so a reboot normally keeps the address, but
+	// nothing guarantees it — and a rollout reboots the CP LAST, immediately
+	// after this package has pinned its old address on every other node.
 	//
 	// Captured once, that pin is a dead address, and because the domains are
 	// routing-only the result is strictly WORSE than no drop-in: the cluster
@@ -326,8 +337,9 @@ func Render(clusterID, serverIP string) string {
 	b.WriteString("# Written by rasputin-agent (clusterdns). Do not edit — rewritten each\n")
 	b.WriteString("# time the agent connects to the bus. See geekdojo/geekdojo-brain#202.\n")
 	b.WriteString("#\n")
-	b.WriteString("# Routes ONLY the cluster's own domains at the control plane. Every other\n")
-	b.WriteString("# query stays on the DNS servers DHCP provided.\n")
+	b.WriteString("# Routes the cluster's own domains to the control plane and nowhere else.\n")
+	b.WriteString("# Other queries go to it as well as to the DNS servers DHCP provided: as the\n")
+	b.WriteString("# global DNS server, it is always a default route.\n")
 	b.WriteString("[Resolve]\n")
 	b.WriteString("DNS=" + serverIP + "\n")
 	b.WriteString("Domains=" + strings.Join(Domains(clusterID), " ") + "\n")

@@ -1,11 +1,18 @@
 'use client';
 
-// /settings — operator preferences for this control plane. Sections:
+// /settings — operator preferences for this control plane. Sections, in the
+// order the page renders them:
 //   • Appearance (theme picker)
 //   • Deployment mode (post-setup change of setup.mode — the only surface for
 //     this once the first-run wizard has completed; the wizard redirects away
 //     when setup is done, so without this an operator who picked the wrong mode
 //     was stuck. Backend: POST /api/setup/mode, same endpoint the wizard uses.)
+//   • Network DNS — lets the control plane answer DNS for the whole LAN (the
+//     AA-11 forwarding stub, Mode B): the cluster's .lan names authoritatively,
+//     everything else forwarded. Backend: GET/POST /api/settings/dns-forwarding.
+//   • BMC — out-of-band power and serial console, off until an operator picks a
+//     backend (bmc-settings.md §7). Backend: /api/bmc/backends, /api/bmc/config
+//     (POST returns a job) and /api/bmc/probe.
 //   • Metrics & logs — the on/off switch for observability. Same species of gap
 //     as deployment mode: the stack shipped complete but could only be turned on
 //     by restarting the api with an env var, which an appliance operator cannot
@@ -666,7 +673,7 @@ function DNSForwardingSection() {
       <SectionLabel>NETWORK DNS</SectionLabel>
       <Hint style={{ marginBottom: 16 }}>
         Let Rasputin answer DNS for your whole network, so app names like{' '}
-        <span style={{ color: DIM }}>jellyfin.&lt;your-cluster&gt;.internal</span> work on every device. Rasputin
+        <span style={{ color: DIM }}>jellyfin.lan.&lt;your-cluster&gt;.internal</span> work on every device. Rasputin
         resolves your cluster&apos;s internal names and forwards everything else on to the internet. Off by
         default; most useful when Rasputin is a device on your existing network (Mode B).
       </Hint>
