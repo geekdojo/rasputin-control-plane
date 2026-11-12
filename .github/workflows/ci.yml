@@ -38,6 +38,12 @@ name: ci
 #              RASPUTIN_SECRETSTORE_FUNCTIONAL=required, so the secret store
 #              smoke test must run against the real OpenBao and pass rather
 #              than skip (geekdojo-brain#753, docs/testing-secret-store.md).
+#              Likewise it installs the pinned identity service, database and
+#              browser with scripts/install-identity.sh and sets
+#              RASPUTIN_IDENTITY_FUNCTIONAL=required, so the identity harness's
+#              self-test must run against the real Keycloak and pass
+#              (geekdojo-brain#966, docs/testing-identity.md), and it refuses a
+#              shipped api that links chromedp.
 #              And it refuses a tileschema contract change that did not bump
 #              ContractMinor over the latest tileschema/v* tag
 #              (scripts/tileschema-contract.sh check, geekdojo-brain#897).
@@ -303,6 +309,51 @@ jobs:
           path: ${{ runner.temp }}/openbao-download
           key: ${{ steps.openbao-cache.outputs.cache-primary-key }}
 
+      # The real identity service for api/internal/identitytest's self-test:
+      # Keycloak, the JRE and Chrome for Testing, read from
+      # api/internal/identitytest/pin.go, plus the pinned PostgreSQL and
+      # Headscale images (docs/testing-identity.md). The downloads come from
+      # the Actions cache when it holds them, as the secret store's do, and are
+      # checked against the pins exactly as a fresh download is; the cache is
+      # saved only after that check has passed.
+      - name: restore the pinned identity downloads
+        id: identity-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/identity-download
+          key: identity-${{ runner.os }}-${{ hashFiles('api/internal/identitytest/pin.go') }}
+
+      - name: install the pinned identity service, database and browser
+        run: ./scripts/install-identity.sh "$RUNNER_TEMP/identity" "$RUNNER_TEMP/identity-download"
+
+      - name: save the pinned identity downloads
+        if: steps.identity-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/identity-download
+          key: ${{ steps.identity-cache.outputs.cache-primary-key }}
+
+      # The browser automation library is test support only. The shipped api
+      # must not link it; the same pattern must match identitytest, which
+      # does, so a pattern that drifted cannot pass silently.
+      - name: shipped api binary carries no chromedp
+        run: |
+          pattern='^github.com/chromedp/'
+          shipped="$(go list -deps ./api/cmd/rasputin-api)"
+          if found="$(printf '%s\n' "$shipped" | grep -E "$pattern")"; then
+            echo "::error::the shipped api links chromedp:"
+            echo "$found"
+            exit 1
+          fi
+          echo "go list -deps ./api/cmd/rasputin-api: no package matches $pattern"
+          harness="$(go list -deps ./api/internal/identitytest)"
+          if ! control="$(printf '%s\n' "$harness" | grep -E "$pattern")"; then
+            echo "::error::positive control failed: $pattern matches nothing in go list -deps ./api/internal/identitytest"
+            exit 1
+          fi
+          echo "positive control: go list -deps ./api/internal/identitytest matches $pattern:"
+          echo "$control"
+
       # Coverage profile only for api — it remains the module whose coverage we
       # trend, and that choice is deliberate rather than a list that drifts.
       # Every other module is still TESTED below; it just isn't profiled.
@@ -318,6 +369,11 @@ jobs:
           # (geekdojo-brain#753, docs/testing-secret-store.md).
           RASPUTIN_SECRETSTORE_BIN: ${{ runner.temp }}/openbao/bao
           RASPUTIN_SECRETSTORE_FUNCTIONAL: required
+          # The same for the identity harness's self-test: the install the
+          # steps above made, and a missing dependency fails this required
+          # job (geekdojo-brain#966, docs/testing-identity.md).
+          RASPUTIN_IDENTITY_HOME: ${{ runner.temp }}/identity
+          RASPUTIN_IDENTITY_FUNCTIONAL: required
         run: |
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html class="login-pf" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Sign in to rasputin</title>
+        <link rel="icon" href="/resources/xmkpe/login/keycloak.v2/img/favicon.ico" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly.min.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly-addons.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/login/keycloak.v2/css/styles.css" rel="stylesheet" />
+    <script type="importmap">
+        {
+            "imports": {
+                "rfc4648": "/resources/xmkpe/common/keycloak/vendor/rfc4648/rfc4648.js"
+            }
+        }
+    </script>
+      <script type="module" async blocking="render">
+          const DARK_MODE_CLASS = "pf-v5-theme-dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+          updateDarkMode(mediaQuery.matches);
+          mediaQuery.addEventListener("change", (event) => updateDarkMode(event.matches));
+
+          function updateDarkMode(isEnabled) {
+            const { classList } = document.documentElement;
+
+            if (isEnabled) {
+              classList.add(DARK_MODE_CLASS);
+            } else {
+              classList.remove(DARK_MODE_CLASS);
+            }
+          }
+      </script>
+    <script type="module" src="/resources/xmkpe/login/keycloak.v2/js/passwordVisibility.js"></script>
+    <script type="module">
+        import { startSessionPolling } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+        startSessionPolling(
+            "/realms/rasputin/login-actions/restart?client_id=rasputin-console&tab_id=dZKUMLMO1pI&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiRzNKVkZNWElkcWlsYXQ5RSJ9&skip_logout=true"
+        );
+    </script>
+    <script type="module">
+        document.addEventListener("click", (event) => {
+            const link = event.target.closest("a[data-once-link]");
+
+            if (!link) {
+                return;
+            }
+
+            if (link.getAttribute("aria-disabled") === "true") {
+                event.preventDefault();
+                return;
+            }
+
+            const { disabledClass } = link.dataset;
+
+            if (disabledClass) {
+                link.classList.add(...disabledClass.trim().split(/\s+/));
+            }
+
+            link.setAttribute("role", "link");
+            link.setAttribute("aria-disabled", "true");
+        });
+    </script>
+        <script type="module">
+            import { checkAuthSession } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+            checkAuthSession(
+                "/EfvAjJbmu0IvbYLrfzV1EUzABRL8louSIXxBnMSUoSA0cI95dBj4h3yqCU8zUQ6"
+            );
+        </script>
+    <script>
+      // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1404468
+      const isFirefox = true;
+    </script>
+</head>
+
+<body id="keycloak-bg" class="" data-page-id="login-login-recovery-authn-code-config">
+<div class="pf-v5-c-login">
+  <div class="pf-v5-c-login__container">
+    <header id="kc-header" class="pf-v5-c-login__header">
+      <div id="kc-header-wrapper"
+              class="pf-v5-c-brand">rasputin</div>
+    </header>
+    <main class="pf-v5-c-login__main">
+      <div class="pf-v5-c-login__main-header">
+        <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title"><!-- template: login-recovery-authn-code-config.ftl -->
+    Recovery Authentication Codes
+</h1>
+      </div>
+      <div class="pf-v5-c-login__main-body">
+
+
+<!-- template: login-recovery-authn-code-config.ftl -->
+    <!-- warning -->
+    <div class="pf-v5-c-alert pf-m-warning pf-m-inline pf-v5-u-mb-md kc-recovery-codes-warning" aria-label="Warning alert">
+        <div class="pf-v5-c-alert__icon">
+            <i class="fas fa-fw fa-bell" aria-hidden="true"></i>
+        </div>
+        <h4 class="pf-v5-c-alert__title">
+            <span class="pf-screen-reader">Warning alert:</span>
+            These recovery codes won&#39;t appear again after leaving this page
+        </h4>
+        <div class="pf-v5-c-alert__description">
+            <p>Make sure to print, download, or copy them to a password manager and keep them safe. Canceling this setup will remove these recovery codes from your account.</p>
+        </div>
+    </div>
+
+    <div class="pf-v5-c-panel pf-m-raised">
+        <div class="pf-v5-c-panel__main">
+            <div class="pf-v5-c-panel__main-body">
+            <ol id="kc-recovery-codes-list" class="pf-v5-c-list" role="list">
+                    <li>KIX9-FIUD-32UR</li>
+                    <li>GLT1-PB1S-T2KA</li>
+                    <li>CT7V-GIF7-HPJY</li>
+                    <li>BJVH-GNP5-R5YY</li>
+                    <li>6APN-Y34E-52P6</li>
+                    <li>AABA-PRQM-VQ8U</li>
+                    <li>1G9E-K295-P5KI</li>
+                    <li>4QCV-E1EW-XD97</li>
+                    <li>PEEM-Y81Z-WY6L</li>
+                    <li>35C5-PXVH-IGNB</li>
+                    <li>DEC1-Y2C7-BLQN</li>
+                    <li>9VXB-E89K-QM9P</li>
+            </ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- actions -->
+    <div class="">
+        <button id="printRecoveryCodes" class="pf-v5-c-button pf-m-link" type="button" onclick="printRecoveryCodes()">
+            <i class="fas fa-print"></i> Print
+        </button>
+        <button id="downloadRecoveryCodes" class="pf-v5-c-button pf-m-link" type="button" onclick="downloadRecoveryCodes()">
+            <i class="fas fa-download"></i> Download
+        </button>
+        <button id="copyRecoveryCodes" class="pf-v5-c-button pf-m-link" type="button" onclick="copyRecoveryCodes()">
+            <i class="fas fa-copy"></i> Copy
+        </button>
+    </div>
+
+    <!-- confirmation checkbox -->
+    <div class=" pf-v5-u-mt-md">
+        <input class="" type="checkbox" id="kcRecoveryCodesConfirmationCheck" name="kcRecoveryCodesConfirmationCheck"
+        onchange="document.getElementById('saveRecoveryAuthnCodesBtn').disabled = !this.checked;"
+        />
+        <label for="kcRecoveryCodesConfirmationCheck">I have saved these codes somewhere safe</label>
+    </div>
+
+    <form action="https://sso-kc959.local:19591/realms/rasputin/login-actions/required-action?session_code=NUSslj9JLEDZlPRhDfy13weQNVbDNq4gZ3K9x3R6VN8&amp;execution=CONFIGURE_RECOVERY_AUTHN_CODES&amp;client_id=rasputin-console&amp;tab_id=dZKUMLMO1pI&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiRzNKVkZNWElkcWlsYXQ5RSJ9" class="pf-v5-c-form__group" id="kc-recovery-codes-settings-form" method="post">
+        <input type="hidden" name="generatedRecoveryAuthnCodes" value="KIX9FIUD32UR,GLT1PB1ST2KA,CT7VGIF7HPJY,BJVHGNP5R5YY,6APNY34E52P6,AABAPRQMVQ8U,1G9EK295P5KI,4QCVE1EWXD97,PEEMY81ZWY6L,35C5PXVHIGNB,DEC1Y2C7BLQN,9VXBE89KQM9P" />
+        <input type="hidden" name="generatedAt" value="1794171600073" />
+        <input type="hidden" id="userLabel" name="userLabel" value="Recovery codes" />
+    <div id="kc-form-options" class="">
+        <div class=""> 
+  <div class="pf-v5-c-check">
+    <label for="logout-sessions" class="pf-v5-c-check">
+      <input
+        class="pf-v5-c-check__input"
+        type="checkbox"
+        id="logout-sessions"
+        name="logout-sessions"
+        
+      />
+      <span class="pf-v5-c-check__label">Sign out from other devices</span>
+    </label>
+  </div>
+        </div>
+    </div>
+
+            <input type="submit"
+            class="pf-v5-c-button pf-v5-c-button pf-m-primary "
+            id="saveRecoveryAuthnCodesBtn" value="Complete setup"
+            disabled
+            />
+            <button type="submit"
+                class="pf-v5-c-button   pf-m-link"
+                id="cancelRecoveryAuthnCodesBtn" name="cancel-aia" value="true">Cancel setup
+            </button>
+    </form>
+
+    <script>
+        /* copy recovery codes  */
+        function copyRecoveryCodes() {
+            const tmpTextarea = document.createElement("textarea");
+            tmpTextarea.innerHTML = parseRecoveryCodeList();
+            document.body.appendChild(tmpTextarea);
+            tmpTextarea.select();
+            document.execCommand("copy");
+            document.body.removeChild(tmpTextarea);
+        }
+
+        /* download recovery codes  */
+        function formatCurrentDateTime() {
+            const dt = new Date();
+            const options = {
+                month: 'long',
+                day: 'numeric',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: 'numeric',
+                timeZoneName: 'short'
+            };
+
+            return dt.toLocaleString('en-US', options);
+        }
+
+        function parseRecoveryCodeList() {
+            const recoveryCodes = document.getElementById("kc-recovery-codes-list").getElementsByTagName("li");
+            let recoveryCodeList = "";
+
+            for (let i = 0; i < recoveryCodes.length; i++) {
+                const recoveryCodeLiElement = recoveryCodes[i].innerText;
+                recoveryCodeList += `${i+1}: ${recoveryCodeLiElement}\r\n`;
+            }
+
+            return recoveryCodeList;
+        }
+
+        function buildDownloadContent() {
+            const recoveryCodeList = parseRecoveryCodeList();
+            const dt = new Date();
+            const options = {
+                month: 'long',
+                day: 'numeric',
+                year: 'numeric',
+                hour: 'numeric',
+                minute: 'numeric',
+                timeZoneName: 'short'
+            };
+
+            return fileBodyContent =
+                "Keep these recovery codes somewhere safe." + "\n\n" +
+                recoveryCodeList + "\n" +
+                "Recovery codes are single-use passcodes that allow you to sign in to your account if you do not have access to your authenticator." + "\n\n" +
+                "These codes were generated on" + " " + formatCurrentDateTime();
+        }
+
+        function setUpDownloadLinkAndDownload(filename, text) {
+            const el = document.createElement('a');
+            el.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+            el.setAttribute('download', filename);
+            el.style.display = 'none';
+            document.body.appendChild(el);
+            el.click();
+            document.body.removeChild(el);
+        }
+
+        function downloadRecoveryCodes() {
+            setUpDownloadLinkAndDownload('kc-download-recovery-codes.txt', buildDownloadContent());
+        }
+
+        /* print recovery codes */
+        function buildPrintContent() {
+            const recoveryCodeListHTML = document.getElementById('kc-recovery-codes-list').parentNode.innerHTML;
+            const styles =
+                `@page { size: auto;  margin-top: 0; }
+                body { width: 480px; }
+                div { font-family: monospace }
+                p:first-of-type { margin-top: 48px }`;
+
+            return printFileContent =
+                "<html><style>" + styles + "</style><body>" +
+                "<title>kc-download-recovery-codes</title>" +
+                "<p>" + "Keep these recovery codes somewhere safe." + "</p>" +
+                "<div>" + recoveryCodeListHTML + "</div>" +
+                "<p>" + "Recovery codes are single-use passcodes that allow you to sign in to your account if you do not have access to your authenticator." + "</p>" +
+                "<p>" + "These codes were generated on" + " " + formatCurrentDateTime() + "</p>" +
+                "</body></html>";
+        }
+
+        function printRecoveryCodes() {
+            const w = window.open();
+            w.document.write(buildPrintContent());
+            w.print();
+            w.close();
+        }
+    </script>
+
+
+
+          <div class="pf-v5-c-login__main-footer">
+<!-- template: login-recovery-authn-code-config.ftl -->
+
+          </div>
+      </div>
+
+        <div class="pf-v5-c-login__main-footer">
+        </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

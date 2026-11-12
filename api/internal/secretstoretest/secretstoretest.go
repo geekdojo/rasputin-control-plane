@@ -14,7 +14,6 @@
 package secretstoretest
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -36,6 +35,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -48,16 +48,6 @@ const (
 	// ClientRole is the cert auth role self-init creates, and the CommonName
 	// of the client leaf ClientTLS presents. Log in with name=ClientRole.
 	ClientRole = "harness-client"
-
-	// healthRecheckInterval is how often waitHealthy re-asks the store's
-	// sys/health. It decides nothing: the wait ends on the store's own answer
-	// (200 initialized and unsealed after Start and Restart; 503 initialized
-	// and sealed after RestartSealed), a store that exits fails at once, and the
-	// wait as a whole is bounded only by the caller's ctx. The interval only
-	// sets how soon after the fact becomes true the harness notices it; a
-	// PebbleDB store is healthy on its first answer (geekdojo-brain#679 Q4).
-	// Timer-audit row K22.
-	healthRecheckInterval = 20 * time.Millisecond
 
 	// stderrTail is how many of the store's last stderr lines an early-exit
 	// error carries. The cause of an early exit (a lost port race, a config
@@ -147,10 +137,8 @@ type Store struct {
 	// per Store, so a hold outlives a Restart's new reader.
 	stdoutHold *holdGate
 
-	cmd     *exec.Cmd
-	stderr  *lineLog
-	exited  chan struct{} // closed once cmd.Wait has returned
-	waitErr error         // cmd.Wait's result; read only after exited closes
+	proc   *proctest.Proc  // the current launch
+	exited <-chan struct{} // proc.Exited(), closed once the process is reaped
 
 	closeOnce sync.Once
 	closeErr  error
@@ -192,8 +180,8 @@ func (s *Store) Reload(context.Context) error {
 		return errors.New("secretstoretest: Reload: the store is not running")
 	default:
 	}
-	if err := s.cmd.Process.Signal(syscall.SIGHUP); err != nil {
-		return fmt.Errorf("secretstoretest: SIGHUP pid %d: %w", s.cmd.Process.Pid, err)
+	if err := s.proc.Signal(syscall.SIGHUP); err != nil {
+		return fmt.Errorf("secretstoretest: %w", err)
 	}
 	return nil
 }
@@ -328,7 +316,7 @@ func (s *Store) RestartSealed(ctx context.Context) error {
 	if err := s.h.waitHealthy(ctx, s, sealedAndInitialised); err != nil {
 		return err
 	}
-	s.log.Info("secret store restarted sealed", "pid", s.cmd.Process.Pid, "dir", s.root)
+	s.log.Info("secret store restarted sealed", "pid", s.proc.Pid(), "dir", s.root)
 	return nil
 }
 
@@ -340,7 +328,7 @@ func (s *Store) Stop(ctx context.Context) error {
 	if err := s.stop(ctx, "Stop"); err != nil {
 		return err
 	}
-	s.log.Info("secret store stopped; data kept", "pid", s.cmd.Process.Pid, "dir", s.root)
+	s.log.Info("secret store stopped; data kept", "pid", s.proc.Pid(), "dir", s.root)
 	return nil
 }
 
@@ -360,7 +348,7 @@ func (s *Store) Restart(ctx context.Context) error {
 	if err := s.h.waitHealthy(ctx, s, healthyAndUnsealed); err != nil {
 		return err
 	}
-	s.log.Info("secret store restarted", "pid", s.cmd.Process.Pid, "dir", s.root)
+	s.log.Info("secret store restarted", "pid", s.proc.Pid(), "dir", s.root)
 	return nil
 }
 
@@ -378,7 +366,7 @@ func (s *Store) StartNoWait(context.Context) error {
 	if err := s.launch(s.h.cfg.BinaryPath, s.args...); err != nil {
 		return err
 	}
-	s.log.Info("secret store started without a health wait", "pid", s.cmd.Process.Pid, "dir", s.root)
+	s.log.Info("secret store started without a health wait", "pid", s.proc.Pid(), "dir", s.root)
 	return nil
 }
 
@@ -400,10 +388,10 @@ func (s *Store) stop(ctx context.Context, op string) error {
 		return fmt.Errorf("secretstoretest: %s: the store is not running", op)
 	default:
 	}
-	pid := s.cmd.Process.Pid
+	pid := s.proc.Pid()
 	s.stdoutHold.release()
-	if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-		return fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err)
+	if err := s.proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("secretstoretest: %w", err)
 	}
 	select {
 	case <-s.exited:
@@ -527,9 +515,9 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 	if err := atrest.EnsureSecretDir(paths.Storage); err != nil {
 		return fmt.Errorf("secretstoretest: storage dir: %w", err)
 	}
-	port, err := freePort()
+	port, err := proctest.FreePort()
 	if err != nil {
-		return err
+		return fmt.Errorf("secretstoretest: %w", err)
 	}
 	s.url = "https://127.0.0.1:" + strconv.Itoa(port)
 
@@ -568,7 +556,7 @@ func (h *Harness) start(ctx context.Context, s *Store, version string, b Bootstr
 		return err
 	}
 	s.log.Info("secret store started", "addr", strings.TrimPrefix(s.url, "https://"),
-		"pid", s.cmd.Process.Pid, "version", version, "dir", s.root)
+		"pid", s.proc.Pid(), "version", version, "dir", s.root)
 	return nil
 }
 
@@ -628,59 +616,27 @@ func SealKeyID(r io.Reader) (string, error) {
 	return fmt.Sprintf("rasputin-%x-%x-%x-%x-%x", u[0:4], u[4:6], u[6:8], u[8:10], u[10:16]), nil
 }
 
-// freePort asks the kernel for a free loopback port and releases it for the
-// store to bind. Another process can take it in between; the store then
-// exits with "address already in use", which Start reports. It is never
-// retried.
-func freePort() (int, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("secretstoretest: free port: %w", err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	if err := l.Close(); err != nil {
-		return 0, fmt.Errorf("secretstoretest: free port: %w", err)
-	}
-	return port, nil
-}
-
-// launch starts the store process. Its stdout and stderr are read a line at
-// a time into the logger; the last stderr lines are kept for an early-exit
-// error. One goroutine owns cmd.Wait: it waits for both readers to reach EOF
-// (exec requires every read from the pipes to finish before Wait), then
-// reaps the process and closes s.exited.
+// launch starts the store process through proctest: its stdout and stderr
+// are read a line at a time into the logger, and the last stderr lines are
+// kept for an early-exit error. Restart and RestartSealed call it again, so
+// s.proc and s.exited name the current launch (geekdojo/geekdojo-brain#760).
 func (s *Store) launch(bin string, args ...string) error {
-	cmd := exec.Command(bin, args...)
-	stdout, err := cmd.StdoutPipe()
+	spec := proctest.Spec{
+		Bin: bin, Args: args, Logger: s.log,
+		Name: "secret store", Source: "openbao",
+		StderrTail: stderrTail,
+	}
+	// A nil *holdGate in a Gate interface is not a nil interface; a Store a
+	// test builds by hand has no gate, and none is passed.
+	if s.stdoutHold != nil {
+		spec.StdoutGate = s.stdoutHold
+	}
+	p, err := proctest.Start(spec)
 	if err != nil {
-		return fmt.Errorf("secretstoretest: stdout pipe: %w", err)
+		return fmt.Errorf("secretstoretest: %w", err)
 	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("secretstoretest: stderr pipe: %w", err)
-	}
-	out := newLineLog(s.log, "stdout", 0)
-	out.hold = s.stdoutHold
-	errLog := newLineLog(s.log, "stderr", stderrTail)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("secretstoretest: start %s: %w", bin, err)
-	}
-	// The goroutines below get this launch's values as locals, never through
-	// s: Restart and RestartSealed call launch again and rewrite s.cmd,
-	// s.stderr and s.exited (geekdojo/geekdojo-brain#760).
-	s.cmd = cmd
-	s.stderr = errLog
-	exited := make(chan struct{})
-	s.exited = exited
-	var readers sync.WaitGroup
-	readers.Add(2)
-	go func() { defer readers.Done(); out.consume(stdout) }()
-	go func() { defer readers.Done(); errLog.consume(stderr) }()
-	go func() {
-		readers.Wait()
-		s.waitErr = cmd.Wait()
-		close(exited)
-	}()
+	s.proc = p
+	s.exited = p.Exited()
 	return nil
 }
 
@@ -707,68 +663,24 @@ func sealedAndInitialised(code int, hb health) bool {
 // waitHealthy returns once the store's sys/health answer satisfies want.
 // READY=1 is no use here: the store sends it before unseal
 // (geekdojo-brain#679 Q4). It fails at once if the store exits, and otherwise
-// waits as long as ctx allows.
-//
-// No request carries a timeout of its own: each runs under a ctx that ends
-// when the caller's ctx does or when the store exits, which are the two facts
-// that can make an answer never come.
-//
-// The exit channel is read from s once, here, and the watcher goroutine is
-// joined before waitHealthy returns: a later launch rewrites s.exited, so
-// nothing may read the field from another goroutine
-// (geekdojo/geekdojo-brain#760).
+// waits as long as ctx allows; the recheck loop is proctest.Await's.
 func (h *Harness) waitHealthy(ctx context.Context, s *Store, want healthWant) error {
-	exited := s.exited
-	reqCtx, cancel := context.WithCancel(ctx)
-	watched := make(chan struct{})
-	defer func() {
-		cancel()
-		<-watched
-	}()
-	go func() {
-		defer close(watched)
-		select {
-		case <-exited:
-			cancel()
-		case <-reqCtx.Done():
-		}
-	}()
 	client := &http.Client{Transport: &http.Transport{TLSClientConfig: s.ClientTLS()}}
 	defer client.CloseIdleConnections()
-
-	last := "no answer yet"
-	ticker := time.NewTicker(healthRecheckInterval)
-	defer ticker.Stop()
-	for {
-		ok, status, err := s.checkHealth(reqCtx, client, want)
-		if ok {
-			return nil
-		}
-		// A request cut short because the store exited or ctx ended says
-		// nothing about the store; keep the answer before it.
-		if reqCtx.Err() == nil {
-			now := status
-			if err != nil {
-				now = err.Error()
-			}
-			if now != last {
-				last = now
-				s.log.Debug("secret store not healthy yet", "health", last)
-			}
-		}
-		select {
-		case <-exited:
-			return s.exitError()
-		default:
-		}
-		select {
-		case <-exited:
-			return s.exitError()
-		case <-ctx.Done():
-			return fmt.Errorf("secretstoretest: store at %s not healthy when ctx ended (last health: %s): %w",
-				s.url, last, ctx.Err())
-		case <-ticker.C:
-		}
+	err := proctest.Await(ctx, s.proc, func(ctx context.Context) (bool, string, error) {
+		return s.checkHealth(ctx, client, want)
+	}, func(last string) {
+		s.log.Debug("secret store not healthy yet", "health", last)
+	})
+	var notReady *proctest.NotReadyError
+	switch {
+	case err == nil:
+		return nil
+	case errors.As(err, &notReady):
+		return fmt.Errorf("secretstoretest: store at %s not healthy when ctx ended (last health: %s): %w",
+			s.url, notReady.Last, notReady.Err)
+	default:
+		return s.exitError(err)
 	}
 }
 
@@ -794,11 +706,10 @@ func (s *Store) checkHealth(ctx context.Context, client *http.Client, want healt
 }
 
 // exitError is the error for a store that exited before it gave the awaited
-// health answer. It
-// carries the store's last stderr lines, where the cause is.
-func (s *Store) exitError() error {
-	return fmt.Errorf("secretstoretest: store exited before it was healthy: %v; last stderr: %s",
-		s.waitErr, s.stderr.tail())
+// health answer. exited is proctest's ExitError, which carries the store's
+// last stderr lines, where the cause is.
+func (s *Store) exitError(exited error) error {
+	return fmt.Errorf("secretstoretest: store exited before it was healthy: %w", exited)
 }
 
 // Close stops the store and removes its temporary root, then proves both: it
@@ -819,29 +730,10 @@ func (s *Store) Close(ctx context.Context) error {
 
 func (s *Store) teardown(ctx context.Context) error {
 	var errs []error
-	if s.cmd != nil {
-		pid := s.cmd.Process.Pid
+	if s.proc != nil {
 		s.stdoutHold.release()
-		select {
-		case <-s.exited:
-		default:
-			if err := s.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
-				errs = append(errs, fmt.Errorf("secretstoretest: SIGTERM pid %d: %w", pid, err))
-			}
-			select {
-			case <-s.exited:
-			case <-ctx.Done():
-				if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
-					errs = append(errs, fmt.Errorf("secretstoretest: SIGKILL pid %d: %w", pid, err))
-				}
-				s.log.Warn("secret store ignored SIGTERM; killed", "pid", pid)
-				<-s.exited
-			}
-		}
-		if s.cmd.ProcessState == nil {
-			errs = append(errs, fmt.Errorf("secretstoretest: teardown left pid %d unreaped", pid))
-		} else {
-			s.log.Info("secret store stopped", "pid", pid, "exit", s.cmd.ProcessState.String())
+		if err := s.proc.Stop(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("secretstoretest: %w", err))
 		}
 	}
 	if err := os.RemoveAll(s.root); err != nil {
@@ -853,69 +745,6 @@ func (s *Store) teardown(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("secretstoretest: cannot show teardown removed %s: %w", s.root, err))
 	}
 	return errors.Join(errs...)
-}
-
-// lineLog reads the store's stdout or stderr: each line goes to the logger at
-// DEBUG, and the last keep lines are kept for an error. It is deliberately not
-// an io.Writer: one reader goroutine owns each stream, and tail is read after
-// the process exits.
-type lineLog struct {
-	log    *slog.Logger
-	stream string
-	keep   int
-	// hold, when set, is waited on before each line is read.
-	hold *holdGate
-
-	mu    sync.Mutex
-	lines []string
-}
-
-func newLineLog(log *slog.Logger, stream string, keep int) *lineLog {
-	return &lineLog{log: log, stream: stream, keep: keep}
-}
-
-// consume reads r to EOF, a line at a time, however long a line is. A last
-// line with no newline is still a line.
-func (l *lineLog) consume(r io.Reader) {
-	br := bufio.NewReader(r)
-	for {
-		l.hold.wait()
-		line, err := br.ReadString('\n')
-		if line != "" {
-			l.emit(strings.TrimRight(line, "\r\n"))
-		}
-		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				// The rest of this stream is lost: the DEBUG lines stop and
-				// the tail an exit error carries is cut short. Say so.
-				l.log.Warn("secret store output read failed", "source", "openbao", "stream", l.stream, "err", err)
-			}
-			return
-		}
-	}
-}
-
-func (l *lineLog) emit(line string) {
-	l.log.Debug("secret store output", "source", "openbao", "stream", l.stream, "line", line)
-	if l.keep == 0 {
-		return
-	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.lines = append(l.lines, line)
-	if len(l.lines) > l.keep {
-		l.lines = l.lines[len(l.lines)-l.keep:]
-	}
-}
-
-// tail is the kept lines joined with " | ".
-func (l *lineLog) tail() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.lines) == 0 {
-		return "(none)"
-	}
-	return strings.Join(l.lines, " | ")
 }
 
 // holdGate pauses a reader between lines while it is held. A nil gate is
@@ -932,8 +761,8 @@ func newHoldGate() *holdGate {
 	return g
 }
 
-// wait returns once the gate is not held.
-func (g *holdGate) wait() {
+// Wait returns once the gate is not held. It is proctest's Gate.
+func (g *holdGate) Wait() {
 	if g == nil {
 		return
 	}

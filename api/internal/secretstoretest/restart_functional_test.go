@@ -68,7 +68,7 @@ func TestSecretStore_StopAndRestartKeepData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	firstPID := s.cmd.Process.Pid
+	firstPID := s.proc.Pid()
 	if err := s.Stop(t.Context()); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestSecretStore_StopAndRestartKeepData(t *testing.T) {
 		t.Fatalf("Health after RestartSealed = %v, want ErrSealed", err)
 	}
 
-	lastPID := s.cmd.Process.Pid
+	lastPID := s.proc.Pid()
 	closed = true
 	if err := s.Close(context.Background()); err != nil {
 		t.Fatalf("Close: %v", err)

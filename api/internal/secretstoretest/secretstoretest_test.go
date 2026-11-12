@@ -21,9 +21,9 @@ import (
 	"sync"
 	"syscall"
 	"testing"
-	"testing/iotest"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
@@ -608,31 +608,6 @@ func launched(t *testing.T, log *slog.Logger, setup, body string) (*Store, int, 
 	return s, pid, root
 }
 
-// TC-753-07: a store that ignores SIGTERM is SIGKILLed only because the ctx
-// given to Close has ended, with one WARN naming its pid (F-753-03,
-// F-753-10).
-func TestClose_KillsAStoreThatIgnoresSIGTERM(t *testing.T) {
-	log, rec := logkittest.New()
-	s, pid, root := launched(t, log, "trap '' TERM\n", "exec tail -f /dev/null\n")
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	if err := s.Close(ctx); err != nil {
-		t.Errorf("Close = %v, want nil", err)
-	}
-	assertReaped(t, pid)
-	if _, err := os.Stat(root); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("root still there: stat %v", err)
-	}
-	warns := rec.Matching(slog.LevelWarn, "secret store ignored SIGTERM; killed")
-	if len(warns) != 1 {
-		t.Fatalf("%d WARN records, want 1", len(warns))
-	}
-	if got, _ := logkittest.Attr(warns[0], "pid"); got != strconv.Itoa(pid) {
-		t.Errorf("WARN pid = %q, want %d", got, pid)
-	}
-}
-
 // TC-753-08: a second Close returns the first one's result, signals nothing
 // and logs nothing.
 func TestClose_Idempotent(t *testing.T) {
@@ -738,50 +713,6 @@ func TestClose_CannotShowRootRemoved(t *testing.T) {
 	assertReaped(t, pid)
 }
 
-// lineLog keeps only the last lines, an unterminated last line included, for
-// the early-exit error.
-func TestLineLogTail(t *testing.T) {
-	l := newLineLog(slog.New(slog.DiscardHandler), "stderr", 3)
-	if got := l.tail(); got != "(none)" {
-		t.Errorf("empty tail = %q", got)
-	}
-	l.consume(strings.NewReader("a\nb\r\nc\npartial"))
-	if got := l.tail(); got != "b | c | partial" {
-		t.Errorf("tail = %q, want %q", got, "b | c | partial")
-	}
-}
-
-// F-753-19: a read that fails with anything but EOF cuts the stream short, so
-// consume logs one WARN naming the stream and the error. EOF logs no WARN.
-func TestLineLogConsume_ReadError(t *testing.T) {
-	errX := errors.New("read broke")
-	log, rec := logkittest.New()
-	l := newLineLog(log, "stderr", 3)
-	l.consume(io.MultiReader(strings.NewReader("a\n"), iotest.ErrReader(errX)))
-
-	warns := rec.AtLevel(slog.LevelWarn)
-	if len(warns) != 1 {
-		t.Fatalf("%d WARN records, want 1:\n%s", len(warns), rec.Text())
-	}
-	if warns[0].Message != "secret store output read failed" {
-		t.Errorf("WARN message = %q", warns[0].Message)
-	}
-	for key, want := range map[string]string{"source": "openbao", "stream": "stderr", "err": errX.Error()} {
-		if got, ok := logkittest.Attr(warns[0], key); !ok || got != want {
-			t.Errorf("WARN %s = %q (present %t), want %q", key, got, ok, want)
-		}
-	}
-	if got := l.tail(); got != "a" {
-		t.Errorf("tail = %q, want the line read before the error", got)
-	}
-
-	eofLog, eofRec := logkittest.New()
-	newLineLog(eofLog, "stdout", 0).consume(strings.NewReader("a\nb"))
-	if w := eofRec.AtLevel(slog.LevelWarn); len(w) != 0 {
-		t.Errorf("EOF input logged %d WARN record(s), want 0:\n%s", len(w), eofRec.Text())
-	}
-}
-
 // checkHealth applies the awaited answer. healthyAndUnsealed (Start) holds
 // only on 200 with initialized=true and sealed=false; sealedAndInitialised
 // (RestartSealed, TC-758-26) only on 503 with initialized=true and
@@ -847,7 +778,7 @@ func TestRestartSealed_CtxEndsBeforeSealed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	port, err := freePort()
+	port, err := proctest.FreePort()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,34 +921,21 @@ esac
 	assertEmpty(t, cfg.TempParent)
 }
 
-// geekdojo/geekdojo-brain#762: a held stdout reader reads nothing more until
-// release, then reads to EOF; release is idempotent, and a nil gate (a Store
-// built by hand) never holds.
+// geekdojo/geekdojo-brain#762: HoldStdout holds the Store's gate until
+// release, which is idempotent, and a nil gate (a Store built by hand) never
+// holds. That a held gate stops proctest's reader between lines is
+// proctest's TestGate_PausesTheReaderUntilReleased.
 func TestHoldStdout_ReleaseResumesTheReader(t *testing.T) {
 	s := &Store{stdoutHold: newHoldGate()}
 	release := s.HoldStdout()
-	l := newLineLog(slog.New(slog.DiscardHandler), "stdout", 5)
-	l.hold = s.stdoutHold
-	pr, pw := io.Pipe()
-	done := make(chan struct{})
-	go func() { defer close(done); l.consume(pr) }()
-	wrote := make(chan error, 1)
-	go func() {
-		_, err := pw.Write([]byte("a\nb\n"))
-		_ = pw.Close()
-		wrote <- err
-	}()
+	waited := make(chan struct{})
+	go func() { defer close(waited); s.stdoutHold.Wait() }()
 	release()
 	release()
-	if err := <-wrote; err != nil {
-		t.Fatal(err)
-	}
-	<-done
-	if got := l.tail(); got != "a | b" {
-		t.Fatalf("tail = %q, want both lines once released", got)
-	}
+	<-waited
+	s.stdoutHold.Wait()
 
 	var nilGate *holdGate
-	nilGate.wait()
+	nilGate.Wait()
 	nilGate.release()
 }

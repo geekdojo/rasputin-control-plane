@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html class="login-pf" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Sign in to rasputin</title>
+        <link rel="icon" href="/resources/xmkpe/login/keycloak.v2/img/favicon.ico" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly.min.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly-addons.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/login/keycloak.v2/css/styles.css" rel="stylesheet" />
+    <script type="importmap">
+        {
+            "imports": {
+                "rfc4648": "/resources/xmkpe/common/keycloak/vendor/rfc4648/rfc4648.js"
+            }
+        }
+    </script>
+      <script type="module" async blocking="render">
+          const DARK_MODE_CLASS = "pf-v5-theme-dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+          updateDarkMode(mediaQuery.matches);
+          mediaQuery.addEventListener("change", (event) => updateDarkMode(event.matches));
+
+          function updateDarkMode(isEnabled) {
+            const { classList } = document.documentElement;
+
+            if (isEnabled) {
+              classList.add(DARK_MODE_CLASS);
+            } else {
+              classList.remove(DARK_MODE_CLASS);
+            }
+          }
+      </script>
+    <script type="module" src="/resources/xmkpe/login/keycloak.v2/js/passwordVisibility.js"></script>
+    <script type="module">
+        import { startSessionPolling } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+        startSessionPolling(
+            "/realms/rasputin/login-actions/restart?client_id=rasputin-console&tab_id=-X3EFmjpyw4&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiSG9VZVNsc2hYT052Z1o1ayJ9&skip_logout=true"
+        );
+    </script>
+    <script type="module">
+        document.addEventListener("click", (event) => {
+            const link = event.target.closest("a[data-once-link]");
+
+            if (!link) {
+                return;
+            }
+
+            if (link.getAttribute("aria-disabled") === "true") {
+                event.preventDefault();
+                return;
+            }
+
+            const { disabledClass } = link.dataset;
+
+            if (disabledClass) {
+                link.classList.add(...disabledClass.trim().split(/\s+/));
+            }
+
+            link.setAttribute("role", "link");
+            link.setAttribute("aria-disabled", "true");
+        });
+    </script>
+        <script type="module">
+            import { checkAuthSession } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+            checkAuthSession(
+                "tu2dsvKsIjAEKcTEtfMWRpo9YlAOLXBlniKrT7bJ4nPByg5AOe48dmSbCeXvk2vP"
+            );
+        </script>
+    <script>
+      // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1404468
+      const isFirefox = true;
+    </script>
+</head>
+
+<body id="keycloak-bg" class="" data-page-id="login-login-config-totp">
+<div class="pf-v5-c-login">
+  <div class="pf-v5-c-login__container">
+    <header id="kc-header" class="pf-v5-c-login__header">
+      <div id="kc-header-wrapper"
+              class="pf-v5-c-brand">rasputin</div>
+    </header>
+    <main class="pf-v5-c-login__main">
+      <div class="pf-v5-c-login__main-header">
+        <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title"><!-- template: login-config-totp.ftl -->
+
+        Mobile Authenticator Setup
+</h1>
+      </div>
+      <div class="pf-v5-c-login__main-body">
+
+
+<!-- template: login-config-totp.ftl -->
+
+        <ol id="kc-totp-settings" class="pf-v5-c-list pf-v5-u-mb-md">
+            <li>
+                <p>Install one of the following applications on your mobile:</p>
+
+                <ul id="kc-totp-supported-apps">
+                        <li>Microsoft Authenticator</li>
+                        <li>FreeOTP</li>
+                        <li>Google Authenticator</li>
+                </ul>
+            </li>
+
+                <li>
+                    <p>Open the application and scan the barcode:</p>
+  <div class="kc-qr-code pf-v5-u-display-flex pf-v5-u-flex-direction-column pf-v5-u-align-items-center pf-v5-u-my-sm">
+      <img id="kc-totp-secret-qr-code" src="data:image/png;base64, iVBORw0KGgoAAAANSUhEUgAAAPYAAAD2AQAAAADNaUdlAAACpUlEQVR4Xu2YMY6rQAyGHW1BmSNwk3CxSCBxsexNOAIlBYrf/3nIrMJK27xiXMQF2sw3KxmPf9uD+Z+223nl3T78vPJuH35eeTf4amYXn10PX7rHVY/nddeijTn46P69fi2bXfe+e5j+GtZ7HyAFv1sn7ttNLsv/vbcbj0sm7hNB1s+nWV82peLEV+fvQlOv7Zl4nL8OnKzsYvvTfuVHQ45+xDs21cdJXw152DouHL3Zze6mTB3Lcgauo/eoOpEEiMgjyFpLwVUV5fod141MHUs6bEN9v8Z8dn8Q1UsoyaUfMlXlMgdfTb4qtKqKvphdJ/QzqtPU/G3LZRtakevzYoMyVdutJ2dT8GgtuH7hJcRdbzJ7Pf/WnAMnlh2ZYDRpoYl0Pd6vNZe0JeieIafomzdxlfPD/9Z8Vv1hldDSBNmkmP/oqy3HV/zvQuTyv3dEnokLWW+D9jHkIHez0FQKroFLpMyHUSQN1ylHOfi4xOgfTVDSmaUk/GccS8Hl8AB3pkJKo35OPf+YguMw9Uddmf6sTZK2+OOIb2vO+TOwkpBcoiaLSXar83VjrkfxX13ZFVqKpPyn56TgRJUmI69nuC4pzA/bq7+05n60Zm3S0ceboKk0fOXqRGhNXcXCdPTaXvXVlpf5wbhwxiU05gfNtLU/t+bKz5gfWJWIYmeRUwquWHLqjIbciuV/XALq/NWaE1C0HJ8W4iNIFCE16Rw8YknB/i7xjXFHmn+df2seFhdignyh/xHaNHwtgmbX/hpiSdc6H7bmQnx/c1oz989SjqLnpOBxa2e+of5E/xui59T8TMD1CBSrRBqRH/HNwOMvjCYt002+1sfWfCyjoaL6VeYvSs9S+0tzHvq5h6oXPk0fcvqZX9vyv+zDzyvv9uHnlXf7b/4PeBVefR39mwwAAAAASUVORK5CYII=" alt="Open the application and scan the barcode:">
+                        <a href="https://sso-kc959.local:19591/realms/rasputin/login-actions/required-action?client_id=rasputin-console&amp;tab_id=-X3EFmjpyw4&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiSG9VZVNsc2hYT052Z1o1ayJ9&amp;mode=manual&amp;execution=CONFIGURE_TOTP" id="mode-manual">Unable to scan?</a>
+  </div>
+                </li>
+            <li>
+                <p>Enter the one-time code provided by the application and click Submit to finish the setup.</p>
+                <p>Provide a Device Name to help you manage your OTP devices.</p>
+            </li>
+        </ol>
+
+        <form action="https://sso-kc959.local:19591/realms/rasputin/login-actions/required-action?session_code=yEWkz3C1EwjrPfgYNI6rc63VuXprS62y2SSa14_vlks&amp;execution=CONFIGURE_TOTP&amp;client_id=rasputin-console&amp;tab_id=-X3EFmjpyw4&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiSG9VZVNsc2hYT052Z1o1ayJ9" class="pf-v5-c-form pf-v5-u-w-100" id="kc-totp-settings-form" method="post" novalidate="novalidate">
+            <div class="pf-v5-c-form__group">
+                <div class="pf-v5-c-form__label">
+                    <label class="pf-v5-c-form__label" for="form-vertical-name">
+                        <span class="pf-v5-c-form__label-text">One-time code</span>&nbsp;<span class="pf-v5-c-form__label-required" aria-hidden="true">&#42;</span>
+                    </label>
+                </div>
+                <div class="pf-v5-c-form-control ">
+                    <input type="text" required id="totp" name="totp" autocomplete="one-time-code"
+                           aria-invalid=""
+                           inputmode="numeric"
+                    />
+
+                </div>
+                <input type="hidden" id="totpSecret" name="totpSecret" value="ISsvyAcDAEBMuWA2CBmO" />
+                
+            </div>
+            <div class="pf-v5-c-form__group">
+                <div class="pf-v5-c-form__label">
+                    <label class="pf-v5-c-form__label" for="form-vertical-name">
+                        <span class="pf-v5-c-form__label-text">Device Name</span>
+                    </label>
+                </div>
+
+                <div class="pf-v5-c-form-control ">
+                    <input type="text" id="userLabel" name="userLabel" autocomplete="off"
+                           aria-invalid=""
+                    />
+
+                </div>
+            </div>
+
+            <div class="pf-v5-c-form__group">
+    <div id="kc-form-options" class="">
+        <div class=""> 
+  <div class="pf-v5-c-check">
+    <label for="logout-sessions" class="pf-v5-c-check">
+      <input
+        class="pf-v5-c-check__input"
+        type="checkbox"
+        id="logout-sessions"
+        name="logout-sessions"
+        
+      />
+      <span class="pf-v5-c-check__label">Sign out from other devices</span>
+    </label>
+  </div>
+        </div>
+    </div>
+            </div>
+
+  <div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__actions pf-v5-u-pt-xs pf-v5-u-flex-nowrap">
+  <button class="pf-v5-c-button pf-m-primary pf-m-block" name="" id="saveTOTPBtn"
+          type="submit" >
+  Submit
+  </button>
+  <button class="pf-v5-c-button pf-m-secondary pf-m-block" name="cancel-aia" id="cancelTOTPBtn"
+          type="submit" value="true">
+  Cancel
+  </button>
+    </div>
+  </div>
+        </form>
+
+
+
+          <div class="pf-v5-c-login__main-footer">
+<!-- template: login-config-totp.ftl -->
+
+
+          </div>
+      </div>
+
+        <div class="pf-v5-c-login__main-footer">
+        </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

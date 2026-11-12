@@ -1,0 +1,42 @@
+{
+  "realm": "{{.Realm}}",
+  "enabled": true,
+  "sslRequired": "all",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "verifyEmail": false,
+  "internationalizationEnabled": false,
+  "clients": [
+    {
+      "clientId": "{{.ClientID}}",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "protocol": "openid-connect",
+      "redirectUris": ["{{.RedirectURI}}"],
+      "webOrigins": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": {{.User}},
+      "enabled": true,
+      "email": "harness-user@identitytest.invalid",
+      "emailVerified": true,
+      "firstName": "Harness",
+      "lastName": "User",
+      "requiredActions": [],
+      "credentials": [
+        {"type": "password", "value": {{.Password}}, "temporary": false}
+      ]
+    }
+  ]
+}

@@ -3,6 +3,8 @@ module github.com/geekdojo/rasputin-control-plane/api
 go 1.26.0
 
 require (
+	github.com/chromedp/cdproto v0.159.0
+	github.com/chromedp/chromedp v0.22.1
 	github.com/coder/websocket v1.8.15
 	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/backupxfer v0.0.0-00010101000000-000000000000
@@ -19,6 +21,7 @@ require (
 	github.com/nats-io/nkeys v0.4.17
 	github.com/oklog/ulid/v2 v2.1.2
 	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.62.0
 	golang.org/x/tools v0.52.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
@@ -28,6 +31,7 @@ require (
 	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
+	github.com/go-json-experiment/json v0.0.0-20260213210345-44df1a37e875 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.3.1 // indirect
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
@@ -44,7 +48,6 @@ require (
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	golang.org/x/mod v0.42.0 // indirect
-	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/time v0.16.0 // indirect

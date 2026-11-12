@@ -111,8 +111,9 @@ func TestAdopt_AgainstTheRealStore(t *testing.T) {
 // Adopt refuses a store started without an external seal, and a fragment
 // that names no key id, before it changes anything.
 func TestAdopt_Refusals(t *testing.T) {
-	s := &Store{exited: make(chan struct{})}
-	close(s.exited)
+	exited := make(chan struct{})
+	s := &Store{exited: exited}
+	close(exited)
 	if err := s.Adopt(context.Background(), Restored{}); err == nil || !strings.Contains(err.Error(), "no external seal") {
 		t.Errorf("Adopt without an external seal = %v", err)
 	}
