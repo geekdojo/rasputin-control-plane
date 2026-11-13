@@ -211,8 +211,8 @@ func (p *Proc) Stop(ctx context.Context) error {
 		// reaps it, and kill(2) cannot tell a zombie from a live process. The
 		// proof that nothing is left is the caller's (identitytest scans
 		// /proc, where a zombie names nothing).
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			errs = append(errs, fmt.Errorf("SIGKILL process group %d: %w", pid, err))
+		if err := groupKillResult(pid, syscall.Kill(-pid, syscall.SIGKILL), allExiting); err != nil {
+			errs = append(errs, err)
 		}
 	}
 	if p.cmd.ProcessState == nil {
@@ -221,6 +221,28 @@ func (p *Proc) Stop(ctx context.Context) error {
 		p.spec.Logger.Info(p.spec.Name+" stopped", "pid", pid, "exit", p.cmd.ProcessState.String())
 	}
 	return errors.Join(errs...)
+}
+
+// groupKillResult judges kill(-pgid, SIGKILL)'s error. ESRCH is a group
+// that is already gone. EPERM is too, but only when every member left is a
+// zombie or already exiting: darwin answers EPERM, not ESRCH, for those (an
+// orphaned member dying or waiting for launchd to reap it, F-966-17).
+// exiting says whether that holds; any other EPERM is a real permission
+// error and is returned, as is every other error.
+func groupKillResult(pgid int, err error, exiting func(pgid int) (bool, error)) error {
+	if err == nil || errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	if errors.Is(err, syscall.EPERM) {
+		gone, zerr := exiting(pgid)
+		if zerr != nil {
+			return fmt.Errorf("SIGKILL process group %d: %w (listing its members: %w)", pgid, err, zerr)
+		}
+		if gone {
+			return nil
+		}
+	}
+	return fmt.Errorf("SIGKILL process group %d: %w", pgid, err)
 }
 
 // Check asks once whether the awaited fact holds. status describes the

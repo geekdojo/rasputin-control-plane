@@ -248,10 +248,15 @@ func TestStop_GroupKillsAMemberThatOutlivesItsLeader(t *testing.T) {
 	// still holding the pipe keeps Exited open, and Stop's ctx ends that. It
 	// says it is ready only after its trap is set, so the signal can only
 	// arrive once it has its disposition.
-	bin := writeFake(t, `trap 'exit 0' TERM
-(trap '' TERM; echo ready >&3; exec tail -f /dev/null >/dev/null 2>&1) &
+	//
+	// The leader sets no trap and execs tail, so it has the default SIGTERM
+	// disposition at every point after the member's ready line (F-966-13). A
+	// "trap 'exit 0' TERM; wait" leader does not: bash holds a trapped TERM
+	// that lands before it reaches wait until wait returns, and wait never
+	// returns because the member ignores TERM.
+	bin := writeFake(t, `(trap '' TERM; echo ready >&3; exec tail -f /dev/null >/dev/null 2>&1) &
 exec 3>&-
-wait
+exec tail -f /dev/null
 `)
 	p, err := Start(Spec{Bin: bin, Logger: slog.New(slog.DiscardHandler), Name: "identity service", Group: true, ExtraFiles: []*os.File{w}})
 	if err != nil {
@@ -263,6 +268,50 @@ wait
 	}
 	assertReaped(t, p.Pid())
 	assertDead(t, r)
+}
+
+// F-966-17: Stop's group SIGKILL treats ESRCH as a group already gone, and
+// EPERM too only when every member left is a zombie or exiting (darwin's
+// answer for such a group). Any other EPERM, an EPERM whose members cannot be
+// listed, and any other error are returned.
+func TestGroupKillResult(t *testing.T) {
+	listErr := errors.New("sysctl failed")
+	cases := []struct {
+		name    string
+		err     error
+		exiting bool
+		zerr    error
+		want    error // nil: no error
+	}{
+		{"killed", nil, false, nil, nil},
+		{"already gone", syscall.ESRCH, false, nil, nil},
+		{"only zombies or exiting left", syscall.EPERM, true, nil, nil},
+		{"a live member we may not signal", syscall.EPERM, false, nil, syscall.EPERM},
+		{"members not listable", syscall.EPERM, false, listErr, listErr},
+		{"other error", syscall.EINVAL, true, nil, syscall.EINVAL},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			asked := 0
+			got := groupKillResult(42, c.err, func(pgid int) (bool, error) {
+				asked++
+				if pgid != 42 {
+					t.Errorf("exiting asked about group %d, want 42", pgid)
+				}
+				return c.exiting, c.zerr
+			})
+			if c.want == nil {
+				if got != nil {
+					t.Fatalf("groupKillResult = %v, want nil", got)
+				}
+			} else if !errors.Is(got, c.want) || !strings.Contains(got.Error(), "process group 42") {
+				t.Fatalf("groupKillResult = %v, want it to wrap %v and name group 42", got, c.want)
+			}
+			if wantAsked := errors.Is(c.err, syscall.EPERM); (asked == 1) != wantAsked {
+				t.Errorf("exiting asked %d times; want asked only on EPERM", asked)
+			}
+		})
+	}
 }
 
 // TC-966-16: Await returns nil as soon as the check answers true, and notes
