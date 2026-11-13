@@ -82,7 +82,7 @@ func TestSecretStore_SmokeWriteReadKV(t *testing.T) {
 			t.Errorf("cleanup Close: %v", err)
 		}
 	})
-	pid, root := s.cmd.Process.Pid, s.root
+	pid, root := s.proc.Pid(), s.root
 	sealKey, err := os.ReadFile(filepath.Join(root, "seal-key"))
 	if err != nil {
 		t.Fatal(err)

@@ -1,0 +1,177 @@
+
+<!DOCTYPE html>
+<html class="login-pf" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Sign in to rasputin</title>
+        <link rel="icon" href="/resources/xmkpe/login/keycloak.v2/img/favicon.ico" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly.min.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly-addons.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/login/keycloak.v2/css/styles.css" rel="stylesheet" />
+    <script type="importmap">
+        {
+            "imports": {
+                "rfc4648": "/resources/xmkpe/common/keycloak/vendor/rfc4648/rfc4648.js"
+            }
+        }
+    </script>
+      <script type="module" async blocking="render">
+          const DARK_MODE_CLASS = "pf-v5-theme-dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+          updateDarkMode(mediaQuery.matches);
+          mediaQuery.addEventListener("change", (event) => updateDarkMode(event.matches));
+
+          function updateDarkMode(isEnabled) {
+            const { classList } = document.documentElement;
+
+            if (isEnabled) {
+              classList.add(DARK_MODE_CLASS);
+            } else {
+              classList.remove(DARK_MODE_CLASS);
+            }
+          }
+      </script>
+    <script type="module" src="/resources/xmkpe/login/keycloak.v2/js/passwordVisibility.js"></script>
+    <script type="module">
+        import { startSessionPolling } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+        startSessionPolling(
+            "/realms/rasputin/login-actions/restart?client_id=rasputin-console&tab_id=hVwxZmJwTiU&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiOXM2MUhGRE9NVTBiVFVVUyJ9&skip_logout=true"
+        );
+    </script>
+    <script type="module">
+        document.addEventListener("click", (event) => {
+            const link = event.target.closest("a[data-once-link]");
+
+            if (!link) {
+                return;
+            }
+
+            if (link.getAttribute("aria-disabled") === "true") {
+                event.preventDefault();
+                return;
+            }
+
+            const { disabledClass } = link.dataset;
+
+            if (disabledClass) {
+                link.classList.add(...disabledClass.trim().split(/\s+/));
+            }
+
+            link.setAttribute("role", "link");
+            link.setAttribute("aria-disabled", "true");
+        });
+    </script>
+    <script>
+      // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1404468
+      const isFirefox = true;
+    </script>
+</head>
+
+<body id="keycloak-bg" class="" data-page-id="login-webauthn-register">
+<div class="pf-v5-c-login">
+  <div class="pf-v5-c-login__container">
+    <header id="kc-header" class="pf-v5-c-login__header">
+      <div id="kc-header-wrapper"
+              class="pf-v5-c-brand">rasputin</div>
+    </header>
+    <main class="pf-v5-c-login__main">
+      <div class="pf-v5-c-login__main-header">
+        <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title">        Passkey Registration
+</h1>
+      </div>
+      <div class="pf-v5-c-login__main-body">
+
+
+    <div class="pf-v5-c-form pf-v5-u-w-100">
+        <form id="register" action="https://sso-kc959.local:19591/realms/rasputin/login-actions/required-action?session_code=GQz5QEiA4MjeH6FLDFy0nQmFBDjaAObs7Ub6vAHq-Ds&amp;execution=webauthn-register-passwordless&amp;client_id=rasputin-console&amp;tab_id=hVwxZmJwTiU&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiOXM2MUhGRE9NVTBiVFVVUyJ9" method="post" >
+            <div class="pf-v5-c-form__group">
+                <input type="hidden" id="clientDataJSON" name="clientDataJSON"/>
+                <input type="hidden" id="attestationObject" name="attestationObject"/>
+                <input type="hidden" id="publicKeyCredentialId" name="publicKeyCredentialId"/>
+                <input type="hidden" id="authenticatorLabel" name="authenticatorLabel"/>
+                <input type="hidden" id="transports" name="transports"/>
+                <input type="hidden" id="authenticatorAttachment" name="authenticatorAttachment"/>
+                <input type="hidden" id="error" name="error"/>
+    <div id="kc-form-options" class="">
+        <div class=""> 
+  <div class="pf-v5-c-check">
+    <label for="logout-sessions" class="pf-v5-c-check">
+      <input
+        class="pf-v5-c-check__input"
+        type="checkbox"
+        id="logout-sessions"
+        name="logout-sessions"
+        
+      />
+      <span class="pf-v5-c-check__label">Sign out from other devices</span>
+    </label>
+  </div>
+        </div>
+    </div>
+            </div>
+        </form>
+
+        <script type="module">
+            import { registerByWebAuthn } from "/resources/xmkpe/login/keycloak.v2/js/webauthnRegister.js";
+            const registerButton = document.getElementById('registerWebAuthn');
+            registerButton.addEventListener("click", function() {
+                const input = {
+                    challenge : "VzVgrW-dTEig7tCOC9EwFQ",
+                    userid : "NDE5NGYwMzMtMjY5MS00ZjE3LTlkODItODQ5YjMzZDMyNDdh",
+                    username : "u1-93eba32d",
+                    signatureAlgorithms : [-7,],
+                    rpEntityName : "rasputin",
+                    rpId : "sso-kc959.local",
+                    attestationConveyancePreference : "not specified",
+                    authenticatorAttachment : "not specified",
+                    requireResidentKey : "not specified",
+                    residentKey : "Required",
+                    userVerificationRequirement : "required",
+                    createTimeout : 0,
+                    excludeCredentialIds : "",
+                    initLabel : "Passkey (Default Label)",
+                    initLabelPrompt : "Please input your registered passkey's label",
+                    errmsg : "WebAuthn is not supported by this browser. Try another one or contact your administrator."
+                };
+                registerByWebAuthn(input);
+            },  { once: true });
+        </script>
+
+  <div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__actions pf-v5-u-pt-xs pf-v5-u-flex-nowrap">
+  <button class="pf-v5-c-button pf-m-primary pf-m-block" name="" id="registerWebAuthn"
+          type="submit" >
+  Register
+  </button>
+                    <form class="pf-v5-c-form pf-v5-u-w-100" action="https://sso-kc959.local:19591/realms/rasputin/login-actions/required-action?session_code=GQz5QEiA4MjeH6FLDFy0nQmFBDjaAObs7Ub6vAHq-Ds&amp;execution=webauthn-register-passwordless&amp;client_id=rasputin-console&amp;tab_id=hVwxZmJwTiU&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiOXM2MUhGRE9NVTBiVFVVUyJ9"
+                          id="kc-webauthn-settings-form" method="post">
+  <button class="pf-v5-c-button pf-m-secondary pf-m-block" name="cancel-aia" id="cancelWebAuthnAIA"
+          type="submit" >
+  Cancel
+  </button>
+                    </form>
+    </div>
+  </div>
+    </div>
+
+
+
+          <div class="pf-v5-c-login__main-footer">
+
+          </div>
+      </div>
+
+        <div class="pf-v5-c-login__main-footer">
+        </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

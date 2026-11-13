@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html class="login-pf" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Sign in to rasputin</title>
+        <link rel="icon" href="/resources/xmkpe/login/keycloak.v2/img/favicon.ico" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly.min.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly-addons.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/login/keycloak.v2/css/styles.css" rel="stylesheet" />
+    <script type="importmap">
+        {
+            "imports": {
+                "rfc4648": "/resources/xmkpe/common/keycloak/vendor/rfc4648/rfc4648.js"
+            }
+        }
+    </script>
+      <script type="module" async blocking="render">
+          const DARK_MODE_CLASS = "pf-v5-theme-dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+          updateDarkMode(mediaQuery.matches);
+          mediaQuery.addEventListener("change", (event) => updateDarkMode(event.matches));
+
+          function updateDarkMode(isEnabled) {
+            const { classList } = document.documentElement;
+
+            if (isEnabled) {
+              classList.add(DARK_MODE_CLASS);
+            } else {
+              classList.remove(DARK_MODE_CLASS);
+            }
+          }
+      </script>
+    <script type="module" src="/resources/xmkpe/login/keycloak.v2/js/passwordVisibility.js"></script>
+    <script type="module">
+        import { startSessionPolling } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+        startSessionPolling(
+            "/realms/rasputin/login-actions/restart?client_id=rasputin-console&tab_id=mgouNh5yJSM&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiakNOdWhwa01hcGl6LUl4RCJ9&skip_logout=true"
+        );
+    </script>
+    <script type="module">
+        document.addEventListener("click", (event) => {
+            const link = event.target.closest("a[data-once-link]");
+
+            if (!link) {
+                return;
+            }
+
+            if (link.getAttribute("aria-disabled") === "true") {
+                event.preventDefault();
+                return;
+            }
+
+            const { disabledClass } = link.dataset;
+
+            if (disabledClass) {
+                link.classList.add(...disabledClass.trim().split(/\s+/));
+            }
+
+            link.setAttribute("role", "link");
+            link.setAttribute("aria-disabled", "true");
+        });
+    </script>
+        <script type="module">
+            import { checkAuthSession } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+            checkAuthSession(
+                "l52D7wU4I+4L/uKATa3wIPcgxVsutHrtobmcmVsVOp+SjemuO1ikx1o2tzOcG778"
+            );
+        </script>
+    <script>
+      // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1404468
+      const isFirefox = true;
+    </script>
+</head>
+
+<body id="keycloak-bg" class="" data-page-id="login-register">
+<div class="pf-v5-c-login">
+  <div class="pf-v5-c-login__container">
+    <header id="kc-header" class="pf-v5-c-login__header">
+      <div id="kc-header-wrapper"
+              class="pf-v5-c-brand">rasputin</div>
+    </header>
+    <main class="pf-v5-c-login__main">
+      <div class="pf-v5-c-login__main-header">
+        <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title"><!-- template: register.ftl -->
+
+            Register
+</h1>
+      </div>
+      <div class="pf-v5-c-login__main-body">
+                <div class="pf-v5-u-mb-md-on-md">
+                    <div class=" subtitle">
+                        <span class="pf-v5-c-helper-text__item-text">
+                          <span class="pf-v5-c-form__label-required">*</span> Required fields
+                        </span>
+                    </div>
+                </div>
+
+
+<!-- template: register.ftl -->
+
+        <form id="kc-register-form" class="pf-v5-c-form pf-v5-u-w-100" action="https://sso-kc959.local:19591/realms/rasputin/login-actions/registration?session_code=-PSVG7QCXQ8Xt3bKJtM942LECIFG_4f-yBTRuddy_ps&amp;execution=84a7af20-06ba-4b0f-ba61-b9da04881594&amp;client_id=rasputin-console&amp;tab_id=mgouNh5yJSM&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiakNOdWhwa01hcGl6LUl4RCJ9" method="post" novalidate="novalidate">
+	
+
+
+
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="username" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+            Username
+        </span>
+                <span class="pf-v5-c-form__label-required" aria-hidden="true">&#42;</span>
+        </label>
+    </div>
+
+				<div class="">
+	<span class="pf-v5-c-form-control ">
+		<input type="text" id="username" name="username" value="" class="pf-v5-c-form-control"
+			aria-invalid=""
+			
+			autocomplete="username"
+			
+			
+			
+			
+			
+			
+			
+			
+		/>
+	</span>
+				</div>
+
+    <div id="input-error-container-username">
+    </div>
+</div>
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="password" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+            Password
+        </span>
+                <span class="pf-v5-c-form__label-required" aria-hidden="true">&#42;</span>
+        </label>
+    </div>
+
+    <div class="pf-v5-c-input-group">
+      <div class="pf-v5-c-input-group__item pf-m-fill">
+        <span class="pf-v5-c-form-control ">
+          <input id="password" name="password" value="" type="password" autocomplete="new-password" 
+                  aria-invalid=""/>
+        </span>
+      </div>
+      <div class="pf-v5-c-input-group__item">
+        <button class="pf-v5-c-button pf-m-control" type="button" aria-label="Show password"
+                aria-controls="password" data-password-toggle
+                data-icon-show="fa-eye fas" data-icon-hide="fa-eye-slash fas"
+                data-label-show="Show password" data-label-hide="Hide password" id="password-show-password">
+            <i class="fa-eye fas" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
+    <div class="pf-v5-c-form__helper-text" aria-live="polite">
+        <div class="pf-v5-c-helper-text pf-v5-u-display-flex pf-v5-u-justify-content-space-between">
+        </div>
+    </div>
+
+
+    <div id="input-error-container-password">
+    </div>
+</div>
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="password-confirm" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+            Confirm password
+        </span>
+                <span class="pf-v5-c-form__label-required" aria-hidden="true">&#42;</span>
+        </label>
+    </div>
+
+    <div class="pf-v5-c-input-group">
+      <div class="pf-v5-c-input-group__item pf-m-fill">
+        <span class="pf-v5-c-form-control ">
+          <input id="password-confirm" name="password-confirm" value="" type="password" autocomplete="new-password" 
+                  aria-invalid=""/>
+        </span>
+      </div>
+      <div class="pf-v5-c-input-group__item">
+        <button class="pf-v5-c-button pf-m-control" type="button" aria-label="Show password"
+                aria-controls="password-confirm" data-password-toggle
+                data-icon-show="fa-eye fas" data-icon-hide="fa-eye-slash fas"
+                data-label-show="Show password" data-label-hide="Hide password" id="password-confirm-show-password">
+            <i class="fa-eye fas" aria-hidden="true"></i>
+        </button>
+      </div>
+    </div>
+    <div class="pf-v5-c-form__helper-text" aria-live="polite">
+        <div class="pf-v5-c-helper-text pf-v5-u-display-flex pf-v5-u-justify-content-space-between">
+        </div>
+    </div>
+
+
+    <div id="input-error-container-password-confirm">
+    </div>
+</div>
+
+
+
+
+
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="email" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+            Email
+        </span>
+        </label>
+    </div>
+
+				<div class="">
+	<span class="pf-v5-c-form-control ">
+		<input type="text" id="email" name="email" value="" class="pf-v5-c-form-control"
+			aria-invalid=""
+			
+			autocomplete="email"
+			
+			
+			
+			
+			
+			
+			
+			
+		/>
+	</span>
+				</div>
+
+    <div id="input-error-container-email">
+    </div>
+</div>
+
+
+
+
+
+
+                <div id="kc-form-buttons" class="">
+                    <input class="pf-v5-c-button pf-v5-c-button pf-m-primary pf-m-block " type="submit" value="Register"/>
+                </div>
+
+            <div class="pf-v5-c-form__group pf-v5-c-login__main-footer-band">
+                <div id="kc-form-options" class=" pf-v5-c-login__main-footer-band-item">
+                    <div class="">
+                        <span><a href="/realms/rasputin/login-actions/authenticate?client_id=rasputin-console&amp;tab_id=mgouNh5yJSM&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiakNOdWhwa01hcGl6LUl4RCJ9">« Back to Login</a></span>
+                    </div>
+                </div>
+            </div>
+
+        </form>
+
+    <template id="errorTemplate">
+        <div class="pf-v5-c-form__helper-text" aria-live="polite">
+            <div class="pf-v5-c-helper-text pf-v5-u-display-flex pf-v5-u-justify-content-space-between">
+                <div class="pf-v5-c-helper-text__item pf-m-error">
+                    <ul class="pf-v5-c-helper-text__item-text pf-m-error kc-feedback-text">
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </template>
+    <template id="errorItemTemplate">
+        <li></li>
+    </template>
+    <script type="module">
+        import { validatePassword } from "/resources/xmkpe/login/keycloak.v2/js/password-policy.js";
+
+        const activePolicies = [
+            { name: "length", policy: { value: -1, error: "Invalid password: minimum length {0}." } },
+            { name: "maxLength", policy: { value: -1, error: "Invalid password: maximum length {0}." } },
+            { name: "lowerCase", policy: { value: -1, error: "Invalid password: must contain at least {0} lower case characters." } },
+            { name: "upperCase", policy: { value: -1, error: "Invalid password: must contain at least {0} upper case characters." } },
+            { name: "digits", policy: { value: -1, error: "Invalid password: must contain at least {0} numerical digits." } },
+            { name: "specialChars", policy: { value: -1, error: "Invalid password: must contain at least {0} special characters." } }
+        ].filter(p => p.policy.value !== -1);
+
+        document.getElementById("password").addEventListener("change", (event) => {
+
+            const errorContainer = document.getElementById("input-error-container-password");
+            const template = document.querySelector("#errorTemplate").content.cloneNode(true);
+            const errors = validatePassword(event.target.value, activePolicies);
+
+            if (errors.length === 0) {
+                errorContainer.replaceChildren();
+                return;
+            }
+
+            const errorList = template.querySelector("ul");
+            const htmlErrors = errors.forEach((e) => {
+                const row = document.querySelector("#errorItemTemplate").content.cloneNode(true);
+                const li = row.querySelector("li");
+                li.textContent = e;
+                errorList.appendChild(li);
+            });
+            errorContainer.replaceChildren(template);
+        });
+    </script>
+
+
+
+          <div class="pf-v5-c-login__main-footer">
+<!-- template: register.ftl -->
+
+
+          </div>
+      </div>
+
+        <div class="pf-v5-c-login__main-footer">
+        </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

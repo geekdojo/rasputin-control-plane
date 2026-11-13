@@ -1,0 +1,730 @@
+{
+  "schema": 1,
+  "_comment": "Synthetic vectors for the headless sign-in clients: the Go client (api/internal/identitytest/signin) and the Python client (geekdojo/geekdojo-brain#967) both pass this file. Nothing here is a real credential. pkce_rfc7636, webauthn and the page fixtures come from geekdojo/geekdojo-brain#959; flows are that probe's CI run.",
+  "source": {
+    "keycloak": "26.8.2",
+    "probe": "geekdojo/geekdojo-brain#959",
+    "run": "42538987025"
+  },
+  "pkce_rfc7636": {
+    "verifier": "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+    "challenge": "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+  },
+  "totp_rfc6238": {
+    "_comment": "RFC 6238 Appendix B: the key is the ASCII seed repeated to key_bytes[hash] bytes.",
+    "seed_ascii": "12345678901234567890",
+    "key_bytes": {
+      "sha1": 20,
+      "sha256": 32,
+      "sha512": 64
+    },
+    "digits": 8,
+    "period": 30,
+    "cases": [
+      [
+        59,
+        "sha1",
+        "94287082"
+      ],
+      [
+        59,
+        "sha256",
+        "46119246"
+      ],
+      [
+        59,
+        "sha512",
+        "90693936"
+      ],
+      [
+        1111111109,
+        "sha1",
+        "07081804"
+      ],
+      [
+        1111111109,
+        "sha256",
+        "68084774"
+      ],
+      [
+        1111111109,
+        "sha512",
+        "25091201"
+      ],
+      [
+        1111111111,
+        "sha1",
+        "14050471"
+      ],
+      [
+        1111111111,
+        "sha256",
+        "67062674"
+      ],
+      [
+        1111111111,
+        "sha512",
+        "99943326"
+      ],
+      [
+        1234567890,
+        "sha1",
+        "89005924"
+      ],
+      [
+        1234567890,
+        "sha256",
+        "91819424"
+      ],
+      [
+        1234567890,
+        "sha512",
+        "93441116"
+      ],
+      [
+        2000000000,
+        "sha1",
+        "69279037"
+      ],
+      [
+        2000000000,
+        "sha256",
+        "90698825"
+      ],
+      [
+        2000000000,
+        "sha512",
+        "38618901"
+      ],
+      [
+        20000000000,
+        "sha1",
+        "65353130"
+      ],
+      [
+        20000000000,
+        "sha256",
+        "77737706"
+      ],
+      [
+        20000000000,
+        "sha512",
+        "47863826"
+      ]
+    ]
+  },
+  "webauthn": {
+    "assertion": {
+      "rp_id": "sso-kc959.local",
+      "origin": "https://sso-kc959.local:19591",
+      "challenge": "AAECAwQFBgcICQoLDA0ODw",
+      "flags": 5,
+      "counter": 0,
+      "authenticator_data_hex": "31b983a84270a77f5c022197e8b8b3ab01337ade8070432ca2c7d90bf25e3a970500000000",
+      "client_data_json": "{\"type\":\"webauthn.get\",\"challenge\":\"AAECAwQFBgcICQoLDA0ODw\",\"origin\":\"https://sso-kc959.local:19591\",\"crossOrigin\":false}",
+      "signed_message_hex": "31b983a84270a77f5c022197e8b8b3ab01337ade8070432ca2c7d90bf25e3a97050000000056d17d7f07a228e6bd941679dd1a51dfc287ee9dfe789e3e6983eb0d25d5bd5d"
+    },
+    "registration": {
+      "rp_id": "sso-kc959.local",
+      "origin": "https://sso-kc959.local:19591",
+      "challenge": "EBESExQVFhcYGRobHB0eHw",
+      "pubkey_der_hex": "3059301306072a8648ce3d020106082a8648ce3d030107034200044dd1ce446d7b9add8dc51e621f49149580d80260a79b0693348205ce12cc69e2de689ba3f6cac0d21baef9d3e79073244c0d78ec85c7a7abbf985737a220ec4c",
+      "credential_id_hex": "000102030405060708090a0b0c0d0e0f",
+      "form_fields": [
+        "clientDataJSON",
+        "attestationObject",
+        "publicKeyCredentialId",
+        "authenticatorLabel",
+        "transports",
+        "authenticatorAttachment",
+        "error"
+      ],
+      "client_data_json_b64url": "eyJ0eXBlIjoid2ViYXV0aG4uY3JlYXRlIiwiY2hhbGxlbmdlIjoiRUJFU0V4UVZGaGNZR1JvYkhCMGVIdyIsIm9yaWdpbiI6Imh0dHBzOi8vc3NvLWtjOTU5LmxvY2FsOjE5NTkxIn0",
+      "attestation_object_b64url": "o2NmbXRkbm9uZWdhdHRTdG10oGhhdXRoRGF0YViUMbmDqEJwp39cAiGX6LizqwEzet6AcEMsosfZC_JeOpdFAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAABAgMEBQYHCAkKCwwNDg-lAQIDJiABIVggTdHORG17mt2NxR5iH0kUlYDYAmCnmwaTNIIFzhLMaeIiWCDeaJuj9srA0huu-dPnkHMkTA147IXHp6u_mFc3oiDsTA",
+      "credential_id_b64url": "AAECAwQFBgcICQoLDA0ODw"
+    }
+  },
+  "pages": [
+    {
+      "id": "login-error",
+      "fixture": "pages/login-error.html",
+      "sha256": "7d86399accabe952f9187e4eaf0c2b980ec73665fb8b0358be91d9ff367d45a2",
+      "forms": []
+    },
+    {
+      "id": "login-login-config-totp",
+      "fixture": "pages/login-login-config-totp.html",
+      "sha256": "e6104f1876ef348449a6c7d925d2c5963b82036e113376d28ace2e895963567a",
+      "forms": [
+        {
+          "id": "kc-totp-settings-form",
+          "fields": [
+            "totp",
+            "totpSecret",
+            "userLabel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-login-otp",
+      "fixture": "pages/login-login-otp.html",
+      "sha256": "bd15389c7319e25f8dbadccf87eba2aa5ea7cd9f68f8490b01397149ff488ca6",
+      "forms": [
+        {
+          "id": "kc-otp-login-form",
+          "fields": [
+            "otp",
+            "selectedCredentialId"
+          ]
+        },
+        {
+          "id": "kc-select-try-another-way-form",
+          "fields": [
+            "tryAnotherWay"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-login-recovery-authn-code-config",
+      "fixture": "pages/login-login-recovery-authn-code-config.html",
+      "sha256": "92db67881fb0e041effdee1a2bb2525a80344b1d4ba7aeccd7b5f94add3c7b6f",
+      "forms": [
+        {
+          "id": "kc-recovery-codes-settings-form",
+          "fields": [
+            "generatedAt",
+            "generatedRecoveryAuthnCodes",
+            "userLabel"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-login-recovery-authn-code-input",
+      "fixture": "pages/login-login-recovery-authn-code-input.html",
+      "sha256": "dcf6349622a9b54b65232a43c06e84d8eedb0dd2b1f5d0182075da46e9620333",
+      "forms": [
+        {
+          "id": "kc-recovery-code-login-form",
+          "fields": [
+            "recoveryCodeInput"
+          ]
+        },
+        {
+          "id": "kc-select-try-another-way-form",
+          "fields": [
+            "tryAnotherWay"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-login-update-password",
+      "fixture": "pages/login-login-update-password.html",
+      "sha256": "a70a940ef43747cfb2795ce6d2e532e094104cd21e8be0080cf3553d9714f7d0",
+      "forms": [
+        {
+          "id": "kc-passwd-update-form",
+          "fields": [
+            "password-confirm",
+            "password-new"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-login",
+      "fixture": "pages/login-login.html",
+      "sha256": "e9772af49c049d60b890c343ac9cdcb5766b7a2c14534c62ad3ffad24477a310",
+      "forms": [
+        {
+          "id": "kc-form-login",
+          "fields": [
+            "credentialId",
+            "password",
+            "username"
+          ]
+        },
+        {
+          "id": "webauth",
+          "fields": [
+            "authenticatorData",
+            "clientDataJSON",
+            "credentialId",
+            "error",
+            "signature",
+            "userHandle"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-register",
+      "fixture": "pages/login-register.html",
+      "sha256": "84a4ca796046df33e0715b787144c58ebabaf05e2242da9013ec7d7babe6add6",
+      "forms": [
+        {
+          "id": "kc-register-form",
+          "fields": [
+            "email",
+            "password",
+            "password-confirm",
+            "username"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-select-authenticator",
+      "fixture": "pages/login-select-authenticator.html",
+      "sha256": "852587506f5a341c2821aae8084f8b48540504425def7b2fa0b911cb8eb8e915",
+      "forms": [
+        {
+          "id": "kc-select-credential-form",
+          "fields": [
+            "authenticationExecution"
+          ]
+        },
+        {
+          "id": "kc-select-credential-form",
+          "fields": [
+            "authenticationExecution"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-webauthn-authenticate",
+      "fixture": "pages/login-webauthn-authenticate.html",
+      "sha256": "55714c009da00744d3a3c366231f7bab6ee5a16b2663259ed0c60cf55c1ddac3",
+      "forms": [
+        {
+          "id": "webauth",
+          "fields": [
+            "authenticatorData",
+            "clientDataJSON",
+            "credentialId",
+            "error",
+            "signature",
+            "userHandle"
+          ]
+        },
+        {
+          "id": "authn_select",
+          "fields": [
+            "authn_use_chk"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-webauthn-error",
+      "fixture": "pages/login-webauthn-error.html",
+      "sha256": "010764e3d0bb65e45f2ab7dbb55cab143e921a37d348b9155c0ad0b78a9d4a8e",
+      "forms": [
+        {
+          "id": "kc-error-credential-form",
+          "fields": [
+            "authenticationExecution",
+            "isSetRetry"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "login-webauthn-register",
+      "fixture": "pages/login-webauthn-register.html",
+      "sha256": "bf321ed819d177cb3f076ac6c12b30b38c01332258eebc95c06ad9ce066d051e",
+      "forms": [
+        {
+          "id": "register",
+          "fields": [
+            "attestationObject",
+            "authenticatorAttachment",
+            "authenticatorLabel",
+            "clientDataJSON",
+            "error",
+            "publicKeyCredentialId",
+            "transports"
+          ]
+        },
+        {
+          "id": "kc-webauthn-settings-form",
+          "fields": []
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "step": "FL1",
+      "verb": "create-account",
+      "args": [],
+      "door": "home",
+      "page_ids": [
+        "login-register"
+      ]
+    },
+    {
+      "step": "FL2",
+      "verb": "sign-in",
+      "args": [
+        "password"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login"
+      ]
+    },
+    {
+      "step": "FL3.enrol",
+      "verb": "enrol",
+      "args": [
+        "totp"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-config-totp"
+      ]
+    },
+    {
+      "step": "FL3.sign-out",
+      "verb": "sign-out",
+      "args": [],
+      "door": "home",
+      "page_ids": []
+    },
+    {
+      "step": "FL3.sign-in",
+      "verb": "sign-in",
+      "args": [
+        "password-totp"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-otp"
+      ]
+    },
+    {
+      "step": "FL6.enrol",
+      "verb": "enrol",
+      "args": [
+        "recovery-codes"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-otp",
+        "login-login-recovery-authn-code-config"
+      ]
+    },
+    {
+      "step": "FL6.sign-in",
+      "verb": "sign-in",
+      "args": [
+        "recovery-code"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-otp",
+        "login-select-authenticator",
+        "login-login-recovery-authn-code-input"
+      ]
+    },
+    {
+      "step": "FL5.enrol",
+      "verb": "enrol",
+      "args": [
+        "passkey"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-otp",
+        "login-webauthn-register"
+      ]
+    },
+    {
+      "step": "FL5.sign-in",
+      "verb": "sign-in",
+      "args": [
+        "passkey"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login"
+      ]
+    },
+    {
+      "step": "FL8",
+      "verb": "reset-password",
+      "args": [
+        "passkey"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-update-password",
+        "login-login",
+        "login-login",
+        "login-login",
+        "login-login-otp"
+      ]
+    },
+    {
+      "step": "FL9.grant",
+      "verb": "grant",
+      "args": [
+        "console-admin"
+      ],
+      "door": "home",
+      "page_ids": []
+    },
+    {
+      "step": "FL9.sign-in",
+      "verb": "sign-in",
+      "args": [
+        "recovery-code"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-login-otp",
+        "login-select-authenticator",
+        "login-login-recovery-authn-code-input"
+      ]
+    },
+    {
+      "step": "FL10",
+      "verb": "sign-in",
+      "args": [
+        "passkey"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login"
+      ]
+    },
+    {
+      "step": "FL4.create",
+      "verb": "create-account",
+      "args": [],
+      "door": "home",
+      "page_ids": [
+        "login-register"
+      ]
+    },
+    {
+      "step": "FL4.enrol",
+      "verb": "enrol",
+      "args": [
+        "passkey-2fa"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-register"
+      ]
+    },
+    {
+      "step": "FL4.sign-in",
+      "verb": "sign-in",
+      "args": [
+        "password-passkey"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate"
+      ]
+    },
+    {
+      "step": "N1",
+      "verb": "negative",
+      "args": [
+        "bad-origin"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N2",
+      "verb": "negative",
+      "args": [
+        "bad-rpid"
+      ],
+      "door": "app",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N3",
+      "verb": "negative",
+      "args": [
+        "no-up"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N4",
+      "verb": "negative",
+      "args": [
+        "no-uv"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N5",
+      "verb": "negative",
+      "args": [
+        "bad-signature"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N6",
+      "verb": "negative",
+      "args": [
+        "bad-challenge"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N7",
+      "verb": "negative",
+      "args": [
+        "replay"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-webauthn-authenticate",
+        "login-webauthn-error"
+      ]
+    },
+    {
+      "step": "N8.create",
+      "verb": "create-account",
+      "args": [],
+      "door": "home",
+      "page_ids": [
+        "login-register"
+      ]
+    },
+    {
+      "step": "N8.grant",
+      "verb": "grant",
+      "args": [
+        "console-admin"
+      ],
+      "door": "home",
+      "page_ids": []
+    },
+    {
+      "step": "N8",
+      "verb": "negative",
+      "args": [
+        "admin-password-alone"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login",
+        "login-error"
+      ]
+    },
+    {
+      "step": "N9.create",
+      "verb": "create-account",
+      "args": [],
+      "door": "home",
+      "page_ids": [
+        "login-register"
+      ]
+    },
+    {
+      "step": "N9",
+      "verb": "negative",
+      "args": [
+        "no-app-access"
+      ],
+      "door": "app",
+      "page_ids": [
+        "login-login",
+        "login-error"
+      ]
+    },
+    {
+      "step": "N9.grant",
+      "verb": "grant",
+      "args": [
+        "app-role",
+        "user"
+      ],
+      "door": "home",
+      "page_ids": []
+    },
+    {
+      "step": "N9.control",
+      "verb": "sign-in",
+      "args": [
+        "password"
+      ],
+      "door": "app",
+      "page_ids": [
+        "login-login"
+      ]
+    },
+    {
+      "step": "FL7n.a",
+      "verb": "negative",
+      "args": [
+        "pkce-wrong-verifier"
+      ],
+      "door": "home",
+      "page_ids": [
+        "login-login"
+      ]
+    },
+    {
+      "step": "FL7n.b",
+      "verb": "negative",
+      "args": [
+        "pkce-absent"
+      ],
+      "door": "home",
+      "page_ids": []
+    }
+  ]
+}

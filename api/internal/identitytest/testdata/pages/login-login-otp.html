@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html class="login-pf" lang="en">
+
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+    <meta name="color-scheme" content="light dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>Sign in to rasputin</title>
+        <link rel="icon" href="/resources/xmkpe/login/keycloak.v2/img/favicon.ico" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly.min.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/common/keycloak/vendor/patternfly-v5/patternfly-addons.css" rel="stylesheet" />
+        <link href="/resources/xmkpe/login/keycloak.v2/css/styles.css" rel="stylesheet" />
+    <script type="importmap">
+        {
+            "imports": {
+                "rfc4648": "/resources/xmkpe/common/keycloak/vendor/rfc4648/rfc4648.js"
+            }
+        }
+    </script>
+      <script type="module" async blocking="render">
+          const DARK_MODE_CLASS = "pf-v5-theme-dark";
+          const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+          updateDarkMode(mediaQuery.matches);
+          mediaQuery.addEventListener("change", (event) => updateDarkMode(event.matches));
+
+          function updateDarkMode(isEnabled) {
+            const { classList } = document.documentElement;
+
+            if (isEnabled) {
+              classList.add(DARK_MODE_CLASS);
+            } else {
+              classList.remove(DARK_MODE_CLASS);
+            }
+          }
+      </script>
+    <script type="module" src="/resources/xmkpe/login/keycloak.v2/js/passwordVisibility.js"></script>
+    <script type="module">
+        import { startSessionPolling } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+        startSessionPolling(
+            "/realms/rasputin/login-actions/restart?client_id=rasputin-console&tab_id=GHLw5Bf_wes&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiNmVtMVlWTW83aGgtZEtoMCJ9&skip_logout=true"
+        );
+    </script>
+    <script type="module">
+        document.addEventListener("click", (event) => {
+            const link = event.target.closest("a[data-once-link]");
+
+            if (!link) {
+                return;
+            }
+
+            if (link.getAttribute("aria-disabled") === "true") {
+                event.preventDefault();
+                return;
+            }
+
+            const { disabledClass } = link.dataset;
+
+            if (disabledClass) {
+                link.classList.add(...disabledClass.trim().split(/\s+/));
+            }
+
+            link.setAttribute("role", "link");
+            link.setAttribute("aria-disabled", "true");
+        });
+    </script>
+        <script type="module">
+            import { checkAuthSession } from "/resources/xmkpe/login/keycloak.v2/js/authChecker.js";
+
+            checkAuthSession(
+                "l0tWV1Zt59Y6NUwqwcSgBvQavwn+B3szzrhE6wnE3KWhHxci3echwH/v5HXchgh6"
+            );
+        </script>
+    <script>
+      // Workaround for https://bugzilla.mozilla.org/show_bug.cgi?id=1404468
+      const isFirefox = true;
+    </script>
+<SCRIPT> if (typeof history.replaceState === 'function') {  history.replaceState({}, "some title", "https://sso-kc959.local:19591/realms/rasputin/login-actions/authenticate?execution=9652d2d3-e604-413a-acc7-c00377a9245b&client_id=rasputin-console&tab_id=GHLw5Bf_wes&client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiNmVtMVlWTW83aGgtZEtoMCJ9"); }</SCRIPT></head>
+
+<body id="keycloak-bg" class="" data-page-id="login-login-otp">
+<div class="pf-v5-c-login">
+  <div class="pf-v5-c-login__container">
+    <header id="kc-header" class="pf-v5-c-login__header">
+      <div id="kc-header-wrapper"
+              class="pf-v5-c-brand">rasputin</div>
+    </header>
+    <main class="pf-v5-c-login__main">
+      <div class="pf-v5-c-login__main-header">
+        <h1 class="pf-v5-c-title pf-m-3xl" id="kc-page-title"><!-- template: login-otp.ftl -->
+
+        Sign In
+</h1>
+      </div>
+      <div class="pf-v5-c-login__main-body">
+                <div class="pf-v5-c-form pf-v5-u-w-100 pf-v5-u-mb-md-on-md">
+<!-- template: login-otp.ftl -->
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="username" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+                Username
+
+        </span>
+        </label>
+    </div>
+
+    <div class="pf-v5-c-input-group">
+      <div class="pf-v5-c-input-group__item pf-m-fill">
+        <span class="pf-v5-c-form-control pf-m-readonly">
+          <input id="kc-attempted-username" value="u1-93eba32d" readonly>
+        </span>
+      </div>
+      <div class="pf-v5-c-input-group__item">
+        <button id="reset-login" class="pf-v5-c-button pf-m-control kc-login-tooltip" type="button" 
+              aria-label="Restart login" onclick="location.href='/realms/rasputin/login-actions/restart?client_id=rasputin-console&amp;tab_id=GHLw5Bf_wes&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiNmVtMVlWTW83aGgtZEtoMCJ9&amp;skip_logout=false'">
+            <i class="fa-sync-alt fas" aria-hidden="true"></i>
+            <span class="kc-tooltip-text">Restart login</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="input-error-container-username">
+    </div>
+</div>
+
+                </div>
+
+
+<!-- template: login-otp.ftl -->
+
+        <form id="kc-otp-login-form" class="pf-v5-c-form pf-v5-u-w-100" onsubmit="login.disabled = true; return true;" action="https://sso-kc959.local:19591/realms/rasputin/login-actions/authenticate?session_code=raU-T9NwcxZIzGZNqm4TcyxQnOdA8MVftDBQVeCB6jI&amp;execution=9652d2d3-e604-413a-acc7-c00377a9245b&amp;client_id=rasputin-console&amp;tab_id=GHLw5Bf_wes&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiNmVtMVlWTW83aGgtZEtoMCJ9" method="post">
+            <input id="selectedCredentialId" type="hidden" name="selectedCredentialId" value="a8bedd55-3fb3-4541-9b43-cdbe67e15568">
+
+
+<div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__group-label pf-v5-u-pb-xs">
+        <label for="otp" class="pf-v5-c-form__label">
+        <span class="pf-v5-c-form__label-text">
+            One-time code
+        </span>
+        </label>
+    </div>
+
+    <span class="pf-v5-c-form-control ">
+        <input id="otp" name="otp" value="" type="text" autocomplete="one-time-code" autofocus
+                inputmode="numeric"
+                aria-invalid=""/>
+    </span>
+
+    <div id="input-error-container-otp">
+    </div>
+</div>
+
+
+  <div class="pf-v5-c-form__group">
+    <div class="pf-v5-c-form__actions pf-v5-u-pt-xs pf-v5-u-flex-wrap">
+  <button class="pf-v5-c-button pf-m-primary pf-m-block" name="login" id="kc-login"
+          type="submit" >
+  Sign In
+  </button>
+    </div>
+  </div>
+        </form>
+        <script>
+            function toggleOTP(index, value) {
+                // select the clicked OTP credential
+                document.getElementById("selectedCredentialId").value = value;
+                // remove selected class from all OTP credentials
+                Array.from(document.getElementsByClassName("pf-m-selected")).map(i => i.classList.remove("pf-m-selected"));
+                // add selected class to the clicked OTP credential
+                document.getElementById("kc-otp-credential-" + index).classList.add("pf-m-selected");
+            }
+        </script>
+
+          <form id="kc-select-try-another-way-form" action="https://sso-kc959.local:19591/realms/rasputin/login-actions/authenticate?session_code=raU-T9NwcxZIzGZNqm4TcyxQnOdA8MVftDBQVeCB6jI&amp;execution=9652d2d3-e604-413a-acc7-c00377a9245b&amp;client_id=rasputin-console&amp;tab_id=GHLw5Bf_wes&amp;client_data=eyJydSI6Imh0dHBzOi8vY29uc29sZS5rYzk1OS5sb2NhbC9jYWxsYmFjayIsInJ0IjoiY29kZSIsInN0IjoiNmVtMVlWTW83aGgtZEtoMCJ9" method="post" novalidate="novalidate">
+              <input type="hidden" name="tryAnotherWay" value="on"/>
+              <a id="try-another-way" href="javascript:document.forms['kc-select-try-another-way-form'].requestSubmit()"
+                  class="pf-v5-c-button pf-m-secondary pf-m-block pf-v5-u-mt-md-on-md">
+                    Try Another Way
+              </a>
+          </form>
+
+
+          <div class="pf-v5-c-login__main-footer">
+<!-- template: login-otp.ftl -->
+
+
+          </div>
+      </div>
+
+        <div class="pf-v5-c-login__main-footer">
+        </div>
+    </main>
+  </div>
+</div>
+</body>
+</html>

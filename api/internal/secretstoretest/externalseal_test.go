@@ -48,14 +48,15 @@ func TestServerArgs(t *testing.T) {
 
 // StartNoWait refuses a store that still runs, as Restart does.
 func TestStartNoWait_RefusesARunningStore(t *testing.T) {
-	s := &Store{exited: make(chan struct{})}
+	exited := make(chan struct{})
+	s := &Store{exited: exited}
 	if err := s.StartNoWait(t.Context()); err == nil || !strings.Contains(err.Error(), "still running") {
 		t.Errorf("StartNoWait on a running store = %v", err)
 	}
 	if !s.Running() {
 		t.Error("Running = false for a store whose process has not exited")
 	}
-	close(s.exited)
+	close(exited)
 	if s.Running() {
 		t.Error("Running = true after the process exited")
 	}
