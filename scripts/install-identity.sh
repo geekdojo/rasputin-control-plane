@@ -42,15 +42,12 @@ pin="$repo_root/api/internal/identitytest/pin.go"
 mesh_images="$repo_root/api/internal/mesh/mesh-images.json"
 build_conf="$repo_root/identity/keycloak-build.conf"
 
-# read_const NAME prints the string value of `NAME = "value"` in pin.go,
-# anchored to a line of its own.
-read_const() {
-  sed -n -E 's/^[[:space:]]*'"$1"'[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' "$pin"
-}
+# shellcheck source=SCRIPTDIR/lib/release-lib.sh
+. "$repo_root/scripts/lib/release-lib.sh"   # pin_const: the anchored pin.go reader
 
 need() {
   local v
-  v="$(read_const "$1")"
+  v="$(pin_const "$pin" "$1")"
   if [ -z "$v" ]; then
     echo "install-identity: cannot read $1 from $pin" >&2
     exit 1

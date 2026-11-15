@@ -173,6 +173,55 @@ jobs:
           [ "$n" -eq 2 ] || { echo "::error::found $n api tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
           echo "every api tarball carries openbao-policy/ byte-equal to $src: $(echo $want)"
 
+      # Every api tarball carries the identity service's release as identity/:
+      # realm-baseline.json and keycloak-build.conf byte-equal to the repo's, a
+      # pins.json naming the Keycloak release pin.go pins, and the theme/ slot;
+      # no agent tarball carries it (geekdojo/geekdojo-brain#980, TC-980-19).
+      # The pin is read through scripts/lib/release-lib.sh, the one reader.
+      # Runs before the publish step on every path, dry runs included.
+      - name: api tarballs carry the identity release
+        run: |
+          set -euo pipefail
+          . scripts/lib/release-lib.sh
+          src=identity
+          kc="$(pin_const api/internal/identitytest/pin.go KeycloakRelease)"
+          kc="${kc##*:}"
+          [ -n "$kc" ] || { echo "::error::cannot read KeycloakRelease from api/internal/identitytest/pin.go."; exit 1; }
+          [ ! -e dist/identity ] || { echo "::error::dist/identity was left behind; build-release.sh packs it into the api tarballs and removes it."; exit 1; }
+          n=0
+          for t in dist/rasputin-api-*.tar.gz; do
+            [ -f "$t" ] || continue
+            n=$((n + 1))
+            x=$(mktemp -d)
+            echo "$t:"
+            tar -tzvf "$t" | grep ' identity/' || true
+            tar -xzf "$t" -C "$x" identity \
+              || { echo "::error::$t holds no identity/ directory."; exit 1; }
+            for f in realm-baseline.json keycloak-build.conf; do
+              cmp -s "$src/$f" "$x/identity/$f" \
+                || { echo "::error::$t identity/$f differs from $src/$f."; exit 1; }
+            done
+            got=$(jq -er '.keycloak.release' "$x/identity/pins.json") \
+              || { echo "::error::$t identity/pins.json does not parse or names no keycloak.release."; exit 1; }
+            [ "$got" = "$kc" ] \
+              || { echo "::error::$t identity/pins.json names Keycloak $got, but pin.go pins $kc."; exit 1; }
+            [ -d "$x/identity/theme" ] \
+              || { echo "::error::$t holds no identity/theme/ slot."; exit 1; }
+            rm -rf "$x"
+          done
+          [ "$n" -eq 2 ] || { echo "::error::found $n api tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
+          a=0
+          for t in dist/rasputin-agent-*.tar.gz; do
+            [ -f "$t" ] || continue
+            a=$((a + 1))
+            l=$(mktemp)
+            tar -tzf "$t" >"$l"
+            if grep -q '^\(\./\)\?identity/' "$l"; then echo "::error::$t, an agent tarball, carries identity/."; exit 1; fi
+            rm -f "$l"
+          done
+          [ "$a" -eq 2 ] || { echo "::error::found $a agent tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
+          echo "every api tarball carries identity/ (baseline and build options byte-equal to $src, pins.json at Keycloak $kc, theme/); no agent tarball does"
+
       # Tag push → publish a GitHub Release with the tarballs + checksums.
       # rasputin-os fetches these from
       #   .../releases/download/v<version>/rasputin-<comp>-<version>-linux-<arch>.tar.gz

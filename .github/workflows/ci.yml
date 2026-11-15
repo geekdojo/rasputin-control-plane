@@ -10,6 +10,8 @@ name: ci
 #              release.yml runs to prove a release tag is on the built commit,
 #              and for scripts/pack-store-policy.sh, which build-release.sh
 #              runs to pack the secrets store's policy text, and for
+#              scripts/pack-identity.sh, which packs identity/ and checks the
+#              realm baseline against its drift lock, and for
 #              scripts/tileschema-contract.sh, which this file's backend job
 #              and tileschema-tag.yml run.
 #
@@ -141,6 +143,13 @@ jobs:
       # TC-804-09).
       - name: store policy packing tests
         run: ./scripts/test-pack-store-policy.sh
+      # scripts/pack-identity.sh, which build-release.sh runs to put identity/
+      # in every api tarball: the four entries, every refusal (an unknown build
+      # option, a baseline that does not match its lock, a missing or malformed
+      # lock, input or pin), the baseline's settings, and the shared pin reader
+      # in scripts/lib/release-lib.sh (geekdojo/geekdojo-brain#980).
+      - name: identity packing tests
+        run: ./scripts/test-pack-identity.sh
       # scripts/tileschema-contract.sh: the contract version, the CI gate on
       # it, and the tagger tileschema-tag.yml runs (geekdojo/geekdojo-brain#897).
       - name: tileschema contract script tests

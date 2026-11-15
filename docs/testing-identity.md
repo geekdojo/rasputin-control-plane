@@ -72,6 +72,12 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   [geekdojo-brain#969](https://github.com/geekdojo/geekdojo-brain/issues/969)). It runs in its
   own browser context and never submits the enrolment form, so the harness user gets no OTP
   credential. It does not prove what the QR encodes.
+- The features `identity/keycloak-build.conf` disables serve nothing at the pin: through the
+  front, `/admin/`, the account console, pushed authorization requests and CIBA authentication
+  answer 404, the token endpoint refuses the device-code and token-exchange grants with
+  `unsupported_grant_type`, and discovery has no `device_authorization_endpoint`
+  (`TestIdentity_DisabledFeaturesServeNothing` in `features_functional_test.go`, capability row
+  T73, [geekdojo-brain#980](https://github.com/geekdojo/geekdojo-brain/issues/980)).
 - No record the harness or the client logged, Keycloak's own output lines included, holds the
   user password, the database password, an authorization code or token bytes
   (`TestIdentity_NoSecretInLogs`).
@@ -98,6 +104,13 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   (`api/cmd/rasputin-api/identityca_functional_test.go`, under the same
   `RASPUTIN_IDENTITY_FUNCTIONAL=required` switch,
   [geekdojo-brain#977](https://github.com/geekdojo/geekdojo-brain/issues/977)).
+- The shipped realm baseline works as Keycloak builds it: `identity/realm-baseline.json` is
+  imported as realm `rasputin` with Keycloak's own `kc.sh import`; `rasputin-admin`, with a
+  `client-x509` leaf whose subject is `CN=rasputin-api,O=Rasputin`, gets a token, reads the realm
+  and creates and deletes a user through the Admin API; each of the five sign-in clients completes
+  a password sign-in; and the console's token carries `auth_time` and `rasputin_roles`
+  (`api/internal/identitytest/baseline_import_functional_test.go`, under the same switch,
+  [geekdojo-brain#980](https://github.com/geekdojo/geekdojo-brain/issues/980)).
 
 ## What it does not prove
 
@@ -111,8 +124,8 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   land with the items whose CI cases need them; the vector file already carries their sections.
 - The ID token's signature. The client decodes the payload of a token it received over TLS from
   the issuer.
-- The real realm baseline (Identity 3.4) or the identity CA (Identity 3.1). The harness imports
-  a minimal realm and makes its own test CA.
+- The baseline's sign-in flows. Its flow skeletons are empty and unbound until Identity 4.5
+  converges them, so the sign-ins above run Keycloak's default browser flow.
 - Stability beyond the runs CI makes.
 - The Python client's conformance to the vector file, which is #967's.
 
@@ -238,3 +251,5 @@ Then run the self-test as above.
 | TC-977-17 | `TestIdentityCA_DoorLeafIsNotAdministrator` (CI) |
 | TC-977-18 | `TestIdentityCA_ControlplaneLeafRefusedAtTLS` (CI) |
 | TC-977-19 | `TestIdentityCA_StoreLeafRefusedAtTLS` (CI) |
+| TC-980-21 | `TestIdentity_DisabledFeaturesServeNothing` (CI) |
+| TC-980-25 | `TestIdentity_BaselineImportedWorks` (CI) |
