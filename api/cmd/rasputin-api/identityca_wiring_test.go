@@ -687,7 +687,7 @@ func TestIdentityLeafNames_RequiredConsumers(t *testing.T) {
 // TC-977-15 (the part the store's existing tests do not already pin):
 // startLeafSweep's records carry the component it is given, and a nil sweeper
 // starts nothing. restartStoreUnit's argv and its hook count are pinned,
-// unedited, by TestRestartStoreUnit's table in secretstore_wiring_test.go.
+// unedited, by TestStoreRestartHook's table in secretstore_wiring_test.go.
 func TestStartLeafSweep_Component(t *testing.T) {
 	if startLeafSweep(t.Context(), nil, slog.New(slog.DiscardHandler), "secretstore") != nil {
 		t.Error("a nil sweeper started a sweep")
