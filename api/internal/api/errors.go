@@ -58,6 +58,15 @@ const (
 	// codeBMCCSRSignFailed: the request passed the policy, but the
 	// controlplane CA could not sign it.
 	codeBMCCSRSignFailed = "bmc_csr_sign_failed"
+	// codeMemoryFloorMissing: an update pull was refused, with nothing
+	// staged, because the release carries the sign-in service but its signed
+	// manifest states no control-plane memory floor
+	// (geekdojo/geekdojo-brain#1011).
+	codeMemoryFloorMissing = "memory_floor_missing"
+	// codeMemoryFloorInvalid: an update pull was refused, with nothing
+	// staged, because the release states a memory floor that is not a
+	// positive number.
+	codeMemoryFloorInvalid = "memory_floor_invalid"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

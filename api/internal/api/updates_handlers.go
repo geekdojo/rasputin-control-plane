@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -290,6 +291,9 @@ func (e errBundleConflict) Error() string { return "bundle already exists: " + e
 // ingest verify callback.
 type bundleMeta struct {
 	Version, Compatible, Architecture, Description, BuildDate, SignedBy string
+	// MemoryFloorBytes is the release's control-plane memory floor, from its
+	// signed manifest; 0 for an upload, which carries no manifest.
+	MemoryFloorBytes int64
 }
 
 // errBundleVerify wraps a verify-callback rejection so ingestStatus can map it
@@ -386,6 +390,8 @@ func (s *Server) ingestBundle(
 		StoragePath:  finalPath,
 		UploadedAt:   time.Now().UTC(),
 		UploadedBy:   uploadedBy,
+
+		MemoryFloorBytes: meta.MemoryFloorBytes,
 	}
 	if err := s.updater.CreateBundle(ctx, bundle); err != nil {
 		_ = os.Remove(finalPath) // don't orphan the file
@@ -626,7 +632,13 @@ func (s *Server) handleSystemUpdatePlan(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "exactly one of version or bundleSha256 is required")
 		return
 	}
-	plan, err := updater.PreviewPlan(r.Context(), s.updater, s.inv, req, updater.SystemUpdateConfig{SelfNodeID: s.selfNodeID})
+	cfg := updater.SystemUpdateConfig{SelfNodeID: s.selfNodeID}
+	if s.metrics != nil {
+		// Only a real store: a nil *metrics.Store in the interface would be a
+		// reader that panics, where no reader refuses (ERR-CLOSED).
+		cfg.Memory = s.metrics
+	}
+	plan, err := updater.PreviewPlan(r.Context(), s.updater, s.inv, req, cfg)
 	if err != nil {
 		// A plan resolution error (e.g. an arch not staged) is the operator's
 		// to see and fix, not a server fault — 400, with the message.
@@ -847,6 +859,27 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "release "+info.Version+" has no deployable artifact")
 		return
 	}
+	// The control-plane memory floor (geekdojo/geekdojo-brain#1011), read once
+	// for the whole release before anything is downloaded. A release that
+	// carries the sign-in service and states no floor is never staged, so no
+	// plan can ever run it unchecked.
+	var memoryFloor int64
+	if comp.Kind == releases.KindRAUC {
+		floor, err := info.Manifest.MemoryFloor()
+		if err != nil {
+			code, event, msg := codeMemoryFloorInvalid, "updates.memory_floor_invalid", comp.Label+" "+info.Version+
+				" states a control-plane memory floor that is not a positive number, so it was not staged."
+			if errors.Is(err, releases.ErrNoMemoryFloor) {
+				code, event, msg = codeMemoryFloorMissing, "updates.memory_floor_missing", comp.Label+" "+info.Version+
+					" carries the sign-in service but its signed manifest states no control-plane memory floor, so it was not staged."
+			}
+			s.writeCodedError(w, r, http.StatusBadGateway, code, msg,
+				slog.String("event", event), slog.String("component", comp.ID),
+				slog.String("version", info.Version), slog.String("err", err.Error()))
+			return
+		}
+		memoryFloor = floor
+	}
 
 	// Every artifact is attempted, and a failure on one does not abandon the
 	// others. Fail-fast here left the store holding whichever arches happened
@@ -898,7 +931,8 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 			return bundleMeta{
 				Version: info.Version, Compatible: art.Compatible, Architecture: art.Architecture,
 				BuildDate: art.BuildDate, SignedBy: art.SignedBy,
-				Description: "pulled from " + channel + " channel",
+				Description:      "pulled from " + channel + " channel",
+				MemoryFloorBytes: memoryFloor,
 			}, nil
 		}
 		bundle, created, err := s.ingestBundle(r.Context(), rc, "update-check", verify)

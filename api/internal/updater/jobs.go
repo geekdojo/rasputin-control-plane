@@ -49,6 +49,11 @@ type Config struct {
 	// is SelfNodeID. Nil means this api runs no store (or the mock), and the
 	// commit rests on diag.health alone.
 	StoreCheck *SelfStoreCheck
+	// Memory reads a control plane's reported memory for validate's
+	// memory-floor backstop (geekdojo/geekdojo-brain#1011). Nil refuses the
+	// update of a control plane to a bundle that states a floor; any other
+	// update never reads it.
+	Memory NodeMemory
 }
 
 // StoreCopier is the secret store's copy before an OS update, as the
@@ -80,7 +85,7 @@ func UpdateWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, cfg Confi
 	return jobs.Workflow{
 		Kind: "node.update",
 		Steps: []jobs.WorkflowStep{
-			{Name: "validate", Timeout: 2 * time.Second, Do: updateValidate(store, inv)},
+			{Name: "validate", Timeout: 2 * time.Second, Do: updateValidate(store, inv, cfg)},
 			{Name: "precheck", Timeout: 10 * time.Second, Do: updatePrecheck()},
 			{Name: "download", Timeout: 10 * time.Minute, Do: updateDownload(store, cfg)},
 			// copy_store runs before install because install activates the new
@@ -199,7 +204,7 @@ func parseSpec(raw json.RawMessage) (*UpdateSpec, error) {
 
 // ----- Step 1: validate ---------------------------------------------------
 
-func updateValidate(store *Store, inv *inventory.Store) jobs.DoFn {
+func updateValidate(store *Store, inv *inventory.Store, cfg Config) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		spec, err := parseSpec(sc.Spec)
 		if err != nil {
@@ -233,6 +238,19 @@ func updateValidate(store *Store, inv *inventory.Store) jobs.DoFn {
 		}
 		if err := store.CreateNodeUpdate(sc.Ctx, row); err != nil {
 			return nil, fmt.Errorf("persist update row: %w", err)
+		}
+		// The memory-floor backstop, after the row exists so the refusal is
+		// recorded on it (finalizeNodeUpdateRow) and before anything reaches
+		// the node. The fleet plan has already judged every control plane; a
+		// direct update of one is judged here.
+		if node.Role == proto.RoleControlPlane && bundle.MemoryFloorBytes > 0 {
+			if r := checkMemoryFloor(sc.Ctx, cfg.Memory, node, bundle.MemoryFloorBytes); r != nil {
+				r.Version = bundle.Version
+				r.log(sc.Ctx, cfg.Log, sc.JobID, "step", "validate")
+				err := r.backstopError()
+				sc.Log("warn", err.Error())
+				return nil, err
+			}
 		}
 		publishChange(sc.NATS, proto.UpdateChangeEvt{
 			NodeID:   spec.NodeID,

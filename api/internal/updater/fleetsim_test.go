@@ -634,6 +634,9 @@ type bundleSpec struct {
 	Version    string
 	Compatible string
 	Arch       string
+	// MemoryFloor is the control-plane memory floor the bundle's release
+	// states; 0 for the ordinary scenarios.
+	MemoryFloor int64
 }
 
 // osBundles is the pair of OS artifacts a mixed-arch cluster needs. Written out
@@ -649,6 +652,13 @@ func osBundles(version string) []bundleSpec {
 // newFleet boots NATS, the three stores, the real runner with the real
 // workflows, and the simulated nodes. Everything is torn down on test cleanup.
 func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
+	t.Helper()
+	return newFleetWithMemory(t, nodes, bundles, nil)
+}
+
+// newFleetWithMemory is newFleet with mem wired as both sagas' memory reader,
+// for the memory-floor scenarios (geekdojo/geekdojo-brain#1011).
+func newFleetWithMemory(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec, mem NodeMemory) *fleet {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -684,6 +694,7 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 			SHA256: b.SHA, Version: b.Version, Compatible: b.Compatible,
 			Architecture: b.Arch, SizeBytes: 4096,
 			UploadedAt: time.Now().UTC(), UploadedBy: "fleetsim",
+			MemoryFloorBytes: b.MemoryFloor,
 		}); err != nil {
 			t.Fatalf("create bundle %s: %v", b.SHA, err)
 		}
@@ -760,9 +771,10 @@ func newFleet(t *testing.T, nodes []simNodeSpec, bundles []bundleSpec) *fleet {
 	runner.SetBackoff(func(int) time.Duration { return 10 * time.Millisecond })
 	runner.Register(cappedTimeouts(UpdateWorkflow(store, inv, nc, Config{
 		PublicBaseURL: "http://localhost:8080",
+		Memory:        mem,
 	}), nodeStepCap))
 	runner.Register(cappedTimeouts(SystemUpdateWorkflow(store, inv, jobStore, runner, nc,
-		SystemUpdateConfig{}), systemStepCap))
+		SystemUpdateConfig{Memory: mem}), systemStepCap))
 	f.runner = runner
 	t.Cleanup(runner.Wait)
 

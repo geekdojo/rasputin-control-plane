@@ -964,6 +964,8 @@ func main() {
 	// the secret store takes the rotation's capture gate (#800).
 	runner.Register(updater.SystemUpdateWorkflow(updaterStore, invStore, jobStore, runner, busSrv.Conn(), updater.SystemUpdateConfig{
 		SelfNodeID: selfNodeID,
+		Memory:     metricsStore,
+		Log:        logger,
 	}))
 	// The console root password reaches every node in inventory, the
 	// controlplane included, over that node's own command lane (#587).
@@ -1173,6 +1175,7 @@ func main() {
 		StoreCopy:     rollback.copier,
 		Log:           logger,
 		StoreCheck:    selfStoreCheck,
+		Memory:        metricsStore,
 	}))
 	// storage.reconcile — #398: every five minutes, storage.inspect plus a
 	// write probe on each claimed target, recorded on the row beside the

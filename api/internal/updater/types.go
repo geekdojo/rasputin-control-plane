@@ -20,6 +20,11 @@ type Bundle struct {
 	StoragePath  string    `json:"-"` // filesystem location; never exposed in JSON
 	UploadedAt   time.Time `json:"uploadedAt"`
 	UploadedBy   string    `json:"uploadedBy"`
+	// MemoryFloorBytes is the least memory every control plane must report
+	// before this bundle installs anywhere in the fleet, copied from the
+	// release's signed manifest at pull (geekdojo/geekdojo-brain#1011). 0 is
+	// no floor: a release from before the field, or a hand-uploaded bundle.
+	MemoryFloorBytes int64 `json:"memoryFloorBytes,omitempty"`
 }
 
 // NodeUpdateStatus is the api's high-level outcome for an update job. The

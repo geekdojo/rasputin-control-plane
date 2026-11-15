@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS bundles (
     signed_by     TEXT NOT NULL DEFAULT '',
     storage_path  TEXT NOT NULL,
     uploaded_at   INTEGER NOT NULL,
-    uploaded_by   TEXT NOT NULL DEFAULT ''
+    uploaded_by   TEXT NOT NULL DEFAULT '',
+    memory_floor_bytes INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_bundles_compat ON bundles(compatible);
 CREATE INDEX IF NOT EXISTS idx_bundles_uploaded_at ON bundles(uploaded_at DESC);
@@ -51,4 +52,8 @@ var migrations = []string{
 	// history.
 	`ALTER TABLE node_updates ADD COLUMN unverified_boot INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE node_updates ADD COLUMN unverified_version INTEGER NOT NULL DEFAULT 0`,
+	// memory_floor_bytes: the control-plane memory floor the bundle's release
+	// states (geekdojo/geekdojo-brain#1011). Default 0 for rows that predate
+	// the column, which is true of them: their releases stated no floor.
+	`ALTER TABLE bundles ADD COLUMN memory_floor_bytes INTEGER NOT NULL DEFAULT 0`,
 }

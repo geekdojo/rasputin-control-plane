@@ -53,17 +53,17 @@ func fromMs(v int64) time.Time { return time.UnixMilli(v).UTC() }
 func (s *Store) CreateBundle(ctx context.Context, b *Bundle) error {
 	_, err := s.db.ExecContext(ctx, `
         INSERT INTO bundles
-        (sha256, version, compatible, architecture, description, build_date, size_bytes, signed_by, storage_path, uploaded_at, uploaded_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (sha256, version, compatible, architecture, description, build_date, size_bytes, signed_by, storage_path, uploaded_at, uploaded_by, memory_floor_bytes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		b.SHA256, b.Version, b.Compatible, b.Architecture, b.Description, b.BuildDate,
-		b.SizeBytes, b.SignedBy, b.StoragePath, ms(b.UploadedAt), b.UploadedBy)
+		b.SizeBytes, b.SignedBy, b.StoragePath, ms(b.UploadedAt), b.UploadedBy, b.MemoryFloorBytes)
 	return err
 }
 
 func (s *Store) GetBundle(ctx context.Context, sha string) (*Bundle, error) {
 	row := s.db.QueryRowContext(ctx, `
         SELECT sha256, version, compatible, architecture, description, build_date,
-               size_bytes, signed_by, storage_path, uploaded_at, uploaded_by
+               size_bytes, signed_by, storage_path, uploaded_at, uploaded_by, memory_floor_bytes
         FROM bundles WHERE sha256 = ?`, sha)
 	return scanBundle(row.Scan)
 }
@@ -71,7 +71,7 @@ func (s *Store) GetBundle(ctx context.Context, sha string) (*Bundle, error) {
 func (s *Store) ListBundles(ctx context.Context) ([]*Bundle, error) {
 	rows, err := s.db.QueryContext(ctx, `
         SELECT sha256, version, compatible, architecture, description, build_date,
-               size_bytes, signed_by, storage_path, uploaded_at, uploaded_by
+               size_bytes, signed_by, storage_path, uploaded_at, uploaded_by, memory_floor_bytes
         FROM bundles ORDER BY uploaded_at DESC`)
 	if err != nil {
 		return nil, err
@@ -107,7 +107,7 @@ func scanBundle(scan func(...any) error) (*Bundle, error) {
 	)
 	if err := scan(&b.SHA256, &b.Version, &b.Compatible, &b.Architecture,
 		&b.Description, &b.BuildDate, &b.SizeBytes, &b.SignedBy,
-		&b.StoragePath, &uploadedAt, &b.UploadedBy); err != nil {
+		&b.StoragePath, &uploadedAt, &b.UploadedBy, &b.MemoryFloorBytes); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}

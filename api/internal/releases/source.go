@@ -2,6 +2,8 @@ package releases
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 )
 
@@ -38,6 +40,36 @@ type Manifest struct {
 	// manifests are parsed leniently. It is only ever read off a manifest
 	// LatestFor returned, so at or above SignedManifestFrom it was verified.
 	SecurityFloor string `json:"securityFloor,omitempty"`
+	// ControlPlaneMemoryFloorBytes is the least memory a control plane must
+	// report before this release may be installed on any node of its fleet, or
+	// 0 when the release states none (every release before
+	// geekdojo/geekdojo-brain#1011). Read it through MemoryFloor.
+	ControlPlaneMemoryFloorBytes int64 `json:"controlPlaneMemoryFloorBytes,omitempty"`
+	// IdentityService is true when the release's own rootfs carries the
+	// sign-in service's unit. The release workflow derives it from the built
+	// image, so a release that carries the service but states no floor is
+	// one made outside that workflow, and MemoryFloor refuses it.
+	IdentityService bool `json:"identityService,omitempty"`
+}
+
+// ErrNoMemoryFloor is MemoryFloor's refusal of a release that carries the
+// sign-in service but states no control-plane memory floor (ERR-CLOSED).
+var ErrNoMemoryFloor = errors.New("releases: the release carries the sign-in service but states no control-plane memory floor")
+
+// MemoryFloor returns the control-plane memory floor this release states, in
+// bytes. 0 means no floor: a release from before the field, which is checked
+// exactly as it was before. A negative floor is an error, and so is a release
+// carrying the sign-in service with no floor (ErrNoMemoryFloor), so neither is
+// ever read as "no floor".
+func (m Manifest) MemoryFloor() (int64, error) {
+	floor := m.ControlPlaneMemoryFloorBytes
+	if floor < 0 {
+		return 0, fmt.Errorf("releases: the control-plane memory floor %d is negative", floor)
+	}
+	if m.IdentityService && floor == 0 {
+		return 0, ErrNoMemoryFloor
+	}
+	return floor, nil
 }
 
 // ManifestArtifact is one buildable artifact within a release. The OS uses
