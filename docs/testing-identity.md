@@ -7,7 +7,7 @@
   started the way the product's unit starts it (`kc.sh --config-file=… start --optimized
   --import-realm`, with the unit's `JAVA_OPTS_APPEND`, `JAVA_OPTS_KC_HEAP` and
   `MALLOC_ARENA_MAX`).
-- **PostgreSQL 18.6**, in a container pinned by digest, with its data on a tmpfs.
+- **PostgreSQL 18.7**, in a container pinned by digest, with its data on a tmpfs.
 - On demand, **Headscale** at the image `api/internal/mesh/mesh-images.json` pins, run by the
   product's own supervisor (`mesh.DockerSupervisor`).
 - On demand, **Chrome for Testing 157.0.8103.78**, pinned by hash and driven by chromedp.
@@ -52,7 +52,7 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
 - With the switch required, a missing Keycloak, JRE, docker or browser fails the required
   `backend` job (the unit test `TestPackage_MissingDependencyFails` covers each case; the job's
   env lines make it live).
-- Keycloak 26.8.2 on Temurin 25.0.5+8 against PostgreSQL 18.6 becomes ready on `/health/ready`
+- Keycloak 26.8.2 on Temurin 25.0.5+8 against PostgreSQL 18.7 becomes ready on `/health/ready`
   over mutual TLS with a test CA, and a client with no certificate is refused at TLS
   (`TestIdentity_ReadyOverMutualTLS`). The start record names both versions.
 - A password sign-in with the authorization code flow and PKCE S256 completes through the
@@ -70,6 +70,12 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   gone from `docker ps -a`, no live process's command line or working directory names the
   harness's temporary root (java, `kc.sh`, Chrome and its helpers included), and the root is
   gone. A failed proof is written to stderr and turns the package red.
+- PostgreSQL at the pin, configured TLS-only with #958's TLS lines and a `pg_hba` whose only
+  line is `hostssl … cert`, refuses a connection without TLS and admits the same one over TLS
+  with a client certificate (capability row T69), and accepts its key from files owned by its
+  own uid at 0400 in its own 0500 directory, the shape `LoadCredential=` gives a service (row
+  T70). `TestPostgresTLSOnly` runs this in a container of its own and needs only docker, not
+  Keycloak ([geekdojo-brain#972](https://github.com/geekdojo/geekdojo-brain/issues/972)).
 - The shipped api links no chromedp: the `backend` job's `shipped api binary carries no
   chromedp` step fails on any `github.com/chromedp/` package in
   `go list -deps ./api/cmd/rasputin-api`, and in the same step requires the pattern to match
@@ -171,6 +177,9 @@ so any change to it downloads afresh. A bump changes a release and its hash toge
   from its transcript.
 - **PostgreSQL.** The image is addressed by digest, so docker verifies the content; take the
   digest of the new tag's index.
+  Keep the version equal to the one rasputin-os carries (`RASPUTIN_POSTGRESQL_VERSION` in its
+  `package/rasputin-postgresql/rasputin-postgresql.mk`), and re-verify capability rows T69 and
+  T70 at the new pin: `TestPostgresTLSOnly` passing there, then the rows' `version` column.
 - **Chrome for Testing.** It publishes no checksum and no signature. Download the version's
   `chrome-linux64.zip` from the URL in its `known-good-versions-with-downloads.json` entry, check
   the download's MD5 against Google's stored object hash (the `x-goog-hash` header), and pin the

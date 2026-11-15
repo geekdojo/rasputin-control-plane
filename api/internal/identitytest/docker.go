@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -108,27 +109,33 @@ func (e *Env) startPostgres(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("identitytest: identity database port: %w", err)
 	}
-	err = proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
-		out, err := e.docker.exec(ctx, id, "pg_isready", "-h", "127.0.0.1", "-U", dbUser, "-d", dbName)
+	if err := e.docker.awaitPostgres(ctx, e.log, id, "-h", "127.0.0.1", "-U", dbUser, "-d", dbName); err != nil {
+		return 0, fmt.Errorf("identitytest: identity database: %w", err)
+	}
+	e.log.Info("identity database started", "container", id, "addr", "127.0.0.1:"+strconv.Itoa(port), "image", PostgresImage)
+	return port, nil
+}
+
+// awaitPostgres returns nil once `pg_isready <isready>` inside container id
+// answers ready. A container that is not running fails at once, since it
+// will never be ready; otherwise the wait ends only with ctx, and the error
+// names the last pg_isready status. Each new status is logged at DEBUG.
+func (d docker) awaitPostgres(ctx context.Context, log *slog.Logger, id string, isready ...string) error {
+	err := proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
+		out, err := d.exec(ctx, id, append([]string{"pg_isready"}, isready...)...)
 		status := strings.TrimSpace(string(out))
 		if err != nil && strings.Contains(status, "is not running") {
 			return false, status, &proctest.Final{Err: fmt.Errorf("container %s is not running: %s", id, status)}
 		}
 		return err == nil, status, nil
 	}, func(last string) {
-		e.log.Debug("identity database not ready yet", "container", id, "pg_isready", last)
+		log.Debug("identity database not ready yet", "container", id, "pg_isready", last)
 	})
 	var notReady *proctest.NotReadyError
-	switch {
-	case err == nil:
-	case errors.As(err, &notReady):
-		return 0, fmt.Errorf("identitytest: identity database %s not ready when ctx ended (last pg_isready: %s): %w",
-			id, notReady.Last, notReady.Err)
-	default:
-		return 0, fmt.Errorf("identitytest: identity database: %w", err)
+	if errors.As(err, &notReady) {
+		return fmt.Errorf("container %s not ready when ctx ended (last pg_isready: %s): %w", id, notReady.Last, notReady.Err)
 	}
-	e.log.Info("identity database started", "container", id, "addr", "127.0.0.1:"+strconv.Itoa(port), "image", PostgresImage)
-	return port, nil
+	return err
 }
 
 // randomHex is n random bytes as hex.

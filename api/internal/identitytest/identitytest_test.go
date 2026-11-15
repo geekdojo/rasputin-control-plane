@@ -644,3 +644,63 @@ func TestParseKeycloakVersion(t *testing.T) {
 		t.Errorf("the pinned output = %q, %v", jvm, err)
 	}
 }
+
+// TC-972-17: the readiness wait startPostgres and TestPostgresTLSOnly share.
+// Its ctx has no deadline, so only the container's own answers or a cancel
+// can end it.
+func TestAwaitPostgres(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	isready := []string{"-h", "127.0.0.1"}
+
+	t.Run("a container that is not running fails at once", func(t *testing.T) {
+		r := &fakeRunner{answers: map[string]func([]string) ([]byte, error){
+			"docker exec": func([]string) ([]byte, error) {
+				return []byte("Error response from daemon: container pgcontainer1 is not running"), errors.New("exit status 1")
+			},
+		}}
+		err := docker{bin: "docker", run: r.run}.awaitPostgres(context.Background(), log, "pgcontainer1", isready...)
+		if err == nil || !strings.Contains(err.Error(), "pgcontainer1") || !strings.Contains(err.Error(), "is not running") {
+			t.Fatalf("awaitPostgres = %v, want an error naming pgcontainer1 and \"is not running\"", err)
+		}
+		if n := r.count(); n != 1 {
+			t.Errorf("docker calls = %d (%q), want exactly one docker exec", n, r.calls)
+		}
+		if want := "docker exec pgcontainer1 pg_isready -h 127.0.0.1"; len(r.calls) > 0 && r.calls[0] != want {
+			t.Errorf("call = %q, want %q", r.calls[0], want)
+		}
+	})
+
+	t.Run("a cancelled wait names the last status", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var mu sync.Mutex
+		calls := 0
+		r := &fakeRunner{answers: map[string]func([]string) ([]byte, error){
+			"docker exec": func([]string) ([]byte, error) {
+				mu.Lock()
+				defer mu.Unlock()
+				calls++
+				if calls > 1 {
+					cancel() // after the first answer has been taken as the last status
+				}
+				return []byte("127.0.0.1:5432 - no response"), errors.New("exit status 2")
+			},
+		}}
+		err := docker{bin: "docker", run: r.run}.awaitPostgres(ctx, log, "pgcontainer1", isready...)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("awaitPostgres = %v, want it to unwrap to context.Canceled", err)
+		}
+		for _, want := range []string{"pgcontainer1", "127.0.0.1:5432 - no response"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("awaitPostgres = %q, want it to name %q", err, want)
+			}
+		}
+	})
+
+	t.Run("an accepting server is ready", func(t *testing.T) {
+		r := goodRunner()
+		if err := (docker{bin: "docker", run: r.run}).awaitPostgres(context.Background(), log, "pgcontainer1", isready...); err != nil {
+			t.Fatalf("awaitPostgres = %v, want nil", err)
+		}
+	})
+}

@@ -24,7 +24,9 @@ package identitytest
 //     OpenJDK25U-jre_x64_linux_hotspot_25.0.5_8.tar.gz, signature-verified in
 //     the same evidence directory: raw/signature-verification-jre-25.0.5+8.txt.
 //   - PostgresImage is addressed by digest, so docker itself verifies the
-//     content it pulls; the digest is #959's.
+//     content it pulls; the digest is Docker Hub's index for tag 18.7
+//     (2026-11-12), the release rasputin-os carries
+//     (geekdojo/geekdojo-brain#972). Capability rows T69 and T70 pin it.
 //   - ChromeLinux64SHA256 is the sha256 of Chrome for Testing's
 //     chrome-linux64.zip for this version, taken at pin time
 //     (2026-11-12). Chrome for Testing publishes no checksum and no signature,
@@ -41,7 +43,7 @@ const (
 	JRELinuxX64SHA256 = "6fac98f0c8202efc3135a9e9e42aa61963ec42d1c5cbb40caf231e7b14a24ef6"
 
 	PostgresMajor = "18"
-	PostgresImage = "postgres:18.6@sha256:e3d24f6906d0760bf4da0dae872415391ededefad23fd471c47dc53b0ddf3c42"
+	PostgresImage = "postgres:18.7@sha256:9f4fd4aa918f52ae3d6f3b687f1de90d8f867cd4d520021545a9a50c120eae3b"
 
 	ChromeForTestingRelease = "googlechromelabs/chrome-for-testing:157.0.8103.78"
 	ChromeLinux64SHA256     = "9223832977a13db3646201b1341c1f9cf08afa3ceae92540116d7b0c062364fb"
