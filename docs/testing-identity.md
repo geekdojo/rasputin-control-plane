@@ -104,6 +104,13 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   (`api/cmd/rasputin-api/identityca_functional_test.go`, under the same
   `RASPUTIN_IDENTITY_FUNCTIONAL=required` switch,
   [geekdojo-brain#977](https://github.com/geekdojo/geekdojo-brain/issues/977)).
+- The shipped realm baseline works as Keycloak builds it: `identity/realm-baseline.json` is
+  imported as realm `rasputin` with Keycloak's own `kc.sh import`; `rasputin-admin`, with a
+  `client-x509` leaf whose subject is `CN=rasputin-api,O=Rasputin`, gets a token, reads the realm
+  and creates and deletes a user through the Admin API; each of the five sign-in clients completes
+  a password sign-in; and the console's token carries `auth_time` and `rasputin_roles`
+  (`api/internal/identitytest/baseline_import_functional_test.go`, under the same switch,
+  [geekdojo-brain#980](https://github.com/geekdojo/geekdojo-brain/issues/980)).
 
 ## What it does not prove
 
@@ -117,8 +124,8 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   land with the items whose CI cases need them; the vector file already carries their sections.
 - The ID token's signature. The client decodes the payload of a token it received over TLS from
   the issuer.
-- The real realm baseline (Identity 3.4) or the identity CA (Identity 3.1). The harness imports
-  a minimal realm and makes its own test CA.
+- The baseline's sign-in flows. Its flow skeletons are empty and unbound until Identity 4.5
+  converges them, so the sign-ins above run Keycloak's default browser flow.
 - Stability beyond the runs CI makes.
 - The Python client's conformance to the vector file, which is #967's.
 
