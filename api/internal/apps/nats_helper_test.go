@@ -96,7 +96,7 @@ func TestDeployPush_HappyPath(t *testing.T) {
 	defer func() { _ = changeSub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
-	out, err := deployPush(store, inv, nc, testSource(t))(sc)
+	out, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(sc)
 	if err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestDeployPush_AgentReportsFailure(t *testing.T) {
 	defer func() { _ = sub.Unsubscribe() }()
 
 	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
-	if _, err := deployPush(store, inv, nc, testSource(t))(sc); err == nil {
+	if _, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(sc); err == nil {
 		t.Error("agent failure: want error, got nil")
 	}
 	got, _ := store.Get(ctx, testAppID)
@@ -162,7 +162,7 @@ func TestDeployPush_RPCFails(t *testing.T) {
 
 	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
 	sc.Ctx = deadline
-	if _, err := deployPush(store, inv, nc, testSource(t))(sc); err == nil {
+	if _, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(sc); err == nil {
 		t.Error("RPC timeout: want error")
 	}
 	got, _ := store.Get(ctx, testAppID)
@@ -180,7 +180,7 @@ func TestDeployPush_BadAck(t *testing.T) {
 	})
 	defer func() { _ = sub.Unsubscribe() }()
 	sc := newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)
-	if _, err := deployPush(store, inv, nc, testSource(t))(sc); err == nil {
+	if _, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(sc); err == nil {
 		t.Error("bad ack: want error")
 	}
 }

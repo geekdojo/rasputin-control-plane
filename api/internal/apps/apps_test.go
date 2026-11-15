@@ -604,7 +604,7 @@ func TestWorkflowShapes(t *testing.T) {
 	}
 	// Direct calls — checking Kind + step names. Even with nil deps the
 	// closures are constructed lazily and never invoked here.
-	d := wf(t)(DeployWorkflow(nil, nil, nil, nil, testSource(t)))
+	d := wf(t)(DeployWorkflow(nil, nil, nil, nil, testSource(t), AppIdentity{}))
 	if d.Kind != "app.deploy" {
 		t.Errorf("DeployWorkflow Kind: %q", d.Kind)
 	}

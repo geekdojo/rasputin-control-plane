@@ -176,10 +176,10 @@ func pushFamilySteps(t *testing.T) string {
 	src := testSource(t)
 	var b strings.Builder
 	for _, w := range []jobs.Workflow{
-		wf(t)(DeployWorkflow(nil, nil, nil, nil, src)),
-		wf(t)(RevertWorkflow(nil, nil, nil, nil, src)),
-		wf(t)(EditWorkflow(nil, nil, nil, nil, nil, src, testSecretDeps())),
-		wf(t)(UpgradeWorkflow(nil, nil, nil, nil, nil, src, testSecretDeps())),
+		wf(t)(DeployWorkflow(nil, nil, nil, nil, src, AppIdentity{})),
+		wf(t)(RevertWorkflow(nil, nil, nil, nil, src, AppIdentity{})),
+		wf(t)(EditWorkflow(nil, nil, nil, nil, nil, src, testSecretDeps(), AppIdentity{})),
+		wf(t)(UpgradeWorkflow(nil, nil, nil, nil, nil, src, testSecretDeps(), AppIdentity{})),
 	} {
 		names := make([]string, 0, len(w.Steps))
 		for _, s := range w.Steps {
@@ -219,7 +219,7 @@ func checkGolden(t *testing.T, name, got string) bool {
 // plain tile, a tile that uses secrets and a custom app.
 func TestDeployGolden_WhatTheAgentReceives(t *testing.T) {
 	build := func(store *Store, inv *inventory.Store, nc *nats.Conn, secrets SecretSource) (jobs.Workflow, error) {
-		return DeployWorkflow(store, inv, nc, nil, secrets)
+		return DeployWorkflow(store, inv, nc, nil, secrets, AppIdentity{})
 	}
 	for _, c := range deployGoldenCases() {
 		t.Run(c.name, func(t *testing.T) {

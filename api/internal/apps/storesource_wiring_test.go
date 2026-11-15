@@ -298,7 +298,7 @@ func TestStoreSource_ClosedOutcomesLeaveTheAppUntouched(t *testing.T) {
 					t.Fatalf("monitor reads %s, want audit-blocked", st)
 				}
 			}
-			runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, src)))
+			runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, src, AppIdentity{})))
 			j, err := runner.Submit(ctx, "app.deploy", DeploySpec{AppID: id}, "test")
 			if err != nil {
 				t.Fatal(err)

@@ -111,7 +111,7 @@ func TestStoreGate_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := apps.DeployWorkflow(appStore, inv, nc, nil, gate)
+	w, err := apps.DeployWorkflow(appStore, inv, nc, nil, gate, apps.AppIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}

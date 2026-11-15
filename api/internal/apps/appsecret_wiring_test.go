@@ -130,7 +130,7 @@ func TestDeployPushResolvesTheSecretAndTheRowKeepsThePlaceholder(t *testing.T) {
 	}
 	defer func() { _ = sub.Unsubscribe() }()
 
-	if _, err := deployPush(store, inv, nc, src)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, src, AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	var cmd proto.AppDeployCmd
@@ -192,7 +192,7 @@ func TestDeployPushRefusesASecretComposeWithNoSeed(t *testing.T) {
 			}
 			defer func() { _ = sub.Unsubscribe() }()
 
-			_, err = deployPush(store, inv, nc, tc.src)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
+			_, err = deployPush(store, inv, nc, tc.src, AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
 			if err == nil {
 				t.Fatal("the deploy went ahead with no seed loaded")
 			}
@@ -236,7 +236,7 @@ func TestDeployPushSendsAComposeWithNoTokensVerbatim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := deployPush(store, inv, nc, testSource(t))(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	select {

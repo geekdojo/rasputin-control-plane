@@ -123,7 +123,7 @@ func TestAppSagas_InvalidAppIDFailsAtFirstStep(t *testing.T) {
 	}{
 		{"app.deploy", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(DeployWorkflow(s, i, nc, nil, testSource(t)))
+				return wf(t)(DeployWorkflow(s, i, nc, nil, testSource(t), AppIdentity{}))
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, DeploySpec{AppID: id})) }},
 		{"app.stop", installedApp,
@@ -131,17 +131,17 @@ func TestAppSagas_InvalidAppIDFailsAtFirstStep(t *testing.T) {
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, DeploySpec{AppID: id})) }},
 		{"app.upgrade", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(UpgradeWorkflow(s, i, nc, nil, lookup, testSource(t), testSecretDeps()))
+				return wf(t)(UpgradeWorkflow(s, i, nc, nil, lookup, testSource(t), testSecretDeps(), AppIdentity{}))
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.edit", customApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(EditWorkflow(s, i, nc, nil, NewComposeStash(), testSource(t), testSecretDeps()))
+				return wf(t)(EditWorkflow(s, i, nc, nil, NewComposeStash(), testSource(t), testSecretDeps(), AppIdentity{}))
 			},
 			func(t *testing.T, id string) string { return string(mustSpecJSON(t, ComposeChangeSpec{AppID: id})) }},
 		{"app.revert", installedApp,
 			func(s *Store, i *inventory.Store, nc *nats.Conn) jobs.Workflow {
-				return wf(t)(RevertWorkflow(s, i, nc, nil, testSource(t)))
+				return wf(t)(RevertWorkflow(s, i, nc, nil, testSource(t), AppIdentity{}))
 			},
 			func(t *testing.T, id string) string {
 				return string(mustSpecJSON(t, RevertSpec{AppID: id, ComposeSHA256: ComposeHash(composeV2)}))
