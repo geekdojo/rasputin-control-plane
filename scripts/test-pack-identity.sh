@@ -241,6 +241,13 @@ holds "TC-980-13 rasputin-mesh builds groups from rasputin_app_role" "$BASE" \
 holds "TC-980-13 rasputin-console holds client roles admin, operator, viewer" "$BASE" '[.roles.client["rasputin-console"][].name] | sort == ["admin", "operator", "viewer"]'
 holds "TC-980-13 rasputin-console's default scopes carry rasputin-console-roles" "$BASE" '.clients[] | select(.clientId == "rasputin-console") | .defaultClientScopes | index("rasputin-console-roles") != null'
 holds "TC-980-13 client scope rasputin-console-roles exists" "$BASE" 'any(.clientScopes[]; .name == "rasputin-console-roles")'
+# F-980-11: identity-authz.md §3.1 names the claim the api authorizes on rasputin_roles.
+holds "TC-980-13 rasputin-console-roles emits the console roles as claim rasputin_roles" "$BASE" \
+	'.clientScopes[] | select(.name == "rasputin-console-roles") | any(.protocolMappers[]; .protocolMapper == "oidc-usermodel-client-role-mapper" and .config["usermodel.clientRoleMapping.clientId"] == "rasputin-console" and .config["claim.name"] == "rasputin_roles")'
+# F-980-10: a baseline that declares clientScopes stops Keycloak's import creating the
+# built-in scopes (basic, profile, email) unless this realm attribute is "true"
+# (RealmManager.java at 26.8.2), and the clients' references to them are dropped silently.
+holds "TC-980-13 realm attribute CreateDefaultClientScopes is \"true\" (the built-in scopes are created on import)" "$BASE" '.attributes.CreateDefaultClientScopes == "true"'
 
 # --- TC-980-14: the admin client's roles, set-equal to the eight -----------------------------------
 admin_roles='([.users[] | select(.serviceAccountClientId == "rasputin-admin")]) as $sa

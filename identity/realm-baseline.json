@@ -22,6 +22,9 @@
   "webAuthnPolicyPasswordlessResidentKey": "required",
   "eventsEnabled": true,
   "eventsListeners": [],
+  "attributes": {
+    "CreateDefaultClientScopes": "true"
+  },
   "roles": {
     "client": {
       "rasputin-console": [
@@ -57,7 +60,7 @@
           "consentRequired": false,
           "config": {
             "usermodel.clientRoleMapping.clientId": "rasputin-console",
-            "claim.name": "rasputin_console_roles",
+            "claim.name": "rasputin_roles",
             "jsonType.label": "String",
             "multivalued": "true",
             "id.token.claim": "true",

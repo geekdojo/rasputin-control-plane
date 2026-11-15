@@ -18,4 +18,4 @@
 # baseline. That one change sets armed-at to that release's tag and keeps the
 # sha256 as it is.
 armed-at=none
-sha256=e1db96bea3f6a0589ea7220c2c3984a6bce0fbd4d7525f241c0ae31ecbfb3b76
+sha256=4b2aa234ac9d11834fc16f90d69c19e3ea63f17dc8787bd3e1ce7c01ef10b675
