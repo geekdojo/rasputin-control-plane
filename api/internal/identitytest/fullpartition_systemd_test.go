@@ -47,7 +47,9 @@ func (p *systemdPair) AwaitDBDown(ctx context.Context) (string, error) {
 		}
 		state = s
 		return strings.HasPrefix(s, "failed/") || s == "activating/auto-restart", "unit " + s, nil
-	}, func(last string) { p.cfg.Logger.Info("database unit with the partition full", "unit", p.DBUnit, "state", last) })
+	}, func(last string) {
+		p.cfg.Logger.Info("database unit with the partition full", "unit", p.DBUnit, "state", last)
+	})
 	if err != nil {
 		return "", errNamed("the database unit "+p.DBUnit+" is failed or in auto-restart with the partition full", err)
 	}
