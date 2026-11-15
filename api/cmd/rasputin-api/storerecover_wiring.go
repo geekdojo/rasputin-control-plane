@@ -10,12 +10,15 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storerecover"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storeaudit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/unitrecover"
 )
+
+// storeRecoverKind is the store recovery's workflow kind.
+const storeRecoverKind = "secretstore.recover"
 
 // storeRecoverDeps is what the full-disk recovery's wiring takes from main
 // (geekdojo/geekdojo-brain#874).
@@ -75,7 +78,8 @@ func storeRecoverWiring(d storeRecoverDeps) (storeRecover, error) {
 	if d.log == nil {
 		return storeRecover{}, errors.New("store recovery: the logger is nil")
 	}
-	deps := storerecover.Deps{
+	deps := unitrecover.Deps{
+		Kind: storeRecoverKind, Service: "secret store", Component: "secretstore",
 		Dir: d.dataDir, Free: storage.FreeBytes, FullBelow: storeaudit.FreeCritBelow,
 		Unit: storeUnit, Log: d.log, StepTimeout: sealrotate.UnsealWait,
 	}
@@ -95,13 +99,13 @@ func storeRecoverWiring(d storeRecoverDeps) (storeRecover, error) {
 		deps.Restoring = func() (string, bool) { return "", false }
 		deps.Restart = func(context.Context) error { return errStoreRecoverOff }
 	}
-	rec, err := storerecover.New(deps)
+	rec, err := unitrecover.New(deps)
 	if err != nil {
 		return storeRecover{}, fmt.Errorf("store recovery: %w", err)
 	}
 	w := storeRecover{workflow: rec.Workflow()}
 	if openbao {
-		w.entry = &scheduler.Entry{Kind: storerecover.Kind, Interval: storeAuditCheckEvery, Due: rec.Due}
+		w.entry = &scheduler.Entry{Kind: storeRecoverKind, Interval: storeAuditCheckEvery, Due: rec.Due}
 		w.arm = rec.Arm
 	}
 	return w, nil

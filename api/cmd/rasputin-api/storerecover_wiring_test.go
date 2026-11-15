@@ -11,7 +11,6 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storerecover"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
@@ -79,7 +78,7 @@ func TestStoreRecoverWiring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if w.workflow.Kind != storerecover.Kind || len(w.workflow.Steps) != 1 {
+			if w.workflow.Kind != storeRecoverKind || len(w.workflow.Steps) != 1 {
 				t.Fatalf("workflow = %q with %d steps", w.workflow.Kind, len(w.workflow.Steps))
 			}
 			entries := w.entries()
@@ -98,7 +97,7 @@ func TestStoreRecoverWiring(t *testing.T) {
 				t.Fatalf("entries = %+v, want the recovery's", entries)
 			}
 			e := entries[0]
-			if e.Kind != storerecover.Kind || e.Interval != storeAuditCheckEvery || e.Due == nil || e.InitialDelay != 0 {
+			if e.Kind != storeRecoverKind || e.Interval != storeAuditCheckEvery || e.Due == nil || e.InitialDelay != 0 {
 				t.Errorf("entry = %+v", e)
 			}
 			if w.arm == nil {

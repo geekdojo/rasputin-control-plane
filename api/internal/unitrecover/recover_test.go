@@ -1,4 +1,4 @@
-package storerecover
+package unitrecover
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 )
 
 const (
+	testKind = "secretstore.recover"
 	testDir  = "/data"
 	testUnit = "openbao.service"
 	fullAt   = uint64(1 << 30)
@@ -58,6 +59,7 @@ func newFixture(t *testing.T) *fixture {
 	f := &facts{free: 0, state: stateFailed}
 	log, rec := logkittest.New()
 	r, err := New(Deps{
+		Kind: testKind, Service: "secret store", Component: "secretstore",
 		Dir: testDir,
 		Free: func(dir string) (uint64, error) {
 			f.mu.Lock()
@@ -174,7 +176,7 @@ func TestDue_OneRecoveryOnRoom(t *testing.T) {
 	if !due {
 		t.Fatalf("Due with room = false, %q", reason)
 	}
-	if want := "the data partition has 1024 MiB free and the store unit is failed"; reason != want {
+	if want := "the data partition has 1024 MiB free and the secret store unit is failed"; reason != want {
 		t.Errorf("reason = %q, want %q", reason, want)
 	}
 	if due, reason := x.due(t); due || reason != "" {
@@ -307,7 +309,7 @@ func TestDue_UnreadableRefuses(t *testing.T) {
 			if due, _ := x.due(t); due {
 				t.Fatal("due on an unreadable free space")
 			}
-			w := x.rec.Matching(slog.LevelWarn, "free space could not be read; no store recovery checked")
+			w := x.rec.Matching(slog.LevelWarn, "free space could not be read; no secret store recovery checked")
 			if len(w) != 1 {
 				t.Fatalf("%d WARN records, want 1", len(w))
 			}
@@ -437,7 +439,7 @@ func TestRestartStep_Rechecks(t *testing.T) {
 		set    func(*facts)
 		reason string
 	}{
-		{"no longer failed", func(f *facts) { f.state = "active" }, "the store unit is active, not failed"},
+		{"no longer failed", func(f *facts) { f.state = "active" }, "the secret store unit is active, not failed"},
 		{"held", func(f *facts) { f.held = true }, "a job holds the secret store"},
 		{"restoring", func(f *facts) { f.restoring = true }, "a restore is in progress"},
 	} {
@@ -464,7 +466,7 @@ func TestRestartStep_Rechecks(t *testing.T) {
 	t.Run("state unreadable", func(t *testing.T) {
 		x := newFixture(t)
 		x.f.set(func(f *facts) { f.stateErr = errors.New("dbus: gone") })
-		if _, _, err := runStep(t, x); !errors.Is(err, errStateUnread) {
+		if _, _, err := runStep(t, x); !errors.Is(err, x.r.errStateUnread()) {
 			t.Errorf("err = %v, want the unread sentence", err)
 		}
 		if _, _, _, _, n := x.f.counts(); n != 0 {
@@ -540,11 +542,11 @@ func TestRestartStep_FailureSurfaces(t *testing.T) {
 		t.Errorf("err = %q, want the cause", got)
 	}
 	w := x.r.Workflow()
-	if w.Kind != Kind || w.Steps[0].Name != "restart" || w.Steps[0].Retries != 0 || w.Steps[0].Timeout != 30*time.Second {
+	if w.Kind != testKind || w.Steps[0].Name != "restart" || w.Steps[0].Retries != 0 || w.Steps[0].Timeout != 30*time.Second {
 		t.Errorf("workflow = %+v", w)
 	}
 	t.Run("not an exit status", func(t *testing.T) {
-		if got := restartFailedLine(errors.New("no systemctl")); got != "systemctl restart of the secret store unit failed." {
+		if got := restartFailedLine("secret store", errors.New("no systemctl")); got != "systemctl restart of the secret store unit failed." {
 			t.Errorf("line = %q", got)
 		}
 	})
@@ -612,6 +614,7 @@ func TestNew_Refuses(t *testing.T) {
 	log, _ := logkittest.New()
 	ok := func() Deps {
 		return Deps{
+			Kind: testKind, Service: "secret store", Component: "secretstore",
 			Dir: testDir, Free: func(string) (uint64, error) { return 0, nil }, FullBelow: fullAt, Unit: testUnit,
 			UnitState: func(context.Context) (string, error) { return "", nil },
 			Held:      func(context.Context) bool { return false },
@@ -628,7 +631,9 @@ func TestNew_Refuses(t *testing.T) {
 		"FullBelow": func(d *Deps) { d.FullBelow = 0 }, "Unit": func(d *Deps) { d.Unit = "" },
 		"UnitState": func(d *Deps) { d.UnitState = nil }, "Held": func(d *Deps) { d.Held = nil },
 		"Restoring": func(d *Deps) { d.Restoring = nil }, "Restart": func(d *Deps) { d.Restart = nil },
-		"Log": func(d *Deps) { d.Log = nil },
+		"Log":  func(d *Deps) { d.Log = nil },
+		"Kind": func(d *Deps) { d.Kind = "" }, "Service": func(d *Deps) { d.Service = "" },
+		"Component": func(d *Deps) { d.Component = "" },
 	} {
 		d := ok()
 		mut(&d)
