@@ -96,7 +96,7 @@ func TestUpdateValidate_HappyPath(t *testing.T) {
 	seedNodeAndBundle(t, store, inv, "n", "sha-1", "v1")
 
 	sc := newUpdaterCtx("j", specJSON("n", "sha-1"), nc)
-	out, err := updateValidate(store, inv)(sc)
+	out, err := updateValidate(store, inv, Config{})(sc)
 	if err != nil {
 		t.Fatalf("updateValidate: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestUpdateValidate_BadSpec(t *testing.T) {
 	store := newStoreFixture(t).store
 	inv := newInventory(t)
 	sc := newUpdaterCtx("j", `{}`, nc)
-	if _, err := updateValidate(store, inv)(sc); err == nil {
+	if _, err := updateValidate(store, inv, Config{})(sc); err == nil {
 		t.Error("missing nodeId: want error")
 	}
 }
@@ -125,7 +125,7 @@ func TestUpdateValidate_UnknownNode(t *testing.T) {
 	store := newStoreFixture(t).store
 	inv := newInventory(t)
 	sc := newUpdaterCtx("j", specJSON("missing", "sha"), nc)
-	if _, err := updateValidate(store, inv)(sc); err == nil {
+	if _, err := updateValidate(store, inv, Config{})(sc); err == nil {
 		t.Error("unknown node: want error")
 	}
 }
@@ -140,7 +140,7 @@ func TestUpdateValidate_UnknownBundle(t *testing.T) {
 		t.Fatalf("inv: %v", err)
 	}
 	sc := newUpdaterCtx("j", specJSON("n", "no-such"), nc)
-	if _, err := updateValidate(store, inv)(sc); err == nil {
+	if _, err := updateValidate(store, inv, Config{})(sc); err == nil {
 		t.Error("unknown bundle: want error")
 	}
 }

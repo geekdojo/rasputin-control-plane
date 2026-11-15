@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,12 @@ import (
 // operator was looking at.
 type SystemUpdateConfig struct {
 	SelfNodeID string
+	// Memory reads each control plane's reported memory for the release's
+	// memory floor (geekdojo/geekdojo-brain#1011). Nil refuses every run whose
+	// release states a floor; a run with no floor never reads it.
+	Memory NodeMemory
+	// Log takes the plan step's floor refusal record. Nil writes none.
+	Log *slog.Logger
 }
 
 // SystemUpdateWorkflow returns the three-step system.update saga.
@@ -185,6 +192,9 @@ func buildPlan(
 		if bundle == nil {
 			return systemPlanState{}, fmt.Errorf("bundle %s not found", spec.BundleSHA256)
 		}
+		if r := checkFleetMemoryFloor(ctx, cfg.Memory, all, bundle.MemoryFloorBytes, bundle.Version); r != nil {
+			return systemPlanState{}, r.planError()
+		}
 		nodes, skipped := planTargets(all, exclude, bundle.Compatible, cfg.SelfNodeID)
 		targets := make([]plannedTarget, len(nodes))
 		for i, n := range nodes {
@@ -280,6 +290,18 @@ func buildPlan(
 		return systemPlanState{}, fmt.Errorf(
 			"%s %s is not staged for every architecture in this cluster — stage %s first",
 			comp.Label, spec.Version, strings.Join(parts, "; "))
+	}
+
+	// The memory floor: the largest any bundle of this run states, judged
+	// against every control plane in inventory, not only the targets.
+	var carried []*Bundle
+	for sku, b := range staged {
+		if componentCovers(comp, sku) {
+			carried = append(carried, b)
+		}
+	}
+	if r := checkFleetMemoryFloor(ctx, cfg.Memory, all, runMemoryFloor(carried), spec.Version); r != nil {
+		return systemPlanState{}, r.planError()
 	}
 
 	if err := assignCanaries(targets, spec.CanaryNodes); err != nil {
@@ -488,6 +510,10 @@ func systemPlan(store *Store, inv *inventory.Store, cfg SystemUpdateConfig) jobs
 		}
 		state, err := buildPlan(sc.Ctx, store, inv, spec, cfg)
 		if err != nil {
+			if r, ok := floorRefusalOf(err); ok {
+				r.log(sc.Ctx, cfg.Log, sc.JobID)
+				sc.Log("warn", err.Error())
+			}
 			return nil, err
 		}
 		targets, skipped, ids := state.Targets, state.Skipped, state.targetIDs()

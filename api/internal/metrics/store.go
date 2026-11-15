@@ -3,6 +3,7 @@ package metrics
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
@@ -59,6 +60,23 @@ func (s *Store) DeleteBefore(ctx context.Context, cutoff time.Time) (int64, erro
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
+}
+
+// LatestValue returns the newest retained sample of one metric for one node,
+// and ok=false with a nil error when the node has none in the retention
+// window. The primary key (node_id, name, ts) serves it.
+func (s *Store) LatestValue(ctx context.Context, nodeID, name string) (float64, bool, error) {
+	var v float64
+	err := s.db.QueryRowContext(ctx, `
+        SELECT value FROM metrics WHERE node_id = ? AND name = ?
+        ORDER BY ts DESC LIMIT 1`, nodeID, name).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return v, true, nil
 }
 
 // Point is one (ts, value) tuple in a returned series.

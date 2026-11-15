@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bytesize"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -277,18 +278,7 @@ func SnapshotDB(ctx context.Context, db *sql.DB, dst string) (uint64, error) {
 }
 
 // humanBytes renders a size for an operator-facing message.
-func humanBytes(n uint64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := uint64(unit), 0
-	for v := n / unit; v >= unit && exp < 4; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
-}
+func humanBytes(n uint64) string { return bytesize.Format(n) }
 
 // byteCount narrows a signed byte count to uint64.
 //
