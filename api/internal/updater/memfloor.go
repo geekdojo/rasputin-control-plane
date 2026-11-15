@@ -59,7 +59,13 @@ type floorRefusal struct {
 // sentence is the refusal a person reads, ending in closing (ERR-MESSAGE).
 // The raw read error is never part of it.
 func (r *floorRefusal) sentence(closing string) string {
-	need := "This update needs at least " + bytesize.Format(uint64(r.Floor)) + " of memory on the control plane"
+	// Floor is > 0 wherever a refusal is built; the guard keeps the unsigned
+	// conversion provably in range.
+	var floor uint64
+	if f := r.Floor; f > 0 {
+		floor = uint64(f)
+	}
+	need := "This update needs at least " + bytesize.Format(floor) + " of memory on the control plane"
 	switch {
 	case r.NodeID == "":
 		return need + ", and this cluster has no control plane that reports its memory, so the update was refused. " + closing

@@ -71,13 +71,16 @@ func TestPullUpdate_IdentityReleaseWithNoFloorIsNotStaged(t *testing.T) {
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d, want 502; body %s", rec.Code, rec.Body.String())
 	}
-	var body map[string]string
+	var body codedError
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	const want = "Rasputin OS 2026.06.0-dev.99 carries the sign-in service but its signed manifest states no control-plane memory floor, so it was not staged."
-	if body["error"] != want {
-		t.Errorf("error = %q\nwant    %q", body["error"], want)
+	if body.Error != want {
+		t.Errorf("error = %q\nwant    %q", body.Error, want)
+	}
+	if body.Code != codeMemoryFloorMissing || body.CorrelationID == "" {
+		t.Errorf("code = %q, correlationId = %q; want %q and a non-empty id", body.Code, body.CorrelationID, codeMemoryFloorMissing)
 	}
 	if n := opens.Load(); n != 0 {
 		t.Errorf("%d asset download(s), want none", n)
@@ -101,7 +104,7 @@ func TestPullUpdate_IdentityReleaseWithNoFloorIsNotStaged(t *testing.T) {
 	if recs[0].Level.String() != "WARN" {
 		t.Errorf("record level = %v, want WARN", recs[0].Level)
 	}
-	for k, v := range map[string]string{"component": "os", "version": version} {
+	for k, v := range map[string]string{"component": "os", "version": version, "code": codeMemoryFloorMissing, "correlation_id": body.CorrelationID} {
 		if got, _ := recAttr(recs[0], k); got != v {
 			t.Errorf("record %s = %q, want %q", k, got, v)
 		}
@@ -224,16 +227,27 @@ func TestPullUpdate_NegativeMemoryFloorIsNotStaged(t *testing.T) {
 	f.srv.SetReleaseSource(releases.NewGithubPublicSource(rel.URL, nil), "dev")
 
 	rec := f.do(t, http.MethodPost, "/api/updates/pull", `{"component":"os","channel":"dev"}`, c)
-	var body map[string]string
-	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	var body codedError
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
 	const want = "Rasputin OS 2026.06.0-dev.99 states a control-plane memory floor that is not a positive number, so it was not staged."
-	if rec.Code != http.StatusBadGateway || body["error"] != want {
-		t.Errorf("pull = %d %q, want 502 %q", rec.Code, body["error"], want)
+	if rec.Code != http.StatusBadGateway || body.Error != want {
+		t.Errorf("pull = %d %q, want 502 %q", rec.Code, body.Error, want)
+	}
+	if body.Code != codeMemoryFloorInvalid || body.CorrelationID == "" {
+		t.Errorf("code = %q, correlationId = %q; want %q and a non-empty id", body.Code, body.CorrelationID, codeMemoryFloorInvalid)
 	}
 	if n := opens.Load(); n != 0 {
 		t.Errorf("%d asset download(s), want none", n)
 	}
-	if recs := f.logs.withAttr("event", "updates.memory_floor_invalid"); len(recs) != 1 {
-		t.Errorf("memory_floor_invalid records = %d, want 1", len(recs))
+	recs := f.logs.withAttr("event", "updates.memory_floor_invalid")
+	if len(recs) != 1 {
+		t.Fatalf("memory_floor_invalid records = %d, want 1", len(recs))
+	}
+	for k, v := range map[string]string{"component": "os", "version": "2026.06.0-dev.99", "code": codeMemoryFloorInvalid, "correlation_id": body.CorrelationID} {
+		if got, _ := recAttr(recs[0], k); got != v {
+			t.Errorf("record %s = %q, want %q", k, got, v)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -866,15 +867,15 @@ func (s *Server) handlePullUpdate(w http.ResponseWriter, r *http.Request) {
 	if comp.Kind == releases.KindRAUC {
 		floor, err := info.Manifest.MemoryFloor()
 		if err != nil {
-			event, msg := "updates.memory_floor_invalid", comp.Label+" "+info.Version+
+			code, event, msg := codeMemoryFloorInvalid, "updates.memory_floor_invalid", comp.Label+" "+info.Version+
 				" states a control-plane memory floor that is not a positive number, so it was not staged."
 			if errors.Is(err, releases.ErrNoMemoryFloor) {
-				event, msg = "updates.memory_floor_missing", comp.Label+" "+info.Version+
+				code, event, msg = codeMemoryFloorMissing, "updates.memory_floor_missing", comp.Label+" "+info.Version+
 					" carries the sign-in service but its signed manifest states no control-plane memory floor, so it was not staged."
 			}
-			s.log.WarnContext(r.Context(), "update pull refused: the release's memory floor is missing or invalid",
-				"event", event, "component", comp.ID, "version", info.Version, "err", err.Error())
-			writeError(w, http.StatusBadGateway, msg)
+			s.writeCodedError(w, r, http.StatusBadGateway, code, msg,
+				slog.String("event", event), slog.String("component", comp.ID),
+				slog.String("version", info.Version), slog.String("err", err.Error()))
 			return
 		}
 		memoryFloor = floor

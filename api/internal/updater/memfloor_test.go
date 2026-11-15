@@ -156,14 +156,14 @@ func versionSpec() proto.SystemUpdateSpec {
 	return proto.SystemUpdateSpec{Version: floorVer, Component: "os"}
 }
 
-// runPlanStep runs the real plan step and returns its error and log records.
-func runPlanStep(t *testing.T, f floorFixture, spec proto.SystemUpdateSpec, mem NodeMemory) (json.RawMessage, error, *logCapture) {
+// runPlanStep runs the real plan step and returns its output, log records and error.
+func runPlanStep(t *testing.T, f floorFixture, spec proto.SystemUpdateSpec, mem NodeMemory) (json.RawMessage, *logCapture, error) {
 	t.Helper()
 	logs := &logCapture{}
 	raw, _ := json.Marshal(spec)
 	sc := newUpdaterCtx("parent-1", string(raw), nil)
 	out, err := systemPlan(f.store, f.inv, SystemUpdateConfig{Memory: mem, Log: slog.New(logs)})(sc)
-	return out, err, logs
+	return out, logs, err
 }
 
 // ----- TC-1011-08: the store ------------------------------------------------
@@ -255,7 +255,7 @@ func TestSystemPlan_RefusesBelowTheMemoryFloor(t *testing.T) {
 	f := newFloorFixture(t, testFloor)
 	reportMemory(t, f.mem, floorCPID, 900*mib)
 
-	out, err, logs := runPlanStep(t, f, versionSpec(), f.mem)
+	out, logs, err := runPlanStep(t, f, versionSpec(), f.mem)
 	if err == nil || out != nil {
 		t.Fatalf("systemPlan = (%s, %v), want no plan and a refusal", out, err)
 	}
@@ -287,7 +287,7 @@ func TestSystemPlan_RefusesBelowTheMemoryFloor(t *testing.T) {
 		t.Fatalf("clear hostname: %v", err)
 	}
 	reportMemory(t, g.mem, floorCPID, 900*mib)
-	_, err, _ = runPlanStep(t, g, versionSpec(), g.mem)
+	_, _, err = runPlanStep(t, g, versionSpec(), g.mem)
 	if want := strings.Replace(belowPlan, floorCPHost, floorCPID, 1); err == nil || err.Error() != want {
 		t.Errorf("error = %v, want %q", err, want)
 	}
@@ -306,7 +306,7 @@ func TestSystemPlan_AtOrAboveTheMemoryFloorPlansAsWithoutOne(t *testing.T) {
 	for _, v := range []float64{float64(testFloor), 3994.8 * mib} {
 		f := newFloorFixture(t, testFloor)
 		reportMemory(t, f.mem, floorCPID, v)
-		out, err, logs := runPlanStep(t, f, versionSpec(), f.mem)
+		out, logs, err := runPlanStep(t, f, versionSpec(), f.mem)
 		if err != nil {
 			t.Fatalf("memory %.0f: plan refused: %v", v, err)
 		}
@@ -432,7 +432,7 @@ func TestSystemPlan_FailsClosedWhenMemoryCannotBeJudged(t *testing.T) {
 					t.Fatalf("drop cp: %v", err)
 				}
 			}
-			out, err, logs := runPlanStep(t, f, versionSpec(), c.mem(f))
+			out, logs, err := runPlanStep(t, f, versionSpec(), c.mem(f))
 			if err == nil || out != nil {
 				t.Fatalf("systemPlan = (%s, %v), want no plan and a refusal", out, err)
 			}
