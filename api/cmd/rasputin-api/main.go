@@ -465,7 +465,7 @@ func main() {
 
 	// Trust material lives at <trustDir>/. Used by:
 	//   - updater.Verifier (root-ca.pem; bundle signatures)
-	//   - tlsca.Ensure (mesh-ca.{key,pem} and store-ca.{key,pem}; the two TLS CAs)
+	//   - tlsca.Ensure (mesh-ca, store-ca and identity-ca .{key,pem}; the three TLS CAs)
 	//   - the .mobileconfig endpoint (serves mesh-ca.pem to operator devices)
 	// Set up ahead of mesh because the docker supervisor needs the controlplane CA
 	// at construction time. See wiki design/control-plane/certificates.md.
@@ -533,10 +533,11 @@ func main() {
 	// of them can be anchored in a bogus pre-NTP window and read as expired
 	// once the clock corrects. It waits at most once; see trustedClock.
 	clockGate := newTrustedClock(ctx, clockGateTimeout)
-	// Both CAs, through one code path (tlsca). The store CA signs the secret
-	// store's server leaf and the api's client leaf at the store, wired just
-	// below; see ensureCAs for why a store CA that will not load is not fatal.
-	cpCA, storeCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
+	// The three CAs, through one code path (tlsca). The store CA signs the
+	// secret store's server leaf and the api's client leaf at the store, and
+	// the identity CA the identity service's leaves, both wired just below;
+	// see ensureCAs for why neither failing to load is fatal.
+	cpCA, storeCA, identityCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
 		tlsca.Deps{Now: time.Now, Rand: cryptorand.Reader, LeafClock: clockGate.ok, Log: logger},
 		storeDataDir, storeDataPresent(storeDataDir))
 	// The secret store (geekdojo/geekdojo-brain#758). RASPUTIN_SECRETSTORE_BACKEND
@@ -552,7 +553,16 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store", "err", err.Error())
 		os.Exit(1)
 	}
-	startStoreSweep(ctx, storeW.sweeper, logger)
+	// The identity CA's six leaves (geekdojo/geekdojo-brain#977), on a
+	// sweeper of their own; nil, and skipped, when the identity CA did not
+	// load. See identityca_wiring.go.
+	identitySweeper, err := wireIdentityLeaves(identityCA, dataDir, execrun.CombinedOutput)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity leaves", "err", err.Error())
+		os.Exit(1)
+	}
+	startLeafSweep(ctx, storeW.sweeper, logger, "secretstore")
+	startLeafSweep(ctx, identitySweeper, logger, "identity")
 	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
 	// The store's readiness (geekdojo/geekdojo-brain#760): with a backend
 	// requested, a monitor whose Gate (wired below, in front of the store
@@ -995,7 +1005,7 @@ func main() {
 		// The store CA's leaves have a sweeper of their own (a sweeper is
 		// bound to one CA); it is nil, and skipped, unless the store is
 		// openbao.
-		Sweepers: []*tlsca.LeafSweeper{leafSweeper, storeW.sweeper},
+		Sweepers: []*tlsca.LeafSweeper{leafSweeper, storeW.sweeper, identitySweeper},
 		FanOut: []tlsca.LeafFanOut{{
 			// The per-app leaves keep their prepare → ship → commit contract
 			// (the on-disk copy must not advance past what the node holds),
@@ -2017,8 +2027,8 @@ func main() {
 	// Every controlplane-CA leaf this configuration holds is now either registered with
 	// the one renewal driver or it is not, and there is no third state — so say
 	// which, here, while the answer is still cheap. See requiredLeafConsumers.
-	if err := verifyLeafConsumers(append(leafSweeper.RegisteredNames(), storeW.registeredNames()...),
-		requiredLeafConsumers(httpsAddr != "", selfHostedMesh, storeW.mode == storeModeOpenBao)); err != nil {
+	if err := verifyLeafConsumers(append(append(leafSweeper.RegisteredNames(), storeW.registeredNames()...), identitySweeper.RegisteredNames()...),
+		append(requiredLeafConsumers(httpsAddr != "", selfHostedMesh, storeW.mode == storeModeOpenBao), identityLeafNames(identityCA != nil)...)); err != nil {
 		log.Fatalf("rasputin-api: %v", err)
 	}
 

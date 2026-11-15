@@ -37,7 +37,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 		var codes []int
 		d := tlscatest.Deps()
 		d.Log = slog.New(h)
-		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", d, "", false)
+		cp, store, _ := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", d, "", false)
 		if len(codes) != 0 {
 			t.Fatalf("exit called %v", codes)
 		}
@@ -59,7 +59,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 		}
 		h := &recordsHandler{}
 		var codes []int
-		cp, store := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", tlscatest.Deps(), "", false)
+		cp, store, _ := ensureCAs(context.Background(), slog.New(h), func(c int) { codes = append(codes, c) }, dir, "home1", tlscatest.Deps(), "", false)
 		if len(codes) != 1 || codes[0] == 0 {
 			t.Fatalf("exit calls %v, want one non-zero exit", codes)
 		}
@@ -73,7 +73,7 @@ func TestEnsureCAs_Outcomes(t *testing.T) {
 	})
 	t.Run("both load", func(t *testing.T) {
 		var codes []int
-		cp, store := ensureCAs(context.Background(), slog.New(&recordsHandler{}), func(c int) { codes = append(codes, c) }, t.TempDir(), "home1", tlscatest.Deps(), "", false)
+		cp, store, _ := ensureCAs(context.Background(), slog.New(&recordsHandler{}), func(c int) { codes = append(codes, c) }, t.TempDir(), "home1", tlscatest.Deps(), "", false)
 		if cp == nil || store == nil || len(codes) != 0 {
 			t.Fatalf("cp=%v store=%v exits=%v", cp != nil, store != nil, codes)
 		}
@@ -139,10 +139,17 @@ func certsIn(t *testing.T, bundle []byte) []*x509.Certificate {
 // starts (F-741-12), and an unreadable CA file there is not an error. On the
 // external path the bundle and wireExternalMesh's TLS pool come from the same
 // file bytes, and an unreadable file is an error.
+//
+// TC-977-13: the identity CA, ensured in the same trust dir, is in no
+// backend's node bundle and not in the collector's CA, compared by DER.
 func TestBundle_PerBackend(t *testing.T) {
 	trustDir := filepath.Join(t.TempDir(), "trust")
 	cp := tlscatest.Controlplane(t, trustDir)
 	store, err := tlsca.Ensure(tlsca.StoreConfig(), trustDir, "home1", tlscatest.Deps())
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := tlsca.Ensure(tlsca.IdentityConfig(), trustDir, "home1", tlscatest.Deps())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,6 +202,9 @@ func TestBundle_PerBackend(t *testing.T) {
 				if bytes.Equal(c.Raw, storeDER) {
 					t.Error("the store CA is in the node bundle")
 				}
+				if bytes.Equal(c.Raw, identity.Cert.Raw) {
+					t.Error("the identity CA is in the node bundle")
+				}
 			}
 			if _, err := nodetrust.New(nodetrust.Options{Bundle: bundle, Nodes: fakeNodes{}, Log: slog.New(&recordsHandler{})}); err != nil {
 				t.Errorf("nodetrust.New refused the %s bundle: %v", name, err)
@@ -204,6 +214,11 @@ func TestBundle_PerBackend(t *testing.T) {
 	// What main hands the collector as its CA is the controlplane CA's PEM.
 	if bytes.Contains(cp.CertPEM, bytes.TrimSpace(store.CertPEM)) {
 		t.Error("the collector CA carries the store CA")
+	}
+	for _, c := range certsIn(t, cp.CertPEM) {
+		if bytes.Equal(c.Raw, identity.Cert.Raw) {
+			t.Error("the collector CA carries the identity CA")
+		}
 	}
 
 	t.Run("unreadable CA file", func(t *testing.T) {

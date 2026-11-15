@@ -105,7 +105,7 @@ type runFunc func(ctx context.Context, name string, args ...string) ([]byte, err
 
 // wireSecretStore selects the store from backend and builds it. It never reads
 // the leaf files: a leaf absent at wiring is every first boot, minted
-// moments later by startStoreSweep (F-758-01). It returns an error only when a
+// moments later by startLeafSweep (F-758-01). It returns an error only when a
 // leaf consumer will not register, which main treats as fatal; every refused
 // setting is a configfault and a Disabled store. afterStoreRestart runs once
 // each time the server leaf's reload restarts the store (#833); it is
@@ -225,22 +225,30 @@ func storeProvisionerLeafSpec() tlsca.LeafSpec {
 func restartStoreUnit(run runFunc, after func(context.Context)) func(context.Context, tlsca.LeafPaths) error {
 	return func(ctx context.Context, _ tlsca.LeafPaths) error {
 		defer after(ctx)
-		for _, verb := range []string{"reset-failed", "restart"} {
-			if _, err := run(ctx, "systemctl", verb, storeUnit); err != nil {
-				return err
-			}
-		}
-		return nil
+		return restartUnits(ctx, run, []string{storeUnit}, storeUnit)
 	}
 }
 
-// startStoreSweep mints and renews the store leaves once, now, in a goroutine
-// of its own, so the leaves exist soon after start whether or not HTTPS is
-// configured (F-758-02). Start never waits on it: a mint waits on the store
-// CA's LeafClock (the clock gate), and a restart on systemd. The scheduled
-// leaf sweep renews them after that. It does nothing, and returns nil, when
-// no store sweeper was built. The channel yields the one report, for tests.
-func startStoreSweep(ctx context.Context, sweeper *tlsca.LeafSweeper, logger *slog.Logger) <-chan tlsca.LeafSweepReport {
+// restartUnits is a unit-loaded leaf's reload: systemctl reset-failed on
+// reset, so a unit skipped on first boot or sitting in failed after a crash
+// loop can start, then systemctl restart unit. The first error is returned
+// and the restart is then not attempted.
+func restartUnits(ctx context.Context, run runFunc, reset []string, unit string) error {
+	if _, err := run(ctx, "systemctl", append([]string{"reset-failed"}, reset...)...); err != nil {
+		return err
+	}
+	_, err := run(ctx, "systemctl", "restart", unit)
+	return err
+}
+
+// startLeafSweep mints and renews one sweeper's leaves once, now, in a
+// goroutine of its own, so the leaves exist soon after start whether or not
+// HTTPS is configured (F-758-02). Start never waits on it: a mint waits on
+// the CA's LeafClock (the clock gate), and a restart on systemd. The
+// scheduled leaf sweep renews them after that; the sweeper serialises the
+// two. Its records carry component. It does nothing, and returns nil, when no
+// sweeper was built. The channel yields the one report, for tests.
+func startLeafSweep(ctx context.Context, sweeper *tlsca.LeafSweeper, logger *slog.Logger, component string) <-chan tlsca.LeafSweepReport {
 	if sweeper == nil {
 		return nil
 	}
@@ -252,7 +260,7 @@ func startStoreSweep(ctx context.Context, sweeper *tlsca.LeafSweeper, logger *sl
 			if level == "warn" {
 				lvl = slog.LevelWarn
 			}
-			logger.Log(ctx, lvl, msg, "component", "secretstore")
+			logger.Log(ctx, lvl, msg, "component", component)
 		})
 	}()
 	return done
