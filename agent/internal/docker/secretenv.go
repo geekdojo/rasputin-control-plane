@@ -55,7 +55,7 @@ func (c *ComposeBackend) dockerEnvFor() dockerEnvExec {
 
 // runEnv is run with env as the call's added process environment.
 func (c *ComposeBackend) runEnv(ctx context.Context, appID string, env proto.AppSecretEnv, args ...string) ([]byte, error) {
-	return c.dockerEnvFor()(ctx, envEntries(env), composeArgs(c.composePath(appID), projectName(appID), args...)...)
+	return c.dockerEnvFor()(ctx, envEntries(env), liveComposeArgs(c.liveFiles(appID), projectName(appID), args...)...)
 }
 
 // envEntries renders env as KEY=value entries, sorted by key.
@@ -140,13 +140,30 @@ func composeGuardArgs() []string {
 // forms, $NAME and ${NAME...}.
 var secretRefRe = regexp.MustCompile(`\$\{?(` + regexp.QuoteMeta(proto.SecretEnvPrefix) + `[A-Za-z0-9_]*)`)
 
-// guardSecretRefs refuses composeYAML unless every string in it naming a
-// secret variable (proto.SecretEnvPrefix) sits in an entry of some service's
-// `environment:`, and env holds every variable those entries reference. It asks Compose itself, on a staged copy and without
-// the values: `config --no-interpolate --format json` is Compose's own
-// normalized model — anchors, merge keys, extends, include and list-form
-// environment all resolved — of the exact bytes `up` will be given. The live
-// file is not touched, so a refused deploy leaves the app as it was.
+// composeModel asks Compose for composeYAML's normalized model, on a staged
+// copy and without any secret value: `config --no-interpolate --format json`
+// is Compose's own model — anchors, merge keys, extends, include and
+// list-form environment all resolved — of the exact bytes `up` will be
+// given, with every variable reference left as written. The live file is not
+// touched. The secret guard and the relay override both read it.
+func (c *ComposeBackend) composeModel(ctx context.Context, appID, composeYAML string) (any, error) {
+	staged, cleanup, err := c.stageCompose(appID, stagedGuardPattern, composeYAML)
+	if err != nil {
+		return nil, err
+	}
+	defer cleanup()
+	out, err := c.dockerFor()(ctx, composeArgs(staged, projectName(appID), composeGuardArgs()...)...)
+	if err != nil {
+		return nil, errors.New(formatCmdErr("docker compose config --no-interpolate", out, err))
+	}
+	return decodeGuardModel(out)
+}
+
+// guardSecretRefs refuses a compose, given as its normalized model
+// (composeModel), unless every string in it naming a secret variable
+// (proto.SecretEnvPrefix) sits in an entry of some service's
+// `environment:`, and env holds every variable those entries reference. A
+// refused deploy leaves the app as it was: nothing live is touched first.
 //
 // A value outside `environment:` could land where dockerd quotes it back in an
 // error and the journal keeps it (a rejected `user:`), or in a label, a
@@ -155,20 +172,7 @@ var secretRefRe = regexp.MustCompile(`\$\{?(` + regexp.QuoteMeta(proto.SecretEnv
 //
 // The refusal names the JSON path or the variable, never a value: the model
 // is uninterpolated, so it holds none.
-func (c *ComposeBackend) guardSecretRefs(ctx context.Context, appID, composeYAML string, env proto.AppSecretEnv) error {
-	staged, cleanup, err := c.stageCompose(appID, stagedGuardPattern, composeYAML)
-	if err != nil {
-		return err
-	}
-	defer cleanup()
-	out, err := c.dockerFor()(ctx, composeArgs(staged, projectName(appID), composeGuardArgs()...)...)
-	if err != nil {
-		return errors.New(formatCmdErr("docker compose config --no-interpolate", out, err))
-	}
-	model, err := decodeGuardModel(out)
-	if err != nil {
-		return err
-	}
+func guardSecretRefs(model any, env proto.AppSecretEnv) error {
 	var outside []string
 	var missing []string
 	seenMissing := map[string]bool{}

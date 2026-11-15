@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/agent/internal/apprelay"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/bus"
@@ -461,6 +462,26 @@ func main() {
 		}
 		backendChoice := dockerBackendFromEnv(autodetectDockerBackend)
 
+		// The app relay (geekdojo/geekdojo-brain#1081): one TLS Unix socket per
+		// app granted a runtime identity. Built once; the sockets an earlier
+		// process opened are reopened before any handler is subscribed, so a
+		// relayed app's redeploy finds its socket open. On every bus
+		// connection the relay is attached (its calls go out on it) and the
+		// app.relay verb is subscribed.
+		appRelay, appRelayMgr, err := newAppRelay(stateDir, nodeID, logger)
+		if err != nil {
+			log.Fatalf("rasputin-agent: app relay: %v", err)
+		}
+		appRelayMgr.Restore()
+		subscribe(func(c *nats.Conn) error {
+			appRelay.Attach(c)
+			if _, err := apprelay.RegisterHandlers(c, nodeID, appRelayMgr); err != nil {
+				return fmt.Errorf("register app relay handler: %w", err)
+			}
+			log.Printf("rasputin-agent: subscribed to %s", proto.AppRelaySubject(nodeID))
+			return nil
+		})
+
 		var dockerBackend docker.Backend
 		switch backendChoice {
 		case "docker":
@@ -485,7 +506,7 @@ func main() {
 
 		if dockerBackend != nil {
 			subscribe(func(c *nats.Conn) error {
-				if _, err := docker.RegisterHandlers(c, nodeID, dockerBackend); err != nil {
+				if _, err := docker.RegisterHandlers(c, nodeID, dockerBackend, appRelayMgr); err != nil {
 					return fmt.Errorf("register docker handlers: %w", err)
 				}
 				return nil

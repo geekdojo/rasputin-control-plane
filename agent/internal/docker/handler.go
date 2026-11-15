@@ -17,12 +17,15 @@ import (
 //
 // Only register on compute (or controlplane) role agents. Firewall and
 // storage nodes don't host user apps.
-func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscription, error) {
+//
+// relays answers which apps have a relay socket open on this node
+// (geekdojo/geekdojo-brain#1081); a deploy that carries Relay mounts it.
+func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend, relays RelayMounts) ([]*nats.Subscription, error) {
 	subs := make([]*nats.Subscription, 0, 8)
 
 	deploySubj := proto.AppDeploySubject(nodeID)
 	sub, err := nc.Subscribe(deploySubj, func(m *nats.Msg) {
-		handleDeploy(b, m)
+		handleDeploy(b, relays, m)
 	})
 	if err != nil {
 		return nil, err
@@ -36,7 +39,7 @@ func RegisterHandlers(nc *nats.Conn, nodeID string, b Backend) ([]*nats.Subscrip
 	// handler: the command carries its values in SecretEnv.
 	deploySecretsSubj := proto.AppDeploySecretsSubject(nodeID)
 	sub, err = nc.Subscribe(deploySecretsSubj, func(m *nats.Msg) {
-		handleDeploy(b, m)
+		handleDeploy(b, relays, m)
 	})
 	if err != nil {
 		return subs, err
@@ -209,7 +212,17 @@ func handleVolumesDrop(r VolumeReaper, m *nats.Msg) {
 	bus.Respond(m, ack)
 }
 
-func handleDeploy(b Backend, m *nats.Msg) {
+// RelayMounts answers whether an app's relay socket is open on this node and
+// where its mount directory is. *apprelay.Manager satisfies it.
+type RelayMounts interface {
+	MountDir(appID string) (string, bool)
+}
+
+// errNoRelaySocket is the deploy's refusal when the command says the app was
+// issued a relay socket and this node has none open for it.
+const errNoRelaySocket = "This app's relay socket is not open on this node."
+
+func handleDeploy(b Backend, relays RelayMounts, m *nats.Msg) {
 	var cmd proto.AppDeployCmd
 	if err := json.Unmarshal(m.Data, &cmd); err != nil {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: "bad cmd"})
@@ -229,10 +242,27 @@ func handleDeploy(b Backend, m *nats.Msg) {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: err.Error()})
 		return
 	}
+	//
+	// A deploy that carries Relay mounts the app's relay directory, and is
+	// refused before anything is written when the socket is not open here:
+	// the app would come up without the identity it was issued.
+	relayDir := ""
+	if cmd.Relay {
+		dir, ok := "", false
+		if relays != nil {
+			dir, ok = relays.MountDir(cmd.AppID)
+		}
+		if !ok {
+			bus.Respond(m, proto.AppDeployAck{OK: false, Status: proto.AppStatusFailed, Detail: errNoRelaySocket})
+			log.Printf("rasputin-agent: docker.deploy %s: refused: the relay socket is not open", cmd.AppID)
+			return
+		}
+		relayDir = dir
+	}
 	budget := proto.AppDeployWorkFor(cmd.WorkBudgetSeconds)
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML, cmd.SecretEnv)
+	status, detail, err := b.Deploy(ctx, cmd.AppID, cmd.Name, cmd.ComposeYAML, cmd.SecretEnv, relayDir)
 	if err != nil {
 		bus.Respond(m, proto.AppDeployAck{OK: false, Status: status, Detail: detail})
 		log.Printf("rasputin-agent: docker.deploy %s: %v", cmd.AppID, err)

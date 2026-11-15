@@ -62,7 +62,7 @@ func newRegistered(t *testing.T) (*nats.Conn, *MockBackend) {
 	if err != nil {
 		t.Fatalf("NewMockBackend: %v", err)
 	}
-	subs, err := RegisterHandlers(nc, "node-1", b)
+	subs, err := RegisterHandlers(nc, "node-1", b, nil)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestRegisterHandlers_StatusBadCmd(t *testing.T) {
 type errBackend struct{}
 
 func (errBackend) Name() string { return "err" }
-func (errBackend) Deploy(_ context.Context, _, _, _ string, _ proto.AppSecretEnv) (proto.AppStatus, string, error) {
+func (errBackend) Deploy(_ context.Context, _, _, _ string, _ proto.AppSecretEnv, _ string) (proto.AppStatus, string, error) {
 	return proto.AppStatusFailed, "boom", errOh
 }
 func (errBackend) Pull(_ context.Context, _, _ string) (string, error) {
@@ -305,7 +305,7 @@ func TestComposeBackend_StatusWhenNoComposeFile(t *testing.T) {
 
 func TestRegisterHandlers_BackendErrorsAckFalse(t *testing.T) {
 	nc := startNATS(t)
-	subs, err := RegisterHandlers(nc, "node-1", errBackend{})
+	subs, err := RegisterHandlers(nc, "node-1", errBackend{}, nil)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestRegisterHandlers_VolumeVerbsOnlyWithAReaper(t *testing.T) {
 	nc2 := startNATS(t)
 	f := scriptedDocker()
 	cb := newFakeBackend(t, f)
-	subs, err := RegisterHandlers(nc2, "node-2", cb)
+	subs, err := RegisterHandlers(nc2, "node-2", cb, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

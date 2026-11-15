@@ -27,7 +27,11 @@ type Backend interface {
 	// references name (geekdojo/geekdojo-brain#776). A backend never writes
 	// them to disk and never logs them; the real one hands them to Compose
 	// only as the process environment of the calls that need them.
-	Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv) (proto.AppStatus, string, error)
+	//
+	// relayDir is the app's relay directory (geekdojo/geekdojo-brain#1081),
+	// bind-mounted read-only at proto.AppRelayMountPath into every service;
+	// "" mounts none.
+	Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv, relayDir string) (proto.AppStatus, string, error)
 
 	// Pull fetches the images composeYAML names for appID's compose project
 	// WITHOUT writing the app's compose file and without creating, stopping or

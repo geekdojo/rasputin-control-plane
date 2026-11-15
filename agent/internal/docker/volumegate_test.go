@@ -256,7 +256,7 @@ func TestRegisterHandlers_VolumeGateVerbs(t *testing.T) {
 	g, b := gateApp(t)
 	g.keys[gateV2] = "data2\n"
 	nc2 := startNATS(t)
-	subs, err := RegisterHandlers(nc2, "node-2", b)
+	subs, err := RegisterHandlers(nc2, "node-2", b, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

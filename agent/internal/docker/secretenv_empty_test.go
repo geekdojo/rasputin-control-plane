@@ -27,7 +27,11 @@ func TestOptionalEmptyValueIsDelivered(t *testing.T) {
 	f := newFakeCompose(t)
 	f.guard = `{"services":{"web":{"environment":{"OPT":"${RASPUTIN_SECRET_OPT_KEY}"}}}}`
 	const compose = "services:\n  web:\n    environment:\n      OPT: ${RASPUTIN_SECRET_OPT_KEY}\n"
-	if err := f.c.guardSecretRefs(context.Background(), envAppID, compose, cmd.SecretEnv); err != nil {
+	model, err := f.c.composeModel(context.Background(), envAppID, compose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := guardSecretRefs(model, cmd.SecretEnv); err != nil {
 		t.Fatalf("the guard refused an empty value: %v", err)
 	}
 	if got := envEntries(cmd.SecretEnv); !slices.Equal(got, []string{"RASPUTIN_SECRET_OPT_KEY="}) {

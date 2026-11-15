@@ -45,6 +45,9 @@ type mockState struct {
 	// VolumesDeleted records that the last Stop asked for `down -v`. The mock
 	// has no volumes; this is so a test can see the flag arrived.
 	VolumesDeleted bool `json:"volumesDeleted,omitempty"`
+	// RelayDir records the relay directory the last Deploy was asked to
+	// mount. The mock mounts nothing; this is so a test can see it arrived.
+	RelayDir string `json:"relayDir,omitempty"`
 }
 
 func (m *MockBackend) appDir(appID string) string {
@@ -92,7 +95,7 @@ func (m *MockBackend) saveState(s *mockState) error {
 
 // Deploy pretends to bring the app up. env is accepted and never persisted:
 // the mock runs nothing that could read it.
-func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML string, _ proto.AppSecretEnv) (proto.AppStatus, string, error) {
+func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML string, _ proto.AppSecretEnv, relayDir string) (proto.AppStatus, string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := atrest.EnsureSecretDir(m.appDir(appID)); err != nil {
@@ -106,6 +109,7 @@ func (m *MockBackend) Deploy(ctx context.Context, appID, name, composeYAML strin
 		Name:       name,
 		Status:     string(proto.AppStatusRunning),
 		DeployedAt: time.Now().UTC(),
+		RelayDir:   relayDir,
 	}
 	if err := m.saveState(s); err != nil {
 		return proto.AppStatusFailed, "save state: " + err.Error(), err
