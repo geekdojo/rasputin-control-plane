@@ -217,7 +217,7 @@
       "fullScopeAllowed": false,
       "consentRequired": false,
       "frontchannelLogout": false,
-      "defaultClientScopes": [],
+      "defaultClientScopes": ["kc-admin-api"],
       "optionalClientScopes": [],
       "attributes": {
         "x509.subjectdn": "CN=rasputin-api,O=Rasputin",

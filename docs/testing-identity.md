@@ -245,3 +245,4 @@ Then run the self-test as above.
 | TC-977-18 | `TestIdentityCA_ControlplaneLeafRefusedAtTLS` (CI) |
 | TC-977-19 | `TestIdentityCA_StoreLeafRefusedAtTLS` (CI) |
 | TC-980-21 | `TestIdentity_DisabledFeaturesServeNothing` (CI) |
+| TC-980-25 | `TestIdentity_BaselineImportedWorks` (CI) |

@@ -268,6 +268,13 @@ admin_scope='([.clientScopeMappings["realm-management"][]? | select(.client == "
 holds "TC-980-14 clientScopeMappings maps exactly the eight realm-management roles to rasputin-admin" "$BASE" "$admin_scope"
 jq 'del(.clientScopeMappings)' "$BASE" >"$tmp/no-scope-mapping.json"
 rejects "TC-980-14 a fixture without the clientScopeMappings entry fails" "$tmp/no-scope-mapping.json" "$admin_scope"
+# Keycloak 26.8's Admin API refuses a token without the kc-admin-api scope and its audience
+# with 401 (admin.audienceCheckEnabled; measured by geekdojo-brain#959), and the import
+# attaches that scope only to its own admin clients (F-980-20).
+admin_api_scope='.clients[] | select(.clientId == "rasputin-admin") | (.defaultClientScopes // []) | index("kc-admin-api") != null'
+holds "TC-980-14 rasputin-admin's default scopes carry kc-admin-api" "$BASE" "$admin_api_scope"
+jq '(.clients[] | select(.clientId == "rasputin-admin") | .defaultClientScopes) -= ["kc-admin-api"]' "$BASE" >"$tmp/no-kc-admin-api.json"
+rejects "TC-980-14 a fixture without kc-admin-api fails" "$tmp/no-kc-admin-api.json" "$admin_api_scope"
 
 # --- TC-980-15: the default clients are disabled -------------------------------------------------------
 for c in account account-console admin-cli broker security-admin-console; do
