@@ -438,7 +438,7 @@ func withAdminClient(realm []byte) ([]byte, error) {
 		return nil, fmt.Errorf("identitytest: realm: %d clients arrays, want 1", n)
 	}
 	at := bytes.Index(realm, anchor) + len(anchor)
-	out := make([]byte, 0, len(realm)+len(client)+1)
+	var out []byte
 	out = append(out, realm[:at]...)
 	out = append(out, client...)
 	out = append(out, ',')
