@@ -19,7 +19,7 @@ func TestDeployCommand_DeliversAnEmptyValue(t *testing.T) {
 		"RASPUTIN_SECRET_FEED_KEY": secret.New([]byte("v")),
 	}
 	b, err := deployCommand(&App{ID: "01J9ZK3Q0M8X7Y6W5V4T3S2R3A", Name: "feeds"},
-		secret.New([]byte("services: {}\n")), env)
+		secret.New([]byte("services: {}\n")), env, false)
 	if err != nil {
 		t.Fatal(err)
 	}

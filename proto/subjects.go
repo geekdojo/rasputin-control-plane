@@ -5,10 +5,18 @@
 //
 //	rasputin.node.<node-id>.cmd.<subsystem>.<verb>   control plane → agent
 //	rasputin.node.<node-id>.evt.<subsystem>.<event>  agent → control plane (broadcast)
+//	rasputin.node.<node-id>.relay.<subsystem>.<verb> agent → control plane (request)
+//	rasputin.node.<node-id>.cmd.app.relay.reply.<id> control plane's reply to a relay request
 //	rasputin.node.<node-id>.heartbeat                10s liveness
 //	rasputin.node.<node-id>.log.<source>             streaming log lines
 //	rasputin.job.<job-id>.events                     job lifecycle events
 //	rasputin.job.<job-id>.log                        per-job aggregated log
+//
+// The relay lane is the one request an agent makes of the control plane: an
+// app's call on its relay socket (apprelay.go, geekdojo/geekdojo-brain#1081).
+// Its reply comes back on the node's own command lane, which only that node
+// may subscribe to and no node may publish on, so no node needs an inbox
+// grant and none can read another's replies.
 package proto
 
 import "fmt"

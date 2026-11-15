@@ -31,6 +31,23 @@ type fakeIssuer struct {
 	ids     []string
 	err     error
 	onIssue func(app *App)
+	// revoked records the apps Revoke was asked about, each as id@node;
+	// revokeErr fails it.
+	revoked   []string
+	revokeErr error
+}
+
+func (f *fakeIssuer) Revoke(_ context.Context, app *App) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.revoked = append(f.revoked, app.ID+"@"+app.TargetNode)
+	return f.revokeErr
+}
+
+func (f *fakeIssuer) revokes() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.revoked...)
 }
 
 func (f *fakeIssuer) Issue(_ context.Context, app *App) error {
@@ -84,9 +101,10 @@ func countingDeployAgent(t *testing.T, nc *nats.Conn, issuer *fakeIssuer) <-chan
 	return seen
 }
 
-// TC-1080-03: nothing outside the package can grant a tile or set an issuer.
-// AppIdentity exposes no field and no method, so the zero value main wires is
-// the only value code outside apps can build.
+// TC-1080-03, as #1081 changes it: nothing outside the package can grant a
+// tile or set an issuer except through NewAppIdentity, which refuses a grant
+// with no issuer (TC-1081-06). AppIdentity exposes no field, and its only
+// exported methods read the switch: Granted and Any.
 func TestAppIdentity_ExposesNothingThatCouldGrant(t *testing.T) {
 	typ := reflect.TypeOf(AppIdentity{})
 	for i := range typ.NumField() {
@@ -94,11 +112,14 @@ func TestAppIdentity_ExposesNothingThatCouldGrant(t *testing.T) {
 			t.Errorf("AppIdentity exports field %s", f.Name)
 		}
 	}
-	if n := typ.NumMethod(); n != 0 {
-		t.Errorf("AppIdentity exports %d methods", n)
-	}
-	if n := reflect.PointerTo(typ).NumMethod(); n != 0 {
-		t.Errorf("*AppIdentity exports %d methods", n)
+	for _, ty := range []reflect.Type{typ, reflect.PointerTo(typ)} {
+		var names []string
+		for i := range ty.NumMethod() {
+			names = append(names, ty.Method(i).Name)
+		}
+		if !reflect.DeepEqual(names, []string{"Any", "Granted"}) {
+			t.Errorf("%s exports methods %v, want only the readers [Any Granted]", ty, names)
+		}
 	}
 }
 
@@ -139,8 +160,8 @@ func TestAppIdentity_ZeroValuePushesWithoutAnIssuer(t *testing.T) {
 	// deployGoldenWire fails the test if the push returns an error or the
 	// agent never acks; a nil issuer reached would panic.
 	deployGoldenWire(t, build, deployGoldenCases()[0])
-	if err := (AppIdentity{}).issue(context.Background(), &App{ID: testAppID, SourceTile: "minecraft"}); err != nil {
-		t.Errorf("the zero value refused: %v", err)
+	if granted, err := (AppIdentity{}).issue(context.Background(), &App{ID: testAppID, SourceTile: "minecraft"}); err != nil || granted {
+		t.Errorf("the zero value issued: granted=%v err=%v", granted, err)
 	}
 }
 
@@ -284,7 +305,7 @@ func TestAppIdentity_CustomAppIsNeverGranted(t *testing.T) {
 		t.Errorf("Issue called %d times for a custom app", n)
 	} // Not even by a grant of the empty tile id, which is what a custom app's
 	// row carries.
-	if grant(issuer, "").granted(&App{ID: testAppID, Name: "mine"}) {
+	if grant(issuer, "").Granted(&App{ID: testAppID, Name: "mine"}) {
 		t.Error("a grant of the empty tile id grants a custom app")
 	}
 }

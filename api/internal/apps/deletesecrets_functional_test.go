@@ -154,7 +154,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err := apps.DeleteWorkflow(appStore, inv, nc, nil, apps.DeleteSecretsDeps{Secrets: svc, Store: monitorState{m: monitor}, Log: log})
+	w, err := apps.DeleteWorkflow(appStore, inv, nc, nil, apps.DeleteSecretsDeps{Secrets: svc, Store: monitorState{m: monitor}, Log: log}, apps.AppIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}

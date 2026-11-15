@@ -972,7 +972,25 @@ func main() {
 	composeStash := apps.NewComposeStash()
 	// app.delete deletes the app's secret store entries with its volumes
 	// (#783), and refuses up front when the store cannot take the deletes.
-	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf, appSecretDeps)))
+	//
+	// The app-identity switch (geekdojo/geekdojo-brain#1080, #1081): one value
+	// for the push sagas, the delete saga and the relay service. It grants no
+	// tile (appIdentityGrants), so the delete keeps its four steps and the
+	// relay answers every call with a refusal.
+	appIdentity, err := newAppIdentity(cpCA, busSrv.Conn(), invStore)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: app identity", "err", err.Error())
+		os.Exit(1)
+	}
+	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf, appSecretDeps, appIdentity)))
+	// An app's calls on its relay socket, carried by its agent. Subscribed
+	// here, before admitAgents below, like every subscriber of agent
+	// subjects (geekdojo/geekdojo-brain#623). The correlation id a reply
+	// carries is crypto/rand's Text, as the HTTP server's.
+	if _, err := wireAppRelay(busSrv.Conn(), appsStore, appIdentity, secretsSvc, logger, cryptorand.Text); err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: app relay", "err", err.Error())
+		os.Exit(1)
+	}
 	runner.Register(apps.ReconcileWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	runner.Register(apps.RotateLeavesWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf))
 	// node.update is registered below, after the seal rotation: its copy of
@@ -1051,7 +1069,7 @@ func main() {
 	// because app.upgrade's new compose comes from this store and nowhere else.
 	registerAppPushWorkflows(runner.Register, must, appPushDeps{
 		Apps: appsStore, Inventory: invStore, Conn: busSrv.Conn(), Rotate: rotateAppLeaf, Stash: composeStash,
-		Tiles: catalogStore.GetVersioned, Secrets: deploySource, SecretDeps: appSecretDeps,
+		Tiles: catalogStore.GetVersioned, Secrets: deploySource, SecretDeps: appSecretDeps, Identity: appIdentity,
 	})
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk

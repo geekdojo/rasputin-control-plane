@@ -204,6 +204,11 @@ func (s *Service) markSwitched(ctx context.Context, a Actor, r Ref) error {
 //     that app's target node; it never replaces or deletes.
 //   - The reference check asks whether an app secret exists, and nothing
 //     else; nobody else asks that.
+//   - An app's runtime entries (refAppRuntime, geekdojo/geekdojo-brain#1081)
+//     are read, created, replaced and deleted only by that app at runtime
+//     (RuntimeActor), from the node it is deployed to, and deleted by an
+//     operator when the app or its node is removed. A runtime caller never
+//     reaches any other reference, the values pushed at deploy included.
 //
 // An app lookup that fails refuses with its error (ERR-CLOSED).
 func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) error {
@@ -215,6 +220,9 @@ func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) erro
 		return s.forbid(ctx, op, a, r, "no actor")
 	case r.kind == refDevice:
 		return s.forbid(ctx, op, a, r, "device secrets have no consumer yet")
+	}
+	if a.kind == actorRuntime || r.kind == refAppRuntime {
+		return s.authorizeRuntime(ctx, op, a, r)
 	}
 	switch {
 	case a.kind == actorCheck && op == opExists:
@@ -262,6 +270,35 @@ func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) erro
 	return s.forbid(ctx, op, a, r, "unknown actor")
 }
 
+// authorizeRuntime is authorize for a runtime actor or a runtime entry: the
+// app's own entries, from its own node, and an operator's delete.
+func (s *Service) authorizeRuntime(ctx context.Context, op string, a Actor, r Ref) error {
+	switch {
+	case a.kind == actorOperator && r.kind == refAppRuntime && op == opDelete:
+		// App delete and node removal: the app row may already be gone.
+		return nil
+	case a.kind != actorRuntime:
+		return s.forbid(ctx, op, a, r, "an app's runtime secrets belong to that app alone")
+	case r.kind != refAppRuntime:
+		return s.forbid(ctx, op, a, r, "an app at runtime reaches only its own runtime secrets")
+	case op == opExists:
+		return s.forbid(ctx, op, a, r, "only the reference check asks whether a secret exists")
+	case r.owner != a.app:
+		return s.forbid(ctx, op, a, r, "the secret belongs to another app")
+	}
+	node, found, err := s.apps.TargetNode(ctx, a.app)
+	if err != nil {
+		return fmt.Errorf("secrets: %s %s: looking up the app: %w", op, r, err)
+	}
+	if !found {
+		return s.forbid(ctx, op, a, r, "the app does not exist")
+	}
+	if node != a.node {
+		return s.forbid(ctx, op, a, r, "the node is not the app's target node")
+	}
+	return nil
+}
+
 // forbid logs the refusal and returns ErrForbidden.
 func (s *Service) forbid(ctx context.Context, op string, a Actor, r Ref, reason string) error {
 	s.denied(ctx, op, a, r, reason)
@@ -294,7 +331,7 @@ func (s *Service) attrs(ctx context.Context, event, op string, a Actor, r Ref) [
 	switch a.kind {
 	case actorOperator:
 		attrs = append(attrs, slog.String("user_id", a.user))
-	case actorDeploy:
+	case actorDeploy, actorRuntime:
 		attrs = append(attrs, slog.String("app_id", a.app), slog.String("node", a.node))
 	}
 	return append(attrs, slog.String("job_id", jobs.JobIDFromContext(ctx)))

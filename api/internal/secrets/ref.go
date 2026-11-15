@@ -33,10 +33,18 @@ const (
 	refNone refKind = iota
 	refApp
 	refDevice
+	// refAppRuntime is an entry an app wrote itself at runtime, through its
+	// relay socket (geekdojo/geekdojo-brain#1081): apps/<ID>/_runtime/<name>.
+	refAppRuntime
 )
 
+// appRuntimeSegment is the path segment the entries an app writes at runtime
+// sit under. It is not a DNS-1123 label, so no pushed secret's name can ever
+// equal it, and the two trees never meet.
+const appRuntimeSegment = "_runtime"
+
 // Ref is a parsed secret reference. Its fields are unexported, so only
-// AppSecret and DeviceSecret make one; the zero Ref names nothing and is
+// AppSecret, AppRuntimeSecret and DeviceSecret make one; the zero Ref names nothing and is
 // refused everywhere.
 type Ref struct {
 	kind refKind
@@ -59,6 +67,18 @@ func AppSecret(appID, name string) (Ref, error) {
 	return Ref{kind: refApp, owner: appID, name: name}, nil
 }
 
+// AppRuntimeSecret is the reference to the entry name that app appID wrote
+// itself at runtime, through its relay socket (geekdojo/geekdojo-brain#1081):
+// apps/<ID>/_runtime/<name>. appID and name follow AppSecret's rules.
+func AppRuntimeSecret(appID, name string) (Ref, error) {
+	r, err := AppSecret(appID, name)
+	if err != nil {
+		return Ref{}, err
+	}
+	r.kind = refAppRuntime
+	return r, nil
+}
+
 // DeviceSecret is the reference to device secret name of kind. Both must be
 // DNS-1123 labels. The service refuses every operation on it for now: no
 // consumer exists yet, and the first one adds its actor and its rule.
@@ -79,6 +99,8 @@ func (r Ref) String() string {
 	switch r.kind {
 	case refApp:
 		return "apps/" + r.owner + "/" + r.name
+	case refAppRuntime:
+		return "apps/" + r.owner + "/" + appRuntimeSegment + "/" + r.name
 	case refDevice:
 		return "devices/" + r.owner + "/" + r.name
 	}

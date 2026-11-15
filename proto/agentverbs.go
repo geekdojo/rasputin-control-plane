@@ -115,6 +115,18 @@ var verbMinAgentVersion = map[string]string{
 	// this floor, or one whose version is unreported or unparseable, before
 	// it marks the app DEPLOYING (api/internal/apps).
 	AppDeploySecretsVerb: "2026.10.4-dev.204",
+	// app.relay (geekdojo/geekdojo-brain#1081): entered when the verb was
+	// authored, before its release existed, as the NEXT release run after
+	// v2026.11.2-dev.220 (the newest published control-plane release at the
+	// time). If a release was cut between this entry and the one that ships
+	// the verb, an agent at that in-between version is reported as "should
+	// answer and did not" rather than "predates the verb"; confirm with
+	// `git tag --contains` once the release exists and correct the floor.
+	//
+	// Load-bearing: a granted app's push draws no responder from an agent
+	// below this floor, and the issuer turns that silence into "update the
+	// node" through inventory's ExplainNoResponder.
+	AppRelayVerb: "2026.11.2-dev.221",
 }
 
 // RestoreReplayMinAgentVersion is the first agent release whose

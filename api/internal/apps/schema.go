@@ -47,6 +47,19 @@ CREATE TABLE IF NOT EXISTS app_secret_refs (
     name   TEXT NOT NULL,
     PRIMARY KEY (app_id, name)
 );
+
+-- app_runtime_secrets: the name of every entry an app has written itself at
+-- runtime through its relay socket, apps/<id>/_runtime/<name>
+-- (geekdojo/geekdojo-brain#1081). A deletion index and nothing else: the
+-- store's policy grants no list, so this is how delete and node removal find
+-- the entries to destroy. A row is recorded before its entry is created and
+-- forgotten after its entry is deleted, so no entry exists that no row names.
+-- Deleting the app removes its rows.
+CREATE TABLE IF NOT EXISTS app_runtime_secrets (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    name   TEXT NOT NULL,
+    PRIMARY KEY (app_id, name)
+);
 `
 
 // migrations are forward-only DDL applied after schema on every open. They must

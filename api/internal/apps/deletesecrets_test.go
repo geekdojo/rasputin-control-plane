@@ -213,7 +213,7 @@ func TestDelete_TC783_08_ComposeRemovalFailureFailsClosed(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	del := &fakeSecretDeleter{}
-	w, err := DeleteWorkflow(store, inv, nc, nil, DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()})
+	w, err := DeleteWorkflow(store, inv, nc, nil, DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()}, AppIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestDelete_TC783_09_RowDeleteReturnsTheNames(t *testing.T) {
 		t.Errorf("after delete: %d app rows, %d refs; want 0, 0", apps, refs)
 	}
 
-	if _, err := store.DeleteWithSecretNames(ctx, delAppID); !errors.Is(err, sql.ErrNoRows) {
+	if _, _, err := store.DeleteWithSecretNames(ctx, delAppID); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("DeleteWithSecretNames on a missing row = %v; want sql.ErrNoRows", err)
 	}
 	out, err = deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
@@ -299,7 +299,7 @@ func TestDeleteWithSecretNames_RefusedComposeNamesNothing(t *testing.T) {
 	ctx := context.Background()
 	store, _ := seedOnlineApp(t, "n", delAppID, "immich")
 	withSecrets(t, store, delAppID, "x: ${secret:Bad_Name}\n", "", "db-password")
-	names, err := store.DeleteWithSecretNames(ctx, delAppID)
+	names, _, err := store.DeleteWithSecretNames(ctx, delAppID)
 	if err != nil || !slices.Equal(names, []string{"db-password"}) {
 		t.Fatalf("DeleteWithSecretNames = %v, %v; want [db-password]", names, err)
 	}
@@ -507,12 +507,12 @@ func TestDeleteWorkflow_TC783_15_RefusesMissingCollaborators(t *testing.T) {
 		"nil store":   {Secrets: full.Secrets, Log: full.Log},
 		"nil logger":  {Secrets: full.Secrets, Store: full.Store},
 	} {
-		w, err := DeleteWorkflow(nil, nil, nil, nil, d)
+		w, err := DeleteWorkflow(nil, nil, nil, nil, d, AppIdentity{})
 		if err == nil || w.Kind != "" {
 			t.Errorf("%s: DeleteWorkflow = %+v, %v; want an error and no workflow", name, w.Kind, err)
 		}
 	}
-	w, err := DeleteWorkflow(nil, nil, nil, nil, full)
+	w, err := DeleteWorkflow(nil, nil, nil, nil, full, AppIdentity{})
 	if err != nil || w.Kind != "app.delete" || w.Steps[len(w.Steps)-1].Name != "destroy_secrets" {
 		t.Errorf("DeleteWorkflow(full) = %+v, %v", w, err)
 	}
@@ -661,7 +661,7 @@ func TestDelete_TC783_33_RefusedComposeNamesNoSecret(t *testing.T) {
 		if st.stateReads() != 0 || len(agent.stops()) != 2 {
 			t.Errorf("state reads = %d, stops = %v; want no read and two stops", st.stateReads(), agent.stops())
 		}
-		names, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		names, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
 		if err != nil || len(names) != 0 {
 			t.Fatalf("remove = %v, %v; want no names", names, err)
 		}
@@ -678,7 +678,7 @@ func TestDelete_TC783_33_RefusedComposeNamesNoSecret(t *testing.T) {
 		if _, err := run(st); err != nil {
 			t.Fatalf("deleteStop: %v", err)
 		}
-		names, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		names, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
 		if err != nil || !slices.Equal(names, []string{"r"}) {
 			t.Fatalf("remove = %v, %v; want [r]", names, err)
 		}
