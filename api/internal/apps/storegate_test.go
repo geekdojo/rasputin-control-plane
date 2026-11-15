@@ -72,13 +72,13 @@ func TestPushStep_CodedRefusalIsTheJobError(t *testing.T) {
 	}{
 		{"app.deploy", 0, func(t *testing.T, nc *nats.Conn, src SecretSource) (jobs.Workflow, any) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
-			return wf(t)(DeployWorkflow(store, inv, nc, nil, src)), DeploySpec{AppID: id}
+			return wf(t)(DeployWorkflow(store, inv, nc, nil, src, AppIdentity{})), DeploySpec{AppID: id}
 		}},
 		{"app.upgrade", 1, func(t *testing.T, nc *nats.Conn, src SecretSource) (jobs.Workflow, any) {
 			store, inv := seedUpgradeApp(t, id)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps())), ComposeChangeSpec{AppID: id}
+			return wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps(), AppIdentity{})), ComposeChangeSpec{AppID: id}
 		}},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
@@ -127,7 +127,7 @@ func TestPushStep_OtherResolveErrorsKeepTheWrap(t *testing.T) {
 	nc := startNATS(t)
 	store, inv := seedComposeApp(t, id, secretComposeV1)
 	cause := errors.New("test source: refused")
-	runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, failingSource{err: cause})))
+	runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, failingSource{err: cause}, AppIdentity{})))
 	j, err := runner.Submit(ctx, "app.deploy", DeploySpec{AppID: id}, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestStoreGate_Redaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, gate)))
+	runner, jst := realRunner(t, nc, wf(t)(DeployWorkflow(store, inv, nc, nil, gate, AppIdentity{})))
 
 	var seen []string
 	run := func(want jobs.Status) string {

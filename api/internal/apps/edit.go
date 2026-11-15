@@ -122,7 +122,7 @@ var errEditComposeNotHeld = errors.New("compose edit not applied: the submitted 
 //
 // It refuses a nil secrets source or a DeleteSecretsDeps with a nil field,
 // returning the zero Workflow.
-func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash, secrets SecretSource, d DeleteSecretsDeps) (jobs.Workflow, error) {
+func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, stash *ComposeStash, secrets SecretSource, d DeleteSecretsDeps, identity AppIdentity) (jobs.Workflow, error) {
 	const kind = "app.edit"
 	if err := requireSecretSource(kind, secrets); err != nil {
 		return jobs.Workflow{}, err
@@ -138,7 +138,7 @@ func EditWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Leaf
 			// own budget, applied inside each step.
 			{Name: "pull", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pullStep(store, inv, nc, "compose edit", composeChangeSpecAppID, composeChangeSpecDeleteVolumes, editPullSource(stash))},
 			{Name: "persist", Timeout: 2 * time.Second, Do: editPersist(store, inv, nc, stash)},
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets, identity)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 			// Last, so it runs only once the new compose is up. One store call

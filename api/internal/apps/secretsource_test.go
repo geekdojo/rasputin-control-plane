@@ -15,13 +15,17 @@ func TestDeployFamilyConstructorsRequireASecretSource(t *testing.T) {
 		kind  string
 		build func(SecretSource) (jobs.Workflow, error)
 	}{
-		{"app.deploy", func(s SecretSource) (jobs.Workflow, error) { return DeployWorkflow(nil, nil, nil, nil, s) }},
-		{"app.revert", func(s SecretSource) (jobs.Workflow, error) { return RevertWorkflow(nil, nil, nil, nil, s) }},
+		{"app.deploy", func(s SecretSource) (jobs.Workflow, error) {
+			return DeployWorkflow(nil, nil, nil, nil, s, AppIdentity{})
+		}},
+		{"app.revert", func(s SecretSource) (jobs.Workflow, error) {
+			return RevertWorkflow(nil, nil, nil, nil, s, AppIdentity{})
+		}},
 		{"app.edit", func(s SecretSource) (jobs.Workflow, error) {
-			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), s, testSecretDeps())
+			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), s, testSecretDeps(), AppIdentity{})
 		}},
 		{"app.upgrade", func(s SecretSource) (jobs.Workflow, error) {
-			return UpgradeWorkflow(nil, nil, nil, nil, nil, s, testSecretDeps())
+			return UpgradeWorkflow(nil, nil, nil, nil, nil, s, testSecretDeps(), AppIdentity{})
 		}},
 	} {
 		t.Run(tc.kind+"/nil source", func(t *testing.T) {

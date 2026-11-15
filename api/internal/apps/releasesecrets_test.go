@@ -313,10 +313,10 @@ func TestRelease_TC783_43_PutBack(t *testing.T) {
 func TestRelease_TC783_44_WorkflowWiring(t *testing.T) {
 	ctors := map[string]func(DeleteSecretsDeps) (jobs.Workflow, error){
 		"UpgradeWorkflow": func(d DeleteSecretsDeps) (jobs.Workflow, error) {
-			return UpgradeWorkflow(nil, nil, nil, nil, nil, testSource(t), d)
+			return UpgradeWorkflow(nil, nil, nil, nil, nil, testSource(t), d, AppIdentity{})
 		},
 		"EditWorkflow": func(d DeleteSecretsDeps) (jobs.Workflow, error) {
-			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), testSource(t), d)
+			return EditWorkflow(nil, nil, nil, nil, NewComposeStash(), testSource(t), d, AppIdentity{})
 		},
 	}
 	for name, ctor := range ctors {
@@ -340,8 +340,8 @@ func TestRelease_TC783_44_WorkflowWiring(t *testing.T) {
 		})
 	}
 	for name, w := range map[string]jobs.Workflow{
-		"deploy": wf(t)(DeployWorkflow(nil, nil, nil, nil, testSource(t))),
-		"revert": wf(t)(RevertWorkflow(nil, nil, nil, nil, testSource(t))),
+		"deploy": wf(t)(DeployWorkflow(nil, nil, nil, nil, testSource(t), AppIdentity{})),
+		"revert": wf(t)(RevertWorkflow(nil, nil, nil, nil, testSource(t), AppIdentity{})),
 	} {
 		for _, s := range w.Steps {
 			if s.Name == "release_secrets" {
@@ -391,7 +391,7 @@ func TestRelease_TC783_45_FailedJobLeavesTheRefForTheRetry(t *testing.T) {
 	switchableDeployAgent(t, nc, &ok)
 	del := &fakeSecretDeleter{}
 	stash := NewComposeStash()
-	w := wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()}))
+	w := wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()}, AppIdentity{}))
 
 	if err := stash.Put("job-c", "services:\n  web:\n    image: me/web:3\n"); err != nil {
 		t.Fatal(err)

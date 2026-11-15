@@ -84,7 +84,7 @@ func TestPushStep_SecretComposeGoesOutOnTheSecretsVerb(t *testing.T) {
 	canary := derived(testAppID, "db-password")
 	seen := busCapture(t, nc, proto.AppDeploySubject("n"), proto.AppDeploySecretsSubject("n"))
 
-	if _, err := deployPush(store, inv, nc, src)(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, src, AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	msgs := seen()
@@ -114,7 +114,7 @@ func TestPushStep_TokenFreeComposeOnAnOldAgentUsesDockerDeploy(t *testing.T) {
 	setAgentVersion(t, inv, "2026.10.3")
 	seen := busCapture(t, nc, proto.AppDeploySubject("n"), proto.AppDeploySecretsSubject("n"))
 
-	if _, err := deployPush(store, inv, nc, testSource(t))(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
+	if _, err := deployPush(store, inv, nc, testSource(t), AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc)); err != nil {
 		t.Fatalf("deployPush: %v", err)
 	}
 	msgs := seen()
@@ -142,12 +142,12 @@ func TestSecretDeployRefusedForAnAgentBelowTheFloor(t *testing.T) {
 	}{
 		{"app.deploy", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, jobs.Workflow, any) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
-			return store, inv, wf(t)(DeployWorkflow(store, inv, nc, nil, testSource(t))), DeploySpec{AppID: id}
+			return store, inv, wf(t)(DeployWorkflow(store, inv, nc, nil, testSource(t), AppIdentity{})), DeploySpec{AppID: id}
 		}},
 		{"app.upgrade", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, jobs.Workflow, any) {
 			store, inv := seedUpgradeApp(t, id)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return store, inv, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), testSource(t), testSecretDeps())), ComposeChangeSpec{AppID: id}
+			return store, inv, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), testSource(t), testSecretDeps(), AppIdentity{})), ComposeChangeSpec{AppID: id}
 		}},
 	}
 	for _, saga := range sagas {

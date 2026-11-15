@@ -1,0 +1,4 @@
+app.deploy: load,push,leaf
+app.revert: load,pull,apply,push,leaf,drop_volumes
+app.edit: load,pull,persist,push,leaf,drop_volumes,release_secrets
+app.upgrade: load,pull,persist,push,leaf,drop_volumes,release_secrets

@@ -58,8 +58,9 @@ type DeleteSpec struct {
 // The agent owns whether the deploy actually succeeded (container running,
 // healthchecks passing). The api just records what the agent reported.
 //
-// It refuses a nil secrets source, returning the zero Workflow.
-func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets SecretSource) (jobs.Workflow, error) {
+// It refuses a nil secrets source, returning the zero Workflow. identity is
+// the app-identity switch the push step consults (AppIdentity).
+func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets SecretSource, identity AppIdentity) (jobs.Workflow, error) {
 	const kind = "app.deploy"
 	if err := requireSecretSource(kind, secrets); err != nil {
 		return jobs.Workflow{}, err
@@ -78,7 +79,7 @@ func DeployWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate Le
 			// Both are longer than the agent's work budget on purpose, so the
 			// agent answers with the real failure instead of a step timing out
 			// on top of it — see proto.AppDeployWorkFor.
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc, secrets)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: deployPush(store, inv, nc, secrets, identity)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: deployLeaf(store, inv, nc, rotate)},
 		},
 	}, nil
@@ -886,12 +887,12 @@ func deployCommand(app *App, compose secret.Value, env map[string]secret.Value) 
 	return cmd, nil
 }
 
-func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets SecretSource) jobs.DoFn {
-	return pushStep(store, inv, nc, deploySpecAppID, secrets)
+func deployPush(store *Store, inv *inventory.Store, nc *nats.Conn, secrets SecretSource, identity AppIdentity) jobs.DoFn {
+	return pushStep(store, inv, nc, deploySpecAppID, secrets, identity)
 }
 
 // pushStep is deployPush for a saga whose spec has its own shape.
-func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID, secrets SecretSource) jobs.DoFn {
+func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID, secrets SecretSource, identity AppIdentity) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		app, err := loadAppFor(sc, store, inv, appID)
 		if err != nil {
@@ -934,6 +935,19 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 				return nil, err
 			}
 			subject = proto.AppDeploySecretsSubject(app.TargetNode)
+		}
+
+		// The app-identity switch (geekdojo/geekdojo-brain#1080): an app granted
+		// an identity is issued it here, before its deploy command is built
+		// and sent, so a failed issue refuses the push and nothing reaches the
+		// node. With the switch off, the shipped wiring, this does nothing.
+		//
+		// On a plain deploy the refusal also comes before DEPLOYING is recorded
+		// or announced, so the app is left where it was. On a revert, edit or
+		// upgrade it is not: their pull step has already marked the app
+		// DEPLOYING, and that status is left as the pull set it.
+		if err := identity.issue(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app); err != nil {
+			return nil, fmt.Errorf("apps: issue the identity of %s: %w", app.ID, err)
 		}
 		cmd, err := deployCommand(app, compose, env)
 		if err != nil {

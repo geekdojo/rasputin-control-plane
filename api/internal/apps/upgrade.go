@@ -165,7 +165,7 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 //
 // It refuses a nil secrets source or a DeleteSecretsDeps with a nil field,
 // returning the zero Workflow.
-func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource, d DeleteSecretsDeps) (jobs.Workflow, error) {
+func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource, d DeleteSecretsDeps, identity AppIdentity) (jobs.Workflow, error) {
 	const kind = "app.upgrade"
 	if err := requireSecretSource(kind, secrets); err != nil {
 		return jobs.Workflow{}, err
@@ -184,7 +184,7 @@ func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate L
 			// Same backstop as DeployWorkflow's push, for the same reason: the
 			// real deadline is the app's own budget, applied inside the push,
 			// and here that is the budget persist just re-copied from the tile.
-			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets)},
+			{Name: "push", Timeout: proto.AppDeployRPCFor(int(proto.AppDeployWorkMax.Seconds())), Do: pushStep(store, inv, nc, composeChangeSpecAppID, secrets, identity)},
 			{Name: "leaf", Timeout: 15 * time.Second, Do: leafStep(store, inv, nc, rotate, composeChangeSpecAppID)},
 			{Name: "drop_volumes", Timeout: 90 * time.Second, Do: dropVolumesStep(store, inv, nc, composeChangeSpecAppID)},
 			// Last, so it runs only once the new compose is up. One store call

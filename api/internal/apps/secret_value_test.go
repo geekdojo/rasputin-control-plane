@@ -146,20 +146,20 @@ func deployFamilyCases(id string) []deployFamilyCase {
 	return []deployFamilyCase{
 		{"app.deploy", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
-			return store, wf(t)(DeployWorkflow(store, inv, nc, nil, src)), DeploySpec{AppID: id}, nil, secretComposeV1
+			return store, wf(t)(DeployWorkflow(store, inv, nc, nil, src, AppIdentity{})), DeploySpec{AppID: id}, nil, secretComposeV1
 		}},
 		{"app.upgrade", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedUpgradeApp(t, id)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			tile := strings.Replace(composeV2, "    volumes:", "    environment:\n      DB_PASSWORD: ${secret:db-password}\n    volumes:", 1)
-			return store, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps())), ComposeChangeSpec{AppID: id}, nil, tile
+			return store, wf(t)(UpgradeWorkflow(store, inv, nc, nil, lookupOf(upgradeTile(tile), 2), src, testSecretDeps(), AppIdentity{})), ComposeChangeSpec{AppID: id}, nil, tile
 		}},
 		{"app.edit", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, customV1)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			stash := NewComposeStash()
 			put := func(jobID string) error { return stash.Put(jobID, secretComposeV2) }
-			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src, testSecretDeps())), ComposeChangeSpec{AppID: id}, put, secretComposeV2
+			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src, testSecretDeps(), AppIdentity{})), ComposeChangeSpec{AppID: id}, put, secretComposeV2
 		}},
 		{"app.revert", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
@@ -167,7 +167,7 @@ func deployFamilyCases(id string) []deployFamilyCase {
 				t.Fatal(err)
 			}
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
-			return store, wf(t)(RevertWorkflow(store, inv, nc, nil, src)), RevertSpec{AppID: id, ComposeSHA256: ComposeHash(secretComposeV1)}, nil, secretComposeV1
+			return store, wf(t)(RevertWorkflow(store, inv, nc, nil, src, AppIdentity{})), RevertSpec{AppID: id, ComposeSHA256: ComposeHash(secretComposeV1)}, nil, secretComposeV1
 		}},
 	}
 }
@@ -276,7 +276,7 @@ func TestPushStep_RefusedResolvePublishesNothing(t *testing.T) {
 	}
 
 	sentinel := errors.New("test source: refused")
-	_, err = deployPush(store, inv, nc, failingSource{err: sentinel})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
+	_, err = deployPush(store, inv, nc, failingSource{err: sentinel}, AppIdentity{})(newStepCtxNATS(`{"appId":"`+testAppID+`"}`, nc))
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("push step error = %v, want one wrapping the source's %v", err, sentinel)
 	}

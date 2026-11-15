@@ -953,18 +953,11 @@ func main() {
 	// The deploy-family constructors refuse a missing secret source; must
 	// turns that refusal into a FATAL exit instead of a saga that cannot run.
 	must := workflowOrExit(ctx, logger, os.Exit)
-	runner.Register(must(apps.DeployWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, deploySource)))
 	runner.Register(apps.StopWorkflow(appsStore, invStore, busSrv.Conn()))
-	// app.revert (#411): re-apply an app's previous compose, named by hash. Its
-	// compose comes from the row, so unlike app.upgrade it needs nothing from
-	// the catalog.
-	runner.Register(must(apps.RevertWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, deploySource)))
-	// app.edit (#410): replace a custom app's compose with one its owner sent.
-	// The compose is held in composeStash, never in the job spec; the server
-	// is given the same stash below, and the workflow discards what it holds
-	// when the job ends.
+	// app.edit's compose (#410) is held in composeStash, never in the job
+	// spec; the server is given the same stash below, and the workflow
+	// discards what it holds when the job ends.
 	composeStash := apps.NewComposeStash()
-	runner.Register(must(apps.EditWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, composeStash, deploySource, appSecretDeps)))
 	// app.delete deletes the app's secret store entries with its volumes
 	// (#783), and refuses up front when the store cannot take the deletes.
 	runner.Register(must(apps.DeleteWorkflow(appsStore, invStore, busSrv.Conn(), removeAppLeaf, appSecretDeps)))
@@ -1041,9 +1034,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: catalog store: %v", err)
 	}
-	// app.upgrade (#409) registers here rather than with the other app sagas
-	// above because its new compose comes from this store and nowhere else.
-	runner.Register(must(apps.UpgradeWorkflow(appsStore, invStore, busSrv.Conn(), rotateAppLeaf, catalogStore.GetVersioned, deploySource, appSecretDeps)))
+	// The app sagas that push a compose to an agent (deploy, revert, edit and
+	// upgrade) register here rather than with the other app sagas above
+	// because app.upgrade's new compose comes from this store and nowhere else.
+	registerAppPushWorkflows(runner.Register, must, appPushDeps{
+		Apps: appsStore, Inventory: invStore, Conn: busSrv.Conn(), Rotate: rotateAppLeaf, Stash: composeStash,
+		Tiles: catalogStore.GetVersioned, Secrets: deploySource, SecretDeps: appSecretDeps,
+	})
 	// backup.target.claim — the only path in the system that formats a disk
 	// (design/storage.md §4.8). The cluster id is stamped into the on-disk
 	// marker so a disk can say which cluster wrote it.
