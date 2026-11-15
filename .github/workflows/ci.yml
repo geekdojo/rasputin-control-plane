@@ -393,7 +393,10 @@ jobs:
       # and only RUN under sudo, from its package directory so testdata/
       # resolves. RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required turns their
       # skips into failures, so this step cannot pass by not running; the
-      # step above runs the same tests unprivileged, where they skip.
+      # step above runs the same tests unprivileged, where they skip. A test
+      # binary run directly has no default timeout, so -test.timeout gives it
+      # go test's own 10m: the tests' waits end before it with an error that
+      # names the fact they waited for, and their cleanup still runs.
       - name: test (identity under real systemd, root)
         run: |
           go test -c -race -o "$RUNNER_TEMP/identitytest.test" ./api/internal/identitytest
@@ -403,7 +406,7 @@ jobs:
             RASPUTIN_IDENTITY_HOME="$RUNNER_TEMP/identity" \
             RASPUTIN_IDENTITY_FUNCTIONAL=required \
             RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required \
-            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.run '^TestIdentitySystemd_'
+            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestIdentitySystemd_'
 
       - name: test (remaining modules)
         env:

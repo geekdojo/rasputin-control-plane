@@ -2,12 +2,27 @@ package identitytest
 
 // The pair helper for the real-systemd identity tests (TC-979-02, TC-979-04,
 // geekdojo/geekdojo-brain#979): the pinned PostgreSQL and Keycloak as two
-// transient units under the runner's real systemd, related the way
-// keycloak-db.service and keycloak.service are (Requires= and After=), so
-// systemd's own states are what the tests read. It needs root, systemd as the
-// init system and docker. It skips without them, and fails instead under
+// runtime units under the runner's real systemd, related the way
+// keycloak-db.service and keycloak.service are (Requires= and After=), so the
+// states the tests read are systemd's own. It needs root, systemd as the init
+// system and docker. It skips without them, and fails instead under
 // RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required, as CI's root step sets it
 // (docs/testing-identity.md).
+//
+// The units are unit files under /run/systemd/system, not systemd-run
+// transient units: systemd garbage-collects a transient unit as soon as it is
+// inactive, so `systemctl restart` of a Keycloak unit its failed database had
+// stopped, which is what identity.recover runs, would answer "not found". A
+// unit file stays loadable, as keycloak.service does on an appliance.
+//
+// What the units do not carry: #973's hooks. Keycloak's unit has no
+// ExecStartPost= start wait and no start-hold ExecStartPre=, so it reads
+// active from the JVM's start, not from /health/started, and its start timeout
+// is systemd's default, never infinity. Its ExecStopPost= is
+// testdata/exit-record-standin.sh, a minimal stand-in for #973's exit-record
+// hook that writes the contract's record and `last` from systemd's real
+// environment, without the hook's cap. The real hooks, their cap and the start
+// wait that exits once $MAINPID is gone are #973's to prove (NOT RUN here).
 
 import (
 	"context"
@@ -32,6 +47,10 @@ import (
 // skips into failures. Only CI's root step sets it.
 const systemdSwitchEnv = "RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL"
 
+// unitDir is where the pair's unit files go: the runtime unit directory, a
+// tmpfs systemd reads on daemon-reload.
+const unitDir = "/run/systemd/system"
+
 // cleanupReserve is the part of the test binary's -test.timeout kept back
 // from a real-systemd test's waits. A wait that never sees its fact then ends
 // with an error naming that fact, and the cleanup still has time to stop the
@@ -41,7 +60,8 @@ const systemdSwitchEnv = "RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL"
 const cleanupReserve = 2 * time.Minute
 
 // systemdPreflight checks for root, systemd as the init system, the systemd
-// tools and docker, and reports the first one missing through SkipOrFail.
+// tools, docker and the installed identity service, and reports the first one
+// missing through SkipOrFail.
 func systemdPreflight(t *testing.T) (Config, bool) {
 	t.Helper()
 	p := NewPackage(ConfigFromEnv)
@@ -58,21 +78,22 @@ func systemdPreflight(t *testing.T) (Config, bool) {
 		functest.SkipOrFail(t, systemdSwitchEnv, "systemd is not the init system: %v", err)
 		return Config{}, false
 	}
-	for _, bin := range []string{"systemd-run", "systemctl", "mount", "umount"} {
+	for _, bin := range []string{"systemctl", "mount", "umount", cfg.DockerBin} {
 		if _, err := exec.LookPath(bin); err != nil {
 			functest.SkipOrFail(t, systemdSwitchEnv, "the real-systemd identity tests need %s: %v", bin, err)
 			return Config{}, false
 		}
 	}
-	if _, err := exec.LookPath(cfg.DockerBin); err != nil {
-		functest.SkipOrFail(t, systemdSwitchEnv, "the real-systemd identity tests need docker: %q: %v", cfg.DockerBin, err)
+	if kcsh := filepath.Join(cfg.KeycloakHome, "bin", "kc.sh"); !executable(kcsh) {
+		functest.SkipOrFail(t, systemdSwitchEnv, "the identity service (Keycloak) is not installed: no executable %s", kcsh)
 		return Config{}, false
 	}
 	return cfg, true
 }
 
 // waitCtx is t's context with a deadline cleanupReserve before the test
-// binary's own, when it has one.
+// binary's own. A binary run with no -test.timeout has none, so CI's root
+// step passes one.
 func waitCtx(t *testing.T) context.Context {
 	t.Helper()
 	ctx := t.Context()
@@ -82,6 +103,11 @@ func waitCtx(t *testing.T) context.Context {
 		t.Cleanup(cancel)
 	}
 	return ctx
+}
+
+// errNamed is a wait's failure naming the fact that never came true.
+func errNamed(fact string, err error) error {
+	return fmt.Errorf("never saw the fact %q: %w", fact, err)
 }
 
 // unitProps is `systemctl show --property=<props> <unit>` as a map.
@@ -123,14 +149,19 @@ type systemdPair struct {
 	// on.
 	PGData string
 	DBPort int
+	// Exits is the Keycloak unit's exit-record directory.
+	Exits string
+	// KC is the Keycloak unit's files: its TLS, home and config. Its ports
+	// are fixed, so its management URL holds across restarts.
+	KC *Env
 
 	dbPassword secret.Value
 	mounted    bool
+	units      []string // unit files written, for the cleanup
 }
 
 // newPair makes the pair's names and root, and registers the cleanup, which
-// runs even when a start fails half way: it stops and resets both units,
-// removes the container and unmounts the tmpfs, then shows each one gone.
+// runs even when a start fails half way.
 func newPair(t *testing.T, cfg Config) *systemdPair {
 	t.Helper()
 	tag, err := randomHex(cfg.Rand, 6)
@@ -144,6 +175,7 @@ func newPair(t *testing.T, cfg Config) *systemdPair {
 		KCUnit: "rasputin-idst-kc-" + tag + ".service",
 	}
 	p.PGData = filepath.Join(p.root, "pgdata")
+	p.Exits = filepath.Join(p.root, "exits")
 	t.Cleanup(p.cleanup)
 	return p
 }
@@ -153,15 +185,30 @@ func newPair(t *testing.T, cfg Config) *systemdPair {
 // label rather than by name.
 func (p *systemdPair) label() string { return "rasputin-idst=" + p.tag }
 
+// writeUnit writes a runtime unit file and reloads systemd.
+func (p *systemdPair) writeUnit(ctx context.Context, name, body string) error {
+	path := filepath.Join(unitDir, name)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	p.units = append(p.units, name)
+	if out, err := p.run(ctx, "systemctl", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w: %s", err, out)
+	}
+	return nil
+}
+
 // StartDB mounts a sizeMiB tmpfs at PGData and runs the pinned PostgreSQL on
-// it as a transient unit with Restart=always, on a fixed loopback port so
-// every restart serves the same address. It returns once the unit is active
-// and pg_isready answers.
+// it as a unit with Restart=always, on a fixed loopback port so every
+// restart serves the same address. It returns once the unit is active and
+// pg_isready answers. The mount point is 0755 root, as /var/lib/postgresql's
+// parent is: the image's entrypoint makes PGDATA under it and gives it to the
+// postgres user, which must be able to reach it.
 func (p *systemdPair) StartDB(ctx context.Context, sizeMiB int) error {
-	if err := os.MkdirAll(p.PGData, 0o700); err != nil {
+	if err := os.MkdirAll(p.PGData, 0o755); err != nil {
 		return fmt.Errorf("pgdata dir: %w", err)
 	}
-	if out, err := p.run(ctx, "mount", "-t", "tmpfs", "-o", "size="+strconv.Itoa(sizeMiB)+"m,mode=0700", "tmpfs", p.PGData); err != nil {
+	if out, err := p.run(ctx, "mount", "-t", "tmpfs", "-o", "size="+strconv.Itoa(sizeMiB)+"m,mode=0755", "tmpfs", p.PGData); err != nil {
 		return fmt.Errorf("mount the tmpfs: %w: %s", err, out)
 	}
 	p.mounted = true
@@ -182,23 +229,30 @@ func (p *systemdPair) StartDB(ctx context.Context, sizeMiB int) error {
 	if p.DBPort, err = proctest.FreePort(); err != nil {
 		return err
 	}
-	if out, err := p.run(ctx, "systemd-run", "--unit="+p.DBUnit,
-		"--description=identitytest database "+p.tag, "--property=Restart=always", "--",
-		p.cfg.DockerBin, "run", "--rm", "--label", p.label(),
-		"-p", "127.0.0.1:"+strconv.Itoa(p.DBPort)+":5432",
-		"-v", p.PGData+":/var/lib/postgresql", "--env-file", envFile, PostgresImage); err != nil {
+	unit := "[Unit]\nDescription=identitytest database " + p.tag + "\n\n[Service]\nRestart=always\n" +
+		"ExecStart=" + strings.Join([]string{p.cfg.DockerBin, "run", "--rm", "--label", p.label(),
+		"-p", "127.0.0.1:" + strconv.Itoa(p.DBPort) + ":5432", "-v", p.PGData + ":/var/lib/postgresql",
+		"--env-file", envFile, PostgresImage}, " ") + "\n"
+	if err := p.writeUnit(ctx, p.DBUnit, unit); err != nil {
+		return err
+	}
+	if out, err := p.run(ctx, "systemctl", "start", p.DBUnit); err != nil {
 		return fmt.Errorf("start the database unit: %w: %s", err, out)
 	}
-	return p.awaitDBReady(ctx)
+	return p.AwaitDBReady(ctx)
 }
 
-// awaitDBReady returns once the database unit is active and pg_isready
-// answers inside its current container.
-func (p *systemdPair) awaitDBReady(ctx context.Context) error {
+// AwaitDBReady returns once the database unit is active and pg_isready
+// answers inside its current container. A unit that reads failed will not
+// become ready by itself, so the wait ends at once with its state.
+func (p *systemdPair) AwaitDBReady(ctx context.Context) error {
 	err := proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
 		state, err := unitState(ctx, p.run, p.DBUnit)
 		if err != nil {
 			return false, "", err
+		}
+		if strings.HasPrefix(state, "failed/") {
+			return false, state, &proctest.Final{Err: fmt.Errorf("the database unit is %s: %s", state, p.journalTail(ctx, p.DBUnit))}
 		}
 		if state != "active/running" {
 			return false, "unit " + state, nil
@@ -207,25 +261,150 @@ func (p *systemdPair) awaitDBReady(ctx context.Context) error {
 		if err != nil || id == "" {
 			return false, "no container yet", err
 		}
-		out, err := p.d.exec(ctx, id, "pg_isready", "-h", "127.0.0.1", "-U", dbUser, "-d", dbName)
+		out, err := p.d.exec(ctx, strings.Fields(id)[0], "pg_isready", "-h", "127.0.0.1", "-U", dbUser, "-d", dbName)
 		return err == nil, strings.TrimSpace(string(out)), nil
 	}, func(last string) {
-		p.cfg.Logger.Debug("identity database unit not ready yet", "unit", p.DBUnit, "last", last)
+		p.cfg.Logger.Info("identity database unit not ready yet", "unit", p.DBUnit, "last", last)
 	})
 	if err != nil {
-		return fmt.Errorf("the database unit %s never became active with pg_isready answering: %w", p.DBUnit, err)
+		return errNamed("the database unit "+p.DBUnit+" is active and pg_isready answers", err)
 	}
 	p.cfg.Logger.Info("identity database unit started", "unit", p.DBUnit, "port", p.DBPort, "pgdata", p.PGData)
 	return nil
 }
 
-// DBContainer is the id of the database unit's current container, or "".
+// journalTail is a unit's last journal lines, for a failure message only: the
+// test reports why a unit failed, and decides nothing on it.
+func (p *systemdPair) journalTail(ctx context.Context, unit string) string {
+	out, _ := p.run(ctx, "journalctl", "--no-pager", "-n", "20", "-u", unit)
+	return strings.TrimSpace(string(out))
+}
+
+// DBContainer is the ids of the database unit's containers, or "".
 func (p *systemdPair) DBContainer(ctx context.Context) (string, error) {
 	out, err := p.run(ctx, p.cfg.DockerBin, "ps", "-q", "--filter", "label="+p.label())
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// KeycloakOptions are what a test changes in the Keycloak unit.
+type KeycloakOptions struct {
+	// Heap is JAVA_OPTS_KC_HEAP; empty is the unit's own.
+	Heap string
+	// StartLimitBurst, when not zero, is the unit's StartLimitBurst=, with
+	// StartLimitIntervalSec=infinity, so the restart loop ends on systemd's
+	// own start limit.
+	StartLimitBurst int
+	// StandIn is the ExecStopPost= exit-record stand-in, or empty for none.
+	StandIn string
+}
+
+// StartKeycloak builds a Keycloak home, TLS and config for the pair's
+// database under fixed loopback ports, and starts it as a unit with Requires=
+// and After= on the database, Restart=always, SuccessExitStatus=143 and the
+// unit's JVM environment. It returns once systemctl start returns, which for
+// a unit with no start wait is as soon as the JVM is spawned.
+func (p *systemdPair) StartKeycloak(ctx context.Context, opt KeycloakOptions) error {
+	h, err := New(p.cfg)
+	if err != nil {
+		return err
+	}
+	e := &Env{h: h, log: p.cfg.Logger, docker: p.d, root: filepath.Join(p.root, "kc"), ports: &reportedPorts{}}
+	p.KC = e
+	if err := atrest.EnsureSecretDir(e.root); err != nil {
+		return err
+	}
+	if err := e.makeTLS(); err != nil {
+		return err
+	}
+	if e.password, err = randomSecret(p.cfg.Rand); err != nil {
+		return err
+	}
+	https, err := proctest.FreePort()
+	if err != nil {
+		return err
+	}
+	mgmt, err := proctest.FreePort()
+	if err != nil {
+		return err
+	}
+	e.ports.https, e.ports.mgmt = https, mgmt
+	home, err := e.makeKeycloakHome()
+	if err != nil {
+		return err
+	}
+	conf := filepath.Join(e.root, "keycloak.conf")
+	body := renderKeycloakConf(kcPaths{
+		CertFile:  filepath.Join(e.root, "server", "leaf.pem"),
+		KeyFile:   filepath.Join(e.root, "server", "leaf.key"),
+		TrustFile: filepath.Join(e.root, "ca", caCertFile),
+		VaultDir:  filepath.Join(e.root, "vault"),
+	}, kcPorts{HTTPS: https, Mgmt: mgmt, DB: p.DBPort}, "https://127.0.0.1:"+strconv.Itoa(https), p.dbPassword)
+	err = atrest.WriteSecretFile(conf, body)
+	clear(body)
+	if err != nil {
+		return err
+	}
+	for _, d := range []string{filepath.Join(e.root, "vault"), filepath.Join(home, "data", "import")} {
+		if err := atrest.EnsureSecretDir(d); err != nil {
+			return err
+		}
+	}
+	rendered, err := renderRealm(UserName, e.password)
+	if err != nil {
+		return err
+	}
+	realm, err := withAdminClient(rendered)
+	clear(rendered)
+	if err != nil {
+		return err
+	}
+	err = atrest.WriteSecretFile(filepath.Join(home, "data", "import", Realm+"-realm.json"), realm)
+	clear(realm)
+	if err != nil {
+		return err
+	}
+
+	envs := e.kcEnv()
+	if opt.Heap != "" {
+		for i, kv := range envs {
+			if strings.HasPrefix(kv, "JAVA_OPTS_KC_HEAP=") {
+				envs[i] = "JAVA_OPTS_KC_HEAP=" + opt.Heap
+			}
+		}
+	}
+	var u strings.Builder
+	u.WriteString("[Unit]\nDescription=identitytest identity service " + p.tag + "\n")
+	u.WriteString("Requires=" + p.DBUnit + "\nAfter=" + p.DBUnit + "\n")
+	if opt.StartLimitBurst > 0 {
+		u.WriteString("StartLimitBurst=" + strconv.Itoa(opt.StartLimitBurst) + "\nStartLimitIntervalSec=infinity\n")
+	}
+	u.WriteString("\n[Service]\nRestart=always\nSuccessExitStatus=143\nWorkingDirectory=" + home + "\n")
+	for _, kv := range envs {
+		u.WriteString("Environment=\"" + kv + "\"\n")
+	}
+	u.WriteString("StandardOutput=append:" + filepath.Join(p.root, "kc.out") + "\nStandardError=append:" + filepath.Join(p.root, "kc.out") + "\n")
+	u.WriteString("ExecStart=" + filepath.Join(home, "bin", "kc.sh") + " --config-file=" + conf + " start --optimized --import-realm\n")
+	if opt.StandIn != "" {
+		u.WriteString("ExecStopPost=" + opt.StandIn + " " + p.Exits + "\n")
+	}
+	if err := p.writeUnit(ctx, p.KCUnit, u.String()); err != nil {
+		return err
+	}
+	if out, err := p.run(ctx, "systemctl", "start", p.KCUnit); err != nil {
+		return fmt.Errorf("start the identity service unit: %w: %s", err, out)
+	}
+	return nil
+}
+
+// KCOutput is the tail of everything the Keycloak unit's runs printed, for a
+// failure message.
+func (p *systemdPair) KCOutput() string {
+	b, _ := os.ReadFile(filepath.Join(p.root, "kc.out"))
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return strings.Join(lines[max(0, len(lines)-20):], "\n")
 }
 
 // Fill writes zeros into a file on the tmpfs until the kernel answers
@@ -252,16 +431,30 @@ func (p *systemdPair) Free() error { return os.Remove(p.fillPath()) }
 
 func (p *systemdPair) fillPath() string { return filepath.Join(p.PGData, "fill") }
 
-// cleanup stops and resets both units, removes any container still carrying
-// the label, unmounts the tmpfs, and then shows each one gone: both units
-// LoadState=not-found, no container listed, the mount point not mounted.
+// cleanup stops both units, removes their files, reloads and resets them,
+// removes any container still carrying the label, unmounts the tmpfs, removes
+// Keycloak's files, and then shows each one gone: both units
+// LoadState=not-found, no container listed, the mount point not mounted, and
+// no process naming Keycloak's root.
 func (p *systemdPair) cleanup() {
 	t := p.t
 	ctx := context.Background() // t.Context() has ended by now
 	var errs []error
 	for _, u := range []string{p.KCUnit, p.DBUnit} {
-		_, _ = p.run(ctx, "systemctl", "stop", u)         // a unit never started has nothing to stop
-		_, _ = p.run(ctx, "systemctl", "reset-failed", u) // nor anything to reset
+		_, _ = p.run(ctx, "systemctl", "stop", u) // a unit never started has nothing to stop
+	}
+	for _, u := range p.units {
+		if err := os.Remove(filepath.Join(unitDir, u)); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(p.units) > 0 {
+		if out, err := p.run(ctx, "systemctl", "daemon-reload"); err != nil {
+			errs = append(errs, fmt.Errorf("systemctl daemon-reload: %w: %s", err, out))
+		}
+	}
+	for _, u := range []string{p.KCUnit, p.DBUnit} {
+		_, _ = p.run(ctx, "systemctl", "reset-failed", u) // a unit that never failed has nothing to reset
 	}
 	if ids, err := p.DBContainer(ctx); err != nil {
 		errs = append(errs, fmt.Errorf("list the database containers: %w", err))
@@ -278,6 +471,11 @@ func (p *systemdPair) cleanup() {
 		}
 	}
 	p.dbPassword.Destroy()
+	if p.KC != nil {
+		// No process, container or front of its own: Close removes its root
+		// and proves no live process names it.
+		errs = append(errs, p.KC.Close(ctx))
+	}
 	// The proof.
 	for _, u := range []string{p.KCUnit, p.DBUnit} {
 		m, err := unitProps(ctx, p.run, u, "LoadState")
@@ -303,9 +501,4 @@ func (p *systemdPair) cleanup() {
 		return
 	}
 	t.Logf("pair cleanup: units %s and %s not-found, no container, %s unmounted", p.DBUnit, p.KCUnit, p.PGData)
-}
-
-// errNamed is a wait's failure naming the fact that never came true.
-func errNamed(fact string, err error) error {
-	return fmt.Errorf("never saw the fact %q: %w", fact, err)
 }
