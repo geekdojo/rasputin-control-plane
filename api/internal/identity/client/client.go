@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
@@ -199,8 +198,8 @@ func (c *Client) failed(ctx context.Context, e *Error) error {
 // ----- operations ----------------------------------------------------------
 
 // tokenForm is the token request's form body, built in one buffer sized up
-// front, so no copy of the secret is left behind by a grow. The caller's
-// transport zeroes it.
+// front, so no copy of the secret is left behind by a grow. roundLocation
+// zeroes it when the call returns.
 func tokenForm(clientID string, clientSecret *secret.Value) []byte {
 	id := url.QueryEscape(clientID)
 	size := len("grant_type=client_credentials&client_id=") + len(id)
@@ -357,22 +356,25 @@ func (c *Client) round(ctx context.Context, op, base, method, path string, token
 // roundLocation sends one request and returns the status, the whole body,
 // which the caller clears, and the Location header. token, when not nil, is
 // set only in Authorization: Bearer, never in the URL, the body or a log.
-// reqBody is zeroed before it returns, whether or not the transport has
-// closed it yet.
+// reqBody is zeroed before it returns.
 func (c *Client) roundLocation(ctx context.Context, op, base, method, path string, token *secret.Value, reqBody []byte, contentType string) (int, []byte, string, *Error) {
 	fail := func(kind, cause error) *Error { return &Error{Op: op, Path: path, Kind: kind, Err: cause} }
+	// The body is a *bytes.Reader, which net/http knows is in memory, so it
+	// sends the headers and the body in one write. Any other reader makes it
+	// flush the headers first; a server that refuses the client certificate
+	// after the TLS 1.3 handshake then resets the connection under the second
+	// write, and the refusal reads as a broken pipe rather than its alert.
+	// The bytes are zeroed when the call returns.
 	var rd io.Reader = http.NoBody
 	if reqBody != nil {
-		cb := &clearingBody{b: reqBody}
-		defer func() { _ = cb.Close() }()
-		rd = cb
+		defer clear(reqBody)
+		rd = bytes.NewReader(reqBody)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, base+path, rd)
 	if err != nil {
 		return 0, nil, "", fail(ErrInvalidValue, errors.New("the request could not be built"))
 	}
 	if reqBody != nil {
-		req.ContentLength = int64(len(reqBody))
 		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Accept", "application/json")
@@ -421,34 +423,6 @@ func classifyTransport(ctx context.Context, err error) (kind, cause error) {
 		return ErrDenied, fmt.Errorf("client certificate refused: %w", err)
 	}
 	return ErrUnreachable, err
-}
-
-// clearingBody is a request body that zeroes its bytes when it is closed:
-// by the transport once it has finished writing, and by roundLocation when
-// the call returns, whichever comes first.
-type clearingBody struct {
-	mu  sync.Mutex
-	b   []byte
-	off int
-}
-
-func (r *clearingBody) Read(p []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.off >= len(r.b) {
-		return 0, io.EOF
-	}
-	n := copy(p, r.b[r.off:])
-	r.off += n
-	return n, nil
-}
-
-func (r *clearingBody) Close() error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	clear(r.b)
-	r.off = len(r.b)
-	return nil
 }
 
 // ----- encoding ------------------------------------------------------------
