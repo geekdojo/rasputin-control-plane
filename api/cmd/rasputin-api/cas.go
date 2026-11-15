@@ -12,16 +12,23 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
-// ensureCAs ensures both CA instances in trustDir, through the one tlsca code
-// path, and returns them.
+// ensureCAs ensures the three CA instances in trustDir, through the one tlsca
+// code path, and returns them.
 //
-// The two fail differently because they are needed differently. The
+// They fail differently because they are needed differently. The
 // controlplane CA signs every HTTPS leaf this api serves and is shipped to
 // every node, so a start without it cannot do anything a node or a browser
 // can trust: FATAL, then exit(1), as it always was. The store CA has no
 // consumer yet that the api cannot start without, so a store CA that will not
 // load is one ERROR record and a nil store CA, and the start carries on.
 // exit is os.Exit in main; the nils returned after it are never used.
+//
+// The identity CA (geekdojo/geekdojo-brain#977) fails like the store CA: one
+// ERROR "identity CA unavailable" and a nil identity CA, which turns the
+// identity leaves off. It is ensured right after the controlplane CA, before
+// the store CA's checks, so no store outcome can skip it, and it has no
+// data-present guard: nothing persisted depends on it, so on a restore it is
+// created afresh and the leaf sweep re-mints everything it signs.
 //
 // tlsca.Ensure logs the load or create itself; neither record here carries key
 // material, because tlsca's errors name the file and the failure only.
@@ -33,24 +40,29 @@ import (
 // ERROR names it, the store CA is nil, and the store wiring turns the store
 // off as a configfault, so readiness raises secret-store:unreachable.
 func ensureCAs(ctx context.Context, logger *slog.Logger, exit func(int), trustDir, installName string, deps tlsca.Deps,
-	storeDataDir string, storeDataPresent bool) (controlplane, store *tlsca.CA) {
+	storeDataDir string, storeDataPresent bool) (controlplane, store, identity *tlsca.CA) {
 	controlplane, err := tlsca.Ensure(tlsca.ControlplaneConfig(), trustDir, installName, deps)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: controlplane CA did not load", "ca", tlsca.ControlplaneConfig().Name, "err", err.Error())
 		exit(1)
-		return nil, nil
+		return nil, nil, nil
+	}
+	identity, err = tlsca.Ensure(tlsca.IdentityConfig(), trustDir, installName, deps)
+	if err != nil {
+		logger.ErrorContext(ctx, "identity CA unavailable", "ca", tlsca.IdentityConfig().Name, "err", err.Error())
+		identity = nil
 	}
 	if storeDataPresent && absent(filepath.Join(trustDir, tlsca.StoreKeyFile)) && absent(filepath.Join(trustDir, tlsca.StoreCertFile)) {
 		logger.ErrorContext(ctx, "store CA refused: store data present without its CA",
 			"event", "tlsca.store_ca_refused", "ca", tlsca.StoreConfig().Name, "store_data_dir", storeDataDir)
-		return controlplane, nil
+		return controlplane, nil, identity
 	}
 	store, err = tlsca.Ensure(tlsca.StoreConfig(), trustDir, installName, deps)
 	if err != nil {
 		logger.ErrorContext(ctx, "store CA unavailable", "ca", tlsca.StoreConfig().Name, "err", err.Error())
-		return controlplane, nil
+		return controlplane, nil, identity
 	}
-	return controlplane, store
+	return controlplane, store, identity
 }
 
 // absent reports whether nothing is at path.

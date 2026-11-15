@@ -100,7 +100,7 @@ func assertNoStoreLeafDirs(t *testing.T, dataDir string) {
 func waitSweep(t *testing.T, done <-chan tlsca.LeafSweepReport) tlsca.LeafSweepReport {
 	t.Helper()
 	if done == nil {
-		t.Fatal("startStoreSweep started nothing")
+		t.Fatal("startLeafSweep started nothing")
 	}
 	rep, ok := <-done
 	if !ok {
@@ -236,7 +236,7 @@ func TestStoreStartupSweep(t *testing.T) {
 		t.Fatalf("first boot logged %d ERROR records:\n%s", len(errs), rec.Text())
 	}
 	assertNoStoreLeafDirs(t, dataDir) // wiring touched no leaf path
-	done := startStoreSweep(t.Context(), w.sweeper, log)
+	done := startLeafSweep(t.Context(), w.sweeper, log, "secretstore")
 	// Both calls have returned while the clock gate is still shut.
 	if len(run.got()) != 0 {
 		t.Fatalf("run called before the gate opened: %v", run.got())
@@ -280,7 +280,7 @@ func TestStoreStartupSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep := waitSweep(t, startStoreSweep(t.Context(), w2.sweeper, log)); len(rep.Renewed) != 0 || len(run2.got()) != 0 {
+	if rep := waitSweep(t, startLeafSweep(t.Context(), w2.sweeper, log, "secretstore")); len(rep.Renewed) != 0 || len(run2.got()) != 0 {
 		t.Errorf("second start renewed %v and ran %v, want nothing", rep.Renewed, run2.got())
 	}
 
@@ -292,7 +292,7 @@ func TestStoreStartupSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rep3 := waitSweep(t, startStoreSweep(t.Context(), w3.sweeper, failLog))
+	rep3 := waitSweep(t, startLeafSweep(t.Context(), w3.sweeper, failLog, "secretstore"))
 	warns := failRec.AtLevel(slog.LevelWarn)
 	if len(warns) != 1 || !strings.Contains(warns[0].Message, storeServerLeafName) || !strings.Contains(warns[0].Message, "unit openbao.service not found") {
 		t.Errorf("WARN records = %s; want one naming %s and the error", failRec.Text(), storeServerLeafName)
@@ -440,7 +440,7 @@ func TestStoreClientLeafReload_ClosesIdleConnections(t *testing.T) {
 		t.Fatalf("wireSecretStore = %v, %v; want openbao", w.mode, err)
 	}
 	t.Cleanup(w.client.CloseIdleConnections)
-	waitSweep(t, startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)))
+	waitSweep(t, startLeafSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler), "secretstore"))
 	health := func() {
 		t.Helper()
 		if _, err := w.store.Health(t.Context()); err != nil {
@@ -532,8 +532,8 @@ func TestSecretStore_UpgradeFromThePreviousRelease(t *testing.T) {
 	if err != nil || w.mode != storeModeOff {
 		t.Fatalf("unset selector: %v, %v", w.mode, err)
 	}
-	if done := startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)); done != nil {
-		t.Error("startStoreSweep started a sweep with the store off")
+	if done := startLeafSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler), "secretstore"); done != nil {
+		t.Error("startLeafSweep started a sweep with the store off")
 	}
 	if got := report(cpSweeper, w.sweeper); got.Checked != previous.Checked || len(got.Renewed) != 0 || len(got.Failed) != 0 {
 		t.Errorf("report with the store off = %+v, want the previous release's (%+v)", got, previous)
@@ -552,7 +552,7 @@ func TestSecretStore_UpgradeFromThePreviousRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	waitSweep(t, startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)))
+	waitSweep(t, startLeafSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler), "secretstore"))
 	for _, name := range []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName} {
 		if err := verifyAgainst(parseLeaf(t, filepath.Join(dataDir, "tls", name, "leaf.pem")), store.CertPEM, map[string]x509.ExtKeyUsage{
 			storeServerLeafName: x509.ExtKeyUsageServerAuth, storeClientLeafName: x509.ExtKeyUsageClientAuth,
@@ -594,7 +594,7 @@ func TestStoreProvisionerLeaf(t *testing.T) {
 	if !slices.Contains(w.registeredNames(), storeProvisionerLeafName) {
 		t.Fatalf("registered = %v, want %s among them", w.registeredNames(), storeProvisionerLeafName)
 	}
-	rep := waitSweep(t, startStoreSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler)))
+	rep := waitSweep(t, startLeafSweep(t.Context(), w.sweeper, slog.New(slog.DiscardHandler), "secretstore"))
 	if !slices.Contains(rep.Renewed, storeProvisionerLeafName) || slices.Contains(rep.Reloaded, storeProvisionerLeafName) {
 		t.Errorf("report = %+v, want %s minted and never reloaded", rep, storeProvisionerLeafName)
 	}

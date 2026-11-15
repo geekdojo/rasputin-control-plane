@@ -25,7 +25,7 @@ import (
 
 // The functional tests for the OS outcome records (#833) run the composition
 // root's own functions (outcomeSources, outcomeReaderWiring, wireOutcomeAlerts,
-// wireSecretStore, startStoreSweep, restartStoreUnit, readyAfterOutcomes)
+// wireSecretStore, startLeafSweep, restartStoreUnit, readyAfterOutcomes)
 // against record fixtures under a temp run dir, over a real job ledger and a
 // real alerts.Service. Restarting the api is a fresh Reader over the same
 // database file.
@@ -358,7 +358,7 @@ func TestFunctional_SealKeyOutcome(t *testing.T) {
 }
 
 // TC-833-27: store init is recorded by the leaf reload's store restart, as
-// the real wireSecretStore and startStoreSweep run it.
+// the real wireSecretStore and startLeafSweep run it.
 func TestFunctional_StoreInitAfterRestartHook(t *testing.T) {
 	for _, tc := range []struct {
 		outcome string
@@ -386,7 +386,7 @@ func TestFunctional_StoreInitAfterRestartHook(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			waitSweep(t, startStoreSweep(t.Context(), w.sweeper, log))
+			waitSweep(t, startLeafSweep(t.Context(), w.sweeper, log, "secretstore"))
 			if n := e.count(t, "os.store_init"); n != 1 {
 				t.Fatalf("after the restart: %d jobs, want 1 (run calls %v)", n, run.got())
 			}

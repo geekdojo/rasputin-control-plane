@@ -132,7 +132,7 @@ func TestEnsureCAs_StoreCAGuard(t *testing.T) {
 		h := &recordsHandler{}
 		d := tlscatest.Deps()
 		d.Log = slog.New(h)
-		cp, store := ensureCAs(ctx, slog.New(h), func(c int) { t.Fatalf("exit %d", c) }, trust, "home1", d, dataDir, storeDataPresent(dataDir))
+		cp, store, _ := ensureCAs(ctx, slog.New(h), func(c int) { t.Fatalf("exit %d", c) }, trust, "home1", d, dataDir, storeDataPresent(dataDir))
 		if cp == nil {
 			t.Fatal("no controlplane CA")
 		}
