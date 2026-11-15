@@ -82,10 +82,10 @@ func ensureIdentityCA(t *testing.T, trustDir string, d tlsca.Deps) *tlsca.CA {
 	return ca
 }
 
-// wireIdentity is wireIdentityLeaves for a CA that loaded.
-func wireIdentity(t *testing.T, ca *tlsca.CA, dataDir string, run runFunc) *tlsca.LeafSweeper {
+// wireIdentityCALeaves is wireIdentityLeaves for a CA that loaded.
+func wireIdentityCALeaves(t *testing.T, ca *tlsca.CA, dataDir string, run runFunc) *tlsca.LeafSweeper {
 	t.Helper()
-	s, err := wireIdentityLeaves(ca, dataDir, run)
+	s, err := wireIdentityLeaves(ca, dataDir, run, nil)
 	if err != nil || s == nil {
 		t.Fatalf("wireIdentityLeaves = %v, %v", s, err)
 	}
@@ -139,7 +139,7 @@ func TestIdentityLeaves_StartupSweepMintsSix(t *testing.T) {
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	dataDir := t.TempDir()
 	run := &scriptedRun{}
-	rep := identitySweep(t, wireIdentity(t, ca, dataDir, run.run), slog.New(slog.DiscardHandler))
+	rep := identitySweep(t, wireIdentityCALeaves(t, ca, dataDir, run.run), slog.New(slog.DiscardHandler))
 	if !slices.Equal(rep.Renewed, identityLeafOrder) || len(rep.Failed) != 0 {
 		t.Fatalf("report %+v, want all six renewed and none failed", rep)
 	}
@@ -218,7 +218,7 @@ func TestIdentityCA_RestoreReMintsCAAndLeaves(t *testing.T) {
 	trustDir, dataDir := t.TempDir(), t.TempDir()
 	noExit := func(c int) { t.Fatalf("exit %d", c) }
 	_, _, oldCA := ensureCAs(t.Context(), slog.New(slog.DiscardHandler), noExit, trustDir, "home1", tlscatest.Deps(), "", false)
-	identitySweep(t, wireIdentity(t, oldCA, dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
+	identitySweep(t, wireIdentityCALeaves(t, oldCA, dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
 	for _, f := range []string{tlsca.IdentityCertFile, tlsca.IdentityKeyFile} {
 		if err := os.Remove(filepath.Join(trustDir, f)); err != nil {
 			t.Fatal(err)
@@ -246,7 +246,7 @@ func TestIdentityCA_RestoreReMintsCAAndLeaves(t *testing.T) {
 	for _, r := range rec.AtLevel(slog.LevelError) {
 		t.Errorf("ERROR record %q after a restore", r.Message)
 	}
-	rep := identitySweep(t, wireIdentity(t, newCA, dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
+	rep := identitySweep(t, wireIdentityCALeaves(t, newCA, dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
 	if !slices.Equal(rep.Renewed, identityLeafOrder) {
 		t.Errorf("renewed %v, want all six", rep.Renewed)
 	}
@@ -326,7 +326,7 @@ func TestIdentityLeaves_RenewOnEachFact(t *testing.T) {
 			ca := ensureIdentityCA(t, t.TempDir(), tlsca.Deps{Now: clock.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
 			dataDir := t.TempDir()
 			run := &scriptedRun{}
-			s := wireIdentity(t, ca, dataDir, run.run)
+			s := wireIdentityCALeaves(t, ca, dataDir, run.run)
 			identitySweep(t, s, slog.New(slog.DiscardHandler))
 			want := tc.prep(t, ca, clock, dataDir)
 			before := leafState(t, dataDir, identityLeafOrder...)
@@ -365,7 +365,7 @@ func TestIdentityLeaves_ReloadsAndOrder(t *testing.T) {
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	dataDir := t.TempDir()
 	run := &scriptedRun{}
-	s := wireIdentity(t, ca, dataDir, run.run)
+	s := wireIdentityCALeaves(t, ca, dataDir, run.run)
 	rep := identitySweep(t, s, slog.New(slog.DiscardHandler))
 	if !slices.Equal(rep.Renewed, identityLeafOrder) {
 		t.Errorf("first sweep renewed %v, want %v", rep.Renewed, identityLeafOrder)
@@ -443,7 +443,7 @@ func TestIdentityLeaves_ReloadFailureIsAWarning(t *testing.T) {
 			dataDir := t.TempDir()
 			run := &scriptedRun{fail: tc.fail}
 			log, rec := logkittest.New()
-			s := wireIdentity(t, ca, dataDir, run.run)
+			s := wireIdentityCALeaves(t, ca, dataDir, run.run)
 			rep := identitySweep(t, s, log)
 			if !slices.Equal(rep.Failed, tc.wantFailed) {
 				t.Errorf("failed %v, want %v", rep.Failed, tc.wantFailed)
@@ -606,7 +606,7 @@ func TestEnsureCAs_IdentityCAFailureIsNonFatalAndIndependent(t *testing.T) {
 func TestIdentityLeaves_NilCAWiring(t *testing.T) {
 	dataDir := t.TempDir()
 	run := &scriptedRun{}
-	identitySweeper, err := wireIdentityLeaves(nil, dataDir, run.run)
+	identitySweeper, err := wireIdentityLeaves(nil, dataDir, run.run, nil)
 	if identitySweeper != nil || err != nil {
 		t.Fatalf("wireIdentityLeaves(nil) = %v, %v; want nil, nil", identitySweeper, err)
 	}
@@ -672,7 +672,7 @@ func TestIdentityLeafNames_RequiredConsumers(t *testing.T) {
 	if got := identityLeafNames(false); len(got) != 0 {
 		t.Errorf("identityLeafNames(false) = %v, want none", got)
 	}
-	s := wireIdentity(t, ensureIdentityCA(t, t.TempDir(), tlscatest.Deps()), t.TempDir(), (&scriptedRun{}).run)
+	s := wireIdentityCALeaves(t, ensureIdentityCA(t, t.TempDir(), tlscatest.Deps()), t.TempDir(), (&scriptedRun{}).run)
 	registered := s.RegisteredNames()
 	five := withoutName(registered, identityRepairCodeLeafName)
 	err := verifyLeafConsumers(five, all)
@@ -757,7 +757,7 @@ func TestIdentityCA_UpgradeFromThePreviousRelease(t *testing.T) {
 	if identityCA == nil {
 		t.Fatal("no identity CA after an upgrade")
 	}
-	s := wireIdentity(t, identityCA, dataDir, run.run)
+	s := wireIdentityCALeaves(t, identityCA, dataDir, run.run)
 	identitySweep(t, s, log)
 
 	if !maps.Equal(before, snapshot()) {

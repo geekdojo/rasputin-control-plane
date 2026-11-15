@@ -79,6 +79,36 @@ func secretStoreAddrFromEnv() string {
 	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_SECRETSTORE_ADDR")), defaultSecretStoreAddr)
 }
 
+// identityBackendFromEnv resolves RASPUTIN_IDENTITY_BACKEND, the identity
+// service selector, verbatim, as secretStoreBackendFromEnv does: no trim and
+// no case-fold, so " keycloak" or "Keycloak" reach wireIdentity as the wrong
+// values they are and turn identity off with a configfault. Absent and empty
+// both give "", which is "not configured" (geekdojo/geekdojo-brain#978).
+func identityBackendFromEnv() string {
+	return os.Getenv("RASPUTIN_IDENTITY_BACKEND")
+}
+
+// The identity service's two loopback listeners (platform.md §3.2).
+const (
+	defaultIdentityAddr     = "https://127.0.0.1:8543"
+	defaultIdentityMgmtAddr = "https://127.0.0.1:8544"
+)
+
+// identityAddrFromEnv resolves RASPUTIN_IDENTITY_ADDR, the identity service's
+// https listener. A blank value gives the default and padding is trimmed;
+// whether the result is acceptable (https, loopback, explicit port) is
+// decided by looptls.ParseAddr in wireIdentity.
+func identityAddrFromEnv() string {
+	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_IDENTITY_ADDR")), defaultIdentityAddr)
+}
+
+// identityMgmtAddrFromEnv resolves RASPUTIN_IDENTITY_MGMT_ADDR, the identity
+// service's management listener, which serves /health/ready, the way
+// identityAddrFromEnv resolves its address.
+func identityMgmtAddrFromEnv() string {
+	return cmp.Or(strings.TrimSpace(os.Getenv("RASPUTIN_IDENTITY_MGMT_ADDR")), defaultIdentityMgmtAddr)
+}
+
 // The app catalog's source, which a non-release build lets the environment
 // re-point (the local-stack app-upgrade test serves a stub catalog through it).
 const (

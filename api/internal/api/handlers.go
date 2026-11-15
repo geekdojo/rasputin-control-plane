@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -29,7 +32,14 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 	}
 	// The job records the operator who submitted it: a step acting on their
 	// behalf (app.delete's store deletes) names them (#783).
-	j, err := s.runner.SubmitRawSpec(r.Context(), req.Kind, req.Spec, userName(r))
+	// The runner decides whether an operator may start this kind: a kind
+	// only the system starts is refused before any job exists (#978).
+	j, err := s.runner.SubmitOperatorSpec(r.Context(), req.Kind, req.Spec, userName(r))
+	if errors.Is(err, jobs.ErrSystemKind) {
+		s.writeCodedError(w, r, http.StatusForbidden, codeJobSystemOnly,
+			"This job runs only when the system starts it.", slog.String("kind", req.Kind))
+		return
+	}
 	if err != nil {
 		writeSubmitError(w, http.StatusBadRequest, err)
 		return

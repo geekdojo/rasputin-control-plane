@@ -375,23 +375,7 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 		return fmt.Errorf("identitytest: realm file: %w", err)
 	}
 
-	p, err := proctest.Start(proctest.Spec{
-		Bin:  filepath.Join(home, "bin", "kc.sh"),
-		Args: []string{"--config-file=" + confPath, "start", "--optimized", "--import-realm"},
-		Env: []string{
-			"PATH=/usr/bin:/bin",
-			"HOME=" + e.root,
-			"JAVA_HOME=" + cfg.JavaHome,
-			"MALLOC_ARENA_MAX=" + mallocArenaMax,
-			"JAVA_OPTS_KC_HEAP=" + javaOptsHeap,
-			"JAVA_OPTS_APPEND=" + javaOptsAppend,
-		},
-		Dir:    home,
-		Logger: e.log, Name: "identity service", Source: "keycloak",
-		StdoutTail: outputTail, StderrTail: outputTail,
-		Group: true,
-		Watch: e.ports.watch,
-	})
+	p, err := proctest.Start(e.keycloakSpec(home, confPath, "start", "--optimized", "--import-realm"))
 	if err != nil {
 		return fmt.Errorf("identitytest: %w", err)
 	}
@@ -406,6 +390,36 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 	e.log.Info("identity service started", "addr", "127.0.0.1:"+strconv.Itoa(https),
 		"mgmt_addr", "127.0.0.1:"+strconv.Itoa(mgmt), "pid", p.Pid(), "version", version, "jvm", jvm, "dir", e.root)
 	return nil
+}
+
+// keycloakSpec runs this Env's kc.sh with the config file at conf, then
+// args, under the unit's JVM environment and nothing inherited, reporting
+// its bound ports to the Env. A test that stops Keycloak and starts it again
+// builds its start from the same spec.
+func (e *Env) keycloakSpec(home, conf string, args ...string) proctest.Spec {
+	return proctest.Spec{
+		Bin:    filepath.Join(home, "bin", "kc.sh"),
+		Args:   append([]string{"--config-file=" + conf}, args...),
+		Env:    e.kcEnv(),
+		Dir:    home,
+		Logger: e.log, Name: "identity service", Source: "keycloak",
+		StdoutTail: outputTail, StderrTail: outputTail,
+		Group: true,
+		Watch: e.ports.watch,
+	}
+}
+
+// kcEnv is kc.sh's whole environment: PATH, HOME and the unit's JVM
+// variables (platform.md §3.2).
+func (e *Env) kcEnv() []string {
+	return []string{
+		"PATH=/usr/bin:/bin",
+		"HOME=" + e.root,
+		"JAVA_HOME=" + e.h.cfg.JavaHome,
+		"MALLOC_ARENA_MAX=" + mallocArenaMax,
+		"JAVA_OPTS_KC_HEAP=" + javaOptsHeap,
+		"JAVA_OPTS_APPEND=" + javaOptsAppend,
+	}
 }
 
 // withAdminClient is the rendered realm with AdminClientID added as its first

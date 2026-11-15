@@ -108,6 +108,13 @@ type Workflow struct {
 	// that also finalizes its own row on the happy path will see a call for a
 	// row already in a terminal state.
 	OnTerminal func(ctx context.Context, jobID string, success bool, errMsg string)
+
+	// System marks a kind only the system starts: SubmitOperatorSpec, the
+	// operator's entry point (POST /api/jobs), refuses it with ErrSystemKind
+	// before any job exists, while Submit and the scheduler's SubmitRawSpec
+	// still run it (geekdojo/geekdojo-brain#978: identity.recover_admin
+	// re-creates the identity service's administrator client).
+	System bool
 }
 
 // ErrStopWorkflow, returned by a step's Do, ends the saga *successfully*
@@ -281,13 +288,31 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, created
 // It is the only way a pre-marshalled spec reaches the ledger. Every other
 // caller passes its typed spec to Submit, which refuses raw bytes with
 // ErrRawSpec, so a secret cannot be marshalled past the secret.Value refusal.
-// Its callers are pinned to Server.handleCreateJob and Scheduler.fire by a
+// Its callers are pinned to Runner.SubmitOperatorSpec (the operator's
+// POST /api/jobs, which refuses a System kind first) and Scheduler.fire by a
 // type-checked test (specargs_test.go).
 func (r *Runner) SubmitRawSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
 	if len(spec) == 0 {
 		spec = json.RawMessage("{}")
 	}
 	return r.create(ctx, kind, spec, createdBy, "", nil)
+}
+
+// ErrSystemKind is SubmitOperatorSpec's refusal of a kind whose Workflow is
+// System.
+var ErrSystemKind = errors.New("jobs: this kind runs only when the system starts it")
+
+// SubmitOperatorSpec is SubmitRawSpec for a job an operator asked for: the
+// body of POST /api/jobs. The runner owns the kinds, so it decides here, in
+// one call, whether an operator may start this one: a System kind is refused
+// with ErrSystemKind before any job row exists (SEC-AUTHZ). Every other kind
+// takes SubmitRawSpec's path unchanged. Its one caller is pinned to
+// Server.handleCreateJob (specargs_test.go).
+func (r *Runner) SubmitOperatorSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+	if wf, ok := r.workflowFor(kind); ok && wf.System {
+		return nil, fmt.Errorf("%w: job kind %q", ErrSystemKind, kind)
+	}
+	return r.SubmitRawSpec(ctx, kind, spec, createdBy)
 }
 
 func (r *Runner) submit(ctx context.Context, kind string, spec any, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {

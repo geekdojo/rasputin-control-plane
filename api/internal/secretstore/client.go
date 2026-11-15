@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -617,46 +618,17 @@ func classifyTransport(ctx context.Context, err error) (kind, cause error) {
 		err = fmt.Errorf("%w: %w", ctxErr, err)
 	}
 	var verr *tls.CertificateVerificationError
-	var lerr *leafError
 	switch {
 	case errors.Is(err, errRedirect):
 		return ErrProtocol, err
 	case errors.As(err, &verr):
 		return ErrUnreachable, fmt.Errorf("server certificate not trusted: %w", err)
-	case errors.As(err, &lerr):
+	case looptls.IsLeafError(err):
 		return ErrUnreachable, err
-	case clientCertRefused(err):
+	case looptls.ClientCertRefused(err):
 		return ErrDenied, fmt.Errorf("client certificate refused: %w", err)
 	}
 	return ErrUnreachable, err
-}
-
-// refusalAlerts are the TLS alerts a server sends about the client's
-// certificate: bad_certificate (42), certificate_unknown (46), unknown_ca
-// (48) and certificate_required (116).
-var refusalAlerts = []tls.AlertError{42, 46, 48, 116}
-
-// clientCertRefused reports whether err is the server refusing our client
-// certificate.
-//
-// crypto/tls reports an alert the PEER sent as a *net.OpError with Op
-// "remote error" wrapping its unexported alert type, never as tls.AlertError
-// (which it uses for QUIC). The unexported alert and tls.AlertError render the
-// same text for the same code, so the code is matched through that text, read
-// from the standard library itself rather than written here
-// (geekdojo/geekdojo-brain#758, F-758-07). tls.AlertError is matched too, so a
-// future crypto/tls that returns it still classifies.
-func clientCertRefused(err error) bool {
-	var ae tls.AlertError
-	if errors.As(err, &ae) && slices.Contains(refusalAlerts, ae) {
-		return true
-	}
-	var op *net.OpError
-	if !errors.As(err, &op) || op.Op != "remote error" || op.Err == nil {
-		return false
-	}
-	text := op.Err.Error()
-	return slices.ContainsFunc(refusalAlerts, func(a tls.AlertError) bool { return a.Error() == text })
 }
 
 // clearingBody is a request body that zeroes its bytes when the transport
