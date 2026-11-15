@@ -22,9 +22,11 @@
 package identitytest
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -58,6 +60,14 @@ const (
 	RedirectURI = "https://127.0.0.1/callback"
 	// UserName is the realm's one user.
 	UserName = "harness-user"
+	// AdminClientID is the realm's administrator client: confidential,
+	// service accounts on, no browser flow, authenticated by client-x509 on
+	// AdminSubjectDN (the shape #958's K-X509 proved). It admits the api's
+	// identity-CA client leaf and refuses the door's (geekdojo/geekdojo-brain#977).
+	AdminClientID = "harness-admin"
+	// AdminSubjectDN is the subject AdminClientID admits, exactly (no
+	// regular expression): the api's identity client leaf's subject.
+	AdminSubjectDN = "CN=rasputin-api,O=Rasputin"
 
 	// outputTail is how many of Keycloak's last output lines an early-exit
 	// error carries. Keycloak logs to stdout, so both streams are kept.
@@ -215,6 +225,18 @@ func (e *Env) ManagementURL() string {
 // returns a fresh copy.
 func (e *Env) ClientTLS() *tls.Config { return e.clientTLS.Clone() }
 
+// CA is the test CA, made from the identity CA's config: Keycloak's trust
+// store admits a client leaf only on a chain to it. A test mints the api's
+// production identity leaves under it.
+func (e *Env) CA() *tlsca.CA { return e.ca }
+
+// KeycloakURL is Keycloak's own https://127.0.0.1:<port>, bypassing the
+// front, so a request presents the caller's client leaf and not the front's.
+func (e *Env) KeycloakURL() string {
+	https, _ := e.ports.get()
+	return "https://127.0.0.1:" + strconv.Itoa(https)
+}
+
 // Roots is a pool holding only the test CA.
 func (e *Env) Roots() *x509.CertPool {
 	p := x509.NewCertPool()
@@ -339,7 +361,12 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 	if err := atrest.EnsureSecretDir(importDir); err != nil {
 		return fmt.Errorf("identitytest: realm import dir: %w", err)
 	}
-	realm, err := renderRealm(UserName, e.password)
+	rendered, err := renderRealm(UserName, e.password)
+	if err != nil {
+		return err
+	}
+	defer clear(rendered)
+	realm, err := withAdminClient(rendered)
 	if err != nil {
 		return err
 	}
@@ -381,16 +408,54 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 	return nil
 }
 
+// withAdminClient is the rendered realm with AdminClientID added as its first
+// client. It is added here rather than in realm.json.tmpl so the client's
+// identifiers come from the constants above, which renderRealm's template data
+// does not carry. It refuses a realm whose clients array is not where the
+// template puts it. The caller clears the returned bytes, which hold the
+// password.
+func withAdminClient(realm []byte) ([]byte, error) {
+	client, err := json.Marshal(map[string]any{
+		"clientId":                  AdminClientID,
+		"enabled":                   true,
+		"publicClient":              false,
+		"clientAuthenticatorType":   "client-x509",
+		"standardFlowEnabled":       false,
+		"implicitFlowEnabled":       false,
+		"directAccessGrantsEnabled": false,
+		"serviceAccountsEnabled":    true,
+		"protocol":                  "openid-connect",
+		"attributes": map[string]string{
+			"x509.subjectdn":                      AdminSubjectDN,
+			"x509.allow.regex.pattern.comparison": "false",
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("identitytest: realm admin client: %w", err)
+	}
+	anchor := []byte(`"clients": [`)
+	if n := bytes.Count(realm, anchor); n != 1 {
+		return nil, fmt.Errorf("identitytest: realm: %d clients arrays, want 1", n)
+	}
+	at := bytes.Index(realm, anchor) + len(anchor)
+	out := make([]byte, 0, len(realm)+len(client)+1)
+	out = append(out, realm[:at]...)
+	out = append(out, client...)
+	out = append(out, ',')
+	return append(out, realm[at:]...), nil
+}
+
 // caCertFile and caKeyFile are the test CA's files under <root>/ca.
 const (
 	caCertFile = "identitytest-ca.pem"
 	caKeyFile  = "identitytest-ca.key"
 )
 
-// caConfig is the store CA's code with its name, files and subject
-// overridden; it keeps the store CA's lifetime and both usages.
+// caConfig is the identity CA's code with its name, files and subject
+// overridden; it keeps the identity CA's lifetime and both usages, so a test
+// mints production leaf specs under it exactly as the api does.
 func caConfig() tlsca.Config {
-	c := tlsca.StoreConfig()
+	c := tlsca.IdentityConfig()
 	c.Name = "identitytest"
 	c.CertFile = caCertFile
 	c.KeyFile = caKeyFile

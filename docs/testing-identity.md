@@ -89,6 +89,15 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   chromedp` step fails on any `github.com/chromedp/` package in
   `go list -deps ./api/cmd/rasputin-api`, and in the same step requires the pattern to match
   `go list -deps ./api/internal/identitytest`, so a drifted pattern cannot pass silently.
+- The api's identity-CA leaves, minted by the production `wireIdentityLeaves` under the harness's
+  test CA (made from `tlsca.IdentityConfig`) and presented straight to Keycloak's own port:
+  the api leaf (CN `rasputin-api`) gets an administrator token from the realm's `client-x509`
+  client `harness-admin`, the door leaf (CN `rasputin-door`) completes TLS and gets 401
+  `invalid_client`, and a controlplane-CA leaf and a store-CA leaf with the api leaf's subject
+  are refused at TLS, with no HTTP status
+  (`api/cmd/rasputin-api/identityca_functional_test.go`, under the same
+  `RASPUTIN_IDENTITY_FUNCTIONAL=required` switch,
+  [geekdojo-brain#977](https://github.com/geekdojo/geekdojo-brain/issues/977)).
 
 ## What it does not prove
 
@@ -225,3 +234,7 @@ Then run the self-test as above.
 | TC-966-21 | The `api-coverage` artifact's counts for the self-test's functions (CI) |
 | TC-969-18 | `TestIdentity_TOTPQRUnderHeadlessJRE` (CI) |
 | TC-969-21 | `TestIdentity_TOTPQRUnderHeadlessJRE` running first, then `TestIdentity_PasswordCodeFlowPKCE`, `TestIdentity_Browser`, `TestIdentity_NoSecretInLogs` and `Package.Run`'s proof (CI) |
+| TC-977-16 | `TestIdentityCA_APILeafIsAdministrator` (CI) |
+| TC-977-17 | `TestIdentityCA_DoorLeafIsNotAdministrator` (CI) |
+| TC-977-18 | `TestIdentityCA_ControlplaneLeafRefusedAtTLS` (CI) |
+| TC-977-19 | `TestIdentityCA_StoreLeafRefusedAtTLS` (CI) |
