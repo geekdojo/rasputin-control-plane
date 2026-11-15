@@ -95,6 +95,13 @@ type LeafSpec struct {
 	// mesh.appLeafSpec); note they no longer withdraw a name on an exposure
 	// change, because exposure is enforced by the route, not the SAN set.
 	ExactDNSNames bool
+	// KeyPKCS8 also writes the leaf's key as unencrypted DER PKCS-8 to
+	// LeafPaths.PKCS8Path (0600), for a consumer that reads no PEM key: the
+	// identity service's database driver takes its client key only in that
+	// form (geekdojo/geekdojo-brain#977). LeafUsable then also requires that
+	// file to hold the certificate's key, so a pk8 deleted or corrupted
+	// outside a mint is re-minted on the next sweep.
+	KeyPKCS8 bool
 }
 
 // LeafPaths is a small bundle of where a leaf's PEM files live on disk.
@@ -103,6 +110,9 @@ type LeafSpec struct {
 type LeafPaths struct {
 	CertPath string
 	KeyPath  string
+	// PKCS8Path is where a KeyPKCS8 leaf's DER PKCS-8 key is written. It is
+	// named for every leaf and written only for a KeyPKCS8 one.
+	PKCS8Path string
 }
 
 // MintLeafToDisk is the operational entry point used by the supervisor.
@@ -127,11 +137,20 @@ func (ca *CA) MintLeafToDisk(outDir string, spec LeafSpec) (LeafPaths, error) {
 	if ca.LeafUsable(paths, spec) {
 		return paths, nil
 	}
-	certPEM, key, err := ca.MintLeaf(spec)
+	certPEM, key, pk8, err := ca.mint(spec, spec.KeyPKCS8)
 	if err != nil {
 		return LeafPaths{}, err
 	}
 	defer key.Destroy()
+	defer pk8.Destroy()
+	// The pk8 first: the cert on disk is still the old one, which already
+	// failed LeafUsable, so a mint interrupted before the cert is written is
+	// re-minted by the next sweep rather than left with a mismatched pk8.
+	if spec.KeyPKCS8 {
+		if err := writeKey(paths.PKCS8Path, pk8); err != nil {
+			return LeafPaths{}, fmt.Errorf("tlsca %s: %w", ca.cfg.Name, err)
+		}
+	}
 	if err := WriteLeafFiles(paths, certPEM, key); err != nil {
 		return LeafPaths{}, err
 	}
@@ -150,24 +169,41 @@ func (ca *CA) MintLeaf(spec LeafSpec) (certPEM []byte, key secret.Value, err err
 	if ca == nil {
 		return nil, secret.Value{}, errors.New("tlsca: MintLeaf: nil CA")
 	}
+	certPEM, key, _, err = ca.mint(spec, false)
+	return certPEM, key, err
+}
+
+// mint is MintLeaf, and also returns the key as DER PKCS-8 when withPKCS8 is
+// set (the zero Value otherwise), encoded while the private key is still in
+// hand. A failure returns zero Values; the caller destroys both on success.
+func (ca *CA) mint(spec LeafSpec, withPKCS8 bool) (certPEM []byte, key, pk8 secret.Value, err error) {
 	// GenerateKey ignores its reader since Go 1.26; see create.
 	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), ca.deps.Rand)
 	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("tlsca %s: generate leaf key: %w", ca.cfg.Name, err)
+		return nil, secret.Value{}, secret.Value{}, fmt.Errorf("tlsca %s: generate leaf key: %w", ca.cfg.Name, err)
 	}
 	certPEM, err = ca.sign(spec, &leafKey.PublicKey)
 	if err != nil {
-		return nil, secret.Value{}, err
+		return nil, secret.Value{}, secret.Value{}, err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(leafKey)
 	if err != nil {
-		return nil, secret.Value{}, fmt.Errorf("tlsca %s: marshal leaf key: %w", ca.cfg.Name, err)
+		return nil, secret.Value{}, secret.Value{}, fmt.Errorf("tlsca %s: marshal leaf key: %w", ca.cfg.Name, err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	key = secret.New(keyPEM)
 	clear(keyPEM)
 	clear(keyDER)
-	return certPEM, key, nil
+	if withPKCS8 {
+		pkcs8DER, err := x509.MarshalPKCS8PrivateKey(leafKey)
+		if err != nil {
+			key.Destroy()
+			return nil, secret.Value{}, secret.Value{}, fmt.Errorf("tlsca %s: marshal leaf key as PKCS-8: %w", ca.cfg.Name, err)
+		}
+		pk8 = secret.New(pkcs8DER)
+		clear(pkcs8DER)
+	}
+	return certPEM, key, pk8, nil
 }
 
 // SignLeaf signs a leaf under ca over a public key the caller supplies, for a
@@ -265,8 +301,9 @@ func (ca *CA) checkSpec(spec LeafSpec) (x509.ExtKeyUsage, error) {
 // LeafUsable reports whether the leaf at paths matches spec well enough to
 // skip re-issuing. False on any of: missing files, parse error, wrong issuer,
 // an EKU set other than exactly the spec's, a missing SAN, near-expiry under
-// the CA's clock, an unreadable key, or a spec MintLeaf would refuse. The
-// caller treats false as "mint a fresh one".
+// the CA's clock, an unreadable key, a spec MintLeaf would refuse, or, for a
+// KeyPKCS8 spec, a pk8 that is missing, does not parse or holds another key
+// than the certificate's. The caller treats false as "mint a fresh one".
 func (ca *CA) LeafUsable(paths LeafPaths, spec LeafSpec) bool {
 	if ca == nil {
 		return false
@@ -339,5 +376,26 @@ func (ca *CA) LeafUsable(paths LeafPaths, spec LeafSpec) bool {
 			return false
 		}
 	}
+	if spec.KeyPKCS8 && !pkcs8Matches(paths.PKCS8Path, cert) {
+		return false
+	}
 	return true
+}
+
+// pkcs8Matches reports whether the file at path is a DER PKCS-8 ECDSA key
+// whose public half is cert's. It guards against a pk8 deleted or corrupted
+// outside a mint; MintLeafToDisk's write order already covers an interrupted
+// one.
+func pkcs8Matches(path string, cert *x509.Certificate) bool {
+	der, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	defer clear(der)
+	k, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return false
+	}
+	ec, ok := k.(*ecdsa.PrivateKey)
+	return ok && ec.PublicKey.Equal(cert.PublicKey)
 }

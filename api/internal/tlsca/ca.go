@@ -37,6 +37,12 @@ const (
 	StoreCertFile = "store-ca.pem"
 	// StoreKeyFile is the store CA's private key. 0600.
 	StoreKeyFile = "store-ca.key"
+	// IdentityCertFile is the identity CA's public cert. Like the store CA's,
+	// it never enters a node, browser or collector bundle, and no backup
+	// archive carries it: a restore re-creates it and re-mints its leaves.
+	IdentityCertFile = "identity-ca.pem"
+	// IdentityKeyFile is the identity CA's private key. 0600.
+	IdentityKeyFile = "identity-ca.key"
 
 	// controlplaneCALifetime is intentionally long: the operator installs the
 	// CA on their devices exactly once and should not have to re-trust it for
@@ -46,13 +52,17 @@ const (
 	// secret store's listener, which re-reads the CA file it is configured
 	// with; there is no device to re-trust, and no fact to rotate on yet.
 	storeCALifetime = 10 * 365 * 24 * time.Hour
+	// identityCALifetime matches them. Its verifiers (the identity service's
+	// listeners and its database's) re-read the CA file at each start, so
+	// there is no device to re-trust either.
+	identityCALifetime = 10 * 365 * 24 * time.Hour
 )
 
 // Config is one CA instance. Every instance goes through the same code; the
 // differences between them are exactly these fields.
 type Config struct {
 	// Name identifies the instance in logs and errors ("controlplane",
-	// "store").
+	// "store", "identity").
 	Name string
 	// CertFile and KeyFile are the file names inside the trust dir.
 	CertFile, KeyFile string
@@ -90,6 +100,23 @@ func StoreConfig() Config {
 		KeyFile:       StoreKeyFile,
 		SubjectFormat: "Rasputin Store CA (%s)",
 		Lifetime:      storeCALifetime,
+		Usages:        []Usage{UsageClient, UsageServer},
+	}
+}
+
+// IdentityConfig is the CA the identity service, its database and their
+// clients trust, alone (geekdojo/geekdojo-brain#977). It issues the identity
+// service's and the database's server leaves and the client leaves of the
+// api, the door and the identity service itself. It cannot be the store CA:
+// that CA already issues a clientAuth leaf with CN rasputin-api, which the
+// identity service would then admit as its administrator.
+func IdentityConfig() Config {
+	return Config{
+		Name:          "identity",
+		CertFile:      IdentityCertFile,
+		KeyFile:       IdentityKeyFile,
+		SubjectFormat: "Rasputin Identity CA (%s)",
+		Lifetime:      identityCALifetime,
 		Usages:        []Usage{UsageClient, UsageServer},
 	}
 }

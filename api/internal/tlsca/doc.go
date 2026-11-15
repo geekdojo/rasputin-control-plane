@@ -3,7 +3,7 @@
 // instance. An instance is a Config value and nothing else, so two CAs cannot
 // drift apart in how they are created, loaded, refused or renewed.
 //
-// There are two instances, both kept in the trust dir:
+// There are three instances, all kept in the trust dir:
 //
 //   - The controlplane CA (ControlplaneConfig, "TLS-A" in
 //     design/control-plane/certificates.md) signs every HTTPS leaf the
@@ -14,8 +14,14 @@
 //     by nothing else. It never enters a node, browser or collector bundle, and
 //     the two CAs never chain to each other, so a listener that trusts the
 //     store CA alone refuses every controlplane-CA leaf.
+//   - The identity CA (IdentityConfig) is trusted by the identity service and
+//     its database, and by nothing else. It is in no bundle and no backup
+//     archive. It cannot be the store CA, because the store CA already issues
+//     a clientAuth leaf with CN rasputin-api, the subject the identity service
+//     admits as its administrator; a listener trusting the identity CA alone
+//     refuses that leaf.
 //
-// Both are separate from the bundle-signing CA: that root belongs to
+// All three are separate from the bundle-signing CA: that root belongs to
 // Rasputin-Inc and never leaves Geekdojo's offline custody. Mixing it with a
 // TLS CA would either leak the cross-fleet intermediate onto every customer's
 // box, or make operators trust Rasputin-Inc keys to verify their own Rasputin.

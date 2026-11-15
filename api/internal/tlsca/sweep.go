@@ -76,6 +76,14 @@ type LeafConsumer struct {
 type LeafSweeper struct {
 	ca *CA
 
+	// sweeping is held for the whole of a Sweep, so two sweeps of one
+	// sweeper run one after the other: the startup sweep and the scheduled
+	// one can both be in flight on a first boot, and the second must find
+	// the leaves the first minted usable rather than mint and reload them
+	// again (geekdojo/geekdojo-brain#977, F-977-03). It is ordering by a lock,
+	// never by timing.
+	sweeping sync.Mutex
+
 	mu    sync.Mutex
 	fixed []LeafConsumer
 }
@@ -106,7 +114,13 @@ func (s *LeafSweeper) Register(c LeafConsumer) error {
 // the tests pass, and that leaf simply stops being renewed until it expires.
 // A name the caller expected and does not find here is that mistake, caught at
 // boot instead of at NotAfter.
+//
+// A nil sweeper (one a configuration did not build, such as the identity
+// CA's when that CA did not load) has registered nothing: nil.
 func (s *LeafSweeper) RegisteredNames() []string {
+	if s == nil {
+		return nil
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	names := make([]string, 0, len(s.fixed))
@@ -143,6 +157,10 @@ func (r LeafSweepReport) merge(o LeafSweepReport) LeafSweepReport {
 // the first problem leaves every later leaf unrenewed.
 //
 // logf receives one line per renewal and one per failure; it may be nil.
+//
+// Sweeps of one sweeper never overlap: a second call waits until the first
+// returns, then re-checks every leaf, so it finds what the first minted
+// usable and mints and reloads nothing twice.
 func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) LeafSweepReport {
 	if logf == nil {
 		logf = func(string, string) {}
@@ -151,6 +169,8 @@ func (s *LeafSweeper) Sweep(ctx context.Context, logf func(level, msg string)) L
 	if s.ca == nil {
 		return report
 	}
+	s.sweeping.Lock()
+	defer s.sweeping.Unlock()
 	for _, c := range s.consumers() {
 		if err := ctx.Err(); err != nil {
 			return report
@@ -203,8 +223,9 @@ func (s *LeafSweeper) consumers() []LeafConsumer {
 // look at different files.
 func LeafPathsIn(dir string) LeafPaths {
 	return LeafPaths{
-		CertPath: filepath.Join(dir, "leaf.pem"),
-		KeyPath:  filepath.Join(dir, "leaf.key"),
+		CertPath:  filepath.Join(dir, "leaf.pem"),
+		KeyPath:   filepath.Join(dir, "leaf.key"),
+		PKCS8Path: filepath.Join(dir, "leaf.pk8"),
 	}
 }
 
