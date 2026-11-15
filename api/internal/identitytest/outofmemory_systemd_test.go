@@ -18,7 +18,8 @@ import (
 // runs out of memory and exits with Java's status 3, which systemd hands to
 // ExecStopPost= as EXIT_CODE=exited and EXIT_STATUS=3. Under Restart=always
 // it loops until systemd's own start limit (StartLimitBurst=3,
-// StartLimitIntervalSec=infinity) fails the unit, with no stop issued. The
+// StartLimitIntervalSec=infinity) fails the unit after two automatic
+// restarts, with no stop issued. The
 // stand-in writes one record per invocation; a reading then gives
 // out-of-memory and exactly one identity.service_exit job per record, and
 // consumes every record but the one `last` names; a second reading adds none.
@@ -33,23 +34,35 @@ func TestIdentitySystemd_OutOfMemory(t *testing.T) {
 	}
 	ctx := waitCtx(t)
 	pair := newPair(t, cfg)
-	if err := pair.StartDB(ctx, 256); err != nil {
+	if err := pair.StartDB(ctx, 256, 0); err != nil {
 		t.Fatal(err)
 	}
 	if err := pair.StartKeycloak(ctx, KeycloakOptions{Heap: "-Xms16m -Xmx16m", StartLimitBurst: 3, StandIn: standIn}); err != nil {
 		t.Fatal(err)
 	}
 
+	// The loop's end is the unit in failed with no stop issued. The
+	// runner's systemd checks the start limit before an automatic restart
+	// and leaves the unit failed with the last run's Result (exit-code), not
+	// start-limit-hit (measured in CI), so the limit is shown by NRestarts:
+	// StartLimitBurst starts are the first and StartLimitBurst-1 automatic
+	// restarts.
+	var props map[string]string
 	err = proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
-		m, err := unitProps(ctx, pair.run, pair.KCUnit, "ActiveState", "Result")
+		m, err := unitProps(ctx, pair.run, pair.KCUnit, "ActiveState", "SubState", "Result", "NRestarts")
 		if err != nil {
 			return false, "", err
 		}
-		s := m["ActiveState"] + " Result=" + m["Result"]
-		return m["ActiveState"] == "failed" && m["Result"] == "start-limit-hit", s, nil
+		props = m
+		s := m["ActiveState"] + "/" + m["SubState"] + " Result=" + m["Result"] + " NRestarts=" + m["NRestarts"]
+		return m["ActiveState"] == "failed", s, nil
 	}, func(last string) { cfg.Logger.Info("identity unit", "unit", pair.KCUnit, "state", last) })
 	if err != nil {
-		t.Fatalf("%v\nidentity service output:\n%s", errNamed("the identity unit is failed with Result=start-limit-hit", err), pair.KCOutput())
+		t.Fatalf("%v\nidentity service output:\n%s", errNamed("the identity unit is failed", err), pair.KCOutput())
+	}
+	t.Logf("TC-979-02: the identity unit is failed, Result=%s, NRestarts=%s", props["Result"], props["NRestarts"])
+	if props["NRestarts"] != "2" {
+		t.Fatalf("NRestarts = %s, want 2: the loop did not end on the start limit of 3", props["NRestarts"])
 	}
 
 	// The snapshot: exactly three records plus last, each systemd's own

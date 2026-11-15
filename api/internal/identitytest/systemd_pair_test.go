@@ -200,11 +200,13 @@ func (p *systemdPair) writeUnit(ctx context.Context, name, body string) error {
 
 // StartDB mounts a sizeMiB tmpfs at PGData and runs the pinned PostgreSQL on
 // it as a unit with Restart=always, on a fixed loopback port so every
-// restart serves the same address. It returns once the unit is active and
-// pg_isready answers. The mount point is 0755 root, as /var/lib/postgresql's
+// restart serves the same address. startLimitBurst, when not zero, is the
+// unit's StartLimitBurst=, with StartLimitIntervalSec=infinity, so a crash
+// loop ends in failed on systemd's own start limit however fast it runs. It
+// returns once the unit is active and pg_isready answers. The mount point is 0755 root, as /var/lib/postgresql's
 // parent is: the image's entrypoint makes PGDATA under it and gives it to the
 // postgres user, which must be able to reach it.
-func (p *systemdPair) StartDB(ctx context.Context, sizeMiB int) error {
+func (p *systemdPair) StartDB(ctx context.Context, sizeMiB, startLimitBurst int) error {
 	if err := os.MkdirAll(p.PGData, 0o755); err != nil {
 		return fmt.Errorf("pgdata dir: %w", err)
 	}
@@ -229,7 +231,11 @@ func (p *systemdPair) StartDB(ctx context.Context, sizeMiB int) error {
 	if p.DBPort, err = proctest.FreePort(); err != nil {
 		return err
 	}
-	unit := "[Unit]\nDescription=identitytest database " + p.tag + "\n\n[Service]\nRestart=always\n" +
+	limit := ""
+	if startLimitBurst > 0 {
+		limit = "StartLimitBurst=" + strconv.Itoa(startLimitBurst) + "\nStartLimitIntervalSec=infinity\n"
+	}
+	unit := "[Unit]\nDescription=identitytest database " + p.tag + "\n" + limit + "\n[Service]\nRestart=always\n" +
 		"ExecStart=" + strings.Join([]string{p.cfg.DockerBin, "run", "--rm", "--label", p.label(),
 		"-p", "127.0.0.1:" + strconv.Itoa(p.DBPort) + ":5432", "-v", p.PGData + ":/var/lib/postgresql",
 		"--env-file", envFile, PostgresImage}, " ") + "\n"

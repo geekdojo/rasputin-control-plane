@@ -24,7 +24,7 @@ const fullBelow = 8 << 20
 
 // TestIdentitySystemd_FullPartition is TC-979-04
 // (geekdojo/geekdojo-brain#979): with the data partition full, the database
-// unit leaves active and Keycloak stops with it; the state reads
+// unit crash-loops into failed and Keycloak stops with it; the state reads
 // database-down and identity.recover arms but is not due; once there is room
 // it is due exactly once, its step restarts the pair through
 // sysunit.RestartUnits, and the state reaches Ready.
@@ -35,7 +35,9 @@ func TestIdentitySystemd_FullPartition(t *testing.T) {
 	}
 	ctx := waitCtx(t)
 	pair := newPair(t, cfg)
-	if err := pair.StartDB(ctx, 128); err != nil {
+	// A full disk crash-loops the database into failed on systemd's start
+	// limit, the sticky state the readings below are taken in.
+	if err := pair.StartDB(ctx, 128, 5); err != nil {
 		t.Fatal(err)
 	}
 	if err := pair.StartKeycloak(ctx, KeycloakOptions{}); err != nil {
@@ -74,11 +76,11 @@ func TestIdentitySystemd_FullPartition(t *testing.T) {
 	if err := pair.Fill(); err != nil {
 		t.Fatal(err)
 	}
-	dbState, err := pair.AwaitDBDown(ctx)
+	dbState, err := pair.AwaitDBFailed(ctx)
 	if err != nil {
 		t.Fatalf("%v\n%s", err, pair.KCOutput())
 	}
-	kcState := pair.awaitKCNotActive(ctx)
+	kcState := pair.awaitKCStopped(ctx)
 	t.Logf("TC-979-04 full: database unit %s, identity unit %s", dbState, kcState)
 	if st, err := mon.State(ctx); err != nil || st != identitystate.DatabaseDown {
 		t.Fatalf("full: state %s (%v), want database-down", st, err)
@@ -121,11 +123,12 @@ func TestIdentitySystemd_FullPartition(t *testing.T) {
 	}
 }
 
-// AwaitDBDown pushes WAL through the database's current container until the
-// unit is failed or in auto-restart, and returns that state. A logical
-// message writes WAL and no table row, so what needs a block is the next WAL
-// segment. A deadline failure names the fact.
-func (p *systemdPair) AwaitDBDown(ctx context.Context) (string, error) {
+// AwaitDBFailed pushes WAL through the database's current container until
+// the unit is failed, and returns its state. A logical message writes WAL and
+// no table row, so what needs a block is the next WAL segment. While the
+// crash loop restarts the database it may start again, which the next push
+// ends. A deadline failure names the fact.
+func (p *systemdPair) AwaitDBFailed(ctx context.Context) (string, error) {
 	var state string
 	err := proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
 		if id, err := p.DBContainer(ctx); err == nil && id != "" {
@@ -138,28 +141,28 @@ func (p *systemdPair) AwaitDBDown(ctx context.Context) (string, error) {
 			return false, "", err
 		}
 		state = s
-		return strings.HasPrefix(s, "failed/") || s == "activating/auto-restart", "unit " + s, nil
+		return strings.HasPrefix(s, "failed/"), "unit " + s, nil
 	}, func(last string) {
 		p.cfg.Logger.Info("database unit with the partition full", "unit", p.DBUnit, "state", last)
 	})
 	if err != nil {
-		return "", errNamed("the database unit "+p.DBUnit+" is failed or in auto-restart with the partition full", err)
+		return "", errNamed("the database unit "+p.DBUnit+" is failed with the partition full", err)
 	}
 	return state, nil
 }
 
-// awaitKCNotActive waits until the identity unit is not active, which
+// awaitKCStopped waits until the identity unit is inactive or failed, which
 // Requires= makes it once its database is not running, and returns its state.
-func (p *systemdPair) awaitKCNotActive(ctx context.Context) string {
+func (p *systemdPair) awaitKCStopped(ctx context.Context) string {
 	p.t.Helper()
 	var state string
 	err := proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
 		s, err := unitState(ctx, p.run, p.KCUnit)
 		state = s
-		return err == nil && !strings.HasPrefix(s, "active/"), s, err
+		return err == nil && (strings.HasPrefix(s, "inactive/") || strings.HasPrefix(s, "failed/")), s, err
 	}, nil)
 	if err != nil {
-		p.t.Fatal(errNamed("the identity unit "+p.KCUnit+" is not active", err))
+		p.t.Fatal(errNamed("the identity unit "+p.KCUnit+" is inactive or failed", err))
 	}
 	return state
 }
