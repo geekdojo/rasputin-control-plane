@@ -20,16 +20,25 @@ const maxReason = 1024
 var (
 	bootIDRE = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	runIDRE  = regexp.MustCompile(`^[0-9a-f]{32}$`)
+	// exitStatusRE is systemd's $EXIT_STATUS: a number, or a signal name
+	// without its SIG prefix.
+	exitStatusRE = regexp.MustCompile(`^(?:[0-9]{1,3}|[A-Z][A-Z0-9+]{0,15})$`)
 )
+
+// exitCodes are systemd's $EXIT_CODE words.
+var exitCodes = map[string]bool{"exited": true, "killed": true, "dumped": true}
 
 // Record is one parsed outcome record. A field the source does not declare
 // is empty.
 type Record struct {
-	Outcome string
-	BootID  string
-	RunID   string
-	KeyID   string
-	Reason  string
+	Outcome      string
+	BootID       string
+	RunID        string
+	KeyID        string
+	Reason       string
+	InvocationID string
+	ExitCode     string
+	ExitStatus   string
 }
 
 // Parse reads b as src's record. It is strict: the bytes are valid UTF-8 of
@@ -78,6 +87,10 @@ func Parse(src Source, b []byte) (Record, error) {
 		RunID:   values[FieldRunID],
 		KeyID:   values[FieldKeyID],
 		Reason:  values[FieldReason],
+
+		InvocationID: values[FieldInvocationID],
+		ExitCode:     values[FieldExitCode],
+		ExitStatus:   values[FieldExitStatus],
 	}
 	if _, ok := src.Outcomes[rec.Outcome]; !ok {
 		return Record{}, fmt.Errorf("the outcome %q is not one %s records", rec.Outcome, src.Kind)
@@ -87,6 +100,15 @@ func Parse(src Source, b []byte) (Record, error) {
 	}
 	if src.has(FieldRunID) && !runIDRE.MatchString(rec.RunID) {
 		return Record{}, errors.New("run_id is not 32 lowercase hex characters")
+	}
+	if src.has(FieldInvocationID) && !runIDRE.MatchString(rec.InvocationID) {
+		return Record{}, errors.New("invocation_id is not 32 lowercase hex characters")
+	}
+	if src.has(FieldExitCode) && rec.ExitCode != "" && !exitCodes[rec.ExitCode] {
+		return Record{}, errors.New("exit_code is not exited, killed or dumped")
+	}
+	if src.has(FieldExitStatus) && rec.ExitStatus != "" && !exitStatusRE.MatchString(rec.ExitStatus) {
+		return Record{}, errors.New("exit_status is neither a number nor a signal name")
 	}
 	if src.has(FieldKeyID) && rec.KeyID != "-" {
 		if _, err := sealrotate.ParseKeyID(rec.KeyID); err != nil {

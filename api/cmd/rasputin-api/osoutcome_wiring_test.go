@@ -175,7 +175,7 @@ func TestOutcomeSources_Paths(t *testing.T) {
 		paths = append(paths, s.Path)
 	}
 	want := []string{"/run/rasputin-seal-key/outcome", "/run/rasputin-store-init/outcome", "/run/rasputin-store-provision/outcome",
-		"/run/rasputin-store-rollback/outcome"}
+		"/run/rasputin-store-rollback/outcome", "/run/rasputin-identity-db-init/outcome", "/run/rasputin-identity-rollback/outcome"}
 	if !slices.Equal(paths, want) {
 		t.Errorf("paths = %v, want %v", paths, want)
 	}

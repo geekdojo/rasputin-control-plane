@@ -150,7 +150,72 @@ not this harness: the harness renders its own runtime file from #959's template.
 so it has no free-port race. Headscale's HTTP port is picked free and released for docker to
 bind, which is a race against other processes on the runner; it is never retried. Headscale's
 STUN mapping is fixed at 127.0.0.1:3478/udp by the supervisor. A Docker Hub outage or rate limit
-fails the two pulls.
+fails the two pulls. The identity-state tests (below) also pick ports free and release them: the restartable
+database's host port in TC-979-01, and the pair's database, Keycloak https and management ports
+in TC-979-02 and TC-979-04, because those must stay the same across a restart. The same race
+applies, and they are never retried.
+
+## The identity state: database down, out of memory, a full partition
+
+[geekdojo-brain#979](https://github.com/geekdojo/geekdojo-brain/issues/979) (Identity 3.3) adds
+three functional tests of `api/internal/identitystate`, the api's view of the identity service's
+state. They run the real pinned Keycloak and PostgreSQL, and two of them run them under the CI
+runner's real systemd.
+
+| Test | Runs as | Proves |
+|---|---|---|
+| `TestIdentityState_DatabaseDown` (TC-979-01, row T80 K-HEALTH) | the runner user, in `test (api with coverage)` | With Keycloak ready, `docker stop` on its database makes `/health/ready` answer 503 naming `Keycloak database connections async health check` DOWN. The state reads `database-down` with its sentence, and `Ready` refuses with `identity_not_ready`. After `docker start` the state is `Ready` with no `identity:` alert. Its own Env keeps the database's data across the stop and serves it on a fixed port. |
+| `TestIdentitySystemd_OutOfMemory` (TC-979-02, row T79 K-OOMEXIT) | root, in `test (identity under real systemd, root)` | Keycloak with a 16 MiB heap exits with status 3 on each start, under `Restart=always`, until systemd's start limit fails the unit. Each invocation's record says `exit_code=exited`, `exit_status=3`, and `last` names the unit's last `InvocationID`. One reading gives `out-of-memory` and exactly one `identity.service_exit` job per record, and leaves only `last` and its record. A second reading adds no job. |
+| `TestIdentitySystemd_FullPartition` (TC-979-04) | root, in the same step | With PostgreSQL's data on a 128 MiB tmpfs that is then filled, the database unit leaves `active` and Keycloak stops with it. The state reads `database-down`, and `identity.recover` arms but is not due. Once the fill file is removed it is due exactly once, its job restarts the pair through `sysunit.RestartUnits`, and the state reaches `Ready`. |
+
+**The units.** The two root tests write the pair as runtime unit files under
+`/run/systemd/system`, related as `keycloak-db.service` and `keycloak.service` are (`Requires=`
+and `After=`). They are not `systemd-run` transient units, because systemd garbage-collects an
+inactive transient unit, and `systemctl restart` of a Keycloak its failed database had stopped
+would answer "not found". Each test's cleanup stops both units, removes their files, unmounts
+the tmpfs and removes the container, then shows the units `not-found`, no container and nothing
+mounted.
+
+**What the units do not carry, and the contract they stand in for.** The units carry none of
+the hooks that rasputin-os builds for `keycloak.service`
+([geekdojo-brain#973](https://github.com/geekdojo/geekdojo-brain/issues/973), Identity 2.5).
+None of them is run here:
+
+- **The start wait (`ExecStartPost=`).** It waits for `/health/started` and then removes the
+  start-hold count file. It exits non-zero as soon as Keycloak's main process (`$MAINPID`) is
+  gone, and the unit's `TimeoutStartSec=` is bounded rather than `infinity`, so a crash during
+  start never leaves the unit activating. The test unit has no start wait, so it reads `active`
+  from the JVM's start, and its start timeout is systemd's default.
+- **The start hold (`ExecStartPre=`)** and its record.
+- **The real exit-record hook (`ExecStopPost=`)** and its 256-record cap. TC-979-02 uses
+  `api/internal/identitytest/testdata/exit-record-standin.sh` instead. It is a **minimal
+  stand-in**, not the shipped hook. It writes exactly the contract's record (`outcome`,
+  `invocation_id`, `exit_code`, `exit_status`) and then `last`, from the `SERVICE_RESULT`,
+  `INVOCATION_ID`, `EXIT_CODE` and `EXIT_STATUS` systemd gives it, each through a rename. It has
+  no cap.
+
+So the tests prove the api's reading of the contract's files under real systemd values. They do
+not prove that #973's hooks write them.
+
+**How to run them.** `TestIdentityState_DatabaseDown` runs with the rest of the package (see
+[How to run it](#how-to-run-it)). The two root tests need Linux with systemd as the init system,
+docker, and root. They skip without them, and fail instead under
+`RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required`, which only CI's root step sets. Build the test
+binary as yourself and run it under sudo, from the package directory so `testdata/` resolves.
+A test binary run directly has no default timeout, so pass go test's own; each wait ends before
+it with an error naming the fact it waited for, and the cleanup still runs.
+
+```sh
+go test -c -race -o /tmp/identitytest.test ./api/internal/identitytest
+cd api/internal/identitytest
+sudo env PATH="$PATH" RASPUTIN_IDENTITY_HOME="$HOME/.cache/rasputin-identity" \
+  RASPUTIN_IDENTITY_FUNCTIONAL=required RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required \
+  /tmp/identitytest.test -test.v -test.count=1 -test.timeout=10m -test.run '^TestIdentitySystemd_'
+```
+
+**Does not prove:** arm64; the `oom-kill` path (systemd's own OOM kill), which has unit tests
+only; the producers of `upgrading`, `held`, `blank`, `apps-paused` and `history-behind`; and the
+hooks listed above.
 
 ## How to run it
 
@@ -271,3 +336,6 @@ Then run the self-test as above.
 | TC-978-27 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-27 (CI) |
 | TC-978-28 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-28 (CI) |
 | TC-978-29 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-29 (CI) |
+| TC-979-01 | `TestIdentityState_DatabaseDown` (CI) |
+| TC-979-02 | `TestIdentitySystemd_OutOfMemory` (CI, root step) |
+| TC-979-04 | `TestIdentitySystemd_FullPartition` (CI, root step) |

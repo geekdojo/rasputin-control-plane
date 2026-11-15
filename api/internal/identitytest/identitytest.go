@@ -131,6 +131,14 @@ type Config struct {
 	Run CmdRunner
 	// Procs lists live processes for the teardown proof.
 	Procs ProcLister
+
+	// pgRestartable, set only by this package's tests, runs PostgreSQL so a
+	// test can docker stop and docker start it under a running Keycloak
+	// (TC-979-01): on a fixed loopback port, which a restarted container
+	// keeps, and with its data in the image's anonymous volume, which a stop
+	// keeps, rather than on a tmpfs, which a stop empties. Teardown's
+	// docker rm -v removes the volume.
+	pgRestartable bool
 }
 
 // Harness starts Envs. It holds only its Config.
