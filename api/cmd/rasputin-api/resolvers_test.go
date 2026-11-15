@@ -251,3 +251,67 @@ func TestSecretStoreAddrFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		})
 	}
 }
+
+// TC-978-01, TC-978-02: fail-closed table test for identityBackendFromEnv
+// (security-resolvers R44). The value is returned verbatim: absent and empty
+// are "" (not configured), and every other shape reaches wireIdentity
+// unchanged, where only exactly "keycloak" or "mock" is accepted
+// (TestWireIdentity_Selection).
+func TestIdentityBackendFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		absent bool
+		value  string
+		want   string
+	}{
+		{"absent", true, "", ""},
+		{"empty", false, "", ""},
+		{"blank", false, " ", " "},
+		{"padded", false, " keycloak", " keycloak"},
+		{"trailing", false, "keycloak ", "keycloak "},
+		{"case", false, "Keycloak", "Keycloak"},
+		{"upper", false, "KEYCLOAK", "KEYCLOAK"},
+		{"unknown", false, "openbao", "openbao"},
+		{"suffixed", false, "keycloakx", "keycloakx"},
+		{"keycloak", false, "keycloak", "keycloak"},
+		{"mock", false, "mock", "mock"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setOrUnset(t, "RASPUTIN_IDENTITY_BACKEND", tc.absent, tc.value)
+			if got := identityBackendFromEnv(); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TC-978-04: fail-closed table tests for identityAddrFromEnv and
+// identityMgmtAddrFromEnv (security-resolvers R45, R46). Blank shapes give
+// the default; a padded value is trimmed; whether a value is acceptable is
+// wireIdentity's decision (TestWireIdentity_RefusedAddresses).
+func TestIdentityAddrFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
+	for _, tc := range []struct {
+		env, def string
+		resolve  func() string
+	}{
+		{"RASPUTIN_IDENTITY_ADDR", "https://127.0.0.1:8543", identityAddrFromEnv},
+		{"RASPUTIN_IDENTITY_MGMT_ADDR", "https://127.0.0.1:8544", identityMgmtAddrFromEnv},
+	} {
+		t.Run(tc.env, func(t *testing.T) {
+			for _, b := range blankShapes {
+				t.Run(b.name, func(t *testing.T) {
+					setOrUnset(t, tc.env, b.absent, b.value)
+					if got := tc.resolve(); got != tc.def {
+						t.Errorf("got %q, want the default %q", got, tc.def)
+					}
+				})
+			}
+			for _, v := range []string{"  https://127.0.0.1:9443  ", "https://127.0.0.1:9443"} {
+				t.Setenv(tc.env, v)
+				if got := tc.resolve(); got != "https://127.0.0.1:9443" {
+					t.Errorf("%q: got %q, want it trimmed", v, got)
+				}
+			}
+		})
+	}
+}

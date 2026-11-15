@@ -16,8 +16,10 @@ import (
 // renews on its own sweeper, in <dataDir>/tls/<name>/. Each carries exactly
 // one EKU. The identity service's unit and its database's load theirs by
 // LoadCredential= at start, so a renewed leaf restarts the unit that reads it;
-// the three client leaves nothing reads yet (Identity 3.2, #321) have no
-// reload, and the items that add their readers add their reloads.
+// the api's own client leaf's reload is the identity client's
+// CloseIdleConnections when that client is wired (Identity 3.2, #978), and
+// the two client leaves nothing in the api reads (the door's, #321) have no
+// reload.
 //
 // They are not gated on any identity setting: keycloak.service will not start
 // until its leaves exist, and only the api mints them.
@@ -112,7 +114,10 @@ func identityRepairCodeLeafSpec() tlsca.LeafSpec {
 // leaves, then the service's, so the one restart keycloak.service gets is the
 // last, once everything it loads exists (the db-client leaf's restart is
 // condition-skipped by the unit until the server leaf exists).
-func wireIdentityLeaves(ca *tlsca.CA, dataDir string, run runFunc) (*tlsca.LeafSweeper, error) {
+//
+// apiClientReload is the api client leaf's reload: identityWiring.reload,
+// nil unless the identity client is wired.
+func wireIdentityLeaves(ca *tlsca.CA, dataDir string, run runFunc, apiClientReload func(context.Context, tlsca.LeafPaths) error) (*tlsca.LeafSweeper, error) {
 	if ca == nil {
 		return nil, nil
 	}
@@ -133,7 +138,7 @@ func wireIdentityLeaves(ca *tlsca.CA, dataDir string, run runFunc) (*tlsca.LeafS
 		{identityDBServerLeafName, identityDBServerLeafSpec, restart(identityDBUnit)},
 		{identityDBClientLeafName, identityDBClientLeafSpec, restart(identityUnit)},
 		{identityServerLeafName, identityServerLeafSpec, restart(identityUnit)},
-		{identityAPIClientLeafName, identityAPIClientLeafSpec, nil},
+		{identityAPIClientLeafName, identityAPIClientLeafSpec, apiClientReload},
 		{identityDoorClientLeafName, identityDoorClientLeafSpec, nil},
 		{identityRepairCodeLeafName, identityRepairCodeLeafSpec, nil},
 	} {

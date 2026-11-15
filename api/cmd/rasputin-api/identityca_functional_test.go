@@ -60,7 +60,7 @@ func identityFunctionalLeaves(t *testing.T) (*identitytest.Env, string) {
 	t.Helper()
 	env := identityPkg.Env(t)
 	dataDir := t.TempDir()
-	rep := identitySweep(t, wireIdentity(t, env.CA(), dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
+	rep := identitySweep(t, wireIdentityCALeaves(t, env.CA(), dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
 	if !slices.Equal(rep.Renewed, identityLeafOrder) {
 		t.Fatalf("the startup sweep renewed %v, want all six", rep.Renewed)
 	}

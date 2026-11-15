@@ -67,6 +67,9 @@ const (
 	// staged, because the release states a memory floor that is not a
 	// positive number.
 	codeMemoryFloorInvalid = "memory_floor_invalid"
+	// codeJobSystemOnly: POST /api/jobs named a kind only the system starts,
+	// so no job was created (geekdojo/geekdojo-brain#978).
+	codeJobSystemOnly = "job_system_only"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

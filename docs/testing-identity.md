@@ -111,6 +111,20 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   a password sign-in; and the console's token carries `auth_time` and `rasputin_roles`
   (`api/internal/identitytest/baseline_import_functional_test.go`, under the same switch,
   [geekdojo-brain#980](https://github.com/geekdojo/geekdojo-brain/issues/980)).
+- The api's identity client, as `wireIdentity` builds it, against the imported baseline
+  (`api/internal/identitytest/identityclient_functional_test.go`, under the same switch,
+  [geekdojo-brain#978](https://github.com/geekdojo/geekdojo-brain/issues/978)): the Admin API
+  session logs in once by `client-x509` as `rasputin-admin`, and after its token is revoked it
+  logs in exactly once more and the retried call answers 200; a `CN=rasputin-api` leaf from a
+  foreign CA is refused at TLS (`ErrDenied`, capability row T74); the door leaf gets
+  `ErrDenied` with `invalid_client` while the api leaf is the administrator (rows T75, T76);
+  `/health/ready` answers over mutual TLS; and `identity.recover_admin`, with `rasputin-admin`
+  deleted, stops Keycloak, runs the real `kc.sh bootstrap-admin service` with the temporary
+  secret only in its environment, starts it on the same ports, re-creates `rasputin-admin` from
+  the baseline, and leaves no user and no `rasputin-recover-*` client in realm `master`
+  (counted with psql), with the secret in no record and not in `kc.sh`'s output. If the Admin
+  API still accepts a token revoked at the RFC 7009 endpoint, the test ends it by retiring the
+  realm's RS256 signing key instead, and says so in its log.
 
 ## What it does not prove
 
@@ -253,3 +267,7 @@ Then run the self-test as above.
 | TC-977-19 | `TestIdentityCA_StoreLeafRefusedAtTLS` (CI) |
 | TC-980-21 | `TestIdentity_DisabledFeaturesServeNothing` (CI) |
 | TC-980-25 | `TestIdentity_BaselineImportedWorks` (CI) |
+| TC-978-26 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-26 (CI) |
+| TC-978-27 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-27 (CI) |
+| TC-978-28 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-28 (CI) |
+| TC-978-29 | `TestIdentityClient_AgainstPinnedKeycloak`, subtest TC-978-29 (CI) |

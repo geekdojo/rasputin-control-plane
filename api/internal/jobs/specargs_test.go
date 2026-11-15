@@ -20,8 +20,10 @@ import (
 //  1. a call to (*jobs.Runner).Submit, SubmitPrepared or SubmitChild, or to a
 //     value of type bmc.SubmitFn or console.Submitter, whose spec argument's
 //     static type is json.RawMessage, *json.RawMessage or []byte;
-//  2. any selection of (*jobs.Runner).SubmitRawSpec, a call or a method value,
-//     outside Server.handleCreateJob and Scheduler.fire;
+//  2. any selection of a raw entry point, a call or a method value, outside
+//     its pinned callers: (*jobs.Runner).SubmitOperatorSpec only in
+//     Server.handleCreateJob, and (*jobs.Runner).SubmitRawSpec only in
+//     Runner.SubmitOperatorSpec and Scheduler.fire;
 //  3. a scan that found no runner call at all, which would pass vacuously.
 //
 // Test files are not loaded: they exercise the refusal and the raw entry point
@@ -34,11 +36,18 @@ const (
 	consolePkg = modulePath + "/internal/console"
 )
 
-// rawSpecCallers are the only declarations allowed to reach SubmitRawSpec,
-// keyed by package path.
-var rawSpecCallers = map[string]string{
-	modulePath + "/internal/api":       "Server.handleCreateJob",
-	modulePath + "/internal/scheduler": "Scheduler.fire",
+// rawSpecCallers are the only declarations allowed to reach each raw entry
+// point, keyed by the method and then by package path. The operator's
+// POST /api/jobs reaches SubmitRawSpec through SubmitOperatorSpec, which
+// refuses a System kind first (geekdojo/geekdojo-brain#978).
+var rawSpecCallers = map[string]map[string]string{
+	"SubmitOperatorSpec": {
+		modulePath + "/internal/api": "Server.handleCreateJob",
+	},
+	"SubmitRawSpec": {
+		jobsPath:                           "Runner.SubmitOperatorSpec",
+		modulePath + "/internal/scheduler": "Scheduler.fire",
+	},
 }
 
 type specScan struct {
@@ -85,13 +94,16 @@ func scanSpecArgs(pkgs []*packages.Package) specScan {
 					case *ast.CallExpr:
 						sc.checkCall(p, n)
 					case *ast.SelectorExpr:
-						if isRunnerMethod(p.TypesInfo.Uses[n.Sel], "SubmitRawSpec") {
+						for method, callers := range rawSpecCallers {
+							if !isRunnerMethod(p.TypesInfo.Uses[n.Sel], method) {
+								continue
+							}
 							where := p.PkgPath + "." + name
-							sc.rawCallers = append(sc.rawCallers, where)
-							if rawSpecCallers[p.PkgPath] != name {
+							sc.rawCallers = append(sc.rawCallers, method+" from "+where)
+							if callers[p.PkgPath] != name {
 								sc.violations = append(sc.violations, violation{p.Fset.Position(n.Pos()), fmt.Sprintf(
-									"SubmitRawSpec selected in %s; only Server.handleCreateJob and Scheduler.fire may reach the raw entry point",
-									where)})
+									"%s selected in %s; only its pinned callers may reach the raw entry point",
+									method, where)})
 							}
 						}
 					}
@@ -227,8 +239,10 @@ func TestSpecArgs_Module(t *testing.T) {
 	slices.Sort(got)
 	got = slices.Compact(got)
 	var want []string
-	for pkg, decl := range rawSpecCallers {
-		want = append(want, pkg+"."+decl)
+	for method, callers := range rawSpecCallers {
+		for pkg, decl := range callers {
+			want = append(want, method+" from "+pkg+"."+decl)
+		}
 	}
 	slices.Sort(want)
 	if !slices.Equal(got, want) {

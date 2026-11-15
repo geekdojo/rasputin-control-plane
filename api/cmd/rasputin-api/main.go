@@ -556,11 +556,23 @@ func main() {
 	// The identity CA's six leaves (geekdojo/geekdojo-brain#977), on a
 	// sweeper of their own; nil, and skipped, when the identity CA did not
 	// load. See identityca_wiring.go.
-	identitySweeper, err := wireIdentityLeaves(identityCA, dataDir, execrun.CombinedOutput)
+	// The identity service's client (geekdojo/geekdojo-brain#978):
+	// RASPUTIN_IDENTITY_BACKEND selects it, and a refused setting turns it
+	// off with a configfault. It is wired before the identity leaves, so its
+	// CloseIdleConnections is the api client leaf's reload. See
+	// identity_wiring.go.
+	identityW, err := wireIdentity(ctx, logger, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
+		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputEnv)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity service", "err", err.Error())
+		os.Exit(1)
+	}
+	identitySweeper, err := wireIdentityLeaves(identityCA, dataDir, execrun.CombinedOutput, identityW.reload)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity leaves", "err", err.Error())
 		os.Exit(1)
 	}
+	logger.InfoContext(ctx, "identity service wired", "mode", identityW.mode)
 	startLeafSweep(ctx, storeW.sweeper, logger, "secretstore")
 	startLeafSweep(ctx, identitySweeper, logger, "identity")
 	logger.InfoContext(ctx, "secret store wired", "mode", storeW.mode)
@@ -1155,6 +1167,9 @@ func main() {
 		os.Exit(1)
 	}
 	runner.Register(storeRecov.workflow)
+	// identity.recover_admin (#978), under keycloak only: a System job, so
+	// POST /api/jobs refuses it. Nothing submits it yet (F-978-04).
+	identityW.register(runner)
 	// The store's copy before an OS update of its host, and the reference
 	// check that reports entries lost when the store's data is put back
 	// (geekdojo/geekdojo-brain#800).
