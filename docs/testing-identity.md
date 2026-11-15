@@ -72,6 +72,12 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   [geekdojo-brain#969](https://github.com/geekdojo/geekdojo-brain/issues/969)). It runs in its
   own browser context and never submits the enrolment form, so the harness user gets no OTP
   credential. It does not prove what the QR encodes.
+- The features `identity/keycloak-build.conf` disables serve nothing at the pin: through the
+  front, `/admin/`, the account console, pushed authorization requests and CIBA authentication
+  answer 404, the token endpoint refuses the device-code and token-exchange grants with
+  `unsupported_grant_type`, and discovery has no `device_authorization_endpoint`
+  (`TestIdentity_DisabledFeaturesServeNothing` in `features_functional_test.go`, capability row
+  T73, [geekdojo-brain#980](https://github.com/geekdojo/geekdojo-brain/issues/980)).
 - No record the harness or the client logged, Keycloak's own output lines included, holds the
   user password, the database password, an authorization code or token bytes
   (`TestIdentity_NoSecretInLogs`).
@@ -238,3 +244,4 @@ Then run the self-test as above.
 | TC-977-17 | `TestIdentityCA_DoorLeafIsNotAdministrator` (CI) |
 | TC-977-18 | `TestIdentityCA_ControlplaneLeafRefusedAtTLS` (CI) |
 | TC-977-19 | `TestIdentityCA_StoreLeafRefusedAtTLS` (CI) |
+| TC-980-21 | `TestIdentity_DisabledFeaturesServeNothing` (CI) |

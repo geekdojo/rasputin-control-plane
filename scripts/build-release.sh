@@ -14,14 +14,16 @@
 #
 # Tarball contents:
 #   agent: rasputin-agent                 (binary at root)
-#   api:   rasputin-api + ui/ + openbao-policy/
+#   api:   rasputin-api + ui/ + openbao-policy/ + identity/
 #          (binary + Next.js static export; rasputin-os installs ui/ to
 #          /usr/share/rasputin/ui, which is the api's RASPUTIN_UI_DIR default,
 #          and openbao-policy/*.hcl to /usr/share/rasputin/openbao-policy, where
 #          the secrets store's self-init reads its fixed policies:
-#          geekdojo/geekdojo-brain#804)
+#          geekdojo/geekdojo-brain#804; identity/ holds realm-baseline.json,
+#          keycloak-build.conf, pins.json and theme/, installed under
+#          /usr/share/rasputin/identity: geekdojo/geekdojo-brain#980)
 #
-# Requires: go, node/npm (for the UI build).
+# Requires: go, node/npm (for the UI build), jq (pins.json).
 #
 # The .hash files are in Buildroot's format (`sha256  <hex>  <file>`) so the
 # OS repo can drop them next to the package .mk for download verification.
@@ -43,6 +45,8 @@ VERSION="${VERSION#v}"   # tolerate a leading v
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 DIST="$ROOT/dist"
+# shellcheck source=SCRIPTDIR/lib/release-lib.sh
+. "$ROOT/scripts/lib/release-lib.sh"   # sha256_of
 rm -rf "$DIST"
 mkdir -p "$DIST"
 
@@ -75,6 +79,13 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 # tarball is ever built without them (geekdojo/geekdojo-brain#804).
 "$ROOT/scripts/pack-store-policy.sh" "$ROOT/api/internal/secretstore/storepolicy" "$DIST/openbao-policy"
 
+# The identity service's release: the realm baseline, the build options, a
+# pins.json generated from identitytest/pin.go, and the theme slot. The script
+# refuses an unknown build option, a baseline that does not match its lock, and
+# a missing input or pin, so no api tarball is built without them
+# (geekdojo/geekdojo-brain#980; platform.md §2.5).
+"$ROOT/scripts/pack-identity.sh" "$ROOT/identity" "$ROOT/api/internal/identitytest/pin.go" "$DIST/identity"
+
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
 # -tags release compiles in artifactsig.ReleaseBuild() = true: a release binary
 # ignores RASPUTIN_TRUST_ROOT and the app-catalog source overrides, so node.env
@@ -87,11 +98,6 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 # a restore refuses an archive taken on any other version
 # (geekdojo/geekdojo-brain#872); the agent has no such symbol.
 LDFLAGS="-s -w -X main.AgentVersion=$VERSION -X main.ControlPlaneVersion=$VERSION"
-
-sha256_of() {
-	if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
-	else shasum -a 256 "$1" | awk '{print $1}'; fi
-}
 
 for comp in $COMPONENTS; do
 	name="${comp%%:*}"          # agent | api
@@ -110,7 +116,7 @@ for comp in $COMPONENTS; do
 
 		tarball="$DIST/$bin-$VERSION-linux-$arch.tar.gz"
 		if [ "$name" = "api" ]; then
-			tar -C "$DIST" -czf "$tarball" "$bin" ui openbao-policy
+			tar -C "$DIST" -czf "$tarball" "$bin" ui openbao-policy identity
 		else
 			tar -C "$DIST" -czf "$tarball" "$bin"
 		fi
@@ -124,7 +130,7 @@ for comp in $COMPONENTS; do
 	done
 done
 
-rm -rf "$DIST/ui" "$DIST/openbao-policy"   # packed into the api tarballs; not artifacts themselves
+rm -rf "$DIST/ui" "$DIST/openbao-policy" "$DIST/identity"   # packed into the api tarballs; not artifacts themselves
 
 # The mesh image pin, published verbatim so the OS build can read it instead of
 # carrying its own copy of the refs.

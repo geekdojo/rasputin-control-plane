@@ -36,14 +36,11 @@ keep="${2:-}"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 pin="$repo_root/api/internal/secretstoretest/pin.go"
 
-# read_const NAME prints the string value of `NAME = "value"` in pin.go,
-# anchored to a line of its own.
-read_const() {
-  sed -n -E 's/^[[:space:]]*'"$1"'[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' "$pin"
-}
+# shellcheck source=SCRIPTDIR/lib/release-lib.sh
+. "$repo_root/scripts/lib/release-lib.sh"   # pin_const: the anchored pin.go reader
 
-release="$(read_const OpenBaoRelease)"
-sha256="$(read_const OpenBaoLinuxAMD64SHA256)"
+release="$(pin_const "$pin" OpenBaoRelease)"
+sha256="$(pin_const "$pin" OpenBaoLinuxAMD64SHA256)"
 if [ -z "$release" ]; then
   echo "install-openbao: cannot read OpenBaoRelease from $pin" >&2
   exit 1
