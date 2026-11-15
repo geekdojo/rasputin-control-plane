@@ -261,6 +261,13 @@ jq '(.users[] | select(.serviceAccountClientId == "rasputin-admin") | .clientRol
 rejects "TC-980-14 a fixture missing manage-users fails" "$tmp/no-manage-users.json" "$admin_roles"
 jq '(.users[] | select(.serviceAccountClientId == "rasputin-admin") | .clientRoles["realm-management"]) += ["realm-admin"]' "$BASE" >"$tmp/realm-admin.json"
 rejects "TC-980-14 a fixture adding realm-admin fails" "$tmp/realm-admin.json" "$admin_roles"
+# With fullScopeAllowed false, the roles reach the client's scope only through this mapping (F-980-19).
+admin_scope='([.clientScopeMappings["realm-management"][]? | select(.client == "rasputin-admin")]) as $m
+	| ($m | length == 1)
+	and (($m[0].roles | sort) == (["manage-users", "view-users", "query-users", "query-groups", "manage-clients", "view-realm", "manage-realm", "view-events"] | sort))'
+holds "TC-980-14 clientScopeMappings maps exactly the eight realm-management roles to rasputin-admin" "$BASE" "$admin_scope"
+jq 'del(.clientScopeMappings)' "$BASE" >"$tmp/no-scope-mapping.json"
+rejects "TC-980-14 a fixture without the clientScopeMappings entry fails" "$tmp/no-scope-mapping.json" "$admin_scope"
 
 # --- TC-980-15: the default clients are disabled -------------------------------------------------------
 for c in account account-console admin-cli broker security-admin-console; do

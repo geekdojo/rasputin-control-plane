@@ -230,6 +230,23 @@
     { "clientId": "broker", "enabled": false },
     { "clientId": "security-admin-console", "enabled": false }
   ],
+  "clientScopeMappings": {
+    "realm-management": [
+      {
+        "client": "rasputin-admin",
+        "roles": [
+          "manage-users",
+          "view-users",
+          "query-users",
+          "query-groups",
+          "manage-clients",
+          "view-realm",
+          "manage-realm",
+          "view-events"
+        ]
+      }
+    ]
+  },
   "users": [
     {
       "username": "service-account-rasputin-admin",
