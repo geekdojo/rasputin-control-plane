@@ -1,7 +1,7 @@
 // Package identitytest runs the real, pinned identity service for a test
 // package: Keycloak 26.8.2 from the pinned tarball on the pinned Temurin JRE,
 // built with the production build options (identity/keycloak-build.conf),
-// against digest-pinned PostgreSQL 18.6 in a container. Headscale, at the
+// against digest-pinned PostgreSQL 18.7 in a container. Headscale, at the
 // image mesh-images.json pins, and Chrome for Testing, driven by chromedp,
 // start on demand. A test package gets one of each through Package
 // (package.go), and its TestMain tears them down with proof: no process, no
