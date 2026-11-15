@@ -63,6 +63,15 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   answers `/health` over a client trusting only its CA (`TestIdentity_Headscale`).
 - The pinned Chrome renders Keycloak's sign-in page through the front, and its body carries
   `data-page-id="login-login"` (`TestIdentity_Browser`).
+- Under the unit's `-Djava.awt.headless=true`, Keycloak on the pinned JRE renders the
+  authenticator-code QR: the pinned Chrome signs the harness user in with
+  `kc_action=CONFIGURE_TOTP`, the page is `login-login-config-totp`, and the
+  `kc-totp-secret-qr-code` image's `data:image/png;base64` URI decodes as a PNG with non-empty
+  bounds (`TestIdentity_TOTPQRUnderHeadlessJRE` in `jre_functional_test.go`, capability row
+  T72; Keycloak on the pinned JRE is row T71,
+  [geekdojo-brain#969](https://github.com/geekdojo/geekdojo-brain/issues/969)). It runs in its
+  own browser context and never submits the enrolment form, so the harness user gets no OTP
+  credential. It does not prove what the QR encodes.
 - No record the harness or the client logged, Keycloak's own output lines included, holds the
   user password, the database password, an authorization code or token bytes
   (`TestIdentity_NoSecretInLogs`).
@@ -214,3 +223,5 @@ Then run the self-test as above.
 | TC-966-19 | The first and a later CI run's cache steps |
 | TC-966-20 | `TestIdentity_NoSecretInLogs` (CI) |
 | TC-966-21 | The `api-coverage` artifact's counts for the self-test's functions (CI) |
+| TC-969-18 | `TestIdentity_TOTPQRUnderHeadlessJRE` (CI) |
+| TC-969-21 | `TestIdentity_TOTPQRUnderHeadlessJRE` running first, then `TestIdentity_PasswordCodeFlowPKCE`, `TestIdentity_Browser`, `TestIdentity_NoSecretInLogs` and `Package.Run`'s proof (CI) |
