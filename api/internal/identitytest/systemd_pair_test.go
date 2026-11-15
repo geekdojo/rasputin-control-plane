@@ -145,6 +145,10 @@ type systemdPair struct {
 	root   string // the pair's temporary root
 	DBUnit string
 	KCUnit string
+	// Target Wants= both units, as multi-user.target wants the appliance's:
+	// it keeps an inactive Keycloak unit loaded, so reset-failed and restart
+	// find it.
+	Target string
 	// PGData is the size-limited tmpfs the database's data directory lives
 	// on.
 	PGData string
@@ -173,6 +177,7 @@ func newPair(t *testing.T, cfg Config) *systemdPair {
 		root:   t.TempDir(),
 		DBUnit: "rasputin-idst-db-" + tag + ".service",
 		KCUnit: "rasputin-idst-kc-" + tag + ".service",
+		Target: "rasputin-idst-" + tag + ".target",
 	}
 	p.PGData = filepath.Join(p.root, "pgdata")
 	p.Exits = filepath.Join(p.root, "exits")
@@ -308,10 +313,11 @@ type KeycloakOptions struct {
 }
 
 // StartKeycloak builds a Keycloak home, TLS and config for the pair's
-// database under fixed loopback ports, and starts it as a unit with Requires=
-// and After= on the database, Restart=always, SuccessExitStatus=143 and the
-// unit's JVM environment. It returns once systemctl start returns, which for
-// a unit with no start wait is as soon as the JVM is spawned.
+// database under fixed loopback ports, writes it as a unit with Requires= and
+// After= on the database, Restart=always, SuccessExitStatus=143 and the
+// unit's JVM environment, and starts it through the pair's target. It
+// returns once systemctl start returns, which for a unit with no start wait
+// is as soon as the JVM is spawned.
 func (p *systemdPair) StartKeycloak(ctx context.Context, opt KeycloakOptions) error {
 	h, err := New(p.cfg)
 	if err != nil {
@@ -399,8 +405,12 @@ func (p *systemdPair) StartKeycloak(ctx context.Context, opt KeycloakOptions) er
 	if err := p.writeUnit(ctx, p.KCUnit, u.String()); err != nil {
 		return err
 	}
-	if out, err := p.run(ctx, "systemctl", "start", p.KCUnit); err != nil {
-		return fmt.Errorf("start the identity service unit: %w: %s", err, out)
+	target := "[Unit]\nDescription=identitytest identity pair " + p.tag + "\nWants=" + p.KCUnit + " " + p.DBUnit + "\n"
+	if err := p.writeUnit(ctx, p.Target, target); err != nil {
+		return err
+	}
+	if out, err := p.run(ctx, "systemctl", "start", p.Target); err != nil {
+		return fmt.Errorf("start the identity pair's target: %w: %s", err, out)
 	}
 	return nil
 }
@@ -446,7 +456,7 @@ func (p *systemdPair) cleanup() {
 	t := p.t
 	ctx := context.Background() // t.Context() has ended by now
 	var errs []error
-	for _, u := range []string{p.KCUnit, p.DBUnit} {
+	for _, u := range []string{p.Target, p.KCUnit, p.DBUnit} {
 		_, _ = p.run(ctx, "systemctl", "stop", u) // a unit never started has nothing to stop
 	}
 	for _, u := range p.units {
@@ -483,7 +493,7 @@ func (p *systemdPair) cleanup() {
 		errs = append(errs, p.KC.Close(ctx))
 	}
 	// The proof.
-	for _, u := range []string{p.KCUnit, p.DBUnit} {
+	for _, u := range []string{p.Target, p.KCUnit, p.DBUnit} {
 		m, err := unitProps(ctx, p.run, u, "LoadState")
 		switch {
 		case err != nil:

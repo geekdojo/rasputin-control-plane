@@ -18,8 +18,8 @@ import (
 // runs out of memory and exits with Java's status 3, which systemd hands to
 // ExecStopPost= as EXIT_CODE=exited and EXIT_STATUS=3. Under Restart=always
 // it loops until systemd's own start limit (StartLimitBurst=3,
-// StartLimitIntervalSec=infinity) fails the unit after two automatic
-// restarts, with no stop issued. The
+// StartLimitIntervalSec=infinity) fails the unit after its third run, with
+// no stop issued. The
 // stand-in writes one record per invocation; a reading then gives
 // out-of-memory and exactly one identity.service_exit job per record, and
 // consumes every record but the one `last` names; a second reading adds none.
@@ -42,11 +42,10 @@ func TestIdentitySystemd_OutOfMemory(t *testing.T) {
 	}
 
 	// The loop's end is the unit in failed with no stop issued. The
-	// runner's systemd checks the start limit before an automatic restart
-	// and leaves the unit failed with the last run's Result (exit-code), not
-	// start-limit-hit (measured in CI), so the limit is shown by NRestarts:
-	// StartLimitBurst starts are the first and StartLimitBurst-1 automatic
-	// restarts.
+	// runner's systemd leaves it failed with the last run's Result
+	// (exit-code), not start-limit-hit, and counts the restart the limit
+	// refused in NRestarts (both measured in CI), so the limit is shown by
+	// the records below: exactly StartLimitBurst runs.
 	var props map[string]string
 	err = proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
 		m, err := unitProps(ctx, pair.run, pair.KCUnit, "ActiveState", "SubState", "Result", "NRestarts")
@@ -61,9 +60,6 @@ func TestIdentitySystemd_OutOfMemory(t *testing.T) {
 		t.Fatalf("%v\nidentity service output:\n%s", errNamed("the identity unit is failed", err), pair.KCOutput())
 	}
 	t.Logf("TC-979-02: the identity unit is failed, Result=%s, NRestarts=%s", props["Result"], props["NRestarts"])
-	if props["NRestarts"] != "2" {
-		t.Fatalf("NRestarts = %s, want 2: the loop did not end on the start limit of 3", props["NRestarts"])
-	}
 
 	// The snapshot: exactly three records plus last, each systemd's own
 	// out-of-memory exit, and last naming the unit's last invocation.

@@ -115,7 +115,7 @@ func TestIdentitySystemd_FullPartition(t *testing.T) {
 		if len(steps) == 1 {
 			got = string(steps[0].Result) + " " + steps[0].Error
 		}
-		t.Fatalf("recover job steps: %v (%v), want restarted:true", got, err)
+		t.Fatalf("recover job steps: %v (%v), want restarted:true\nrecovery log:\n%s", got, err, rec.Text())
 	}
 	awaitState(t, ctx, cfg.Logger, mon, identitystate.Ready, pair.KCOutput)
 	if due, _ := rcv.Due(ctx); due {
