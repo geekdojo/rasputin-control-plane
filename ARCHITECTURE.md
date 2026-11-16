@@ -31,13 +31,15 @@ node reads a small seed file on first boot and becomes whatever the seed says.
 
 | Role | Architectures | What it runs |
 |---|---|---|
-| `controlplane` | amd64 (Intel N100 class) or arm64 (Raspberry Pi 4 / 5 / CM5) | `rasputin-api` (web UI, job engine, embedded NATS) + `rasputin-agent` + mesh coordinator |
+| `controlplane` | amd64 (Intel N100 class) or arm64 (Raspberry Pi 5 / CM5), 4 GB RAM or more | `rasputin-api` (web UI, job engine, embedded NATS) + `rasputin-agent` + mesh coordinator |
 | `compute` | amd64 or arm64 | `rasputin-agent` + Docker (the app substrate) |
 | `firewall` | **amd64 only** (N100 + dual Intel i226-V) | OpenWrt + `rasputin-agent` |
 
 The firewall is deliberately x86-only: a Raspberry Pi can't be the firewall
 node (one PCIe lane, a 5 W PCIe budget, single 1GbE PHY). The compute and
-controlplane roles run on either architecture.
+controlplane roles run on either architecture. Cortex-A72 boards (Raspberry Pi 4,
+Pi 400, CM4, CM4S) are compute-only since 2026-11-08; nothing in the image or the
+provisioning tools enforces that yet.
 
 ## The repos
 
