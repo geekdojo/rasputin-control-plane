@@ -8,6 +8,7 @@ const (
 	actorOperator
 	actorDeploy
 	actorCheck
+	actorRuntime
 )
 
 // Actor is the identity the endpoint or job passes to the Service, which
@@ -16,7 +17,8 @@ type Actor struct {
 	kind actorKind
 	// user is the operator's user ID.
 	user string
-	// app and node are the deploy job's app and the node it delivers to.
+	// app and node are the deploy job's app and the node it delivers to, or
+	// the runtime caller's app and the node whose relay carried the call.
 	app, node string
 }
 
@@ -41,6 +43,13 @@ func CheckActor() Actor {
 	return Actor{kind: actorCheck}
 }
 
+// RuntimeActor is app appID calling at runtime through its relay socket on
+// node, the node whose agent carried the call (geekdojo/geekdojo-brain#1081).
+// The broker authenticated node; the agent stamped appID.
+func RuntimeActor(appID, node string) Actor {
+	return Actor{kind: actorRuntime, app: appID, node: node}
+}
+
 // kindName is the actor kind as its log records name it.
 func (a Actor) kindName() string {
 	switch a.kind {
@@ -50,6 +59,8 @@ func (a Actor) kindName() string {
 		return "deploy"
 	case actorCheck:
 		return "check"
+	case actorRuntime:
+		return "runtime"
 	}
 	return "none"
 }

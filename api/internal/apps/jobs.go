@@ -294,25 +294,57 @@ func StopWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn) jobs.Workfl
 // were not touched). The reverse ordering — row first, volumes second — is
 // the failure mode this issue exists to fix: data with no owner.
 //
+// With any tile granted an identity (identity.Any), a teardown_relay step
+// after teardown_leaf removes the app's relay socket from its node
+// (geekdojo/geekdojo-brain#1081). With none granted, the shipped wiring, the
+// saga's steps are the four above.
+//
 // It refuses a DeleteSecretsDeps with a nil field.
-func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover, d DeleteSecretsDeps) (jobs.Workflow, error) {
+func DeleteWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, removeLeaf LeafRemover, d DeleteSecretsDeps, identity AppIdentity) (jobs.Workflow, error) {
 	if err := d.check("DeleteWorkflow"); err != nil {
 		return jobs.Workflow{}, err
 	}
-	return jobs.Workflow{
-		Kind: "app.delete",
-		Steps: []jobs.WorkflowStep{
-			// Keeping data is one `compose down`. Deleting it is a `down`, a
-			// volume listing (appVolumesListRPC) and a `down -v` with the
-			// sweep behind it, each a single round trip to the node.
-			{Name: "stop", Timeout: 90 * time.Second, Do: deleteStop(store, inv, nc, d.Store)},
-			{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc, removeLeaf)},
-			{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
-			// One store call per entry. Never retried: a retry would be a
-			// timer-driven re-attempt, and a failure names what is left.
-			{Name: "destroy_secrets", Timeout: 60 * time.Second, Do: deleteDestroySecrets(d)},
-		},
-	}, nil
+	steps := []jobs.WorkflowStep{
+		// Keeping data is one `compose down`. Deleting it is a `down`, a
+		// volume listing (appVolumesListRPC) and a `down -v` with the
+		// sweep behind it, each a single round trip to the node.
+		{Name: "stop", Timeout: 90 * time.Second, Do: deleteStop(store, inv, nc, d.Store)},
+		{Name: "teardown_leaf", Timeout: 10 * time.Second, Do: deleteLeaf(store, inv, nc, removeLeaf)},
+	}
+	if identity.Any() {
+		steps = append(steps, jobs.WorkflowStep{Name: "teardown_relay", Timeout: 10 * time.Second, Do: deleteRelay(store, inv, identity)})
+	}
+	steps = append(steps,
+		jobs.WorkflowStep{Name: "remove", Timeout: 2 * time.Second, Do: deleteRemove(store, nc)},
+		// One store call per entry. Never retried: a retry would be a
+		// timer-driven re-attempt, and a failure names what is left.
+		jobs.WorkflowStep{Name: "destroy_secrets", Timeout: 60 * time.Second, Do: deleteDestroySecrets(d)},
+	)
+	return jobs.Workflow{Kind: "app.delete", Steps: steps}, nil
+}
+
+// deleteRelay removes the app's relay socket from its node
+// (geekdojo/geekdojo-brain#1081). Best effort, as deleteLeaf is: an offline
+// node, an agent that does not answer or one that refuses is a WARN line and
+// the delete proceeds. The revocation that matters is the api's: once the row
+// is gone, the api refuses every call naming the app, so a socket left on an
+// offline node is answered by nothing.
+func deleteRelay(store *Store, inv *inventory.Store, identity AppIdentity) jobs.DoFn {
+	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		spec, err := parseDeleteSpec(sc.Spec)
+		if err != nil {
+			return nil, err
+		}
+		app, err := loadAppByID(sc, store, inv, spec.AppID)
+		if err != nil {
+			sc.Log("warn", "skip relay teardown: "+err.Error())
+			return nil, nil
+		}
+		if err := identity.revoke(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app); err != nil {
+			sc.Log("warn", fmt.Sprintf("relay teardown of %s on %s failed: %v", app.ID, app.TargetNode, err))
+		}
+		return nil, nil
+	}
 }
 
 // ReconcileWorkflow sweeps every app's actual status from its target node
@@ -865,8 +897,11 @@ func deployLoad(store *Store, inv *inventory.Store) jobs.DoFn {
 // each value leave their secret.Value, into the bus command to the target
 // agent and nothing else (ADR-0006 D11a, ADR-0009): the compose as text
 // holding references only, the values in the typed SecretEnv map beside it
-// (geekdojo/geekdojo-brain#776). An empty env sends no map.
-func deployCommand(app *App, compose secret.Value, env map[string]secret.Value) ([]byte, error) {
+// (geekdojo/geekdojo-brain#776). An empty env sends no map. relay is whether
+// the app was issued its runtime identity (geekdojo/geekdojo-brain#1081);
+// false sends no field, so an app that is not granted gets the bytes it got
+// before the field existed.
+func deployCommand(app *App, compose secret.Value, env map[string]secret.Value, relay bool) ([]byte, error) {
 	var secretEnv proto.AppSecretEnv
 	if len(env) > 0 {
 		secretEnv = make(proto.AppSecretEnv, len(env))
@@ -880,6 +915,7 @@ func deployCommand(app *App, compose secret.Value, env map[string]secret.Value) 
 		ComposeYAML:       string(compose.Reveal()),
 		WorkBudgetSeconds: app.DeployBudgetSeconds,
 		SecretEnv:         secretEnv,
+		Relay:             relay,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode deploy command: %w", err)
@@ -946,10 +982,14 @@ func pushStep(store *Store, inv *inventory.Store, nc *nats.Conn, appID specAppID
 		// or announced, so the app is left where it was. On a revert, edit or
 		// upgrade it is not: their pull step has already marked the app
 		// DEPLOYING, and that status is left as the pull set it.
-		if err := identity.issue(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app); err != nil {
+		//
+		// A granted app's command carries Relay, so its agent mounts the relay
+		// socket the issue just opened (geekdojo/geekdojo-brain#1081).
+		relay, err := identity.issue(jobs.ContextWithJobID(sc.Ctx, sc.JobID), app)
+		if err != nil {
 			return nil, fmt.Errorf("apps: issue the identity of %s: %w", app.ID, err)
 		}
-		cmd, err := deployCommand(app, compose, env)
+		cmd, err := deployCommand(app, compose, env, relay)
 		if err != nil {
 			return nil, err
 		}
@@ -1201,7 +1241,7 @@ func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		names, err := store.DeleteWithSecretNames(sc.Ctx, spec.AppID)
+		names, runtimeNames, err := store.DeleteWithSecretNames(sc.Ctx, spec.AppID)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
@@ -1215,7 +1255,7 @@ func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 		}
 		emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
 		sc.Log("info", "removed from the app list")
-		return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "true", SecretNames: names})
+		return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "true", SecretNames: names, RuntimeNames: runtimeNames})
 	}
 }
 

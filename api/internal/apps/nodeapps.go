@@ -77,10 +77,12 @@ func (n *NodeApps) CheckSecrets(ctx context.Context, nodeID string) error {
 		return &NodeSecretsError{Kind: ErrNodeSecretsUnreadable, Cause: err,
 			Sentence: "The recorded secrets of the node's apps could not be read, so the node was not removed."}
 	}
+	// An app's runtime entries (geekdojo/geekdojo-brain#1081) are names in
+	// the store and recorded ones.
 	var names, refs int
 	for _, a := range apps {
-		names += len(a.Names)
-		refs += a.RecordedRefs
+		names += len(a.Names) + len(a.RuntimeNames)
+		refs += a.RecordedRefs + len(a.RuntimeNames)
 	}
 	if names == 0 {
 		return nil
@@ -98,7 +100,8 @@ func (n *NodeApps) CheckSecrets(ctx context.Context, nodeID string) error {
 }
 
 // Remove deletes the rows of every app on nodeID, and their refs, then every
-// secret those apps had in the store, on user's behalf, and returns the
+// secret those apps had in the store, the entries they wrote at runtime
+// included, on user's behalf, and returns the
 // removed app ids. A database error is returned as it is, and nothing is
 // deleted from the store. When only store deletes fail, the ids come back
 // with a NodeSecretsError of kind ErrSecretsLeft naming each entry left.
@@ -112,10 +115,11 @@ func (n *NodeApps) Remove(ctx context.Context, user, nodeID string) ([]string, e
 		return nil, err
 	}
 	ids := make([]string, len(removed))
-	var refs []SecretRef
+	var refs []storeEntry
 	for i, a := range removed {
 		ids[i] = a.AppID
 		refs = append(refs, appRefs(a.AppID, a.Names)...)
+		refs = append(refs, runtimeRefs(a.AppID, a.RuntimeNames)...)
 	}
 	if len(refs) == 0 || !n.d.Store.Configured() {
 		// With no store, CheckSecrets refused any recorded reference, so
@@ -128,7 +132,7 @@ func (n *NodeApps) Remove(ctx context.Context, user, nodeID string) ([]string, e
 	}
 	failed := make([]string, len(failedRefs))
 	for i, r := range failedRefs {
-		failed[i] = r.AppID + "/" + r.Name
+		failed[i] = r.AppID + "/" + r.label()
 	}
 	n.d.Log.LogAttrs(ctx, slog.LevelError, "secrets of a removed node's apps not deleted from the secret store",
 		slog.String("component", "apps"),

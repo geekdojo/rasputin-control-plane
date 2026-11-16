@@ -375,7 +375,8 @@ jobs:
           RASPUTIN_APPSECRET_FUNCTIONAL: required
           # The same for the secret store smoke test: the binary the step
           # above installed, and a missing one fails this required job
-          # (geekdojo-brain#753, docs/testing-secret-store.md).
+          # (geekdojo-brain#753, docs/testing-secret-store.md). The app relay's
+          # scope test runs on the same switch (docs/testing-app-relay.md).
           RASPUTIN_SECRETSTORE_BIN: ${{ runner.temp }}/openbao/bao
           RASPUTIN_SECRETSTORE_FUNCTIONAL: required
           # The same for the identity harness's self-test: the install the
@@ -391,7 +392,8 @@ jobs:
           # The agent's Compose test for secret values carried beside the
           # compose (geekdojo-brain#776) must run against the runner's real
           # Compose and pass rather than skip, as the api's does above
-          # (docs/testing-appsecret-compose.md).
+          # (docs/testing-appsecret-compose.md); so must the app relay's mount
+          # test (docs/testing-app-relay.md).
           RASPUTIN_APPSECRET_FUNCTIONAL: required
         run: |
           modules="$(./scripts/workspace-modules.sh)"

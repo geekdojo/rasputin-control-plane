@@ -180,7 +180,7 @@ func TestDeploySecrets_CallOrderAndEnvConfinement(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, detail, err := f.c.Deploy(ctx, envAppID, "app", refCompose, env)
+	status, detail, err := f.c.Deploy(ctx, envAppID, "app", refCompose, env, "")
 	if err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy = %s, %q, %v", status, detail, err)
 	}
@@ -299,7 +299,7 @@ func TestDeploySecrets_GuardRefusals(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.guard = tc.guard
-			status, detail, err := f.c.Deploy(ctx, envAppID, "app", refCompose, env)
+			status, detail, err := f.c.Deploy(ctx, envAppID, "app", refCompose, env, "")
 			if err == nil || status != proto.AppStatusFailed {
 				t.Fatalf("Deploy = %s, %v; want a refusal", status, err)
 			}
@@ -323,7 +323,7 @@ func TestDeploySecrets_GuardRefusals(t *testing.T) {
 func TestDeploySecrets_GuardSkipsLeadingWarnings(t *testing.T) {
 	f := newFakeCompose(t)
 	f.guard = "time=\"2026-10-27T00:00:00Z\" level=warning msg=\"/x/docker-compose.yml: the attribute `version` is obsolete\"\n" + guardJSON + "\n"
-	status, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: canaryValue(t)})
+	status, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: canaryValue(t)}, "")
 	if err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy = %s, %q, %v", status, detail, err)
 	}
@@ -339,7 +339,7 @@ func TestDeploySecrets_GuardSkipsLeadingWarnings(t *testing.T) {
 func TestDeploySecrets_GuardAcceptsListFormAndExtensions(t *testing.T) {
 	f := newFakeCompose(t)
 	f.guard = `{"services":{"web":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"],"x-note":"${RASPUTIN_SECRET_DB_PASSWORD}"}},"x-common":{"environment":["DB_PASSWORD=${RASPUTIN_SECRET_DB_PASSWORD}"]}}`
-	if status, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: "v"}); err != nil {
+	if status, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: "v"}, ""); err != nil {
 		t.Fatalf("Deploy = %s, %q, %v", status, detail, err)
 	}
 }
@@ -407,7 +407,7 @@ func TestDeployWithoutSecrets_ClearsAStaleRecord(t *testing.T) {
 	if err := atrest.WriteSecretFile(f.c.configHashRecordPath(envAppID), []byte(`{"web":"`+envHashA+`"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, detail, err := f.c.Deploy(ctx, envAppID, "app", "services:\n  web:\n    image: busybox:1.36.1\n", nil); err != nil {
+	if _, detail, err := f.c.Deploy(ctx, envAppID, "app", "services:\n  web:\n    image: busybox:1.36.1\n", nil, ""); err != nil {
 		t.Fatalf("Deploy: %q, %v", detail, err)
 	}
 	for _, c := range f.composeCalls() {
@@ -437,7 +437,7 @@ func TestDeployWithoutSecrets_ClearsAStaleRecord(t *testing.T) {
 func TestDeploySecrets_RecordFailureStopsBeforeUp(t *testing.T) {
 	f := newFakeCompose(t)
 	f.hashWith = "level=warning msg=\"nothing\"\n"
-	_, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: "v"})
+	_, detail, err := f.c.Deploy(context.Background(), envAppID, "app", refCompose, proto.AppSecretEnv{envKey: "v"}, "")
 	if err == nil || !strings.Contains(detail, "no service hash") {
 		t.Fatalf("Deploy = %q, %v; want the record failure", detail, err)
 	}
@@ -470,7 +470,7 @@ type recordingBackend struct {
 	fail    bool
 }
 
-func (r *recordingBackend) Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv) (proto.AppStatus, string, error) {
+func (r *recordingBackend) Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv, _ string) (proto.AppStatus, string, error) {
 	r.mu.Lock()
 	r.deploys++
 	r.env = env
@@ -528,7 +528,7 @@ func newRecordingBackend(t *testing.T, fail bool) *recordingBackend {
 func TestHandlers_DeploySecretsRoutingAndKeyValidation(t *testing.T) {
 	nc := startNATS(t)
 	b := newRecordingBackend(t, false)
-	subs, err := RegisterHandlers(nc, "node-1", b)
+	subs, err := RegisterHandlers(nc, "node-1", b, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -562,7 +562,7 @@ func TestHandleDeploy_NeverLogsValues(t *testing.T) {
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 	nc := startNATS(t)
 	b := newRecordingBackend(t, true)
-	subs, err := RegisterHandlers(nc, "node-1", b)
+	subs, err := RegisterHandlers(nc, "node-1", b, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -594,7 +594,7 @@ func TestMockBackend_NeverPersistsSecretEnv(t *testing.T) {
 		t.Fatal(err)
 	}
 	canary := canaryValue(t)
-	if _, _, err := mb.Deploy(context.Background(), "a1", "x", refCompose, proto.AppSecretEnv{envKey: canary}); err != nil {
+	if _, _, err := mb.Deploy(context.Background(), "a1", "x", refCompose, proto.AppSecretEnv{envKey: canary}, ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "a1", mockStateFileName)); err != nil {

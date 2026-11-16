@@ -125,6 +125,14 @@ type AppDeployCmd struct {
 	// map, and omitempty keeps that command byte-identical to the one an older
 	// api sent on AppDeploySubject.
 	SecretEnv AppSecretEnv `json:"secretEnv,omitempty"`
+
+	// Relay says the app was granted a runtime identity
+	// (geekdojo/geekdojo-brain#1081): the agent bind-mounts the app's relay
+	// directory (AppRelayMountPath) into every service, and refuses the
+	// deploy when the app has no relay socket open on the node. False for
+	// every app that is not granted, and omitempty keeps that command
+	// byte-identical to the one sent before the field existed.
+	Relay bool `json:"relay,omitempty"`
 }
 
 // LogValue renders the command for log/slog without its compose or its
@@ -136,6 +144,7 @@ func (c AppDeployCmd) LogValue() slog.Value {
 		slog.String("name", c.Name),
 		slog.Int("workBudgetSeconds", c.WorkBudgetSeconds),
 		slog.Any("secretEnv", c.SecretEnv),
+		slog.Bool("relay", c.Relay),
 	)
 }
 

@@ -152,7 +152,7 @@ func TestMockRemoveCompose_RemovesTheComposeAndKeepsState(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	if _, _, err := mb.Deploy(ctx, "a1", "A", "services: {}\n", nil); err != nil {
+	if _, _, err := mb.Deploy(ctx, "a1", "A", "services: {}\n", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := mb.RemoveCompose(ctx, "a1"); err != nil {
@@ -202,7 +202,7 @@ func (r *stopCallLog) RemoveCompose(_ context.Context, appID string) error {
 func stopVia(t *testing.T, b Backend, payload []byte) proto.AppStopAck {
 	t.Helper()
 	nc := startNATS(t)
-	subs, err := RegisterHandlers(nc, "node-1", b)
+	subs, err := RegisterHandlers(nc, "node-1", b, nil)
 	if err != nil {
 		t.Fatalf("RegisterHandlers: %v", err)
 	}

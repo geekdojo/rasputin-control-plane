@@ -164,7 +164,7 @@ func TestSecretEnvFunctional_DeployQuiesceDelete(t *testing.T) {
 	env := proto.AppSecretEnv{"RASPUTIN_SECRET_CANARY": canary}
 
 	// TC-776-26.
-	status, detail, err := c.Deploy(ctx, appID, "fn", secretCompose(""), env)
+	status, detail, err := c.Deploy(ctx, appID, "fn", secretCompose(""), env, "")
 	if err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("Deploy = %s, %q, %v", status, detail, err)
 	}
@@ -221,7 +221,7 @@ func TestSecretEnvFunctional_PlacementRefusalAndFailedDetail(t *testing.T) {
 		secretCompose("${RASPUTIN_SECRET_CANARY}"): "services.web.user",
 		xWeb: "services.x-web.user",
 	} {
-		_, detail, err := c.Deploy(ctx, refused, "fn", compose, env)
+		_, detail, err := c.Deploy(ctx, refused, "fn", compose, env, "")
 		if err == nil || !strings.Contains(detail, path) || strings.Contains(detail, canary) {
 			t.Fatalf("Deploy = %q, %v; want the placement refusal naming %s", detail, err, path)
 		}
@@ -230,7 +230,7 @@ func TestSecretEnvFunctional_PlacementRefusalAndFailedDetail(t *testing.T) {
 		}
 	}
 
-	status, detail, err := c.Deploy(ctx, failed, "fn", secretCompose("no-such-user-776"), env)
+	status, detail, err := c.Deploy(ctx, failed, "fn", secretCompose("no-such-user-776"), env, "")
 	if err == nil && status == proto.AppStatusRunning {
 		t.Fatal("a deploy with a nonexistent user came up running")
 	}
@@ -255,14 +255,14 @@ func TestSecretEnvFunctional_UpgradeFromInline(t *testing.T) {
 	canary := canaryValue(t)
 
 	inline := strings.Replace(secretCompose(""), "${RASPUTIN_SECRET_CANARY}", canary, 1)
-	if status, detail, err := c.Deploy(ctx, appID, "fn", inline, nil); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := c.Deploy(ctx, appID, "fn", inline, nil, ""); err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("inline Deploy = %s, %q, %v", status, detail, err)
 	}
 	assertRunningCurrent(t, c, appID)
 	before := oneContainer(t, appID)
 
 	env := proto.AppSecretEnv{"RASPUTIN_SECRET_CANARY": canary}
-	if status, detail, err := c.Deploy(ctx, appID, "fn", secretCompose(""), env); err != nil || status != proto.AppStatusRunning {
+	if status, detail, err := c.Deploy(ctx, appID, "fn", secretCompose(""), env, ""); err != nil || status != proto.AppStatusRunning {
 		t.Fatalf("reference Deploy = %s, %q, %v", status, detail, err)
 	}
 	after := oneContainer(t, appID)

@@ -77,14 +77,15 @@ func secretRefNames(ctx context.Context, q queryer, appID string) ([]string, err
 }
 
 // DeleteWithSecretNames deletes app id's row, and with it its app_secret_refs
-// rows, and returns the secret names it had (secretNames over the recorded
-// references and both composes). The names are read in the same transaction
-// as the delete, because the references cascade with the row. A missing row
-// is sql.ErrNoRows.
-func (s *Store) DeleteWithSecretNames(ctx context.Context, id string) (names []string, err error) {
+// and app_runtime_secrets rows, and returns the secret names it had
+// (secretNames over the recorded references and both composes) and the names
+// of the entries it wrote itself at runtime (geekdojo/geekdojo-brain#1081).
+// The names are read in the same transaction as the delete, because both
+// cascade with the row. A missing row is sql.ErrNoRows.
+func (s *Store) DeleteWithSecretNames(ctx context.Context, id string) (names, runtimeNames []string, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() {
 		if err != nil {
@@ -93,24 +94,28 @@ func (s *Store) DeleteWithSecretNames(ctx context.Context, id string) (names []s
 	}()
 	var compose, previous string
 	if err := tx.QueryRowContext(ctx, `SELECT compose_yaml, previous_compose_yaml FROM apps WHERE id = ?`, id).Scan(&compose, &previous); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	refs, err := secretRefNames(ctx, tx, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	names = secretNames(refs, compose, previous)
+	runtimeNames, err = runtimeSecretNames(ctx, tx, id)
+	if err != nil {
+		return nil, nil, err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM apps WHERE id = ?`, id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil, sql.ErrNoRows
+		return nil, nil, sql.ErrNoRows
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return names, nil
+	return names, runtimeNames, nil
 }
 
 // UnusedSecretRefs returns the names app appID's app_secret_refs rows record
@@ -189,12 +194,14 @@ func (s *Store) DropUnusedSecretRefs(ctx context.Context, appID string) (dropped
 }
 
 // AppSecretNames is one app's secret names, as node removal reads them: every
-// name the app may have in the store (secretNames), and how many of them its
-// app_secret_refs rows record.
+// name the app may have in the store (secretNames), how many of them its
+// app_secret_refs rows record, and the names of the entries it wrote itself
+// at runtime (geekdojo/geekdojo-brain#1081).
 type AppSecretNames struct {
 	AppID        string
 	Names        []string
 	RecordedRefs int
+	RuntimeNames []string
 }
 
 // SecretNamesByTargetNode reads AppSecretNames for every app whose
@@ -228,13 +235,17 @@ func secretNamesByTargetNode(ctx context.Context, q queryer, nodeID string) ([]A
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, AppSecretNames{AppID: r.id, Names: secretNames(refs, r.compose, r.previous), RecordedRefs: len(refs)})
+		runtime, err := runtimeSecretNames(ctx, q, r.id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, AppSecretNames{AppID: r.id, Names: secretNames(refs, r.compose, r.previous), RecordedRefs: len(refs), RuntimeNames: runtime})
 	}
 	return out, nil
 }
 
 // DeleteByTargetNodeWithSecretNames removes every apps row whose target_node
-// is nodeID, and with them their app_secret_refs rows, and returns each
+// is nodeID, and with them their app_secret_refs and app_runtime_secrets rows, and returns each
 // app's AppSecretNames read in the same transaction, because the references
 // cascade with the rows. A node with no apps returns an empty result and
 // writes nothing.

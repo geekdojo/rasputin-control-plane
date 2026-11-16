@@ -33,7 +33,7 @@ func deleteWorkflowForTest(t *testing.T, f *apiFixture) jobs.Workflow {
 	t.Helper()
 	w, err := apps.DeleteWorkflow(f.appsStore, f.inv, f.nc, nil, apps.DeleteSecretsDeps{
 		Secrets: noopSecretDeleter{}, Store: readyStoreState{}, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	})
+	}, apps.AppIdentity{})
 	if err != nil {
 		t.Fatalf("DeleteWorkflow: %v", err)
 	}

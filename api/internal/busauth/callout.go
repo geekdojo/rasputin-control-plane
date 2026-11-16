@@ -208,13 +208,19 @@ func (r *Responder) mintUserJWT(userNkey, nodeID string) (string, error) {
 	uc.Permissions.Pub.Deny.Add(proto.NodeCmdFilter(nodeID))
 	// A node subscribes to its own commands and NOTHING else — in particular
 	// not _INBOX.>. Inbox subscriptions exist only to receive replies to
-	// requests a connection makes, and the agent makes none: it only answers,
-	// through the Resp grant below. The api's requests to every node use
+	// requests a connection makes. The api's requests to every node use
 	// nats.go's shared _INBOX. prefix, so an _INBOX.> subscribe grant let any
 	// node read every other node's replies to the api — the PPPoE WAN password
 	// in firewall.get, the passphrase-sealed backup key in storage.* (geekdojo/
-	// geekdojo-brain#451). If the agent ever needs to make a request, give it a
-	// per-node inbox prefix; do not re-add the shared one.
+	// geekdojo-brain#451). Do not re-add the shared one.
+	//
+	// The agent makes one kind of request: an app's call on its relay socket
+	// (geekdojo/geekdojo-brain#1081), published on rasputin.node.<id>.relay.*
+	// under the Pub grant above. It names a reply subject on its OWN command
+	// lane (proto.AppSecretReplyPrefix), which this grant already lets it
+	// subscribe to and the Pub deny above stops every node publishing on, and
+	// the api refuses a reply subject outside the publishing node's prefix. So
+	// that request needs no inbox grant of any kind.
 	uc.Permissions.Sub.Allow.Add(scope + ".cmd.>")
 	// Let the agent answer request-reply (api → agent commands) by publishing
 	// to the reply subject it received, without granting blanket pub. Both

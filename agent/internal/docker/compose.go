@@ -93,7 +93,7 @@ const composeFileName = "docker-compose.yml"
 // in the directory arrived through a tile's own bind mount.
 // The mock backend's state.json is here too: TightenAppState serves both
 // backends, and a dev box that switches between them keeps one state tree.
-var agentWrittenFiles = []string{composeFileName, volumeRecordFile, mockStateFileName, configHashRecordFile}
+var agentWrittenFiles = []string{composeFileName, volumeRecordFile, mockStateFileName, configHashRecordFile, relayOverrideFile}
 
 // projectName is what `docker compose -p` sees. Prefixed so we can identify
 // (and clean up) Rasputin-managed projects. App IDs are ULIDs so they're
@@ -115,7 +115,12 @@ func projectName(appID string) string {
 // reach exactly two calls, as their process environment: the `config --hash`
 // whose output is recorded for Status (secretenv.go), and `up`. Every other
 // call runs without them, and no file this agent writes holds one.
-func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv) (proto.AppStatus, string, error) {
+//
+// With relayDir set (geekdojo/geekdojo-brain#1081), the relay override binds
+// it read-only into every service of the compose's normalized model, and
+// every later compose call reads the override beside the compose
+// (relayoverride.go). With relayDir empty, a leftover override is removed.
+func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML string, env proto.AppSecretEnv, relayDir string) (proto.AppStatus, string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if !safeAppID(appID) {
@@ -125,10 +130,28 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	if err := atrest.EnsureSecretDir(c.appDir(appID)); err != nil {
 		return proto.AppStatusFailed, "mkdir: " + err.Error(), err
 	}
-	if len(env) > 0 {
-		if err := c.guardSecretRefs(ctx, appID, composeYAML, env); err != nil {
+	// Compose's normalized model of the compose, asked for once, and only
+	// when the guard or the relay override needs it.
+	var model any
+	if len(env) > 0 || relayDir != "" {
+		m, err := c.composeModel(ctx, appID, composeYAML)
+		if err != nil {
 			return proto.AppStatusFailed, err.Error(), err
 		}
+		model = m
+	}
+	if len(env) > 0 {
+		if err := guardSecretRefs(model, env); err != nil {
+			return proto.AppStatusFailed, err.Error(), err
+		}
+	}
+	var override []byte
+	if relayDir != "" {
+		b, err := relayOverride(model, relayDir)
+		if err != nil {
+			return proto.AppStatusFailed, err.Error(), err
+		}
+		override = b
 	}
 	// Record the anonymous volumes of the containers `up` may be about to
 	// replace or remove (#413; see appvolumes.go). An `up --remove-orphans`
@@ -140,6 +163,11 @@ func (c *ComposeBackend) Deploy(ctx context.Context, appID, name, composeYAML st
 	// new compose.
 	if err := c.removeConfigHashRecord(appID); err != nil {
 		return proto.AppStatusFailed, "remove config-hash record: " + err.Error(), err
+	}
+	// The override goes before the compose, so no call ever reads the new
+	// compose without it.
+	if err := c.writeRelayOverride(appID, override); err != nil {
+		return proto.AppStatusFailed, "relay override: " + err.Error(), err
 	}
 	if err := c.writeCompose(appID, composeYAML); err != nil {
 		return proto.AppStatusFailed, "write compose: " + err.Error(), err
@@ -393,6 +421,9 @@ func (c *ComposeBackend) RemoveCompose(_ context.Context, appID string) error {
 	if err := c.removeConfigHashRecord(appID); err != nil {
 		return fmt.Errorf("remove %s: %w", configHashRecordFile, err)
 	}
+	if err := c.writeRelayOverride(appID, nil); err != nil {
+		return fmt.Errorf("remove %s: %w", relayOverrideFile, err)
+	}
 	return nil
 }
 
@@ -533,14 +564,26 @@ func isHexHash(s string) bool {
 //
 // It goes through dockerFor, so a test that injects a docker CLI sees every
 // compose invocation too.
+//
+// The live compose is read with the app's relay override beside it when one
+// exists (relayoverride.go), so every call sees the model `up` was given.
 func (c *ComposeBackend) run(ctx context.Context, appID string, args ...string) ([]byte, error) {
-	return c.dockerFor()(ctx, composeArgs(c.composePath(appID), projectName(appID), args...)...)
+	return c.dockerFor()(ctx, liveComposeArgs(c.liveFiles(appID), projectName(appID), args...)...)
 }
 
 // composeArgs builds the docker CLI arg vector for one compose invocation.
 // It exists so the flags are assertable in a test.
 func composeArgs(composePath, project string, args ...string) []string {
-	return append([]string{"compose", "-f", composePath, "-p", project}, args...)
+	return liveComposeArgs([]string{composePath}, project, args...)
+}
+
+// liveComposeArgs is composeArgs over one or more compose files, in order.
+func liveComposeArgs(files []string, project string, args ...string) []string {
+	out := []string{"compose"}
+	for _, f := range files {
+		out = append(out, "-f", f)
+	}
+	return append(append(out, "-p", project), args...)
 }
 
 // composeUpArgs is the `up` invocation Deploy uses.
