@@ -569,7 +569,26 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		if err := json.Unmarshal(out, &roles); err != nil || len(roles) == 0 {
 			t.Fatalf("the service account's realm-management roles: %d (%v)", len(roles), err)
 		}
-		api.must(http.StatusNoContent, http.MethodDelete, path, roles)
+		// rasputin-admin strips itself: no other account administers the
+		// realm. Keycloak checks each role of a DELETE against the caller's
+		// live mappings, one at a time, and a role checked after manage-users
+		// is gone is refused (26.8.2 ClientRoleMappingsResource.java:222-230,
+		// RolePermissions.java:348-377). So manage-users goes last, alone.
+		var rest, manageUsers []map[string]any
+		for _, role := range roles {
+			if role["name"] == "manage-users" {
+				manageUsers = append(manageUsers, role)
+			} else {
+				rest = append(rest, role)
+			}
+		}
+		if len(manageUsers) != 1 {
+			t.Fatalf("the service account holds manage-users %d times, want 1", len(manageUsers))
+		}
+		if len(rest) > 0 {
+			api.must(http.StatusNoContent, http.MethodDelete, path, rest)
+		}
+		api.must(http.StatusNoContent, http.MethodDelete, path, manageUsers)
 
 		// The rig's session has no token yet, so its first login is after
 		// the strip.
