@@ -170,7 +170,7 @@ func (c *Client) Admin(ctx context.Context, token secret.Value, method, path str
 func (c *Client) Ready(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
-	if e := c.ready(ctx); e != nil {
+	if _, e := c.health(ctx, "ready"); e != nil {
 		return c.failed(ctx, e)
 	}
 	return nil
@@ -318,31 +318,38 @@ func (c *Client) admin(ctx context.Context, token secret.Value, method, path str
 	return Response{Status: status, Location: location}, nil
 }
 
-func (c *Client) ready(ctx context.Context) *Error {
-	const op, path = "ready", "/health/ready"
+// health asks /health/ready once as op and returns its report. A 200 that
+// says UP is the report and nil. A 5xx is ErrUnreachable, with the report
+// when its body is the health JSON (a 503 names each check's status), and
+// with an empty one otherwise. Any other status, and a 200 whose body is not
+// the health JSON or does not say UP, is ErrProtocol.
+func (c *Client) health(ctx context.Context, op string) (HealthReport, *Error) {
+	const path = "/health/ready"
 	status, body, e := c.round(ctx, op, c.mgmt, http.MethodGet, path, nil, nil, "")
 	if e != nil {
-		return e
+		return HealthReport{}, e
 	}
 	fail := func(kind, cause error) *Error {
 		return &Error{Op: op, Path: path, Status: status, Kind: kind, Err: cause}
 	}
+	var rep HealthReport
+	decodeErr := decodeJSON(body, &rep)
 	if status >= 500 {
-		return fail(ErrUnreachable, nil)
+		if decodeErr != nil {
+			rep = HealthReport{}
+		}
+		return rep, fail(ErrUnreachable, nil)
 	}
 	if status != http.StatusOK {
-		return fail(ErrProtocol, errors.New("unexpected status"))
+		return HealthReport{}, fail(ErrProtocol, errors.New("unexpected status"))
 	}
-	var hb struct {
-		Status string `json:"status"`
+	if decodeErr != nil {
+		return HealthReport{}, fail(ErrProtocol, decodeErr)
 	}
-	if err := decodeJSON(body, &hb); err != nil {
-		return fail(ErrProtocol, err)
+	if rep.Status != "UP" {
+		return rep, fail(ErrProtocol, errors.New("health 200 does not say UP"))
 	}
-	if hb.Status != "UP" {
-		return fail(ErrProtocol, errors.New("health 200 does not say UP"))
-	}
-	return nil
+	return rep, nil
 }
 
 // ----- transport -----------------------------------------------------------

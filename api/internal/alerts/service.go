@@ -138,6 +138,9 @@ type Service struct {
 	// storeAlerts, when set, reports a secret store that cannot serve
 	// secrets (storestate.Monitor.Alerts). Nil means no such alert.
 	storeAlerts func(ctx context.Context, now time.Time) []proto.Alert
+	// identityAlerts, when set, reports an identity service that is not
+	// ready (identitystate.Monitor.Alerts). Nil means no such alert.
+	identityAlerts func(ctx context.Context, now time.Time) []proto.Alert
 	// outcomeAlerts, when set, reports the OS's pre-api outcome records that
 	// failed or could not be read (osoutcome.Reader.Alerts). outcomeKinds are
 	// the job kinds it covers, which jobAlerts leaves to it.
@@ -169,6 +172,14 @@ func (s *Service) SetDiskAlerts(fn func(now time.Time) []proto.Alert) { s.diskAl
 // it asks the store, so a request that ends stops the question.
 func (s *Service) SetStoreAlerts(fn func(ctx context.Context, now time.Time) []proto.Alert) {
 	s.storeAlerts = fn
+}
+
+// SetIdentityAlerts wires the identity service's state alert
+// (identitystate.Monitor.Alerts, geekdojo/geekdojo-brain#979), the twin of
+// SetStoreAlerts. Set before List. It takes List's ctx because it asks the
+// identity service, so a request that ends stops the question.
+func (s *Service) SetIdentityAlerts(fn func(ctx context.Context, now time.Time) []proto.Alert) {
+	s.identityAlerts = fn
 }
 
 // SetOutcomeAlerts wires the OS outcome records' alert
@@ -249,6 +260,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if s.storeAlerts != nil {
 		out = append(out, s.storeAlerts(ctx, now)...)
+	}
+	if s.identityAlerts != nil {
+		out = append(out, s.identityAlerts(ctx, now)...)
 	}
 	if s.outcomeAlerts != nil {
 		alerts, err := s.outcomeAlerts(ctx, now)

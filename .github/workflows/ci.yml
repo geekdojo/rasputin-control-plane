@@ -387,6 +387,28 @@ jobs:
         run: |
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
+      # The identity tests that need root and the runner's real systemd
+      # (geekdojo/geekdojo-brain#979, docs/testing-identity.md): the pinned
+      # PostgreSQL and Keycloak run as transient units, so the states they
+      # read are systemd's own. The test binary is built as the runner user
+      # and only RUN under sudo, from its package directory so testdata/
+      # resolves. RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required turns their
+      # skips into failures, so this step cannot pass by not running; the
+      # step above runs the same tests unprivileged, where they skip. A test
+      # binary run directly has no default timeout, so -test.timeout gives it
+      # go test's own 10m: the tests' waits end before it with an error that
+      # names the fact they waited for, and their cleanup still runs.
+      - name: test (identity under real systemd, root)
+        run: |
+          go test -c -race -o "$RUNNER_TEMP/identitytest.test" ./api/internal/identitytest
+          cd api/internal/identitytest
+          sudo env \
+            PATH="$PATH" \
+            RASPUTIN_IDENTITY_HOME="$RUNNER_TEMP/identity" \
+            RASPUTIN_IDENTITY_FUNCTIONAL=required \
+            RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required \
+            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestIdentitySystemd_'
+
       - name: test (remaining modules)
         env:
           # The agent's Compose test for secret values carried beside the

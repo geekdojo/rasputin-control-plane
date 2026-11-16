@@ -19,6 +19,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/sysunit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -225,20 +226,8 @@ func storeProvisionerLeafSpec() tlsca.LeafSpec {
 func restartStoreUnit(run runFunc, after func(context.Context)) func(context.Context, tlsca.LeafPaths) error {
 	return func(ctx context.Context, _ tlsca.LeafPaths) error {
 		defer after(ctx)
-		return restartUnits(ctx, run, []string{storeUnit}, storeUnit)
+		return sysunit.RestartUnits(ctx, run, []string{storeUnit}, storeUnit)
 	}
-}
-
-// restartUnits is a unit-loaded leaf's reload: systemctl reset-failed on
-// reset, so a unit skipped on first boot or sitting in failed after a crash
-// loop can start, then systemctl restart unit. The first error is returned
-// and the restart is then not attempted.
-func restartUnits(ctx context.Context, run runFunc, reset []string, unit string) error {
-	if _, err := run(ctx, "systemctl", append([]string{"reset-failed"}, reset...)...); err != nil {
-		return err
-	}
-	_, err := run(ctx, "systemctl", "restart", unit)
-	return err
 }
 
 // startLeafSweep mints and renews one sweeper's leaves once, now, in a

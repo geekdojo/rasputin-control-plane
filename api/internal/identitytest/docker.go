@@ -82,7 +82,8 @@ func (d docker) info(ctx context.Context) error {
 	return err
 }
 
-// startPostgres runs the pinned PostgreSQL with its data on a tmpfs, the
+// startPostgres runs the pinned PostgreSQL with its data on a tmpfs (in its
+// anonymous volume, on a fixed port, under Config.pgRestartable), the
 // password passed by --env-file so it never appears in an argument or in
 // docker's output, and returns its loopback port once pg_isready answers.
 func (e *Env) startPostgres(ctx context.Context) (int, error) {
@@ -99,8 +100,15 @@ func (e *Env) startPostgres(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("identitytest: database env file: %w", err)
 	}
-	id, err := e.docker.runDetached(ctx, "--name", "rasputin-identitytest-pg-"+suffix,
-		"-p", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql", "--env-file", envFile, PostgresImage)
+	args := []string{"--name", "rasputin-identitytest-pg-" + suffix, "-p", "127.0.0.1::5432", "--tmpfs", "/var/lib/postgresql"}
+	if e.h.cfg.pgRestartable {
+		fixed, err := proctest.FreePort()
+		if err != nil {
+			return 0, fmt.Errorf("identitytest: identity database port: %w", err)
+		}
+		args = []string{"--name", "rasputin-identitytest-pg-" + suffix, "-p", "127.0.0.1:" + strconv.Itoa(fixed) + ":5432"}
+	}
+	id, err := e.docker.runDetached(ctx, append(args, "--env-file", envFile, PostgresImage)...)
 	if err != nil {
 		return 0, fmt.Errorf("identitytest: start the identity database: %w", err)
 	}

@@ -7,6 +7,7 @@ import (
 	"net"
 	"path/filepath"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/sysunit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 )
 
@@ -126,7 +127,7 @@ func wireIdentityLeaves(ca *tlsca.CA, dataDir string, run runFunc, apiClientRelo
 	}
 	restart := func(unit string) func(context.Context, tlsca.LeafPaths) error {
 		return func(ctx context.Context, _ tlsca.LeafPaths) error {
-			return restartUnits(ctx, run, []string{identityDBUnit, identityUnit}, unit)
+			return sysunit.RestartUnits(ctx, run, []string{identityDBUnit, identityUnit}, unit)
 		}
 	}
 	sweeper := tlsca.NewLeafSweeper(ca)

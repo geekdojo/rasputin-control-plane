@@ -27,3 +27,8 @@ func (d Disabled) Admin(_ context.Context, _ secret.Value, _, path string, _, _ 
 func (d Disabled) Ready(context.Context) error {
 	return &Error{Op: "ready", Kind: d.Kind}
 }
+
+// Health refuses with Kind.
+func (d Disabled) Health(context.Context) (HealthReport, error) {
+	return HealthReport{}, &Error{Op: "health", Kind: d.Kind}
+}

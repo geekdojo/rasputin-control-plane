@@ -16,8 +16,9 @@ import (
 )
 
 // The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): the seal
-// key (#803), the store's first init (#804), the store provisioner (#805)
-// and the store's version gate (#801) each write a record under /run that
+// key (#803), the store's first init (#804), the store provisioner (#805),
+// the store's version gate (#801), and the identity database's first-init
+// gate (#975) and version gate (#1009) each write a record under /run that
 // the api turns into a job and, when it failed or cannot be read, a crit
 // alert.
 
@@ -86,6 +87,38 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 			},
 			Title:             "The secret store's data was rolled back, or the store was held stopped",
 			AfterStoreRestart: true,
+		},
+		{
+			// The identity database's first-init gate (#975), run in every
+			// start of keycloak-db.service: created on a first start,
+			// untouched on every other, refused when it would not initialise
+			// over data it found. Read at start and on each new database run
+			// the identity state monitor sees (geekdojo/geekdojo-brain#979).
+			Kind:     "os.identity_db_init",
+			Path:     filepath.Join(runDir, "rasputin-identity-db-init", "outcome"),
+			Fields:   []string{osoutcome.FieldBootID, osoutcome.FieldReason},
+			KeyField: osoutcome.FieldBootID,
+			Outcomes: map[string]osoutcome.Verdict{
+				"created": osoutcome.OK, "untouched": osoutcome.OK, "refused": osoutcome.Alert,
+			},
+			Title: "The sign-in service's database did not start",
+		},
+		{
+			// The identity data's version gate (#1009, lifecycle.md §1.4),
+			// run in every start of keycloak-db.service: current when the data
+			// is not newer than this slot; restored when the pre-update copy
+			// was put back; refused or failed when the pair was held stopped.
+			// restored alerts too: changes made since the update are only in
+			// the set-aside copy.
+			Kind:     "os.identity_rollback",
+			Path:     filepath.Join(runDir, "rasputin-identity-rollback", "outcome"),
+			Fields:   []string{osoutcome.FieldBootID, osoutcome.FieldReason},
+			KeyField: osoutcome.FieldBootID,
+			Outcomes: map[string]osoutcome.Verdict{
+				"current": osoutcome.OK, "restored": osoutcome.Alert,
+				"refused": osoutcome.Alert, "failed": osoutcome.Alert,
+			},
+			Title: "The sign-in service's data was rolled back, or sign-in was held stopped",
 		},
 	}
 }

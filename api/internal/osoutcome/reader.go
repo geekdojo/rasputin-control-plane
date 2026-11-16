@@ -131,6 +131,20 @@ func (r *Reader) ReadAtStart(ctx context.Context) {
 	}
 }
 
+// ReadKind reads the one declared record of kind, as ReadAtStart reads it.
+// The identity state monitor calls it when the identity database starts a
+// new run (geekdojo/geekdojo-brain#979). A kind that is not declared is an
+// error, and nothing is read.
+func (r *Reader) ReadKind(ctx context.Context, kind string) error {
+	for _, s := range r.srcs {
+		if s.Kind == kind {
+			r.read(ctx, s)
+			return nil
+		}
+	}
+	return fmt.Errorf("osoutcome: no record of kind %q is declared", kind)
+}
+
 // AfterStoreRestart reads each record declared to follow a store restart,
 // starting its unit first when one is declared. It is the hook every store
 // restart the api performs runs once the restart returns.

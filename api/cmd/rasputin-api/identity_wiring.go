@@ -89,6 +89,7 @@ type identityClient interface {
 	ClientCredentials(ctx context.Context, realm, clientID string, clientSecret *secret.Value) (secret.Value, error)
 	Admin(ctx context.Context, token secret.Value, method, path string, in, out any) (idclient.Response, error)
 	Ready(ctx context.Context) error
+	Health(ctx context.Context) (idclient.HealthReport, error)
 }
 
 // identityWiring is what wireIdentity built.

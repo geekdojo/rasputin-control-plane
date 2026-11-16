@@ -34,6 +34,12 @@ const (
 	FieldRunID  = "run_id"
 	FieldKeyID  = "key_id"
 	FieldReason = "reason"
+	// The identity service's exit records (geekdojo/geekdojo-brain#979): the
+	// systemd invocation the record ends, and systemd's $EXIT_CODE and
+	// $EXIT_STATUS for it, each empty when systemd set none.
+	FieldInvocationID = "invocation_id"
+	FieldExitCode     = "exit_code"
+	FieldExitStatus   = "exit_status"
 )
 
 // fieldOutcome is the line every record carries.
@@ -44,7 +50,10 @@ const fieldOutcome = "outcome"
 const OutcomeUnreadable = "unreadable"
 
 // knownFields is the closed field set.
-var knownFields = map[string]bool{FieldBootID: true, FieldRunID: true, FieldKeyID: true, FieldReason: true}
+var knownFields = map[string]bool{
+	FieldBootID: true, FieldRunID: true, FieldKeyID: true, FieldReason: true,
+	FieldInvocationID: true, FieldExitCode: true, FieldExitStatus: true,
+}
 
 // keyFields are the fields that may be a record's idempotency key.
 var keyFields = map[string]bool{FieldBootID: true, FieldRunID: true}

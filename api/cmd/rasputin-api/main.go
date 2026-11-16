@@ -1188,6 +1188,21 @@ func main() {
 	// identity.recover_admin (#978), under keycloak only: a System job, so
 	// POST /api/jobs refuses it. Nothing submits it yet (F-978-04).
 	identityW.register(runner)
+	// The identity service's state, its identity:<state> alert and
+	// identity.recover, the pair's restart after a full disk
+	// (geekdojo/geekdojo-brain#979), under keycloak only. Nothing on the
+	// start path reads the monitor.
+	identityState, err := identityStateWiring(identityStateDeps{
+		mode: identityW.mode, client: identityW.client, ledger: jobStore, settings: setupStore,
+		outcomes: outcomes, jobRunning: jobRunning(jobStore), run: execrun.CombinedOutput,
+		fsys: os.DirFS("/"), remove: os.Remove, free: storage.FreeBytes, dataDir: dataDir,
+		restores: restoreSessions, now: time.Now, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity state", "err", err.Error())
+		os.Exit(1)
+	}
+	identityState.register(runner)
 	// The store's copy before an OS update of its host, and the reference
 	// check that reports entries lost when the store's data is put back
 	// (geekdojo/geekdojo-brain#800).
@@ -1639,10 +1654,11 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), identityState.entries()...)...))
 	sched.Start(ctx)
-	// The recovery's reading on the fact of this start (F-874-02).
+	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
+	identityState.start(ctx)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -1858,6 +1874,8 @@ func main() {
 	if storeAlerts := sealRot.storeAlerts(readiness.alerts); storeAlerts != nil {
 		alertsSvc.SetStoreAlerts(storeAlerts)
 	}
+	// The identity service's state alert (#979), under keycloak only.
+	identityState.wireAlerts(alertsSvc)
 	// The OS outcome records' crit alert (#833), which replaces the generic
 	// job-failed warn for their kinds.
 	wireOutcomeAlerts(alertsSvc, outcomes)
