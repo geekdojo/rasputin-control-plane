@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -46,7 +47,7 @@ const (
 	// identityRealm and identityAdminClient are the realm baseline's realm
 	// and the administrator client the api's session logs in as (C27, C28).
 	identityRealm       = "rasputin"
-	identityAdminClient = "rasputin-admin"
+	identityAdminClient = adminguard.AdminClientID
 
 	// identityCallTimeout bounds one call to the identity service. It bounds
 	// I/O on a loopback socket and decides no state.

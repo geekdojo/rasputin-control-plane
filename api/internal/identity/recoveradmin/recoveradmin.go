@@ -33,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -45,7 +46,7 @@ const (
 	// realm and adminClient are the baseline's realm and its administrator
 	// client.
 	realm       = "rasputin"
-	adminClient = "rasputin-admin"
+	adminClient = adminguard.AdminClientID
 	// realmManagement is the client whose roles the administrator holds.
 	realmManagement = "realm-management"
 	// masterRealm is where bootstrap-admin makes its temporary client.

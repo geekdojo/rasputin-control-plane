@@ -452,7 +452,6 @@ func TestNew_RefusesIncompleteDeps(t *testing.T) {
 type ctxUnits struct {
 	*fakeWorld
 	stopFails  bool
-	startErrs  []error
 	startCtxOK []bool
 }
 
@@ -472,7 +471,7 @@ func (u *ctxUnits) Start(ctx context.Context) error {
 
 // runCancelled runs the step on a context that is cancelled once stop (or
 // the blocking bootstrap) is reached.
-func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (error, *logkittest.Recorder) {
+func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (*logkittest.Recorder, error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -494,7 +493,7 @@ func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (error, *logkittest
 		t.Fatal(err)
 	}
 	_, err = r.Workflow().Steps[0].Do(&jobs.StepCtx{Ctx: ctx, JobID: jobID})
-	return err, rec
+	return rec, err
 }
 
 // TC-1127-10 (F-978-09): a step cancelled during the recovery command starts
@@ -504,7 +503,7 @@ func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (error, *logkittest
 // fails with errStop.
 func TestRestore_CancelledStepLeavesTheUnitStarted(t *testing.T) {
 	u := &ctxUnits{fakeWorld: healthyWorld()}
-	err, _ := runCancelled(t, u, true)
+	_, err := runCancelled(t, u, true)
 	if !errors.Is(err, errCommand) {
 		t.Errorf("err = %v, want errCommand", err)
 	}
@@ -514,7 +513,7 @@ func TestRestore_CancelledStepLeavesTheUnitStarted(t *testing.T) {
 
 	u = &ctxUnits{fakeWorld: healthyWorld()}
 	u.startErr = errors.New("systemctl start: exit 1")
-	err, rec := runCancelled(t, u, true)
+	rec, err := runCancelled(t, u, true)
 	if !errors.Is(err, errCommand) {
 		t.Errorf("start failing too: err = %v, want errCommand", err)
 	}
@@ -527,7 +526,7 @@ func TestRestore_CancelledStepLeavesTheUnitStarted(t *testing.T) {
 	}
 
 	u = &ctxUnits{fakeWorld: healthyWorld(), stopFails: true}
-	err, _ = runCancelled(t, u, false)
+	_, err = runCancelled(t, u, false)
 	if !errors.Is(err, errStop) {
 		t.Errorf("stop failure: err = %v, want errStop", err)
 	}

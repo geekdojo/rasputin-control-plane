@@ -132,7 +132,8 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   TLS (Identity 2.4 and 2.6, proved in rasputin-os CI).
 - That the front behaves like the door. The front is an `httptest` TLS server whose reverse
   proxy presents the client leaf to Keycloak; it stands in for the door (Identity 4.3) and
-  forwards everything. It exists because `https-client-auth=required` holds for every caller,
+  forwards everything except what the door's admin-account guard refuses (`adminguard`,
+  geekdojo/geekdojo-brain#1127). It exists because `https-client-auth=required` holds for every caller,
   a browser included.
 - Any sign-in verb other than password with PKCE. The TOTP, passkey, reset and app-door verbs
   land with the items whose CI cases need them; the vector file already carries their sections.
@@ -178,7 +179,7 @@ process would.
 
 | Subtest | Proves |
 |---|---|
-| TC-1127-15 (row T83) | `failureFactor+1` (read from the baseline) of each of: client-credentials logins as `rasputin-admin` with the door leaf, with a foreign-CA leaf, and with the door leaf and a client secret; password grants for `service-account-rasputin-admin`; and login-form sign-ins as that user through `signin.PasswordCodeFlow`. Afterwards the trigger is not due, the api leaf's login and the session's realm read answer 200, the service account's brute-force status reads not disabled, and the ledger holds no job. |
+| TC-1127-15 (row T83) | `failureFactor+1` (read from the baseline) client-credentials logins as `rasputin-admin` sent directly to Keycloak with the `rasputin-door` leaf (the inside path), each refused by Keycloak. Then, through the front, which applies the door's admin-account guard (`adminguard`), `failureFactor+1` of each of: client-credentials requests naming `rasputin-admin` in the form and in a `Basic` header with a secret; password grants for `service-account-rasputin-admin`; and login-form sign-ins as that user through `signin.PasswordCodeFlow`. The front refuses every one with 400 and its sentence and forwards none. Afterwards the service account's brute-force status reads `numFailures` 0 and not disabled, while a control user's one wrong password through the same front reads `numFailures` 1 (waited on as a fact, because Keycloak records failures asynchronously). The trigger is not due, the api leaf's login and the session's realm read answer 200, and the ledger holds no job. |
 | TC-1127-16 (row T81) | With `rasputin-admin` deleted, the real scheduler's first tick submits exactly one job, which succeeds; the restored hook is called once with its id; the session reads the realm and creates and deletes a user; the trigger is no longer due; the temporary secret is in no record. |
 | TC-1127-17 (row T82) | With the service account's realm-management roles removed, the session's realm read answers 403 and the trigger is due; the job succeeds and the read answers 200. |
 | TC-1127-18 | With `rasputin-admin` deleted and the baseline unreadable, the job fails with the baseline sentence; after two more scheduler ticks (30 s apart, waited on as ticks) the ledger still holds that one job, and the alerts list carries `job-failed:<id>` and `identity:admin-client-refused`. |

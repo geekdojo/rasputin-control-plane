@@ -2,8 +2,10 @@ package identitytest
 
 // TC-1127-15 to TC-1127-18: identity.recover_admin's trigger against the real
 // pinned Keycloak with the repo's realm baseline imported
-// (geekdojo/geekdojo-brain#1127, Identity 2.8). Outside bad credentials past
-// the realm's brute-force threshold never make the fact; a deleted client and
+// (geekdojo/geekdojo-brain#1127, Identity 2.8). Requests naming the api's
+// admin account past the realm's brute-force threshold, through the front
+// that applies the door's admin-account guard and as client authentication
+// on the inside path, leave its failure count at 0; a deleted client and
 // a client stripped of its roles are restored by exactly one job the real
 // scheduler submits on the trigger; a failed run is not tried again.
 //
@@ -15,8 +17,9 @@ package identitytest
 // on linux/amd64 natively, never under emulation.
 
 import (
+	"bytes"
 	"context"
-	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -33,6 +36,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
@@ -42,13 +46,12 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
-	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
 
 // serviceAccountUser is rasputin-admin's service-account user.
-const serviceAccountUser = "service-account-" + baselineAdminClient
+const serviceAccountUser = adminguard.ServiceAccountUsername
 
 // terminal is one OnTerminal call.
 type terminal struct {
@@ -188,6 +191,32 @@ func (r *triggerRig) jobsOfKind(t *testing.T) []*jobs.Job {
 	return list
 }
 
+// sentenceCount carries requests to the front and counts the answers that
+// are a 400 whose body is exactly sentence (http.Error adds a newline), the
+// front's refusal.
+type sentenceCount struct {
+	inner    http.RoundTripper
+	sentence string
+	n        int
+}
+
+func (c *sentenceCount) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.inner.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusBadRequest {
+		return resp, err
+	}
+	body, err := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if strings.TrimSuffix(string(body), "\n") == c.sentence {
+		c.n++
+	}
+	return resp, nil
+}
+
 // realmStatus is the session's GET of the realm: its status, 0 with the
 // error when it failed.
 func realmStatus(t *testing.T, s *idclient.Session) (int, error) {
@@ -201,22 +230,6 @@ func realmStatus(t *testing.T, s *idclient.Session) (int, error) {
 		return 0, err
 	}
 	return resp.Status, nil
-}
-
-// leafTLSFor is a TLS 1.3 client config presenting an identity-CA leaf with
-// common name cn.
-func leafTLSFor(t *testing.T, env *Env, cn string) *tls.Config {
-	t.Helper()
-	paths, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: cn})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pair, err := tls.LoadX509KeyPair(paths.CertPath, paths.KeyPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &tls.Config{MinVersion: tls.VersionTLS13, RootCAs: env.Roots(),
-		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) { return &pair, nil }}
 }
 
 // baselineFailureFactor is the realm baseline's brute-force threshold.
@@ -291,26 +304,12 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		return u.ID
 	}
 
-	t.Run("TC-1127-15 outside bad credentials past the brute-force threshold never make the fact", func(t *testing.T) {
+	t.Run("TC-1127-15 outside requests naming the admin account never reach Keycloak's failure count", func(t *testing.T) {
 		r := newTriggerRig(t, env, client, readRepoBaseline)
 		n := baselineFailureFactor(t) + 1
 		ctx := t.Context()
+		refusal := adminguard.Sentence(adminguard.ErrAdminAccount)
 
-		doorLeaf, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-door"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		door := productionClient(t, env, doorLeaf)
-		d := tlsca.Deps{Now: env.h.cfg.Now, Rand: env.h.cfg.Rand, Log: env.log}
-		foreignCA, err := tlsca.Ensure(caConfig(), filepath.Join(t.TempDir(), "foreign"), "foreign", d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		foreignLeaf, err := foreignCA.MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-api"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		foreign := productionClient(t, env, foreignLeaf)
 		bogus, err := randomSecret(env.h.cfg.Rand)
 		if err != nil {
 			t.Fatal(err)
@@ -322,66 +321,124 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		}
 		defer wrong.Destroy()
 
-		doorTLS := leafTLSFor(t, env, "rasputin-door")
-		doorTransport := &http.Transport{TLSClientConfig: doorTLS}
-		t.Cleanup(doorTransport.CloseIdleConnections)
-		doorHTTP := &http.Client{Transport: doorTransport,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-
 		// The login form's client needs a redirect URI, which the baseline
 		// leaves to the cluster (TC-980-13), as TC-980-25 sets it.
 		api := admin(t)
 		consoleID, consoleRep := api.clientRep(baselineConsole)
 		consoleRep["redirectUris"] = []string{RedirectURI}
 		api.must(http.StatusNoContent, http.MethodPut, "/clients/"+consoleID, consoleRep)
-		form, err := signin.New(signin.Config{Transport: doorTransport, Issuer: env.KeycloakURL() + "/realms/" + baselineRealm,
-			ClientID: baselineConsole, RedirectURI: RedirectURI, Rand: env.h.cfg.Rand, Logger: env.log})
+
+		// The control user, with a full profile and a password, deleted
+		// afterwards.
+		controlPW, err := randomSecret(env.h.cfg.Rand)
 		if err != nil {
 			t.Fatal(err)
 		}
+		defer controlPW.Destroy()
+		const controlUser = "tc-1127-15-control"
+		controlLoc, _ := api.must(http.StatusCreated, http.MethodPost, "/users", map[string]any{
+			"username": controlUser, "enabled": true, "email": "tc-1127-15@identitytest.invalid", "emailVerified": true,
+			"firstName": "Control", "lastName": "User", "requiredActions": []string{},
+			"credentials": []map[string]any{{"type": "password", "value": string(controlPW.Reveal()), "temporary": false}},
+		})
+		defer func() { a := admin(t); a.must(http.StatusNoContent, http.MethodDelete, controlLoc, nil) }()
+		controlID := controlLoc[strings.LastIndex(controlLoc, "/")+1:]
 
-		counts := map[string]int{}
-		refusedLogin := func(kind string, c *idclient.Client, s *secret.Value) {
-			tok, err := c.ClientCredentials(ctx, baselineRealm, baselineAdminClient, s)
-			if err == nil || tok.Len() != 0 {
-				tok.Destroy()
-				t.Fatalf("%s: rasputin-admin login succeeded", kind)
-			}
-			counts[kind]++
+		type bruteForce struct {
+			Disabled    bool `json:"disabled"`
+			NumFailures int  `json:"numFailures"`
 		}
-		for range n {
-			refusedLogin("client-credentials, door leaf", door, nil)
-			refusedLogin("client-credentials, foreign-CA leaf", foreign, nil)
-			refusedLogin("client-credentials, door leaf and a client secret", door, &bogus)
+		status := func(api adminAPI, userID string) (bruteForce, []byte) {
+			api.t.Helper()
+			_, out := api.must(http.StatusOK, http.MethodGet, "/attack-detection/brute-force/users/"+userID, nil)
+			var bf bruteForce
+			if err := json.Unmarshal(out, &bf); err != nil {
+				api.t.Fatal(err)
+			}
+			return bf, out
+		}
+		saID := serviceAccountID(api)
+		if bf, out := status(api, saID); bf.NumFailures != 0 || bf.Disabled {
+			t.Fatalf("brute-force status of %s before the floods: %s, want numFailures 0", serviceAccountUser, out)
+		}
+		r0 := env.FrontRefusals()
 
-			pw := url.Values{"grant_type": {"password"}, "client_id": {baselineConsole},
-				"username": {serviceAccountUser}, "password": {string(wrong.Reveal())}}
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-				env.KeycloakURL()+"/realms/"+baselineRealm+"/protocol/openid-connect/token", strings.NewReader(pw.Encode()))
+		// (a) The inside path: client-credentials logins as rasputin-admin
+		// with the door leaf, straight to Keycloak, each refused by Keycloak
+		// (F-1127-16).
+		doorLeaf, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-door"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		door := productionClient(t, env, doorLeaf)
+
+		// (b) to (e) go through the front. Every answer it gives with its
+		// refusal sentence is counted.
+		frontTransport := &http.Transport{TLSClientConfig: env.ClientTLS()}
+		t.Cleanup(frontTransport.CloseIdleConnections)
+		seen := &sentenceCount{inner: frontTransport, sentence: refusal}
+		frontHTTP := &http.Client{Transport: seen,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		tokenURL := env.FrontURL() + "/realms/" + baselineRealm + "/protocol/openid-connect/token"
+		frontPost := func(kind string, form url.Values, authorization string) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
 			if err != nil {
 				t.Fatal(err)
 			}
 			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			resp, err := doorHTTP.Do(req)
+			if authorization != "" {
+				req.Header.Set("Authorization", authorization)
+			}
+			resp, err := frontHTTP.Do(req)
 			if err != nil {
-				t.Fatalf("password grant: %v", err)
+				t.Fatalf("%s: %v", kind, err)
 			}
-			_, _ = io.Copy(io.Discard, resp.Body)
+			body, err := io.ReadAll(resp.Body)
 			_ = resp.Body.Close()
-			if resp.StatusCode == http.StatusOK {
-				t.Fatal("a password grant for the service account succeeded")
+			if err != nil {
+				t.Fatalf("%s: read the answer: %v", kind, err)
 			}
-			counts["password grant, "+serviceAccountUser]++
+			if resp.StatusCode != http.StatusBadRequest || strings.TrimSuffix(string(body), "\n") != refusal {
+				t.Fatalf("%s: the front answered %d %.200q, want 400 %q", kind, resp.StatusCode, body, refusal)
+			}
+		}
+		form, err := signin.New(signin.Config{Transport: seen, Issuer: env.FrontURL() + "/realms/" + baselineRealm,
+			ClientID: baselineConsole, RedirectURI: RedirectURI, Rand: env.h.cfg.Rand, Logger: env.log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		basicAdmin := "Basic " + base64.StdEncoding.EncodeToString([]byte(baselineAdminClient+":"+string(bogus.Reveal())))
 
-			_, err = form.PasswordCodeFlow(ctx, serviceAccountUser, wrong)
-			var refused *signin.RefusedError
-			if !errors.As(err, &refused) {
-				t.Fatalf("login form as %s: %v, want a refusal on the sign-in page", serviceAccountUser, err)
+		counts := map[string]int{}
+		for range n {
+			tok, err := door.ClientCredentials(ctx, baselineRealm, baselineAdminClient, nil)
+			if err == nil || tok.Len() != 0 {
+				tok.Destroy()
+				t.Fatal("(a) client-credentials as rasputin-admin with the door leaf succeeded")
 			}
-			counts["login form, "+serviceAccountUser]++
+			counts["(a) direct client-credentials, door leaf"]++
+
+			frontPost("(b)", url.Values{"grant_type": {"client_credentials"}, "client_id": {baselineAdminClient}}, "")
+			counts["(b) front client-credentials, form client_id"]++
+
+			frontPost("(c)", url.Values{"grant_type": {"client_credentials"}}, basicAdmin)
+			counts["(c) front client-credentials, Basic"]++
+
+			frontPost("(d)", url.Values{"grant_type": {"password"}, "client_id": {baselineConsole},
+				"username": {serviceAccountUser}, "password": {string(wrong.Reveal())}}, "")
+			counts["(d) front password grant"]++
+
+			before := seen.n
+			if _, err := form.PasswordCodeFlow(ctx, serviceAccountUser, wrong); err == nil {
+				t.Fatalf("(e) the login form signed %s in", serviceAccountUser)
+			}
+			if seen.n != before+1 {
+				t.Fatalf("(e) the login-form post as %s drew %d refusals from the front, want 1", serviceAccountUser, seen.n-before)
+			}
+			counts["(e) front login form"]++
 		}
 		for kind, c := range counts {
-			t.Logf("%s: %d refused requests (failureFactor+1 = %d)", kind, c, n)
+			t.Logf("%s: %d requests (failureFactor+1 = %d)", kind, c, n)
 			if c < n {
 				t.Errorf("%s: %d requests, want at least %d", kind, c, n)
 			}
@@ -389,31 +446,53 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		if len(counts) != 5 {
 			t.Fatalf("%d kinds of request, want 5", len(counts))
 		}
+		if got, want := env.FrontRefusals()-r0, int64(4*n); got != want || seen.n != 4*n {
+			t.Fatalf("the front refused %d requests and %d answers carried the sentence, want %d of each", got, seen.n, want)
+		}
+
+		// The control: one wrong password through the same front.
+		var refused *signin.RefusedError
+		if _, err := form.PasswordCodeFlow(ctx, controlUser, wrong); !errors.As(err, &refused) {
+			t.Fatalf("the control user's wrong password: %v, want a refusal on the sign-in page", err)
+		}
+		// Keycloak records a failure on its own executor, so the control's
+		// count is waited on as a fact, bounded only by the test's context.
+		api = admin(t)
+		var control []byte
+		for {
+			bf, out := status(api, controlID)
+			if bf.NumFailures >= 1 {
+				if bf.NumFailures != 1 {
+					t.Fatalf("the control user's brute-force status: %s, want numFailures 1", out)
+				}
+				control = out
+				break
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("the test ended before the control user's failure was recorded: %s", out)
+			}
+		}
+		t.Logf("brute-force status of %s: %s", controlUser, control)
+		bf, out := status(api, saID)
+		t.Logf("brute-force status of %s: %s", serviceAccountUser, out)
+		if bf.NumFailures != 0 || bf.Disabled {
+			t.Errorf("brute-force status of %s after the floods: %s, want numFailures 0 and not disabled", serviceAccountUser, out)
+		}
 
 		if due, reason := r.trig.Due(ctx); due {
 			t.Errorf("Due after the floods = true (%s), want false", reason)
 		}
+		t.Log("Due after the floods = false")
 		tok, err := client.ClientCredentials(ctx, baselineRealm, baselineAdminClient, nil)
 		if err != nil {
 			t.Fatalf("the api leaf's login after the floods: %v", err)
 		}
 		tok.Destroy()
+		t.Log("the api leaf's login after the floods: 200")
 		if st, err := realmStatus(t, r.session); st != http.StatusOK {
 			t.Errorf("the session's realm GET after the floods = %d, %v; want 200", st, err)
 		}
-		api = admin(t)
-		_, out := api.must(http.StatusOK, http.MethodGet, "/attack-detection/brute-force/users/"+serviceAccountID(api), nil)
-		t.Logf("brute-force status of %s: %s", serviceAccountUser, out)
-		var bf struct {
-			Disabled    bool `json:"disabled"`
-			NumFailures int  `json:"numFailures"`
-		}
-		if err := json.Unmarshal(out, &bf); err != nil {
-			t.Fatal(err)
-		}
-		if bf.Disabled {
-			t.Errorf("Keycloak disabled %s after the floods (numFailures %d): the deviation the plan stops on", serviceAccountUser, bf.NumFailures)
-		}
+		t.Log("the session's realm GET after the floods: 200")
 		if j := r.jobsOfKind(t); len(j) != 0 {
 			t.Errorf("%d identity.recover_admin jobs, want 0", len(j))
 		}
