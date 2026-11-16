@@ -3,8 +3,8 @@ module github.com/geekdojo/rasputin-control-plane/api
 go 1.26.0
 
 require (
-	github.com/chromedp/cdproto v0.159.0
-	github.com/chromedp/chromedp v0.22.1
+	github.com/chromedp/cdproto v0.160.0
+	github.com/chromedp/chromedp v0.23.0
 	github.com/coder/websocket v1.8.15
 	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/backupxfer v0.0.0-00010101000000-000000000000
@@ -13,14 +13,14 @@ require (
 	github.com/geekdojo/rasputin-control-plane/secret v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.18.2
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/miekg/dns v1.1.73
 	github.com/nats-io/jwt/v2 v2.8.3
-	github.com/nats-io/nats-server/v2 v2.15.2
+	github.com/nats-io/nats-server/v2 v2.15.3
 	github.com/nats-io/nats.go v1.55.0
 	github.com/nats-io/nkeys v0.4.17
 	github.com/oklog/ulid/v2 v2.1.2
-	golang.org/x/crypto v0.58.0
+	golang.org/x/crypto v0.59.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/tools v0.52.0
@@ -29,7 +29,7 @@ require (
 )
 
 require (
-	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.9.0-default-no-op // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260213210345-44df1a37e875 // indirect
