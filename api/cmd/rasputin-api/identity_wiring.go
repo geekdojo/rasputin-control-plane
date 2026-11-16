@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
@@ -116,9 +117,11 @@ func (w identityWiring) register(r interface{ Register(jobs.Workflow) }) {
 // client. It never reads the leaf files: a leaf absent at wiring is every
 // first boot, minted moments later by the identity leaf sweep. It returns an
 // error only for a programming error, which main treats as fatal; every
-// refused setting is a configfault and the off client.
+// refused setting is a configfault and the off client. restored is the
+// holder the composition root sets to the restored alert once the alerts
+// service exists (recoveradmin_trigger_wiring.go).
 func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtAddr string, ca *tlsca.CA, dataDir string,
-	run runFunc, runEnv runEnvFunc) (identityWiring, error) {
+	run runFunc, runEnv runEnvFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
 	disabled := func(mode string, kind error) (identityWiring, error) {
 		c := idclient.Disabled{Kind: kind}
 		s, err := identitySession(c, logger)
@@ -141,8 +144,8 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtA
 			"setting", "RASPUTIN_IDENTITY_BACKEND")
 		return disabled(identityModeMock, idclient.ErrMock)
 	case identityModeKeycloak:
-		if run == nil || runEnv == nil {
-			return identityWiring{}, errors.New("identity service: a command runner is nil under keycloak")
+		if run == nil || runEnv == nil || restored == nil {
+			return identityWiring{}, errors.New("identity service: a command runner or the restored holder is nil under keycloak")
 		}
 	default:
 		return configFault("RASPUTIN_IDENTITY_BACKEND", backend, `not "keycloak" or "mock"`)
@@ -179,6 +182,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtA
 		Bootstrap:    identityBootstrap(runEnv),
 		ReadBaseline: func() ([]byte, error) { return os.ReadFile(identityBaseline) },
 		Rand:         rand.Reader,
+		Restored:     restoredVia(restored),
 		Log:          logger,
 		StepTimeout:  identityRecoverStepTimeout,
 	})

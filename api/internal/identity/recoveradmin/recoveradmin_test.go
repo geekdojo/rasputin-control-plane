@@ -25,6 +25,9 @@ import (
 
 const jobID = "01JOBTEST"
 
+// noRestored is a Restored that raises nothing.
+func noRestored(context.Context, string) error { return nil }
+
 // adminRoles are the baseline's eight realm-management roles.
 var adminRoles = []string{"manage-users", "view-users", "query-users", "query-groups", "manage-clients", "view-realm", "manage-realm", "view-events"}
 
@@ -165,7 +168,7 @@ func runRestore(t *testing.T, w *fakeWorld, rnd io.Reader, baseline func() ([]by
 	t.Helper()
 	log, rec := logkittest.New()
 	r, err := New(Deps{Identity: w, Units: w, Unit: "keycloak.service", Bootstrap: w.bootstrap, ReadBaseline: baseline,
-		Rand: rnd, Log: log, StepTimeout: time.Minute})
+		Rand: rnd, Restored: noRestored, Log: log, StepTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +275,7 @@ func TestRestore_SucceedsInOrderOnProofOnly(t *testing.T) {
 		t.Error("a record carries the secret")
 	}
 	rr, _ := New(Deps{Identity: r.w, Units: r.w, Unit: "u", Bootstrap: r.w.bootstrap, ReadBaseline: readRepoBaseline,
-		Rand: seededRand(1), Log: slog.New(slog.DiscardHandler), StepTimeout: 15 * time.Minute})
+		Rand: seededRand(1), Restored: noRestored, Log: slog.New(slog.DiscardHandler), StepTimeout: 15 * time.Minute})
 	wf := rr.Workflow()
 	if wf.Kind != "identity.recover_admin" || !wf.System || len(wf.Steps) != 1 {
 		t.Fatalf("workflow = %+v", wf)
@@ -318,7 +321,8 @@ func TestRestore_BadBaselineStopsNothing(t *testing.T) {
 	}
 }
 
-// TC-978-24: a failed stop ends the step with no recovery command; a failed
+// TC-978-24: a failed stop ends the step with no recovery command, and still
+// starts the unit (F-1127-05: starting an active unit does nothing); a failed
 // recovery command still starts the unit and fails with its sentence.
 func TestRestore_UnitControlFailsClosed(t *testing.T) {
 	w := healthyWorld()
@@ -327,8 +331,8 @@ func TestRestore_UnitControlFailsClosed(t *testing.T) {
 	if r.err == nil || r.err.Error() != "The identity service could not be stopped, so the admin client was not restored." {
 		t.Errorf("stop failure: err = %v", r.err)
 	}
-	if c := w.calls(); !slices.Equal(c, []string{"stop"}) {
-		t.Errorf("stop failure: calls = %v, want only the stop", c)
+	if c := w.calls(); !slices.Equal(c, []string{"stop", "start"}) {
+		t.Errorf("stop failure: calls = %v, want the stop and a start, no recovery command", c)
 	}
 
 	w = healthyWorld()
@@ -347,7 +351,7 @@ func TestRestore_UnitControlFailsClosed(t *testing.T) {
 	wNotActive := &inactiveWorld{w}
 	log := slog.New(slog.DiscardHandler)
 	rr, _ := New(Deps{Identity: w, Units: wNotActive, Unit: "u", Bootstrap: w.bootstrap, ReadBaseline: readRepoBaseline,
-		Rand: seededRand(1), Log: log, StepTimeout: time.Minute})
+		Rand: seededRand(1), Restored: noRestored, Log: log, StepTimeout: time.Minute})
 	_, err := rr.Workflow().Steps[0].Do(&jobs.StepCtx{Ctx: t.Context(), JobID: jobID})
 	if err == nil || err.Error() != "The identity service did not become ready after the recovery, so the admin client was not restored." {
 		t.Errorf("not ready: err = %v", err)
@@ -430,8 +434,9 @@ func (failingRand) Read([]byte) (int, error) { return 0, errors.New("no entropy"
 func TestNew_RefusesIncompleteDeps(t *testing.T) {
 	w := healthyWorld()
 	full := Deps{Identity: w, Units: w, Unit: "u", Bootstrap: w.bootstrap, ReadBaseline: readRepoBaseline,
-		Rand: seededRand(1), Log: slog.New(slog.DiscardHandler), StepTimeout: time.Minute}
+		Rand: seededRand(1), Restored: noRestored, Log: slog.New(slog.DiscardHandler), StepTimeout: time.Minute}
 	for name, m := range map[string]func(*Deps){
+		"restored": func(d *Deps) { d.Restored = nil },
 		"identity": func(d *Deps) { d.Identity = nil }, "unit": func(d *Deps) { d.Unit = "" },
 		"timeout": func(d *Deps) { d.StepTimeout = 0 }, "rand": func(d *Deps) { d.Rand = nil },
 	} {
@@ -440,5 +445,157 @@ func TestNew_RefusesIncompleteDeps(t *testing.T) {
 		if _, err := New(d); err == nil {
 			t.Errorf("%s: New accepted it", name)
 		}
+	}
+}
+
+// ctxUnits records the context error each Start saw.
+type ctxUnits struct {
+	*fakeWorld
+	stopFails  bool
+	startErrs  []error
+	startCtxOK []bool
+}
+
+func (u *ctxUnits) Stop(ctx context.Context) error {
+	u.add("stop")
+	if u.stopFails {
+		return errors.Join(errors.New("systemctl stop: exit 1"), ctx.Err())
+	}
+	return nil
+}
+
+func (u *ctxUnits) Start(ctx context.Context) error {
+	u.add("start")
+	u.startCtxOK = append(u.startCtxOK, ctx.Err() == nil)
+	return u.startErr
+}
+
+// runCancelled runs the step on a context that is cancelled once stop (or
+// the blocking bootstrap) is reached.
+func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (error, *logkittest.Recorder) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	boot := u.bootstrap
+	if blockBoot {
+		boot = func(ctx context.Context, args, env []string) error {
+			u.add("bootstrap")
+			cancel()
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	} else {
+		cancel()
+	}
+	log, rec := logkittest.New()
+	r, err := New(Deps{Identity: u.fakeWorld, Units: u, Unit: "keycloak.service", Bootstrap: boot, ReadBaseline: readRepoBaseline,
+		Rand: seededRand(1), Restored: noRestored, Log: log, StepTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Workflow().Steps[0].Do(&jobs.StepCtx{Ctx: ctx, JobID: jobID})
+	return err, rec
+}
+
+// TC-1127-10 (F-978-09): a step cancelled during the recovery command starts
+// the unit exactly once on a live context and fails with errCommand; when the
+// start fails too, the ERROR record carries both errors. F-1127-05: a stop
+// that fails on a cancelled context starts the unit on a live one and still
+// fails with errStop.
+func TestRestore_CancelledStepLeavesTheUnitStarted(t *testing.T) {
+	u := &ctxUnits{fakeWorld: healthyWorld()}
+	err, _ := runCancelled(t, u, true)
+	if !errors.Is(err, errCommand) {
+		t.Errorf("err = %v, want errCommand", err)
+	}
+	if c := u.calls(); !slices.Equal(c, []string{"stop", "bootstrap", "start"}) || !slices.Equal(u.startCtxOK, []bool{true}) {
+		t.Errorf("calls = %v, start context live = %v; want one start on a live context", c, u.startCtxOK)
+	}
+
+	u = &ctxUnits{fakeWorld: healthyWorld()}
+	u.startErr = errors.New("systemctl start: exit 1")
+	err, rec := runCancelled(t, u, true)
+	if !errors.Is(err, errCommand) {
+		t.Errorf("start failing too: err = %v, want errCommand", err)
+	}
+	errs := rec.Matching(slog.LevelError, "recovery command failed")
+	if len(errs) != 1 {
+		t.Fatalf("records:\n%s", rec.Text())
+	}
+	if e, _ := logkittest.Attr(errs[0], "err"); !strings.Contains(e, "context canceled") || !strings.Contains(e, "systemctl start: exit 1") {
+		t.Errorf("the ERROR's err = %q, want both errors", e)
+	}
+
+	u = &ctxUnits{fakeWorld: healthyWorld(), stopFails: true}
+	err, _ = runCancelled(t, u, false)
+	if !errors.Is(err, errStop) {
+		t.Errorf("stop failure: err = %v, want errStop", err)
+	}
+	if c := u.calls(); !slices.Equal(c, []string{"stop", "start"}) || !slices.Equal(u.startCtxOK, []bool{true}) {
+		t.Errorf("stop failure: calls = %v, start context live = %v; want one start on a live context", c, u.startCtxOK)
+	}
+}
+
+// TC-1127-11: the workflow's OnTerminal raises the restored alert once, for
+// the job that succeeded, never for a failed run or a recovered orphan; a
+// Restored that fails writes one ERROR and nothing panics.
+func TestWorkflow_RaisesRestoredOnSuccessOnly(t *testing.T) {
+	var mu sync.Mutex
+	var raised []string
+	var fail error
+	log, rec := logkittest.New()
+	w := healthyWorld()
+	r, err := New(Deps{Identity: w, Units: w, Unit: "u", Bootstrap: w.bootstrap, ReadBaseline: readRepoBaseline, Rand: seededRand(1),
+		Restored: func(_ context.Context, id string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			raised = append(raised, id)
+			return fail
+		}, Log: log, StepTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wf := r.Workflow()
+	wf.OnTerminal(t.Context(), "J1", true, "")
+	wf.OnTerminal(t.Context(), "J2", false, "The admin client could not be re-created.")
+
+	store, err := jobs.OpenStore(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	runner := jobs.NewRunner(store, nil)
+	runner.Register(wf)
+	if err := store.CreateJob(t.Context(), &jobs.Job{ID: "ORPHAN", Kind: Kind, Spec: []byte("{}"), Status: jobs.StatusQueued,
+		CreatedBy: "scheduler", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkJobStarted(t.Context(), "ORPHAN", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.Recover(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := store.GetJob(t.Context(), "ORPHAN"); j == nil || j.Status != jobs.StatusFailed {
+		t.Fatalf("the orphan = %+v, want failed by Recover", j)
+	}
+	if !slices.Equal(raised, []string{"J1"}) {
+		t.Errorf("Restored calls = %v, want [J1]", raised)
+	}
+	if n := len(rec.Records()); n != 0 {
+		t.Errorf("records:\n%s", rec.Text())
+	}
+
+	fail = errors.New("alerts store is locked")
+	wf.OnTerminal(t.Context(), "J3", true, "")
+	errs := rec.Matching(slog.LevelError, "The admin client restored alert was not raised.")
+	if len(errs) != 1 || len(rec.Records()) != 1 {
+		t.Fatalf("records:\n%s\nwant one ERROR", rec.Text())
+	}
+	if id, _ := logkittest.Attr(errs[0], "job_id"); id != "J3" {
+		t.Errorf("job_id = %q", id)
+	}
+	if e, _ := logkittest.Attr(errs[0], "err"); e != "alerts store is locked" {
+		t.Errorf("err = %q", e)
 	}
 }

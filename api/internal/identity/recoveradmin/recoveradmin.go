@@ -12,7 +12,10 @@
 // declares it, deletes every temporary client, and reports restored only
 // once rasputin-admin itself has logged in by client-x509 and read the realm.
 //
-// It is a System workflow: the runner refuses it from POST /api/jobs.
+// It is a System workflow: the runner refuses it from POST /api/jobs. The
+// Trigger (trigger.go, geekdojo/geekdojo-brain#1127, Identity 2.8) is what
+// submits it, on the fact that the identity service is ready and refuses the
+// api's own admin login.
 package recoveradmin
 
 import (
@@ -85,7 +88,10 @@ type Deps struct {
 	ReadBaseline func() ([]byte, error)
 	// Rand makes the temporary secret.
 	Rand io.Reader
-	Log  *slog.Logger
+	// Restored raises the persisted "admin client restored" alert for a job
+	// that succeeded. Its error is logged; the job's outcome stands.
+	Restored func(ctx context.Context, jobID string) error
+	Log      *slog.Logger
 	// StepTimeout bounds the one step; it marks work gone far outside
 	// normal and decides nothing else.
 	StepTimeout time.Duration
@@ -97,7 +103,7 @@ type Recoverer struct{ d Deps }
 // New checks d and returns a Recoverer. It does no I/O.
 func New(d Deps) (*Recoverer, error) {
 	switch {
-	case d.Identity == nil || d.Units == nil || d.Bootstrap == nil || d.ReadBaseline == nil || d.Rand == nil || d.Log == nil:
+	case d.Identity == nil || d.Units == nil || d.Bootstrap == nil || d.ReadBaseline == nil || d.Rand == nil || d.Restored == nil || d.Log == nil:
 		return nil, errors.New("recoveradmin: a collaborator is nil")
 	case d.Unit == "":
 		return nil, errors.New("recoveradmin: Deps.Unit is empty")
@@ -108,11 +114,25 @@ func New(d Deps) (*Recoverer, error) {
 }
 
 // Workflow is the job's one step. It is Irreversible, so it is never retried
-// and never replayed, and System, so no operator can start it.
+// and never replayed, and System, so no operator can start it. A job that
+// succeeds raises the restored alert once, from OnTerminal.
 func (r *Recoverer) Workflow() jobs.Workflow {
 	return jobs.Workflow{Kind: Kind, System: true, Steps: []jobs.WorkflowStep{
 		{Name: "restore", Do: r.restore, Timeout: r.d.StepTimeout, Retries: 0, Irreversible: true},
-	}}
+	}, OnTerminal: r.terminal}
+}
+
+// terminal raises the restored alert for a job that succeeded. A failed job
+// is recorded by the ledger and its job-failed alert, so it raises nothing
+// here.
+func (r *Recoverer) terminal(ctx context.Context, jobID string, success bool, _ string) {
+	if !success {
+		return
+	}
+	if err := r.d.Restored(ctx, jobID); err != nil {
+		r.d.Log.ErrorContext(ctx, "The admin client restored alert was not raised.",
+			"component", "identity", "job_id", jobID, "err", err.Error())
+	}
 }
 
 // stepError is a failure sentence a person reads: the runner stores a failed
@@ -170,8 +190,14 @@ func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	}
 	defer sec.Destroy()
 
+	// Every start below runs on a context the step's cancellation does not
+	// reach (F-978-09): a step that timed out or was cancelled must never
+	// leave the sign-in service stopped. systemctl start is bounded by the
+	// unit's own TimeoutStartSec= (F-979-11). Starting an active unit does
+	// nothing, so a stop that failed is followed by a start too (F-1127-05).
+	startCtx := context.WithoutCancel(ctx)
 	if err := r.d.Units.Stop(ctx); err != nil {
-		return fail(errStop, "The identity service could not be stopped.", err)
+		return fail(errStop, "The identity service could not be stopped.", errors.Join(err, r.d.Units.Start(startCtx)))
 	}
 	jobs.LogStep(r.d.Log, sc, slog.LevelInfo, "The identity service is stopped for the admin client's recovery.",
 		append(attrs, "event", "identity.recover_admin_stopped")...)
@@ -185,7 +211,7 @@ func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	}
 	// The unit is started whether or not the command worked: a stopped
 	// identity service is worse than the missing client.
-	startErr := r.d.Units.Start(ctx)
+	startErr := r.d.Units.Start(startCtx)
 	if bootErr != nil {
 		return fail(errCommand, "The identity service's recovery command failed.", errors.Join(bootErr, startErr))
 	}

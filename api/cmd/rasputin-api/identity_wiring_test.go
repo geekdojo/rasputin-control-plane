@@ -87,7 +87,7 @@ func TestWireIdentity_Selection(t *testing.T) {
 	} {
 		t.Run("backend="+tc.backend, func(t *testing.T) {
 			log, rec := logkittest.New()
-			w, err := wireIdentity(t.Context(), log, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv)
+			w, err := wireIdentity(t.Context(), log, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 			if err != nil {
 				t.Fatalf("wireIdentity: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestWireIdentity_RefusedAddresses(t *testing.T) {
 					mgmt = v
 				}
 				log, rec := logkittest.New()
-				w, err := wireIdentity(t.Context(), log, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv)
+				w, err := wireIdentity(t.Context(), log, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -185,7 +185,7 @@ func newIdentityServer(t *testing.T, ca *tlsca.CA) *identityServer {
 // server sees no request.
 func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunEnv)
+	w, err := wireIdentity(t.Context(), log, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	srv := newIdentityServer(t, ca)
-	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv)
+	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak {
 		t.Fatalf("wireIdentity = %v, %v", w.mode, err)
 	}
@@ -224,7 +224,7 @@ func TestWireIdentity_KeycloakAndLeafReload(t *testing.T) {
 	srv := newIdentityServer(t, ca)
 	dataDir := t.TempDir()
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunEnv)
+	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak || w.recoverer == nil || w.reload == nil {
 		t.Fatalf("wireIdentity = %+v, %v", w, err)
 	}
@@ -293,7 +293,7 @@ func TestWireIdentity_UpgradeFromThePreviousRelease(t *testing.T) {
 
 	log, rec := logkittest.New()
 	w, err := wireIdentity(t.Context(), log, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		ca, dataDir, (&scriptedRun{}).run, noRunEnv)
+		ca, dataDir, (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeOff {
 		t.Fatalf("wireIdentity = %q, %v; want off", w.mode, err)
 	}

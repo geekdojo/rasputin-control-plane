@@ -59,7 +59,7 @@ func (s *Service) RaiseNodeKeyChanged(ctx context.Context, change inventory.Node
 		"nodeKeys": change.Current.String(),
 	}
 	fp := fingerprintFromLabels(labels)
-	saved, isNew, err := s.store.Upsert(ctx, &PersistedAlert{
+	return s.raisePersisted(ctx, &PersistedAlert{
 		ID:          NodeKeyChangedID(fp),
 		Fingerprint: fp,
 		Status:      "firing",
@@ -70,6 +70,13 @@ func (s *Service) RaiseNodeKeyChanged(ctx context.Context, change inventory.Node
 		Annotations: map[string]string{},
 		StartsAt:    s.clock(),
 	})
+}
+
+// raisePersisted upserts an event alert the api raises itself and publishes
+// it once, when the row is new. A second raise of the same labels updates the
+// row and publishes nothing.
+func (s *Service) raisePersisted(ctx context.Context, a *PersistedAlert) error {
+	saved, isNew, err := s.store.Upsert(ctx, a)
 	if err != nil {
 		return err
 	}

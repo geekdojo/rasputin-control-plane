@@ -561,8 +561,10 @@ func main() {
 	// off with a configfault. It is wired before the identity leaves, so its
 	// CloseIdleConnections is the api client leaf's reload. See
 	// identity_wiring.go.
+	// The restored alert's holder (#1127): set once the alerts service exists.
+	adminRestored := &atomic.Pointer[restoredFunc]{}
 	identityW, err := wireIdentity(ctx, logger, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputEnv)
+		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputEnv, adminRestored)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity service", "err", err.Error())
 		os.Exit(1)
@@ -1186,7 +1188,7 @@ func main() {
 	}
 	runner.Register(storeRecov.workflow)
 	// identity.recover_admin (#978), under keycloak only: a System job, so
-	// POST /api/jobs refuses it. Nothing submits it yet (F-978-04).
+	// POST /api/jobs refuses it. Only its trigger submits it (#1127).
 	identityW.register(runner)
 	// The identity service's state, its identity:<state> alert and
 	// identity.recover, the pair's restart after a full disk
@@ -1203,6 +1205,14 @@ func main() {
 		os.Exit(1)
 	}
 	identityState.register(runner)
+	// identity.recover_admin's trigger (#1127): due only once the restored
+	// alert's holder is set below, and then on its fact.
+	adminEntry, adminTrigger, err := identityAdminTrigger(identityW.mode, identityState.monitor, identityW.session, jobStore,
+		adminRestored, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity admin trigger", "err", err.Error())
+		os.Exit(1)
+	}
 	// The store's copy before an OS update of its host, and the reference
 	// check that reports entries lost when the store's data is put back
 	// (geekdojo/geekdojo-brain#800).
@@ -1654,7 +1664,7 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), identityState.entries()...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(identityState.entries(), entriesOf(adminEntry)...)...)...))
 	sched.Start(ctx)
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
@@ -1874,8 +1884,12 @@ func main() {
 	if storeAlerts := sealRot.storeAlerts(readiness.alerts); storeAlerts != nil {
 		alertsSvc.SetStoreAlerts(storeAlerts)
 	}
-	// The identity service's state alert (#979), under keycloak only.
-	identityState.wireAlerts(alertsSvc)
+	// The identity service's state alert (#979) and the admin client's
+	// still-refused alert (#1127), under keycloak only. Setting the restored
+	// alert's holder is the fact identity.recover_admin's trigger waits on.
+	identityState.wireAlerts(alertsSvc, adminTrigger)
+	raiseRestored := restoredFunc(alertsSvc.RaiseIdentityAdminRestored)
+	adminRestored.Store(&raiseRestored)
 	// The OS outcome records' crit alert (#833), which replaces the generic
 	// job-failed warn for their kinds.
 	wireOutcomeAlerts(alertsSvc, outcomes)

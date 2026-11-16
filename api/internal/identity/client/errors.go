@@ -62,7 +62,10 @@ type Error struct {
 	// Err is the cause, when there is one: a transport error, a context
 	// error, or what was wrong with an answer. It never holds a body.
 	Err error
-	// OAuthError is the token endpoint's "error" code, for logs only.
+	// OAuthError is the token endpoint's "error" code. It is logged, and
+	// recoveradmin's trigger reads it to tell a refused client
+	// (invalid_client, unauthorized_client) from a TLS refusal, which has
+	// none (geekdojo/geekdojo-brain#1127).
 	OAuthError string
 }
 

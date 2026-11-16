@@ -168,6 +168,21 @@ runner's real systemd.
 | `TestIdentitySystemd_OutOfMemory` (TC-979-02, row T79 K-OOMEXIT) | root, in `test (identity under real systemd, root)` | Keycloak with a 16 MiB heap exits with status 3 on each start, under `Restart=always`, until systemd's start limit (`StartLimitBurst=3`, `StartLimitIntervalSec=infinity`) fails the unit after its third run. The runner's systemd leaves it `failed` with `Result=exit-code`, not `start-limit-hit`. Each invocation's record says `exit_code=exited`, `exit_status=3`, and `last` names the unit's last `InvocationID`. One reading gives `out-of-memory` and exactly one `identity.service_exit` job per record, and leaves only `last` and its record. A second reading adds no job. |
 | `TestIdentitySystemd_FullPartition` (TC-979-04) | root, in the same step | With PostgreSQL's data on a 128 MiB tmpfs that is then filled, the database unit crash-loops until systemd's start limit (`StartLimitBurst=5`, `StartLimitIntervalSec=infinity`) leaves it `failed`, and Keycloak stops with it. The state reads `database-down`, and `identity.recover` arms but is not due. Once the fill file is removed it is due exactly once, its job restarts the pair through `sysunit.RestartUnits`, and the state reaches `Ready`. |
 
+[geekdojo-brain#1127](https://github.com/geekdojo/geekdojo-brain/issues/1127) (Identity 2.8) adds
+`TestRecoverAdminTrigger_AgainstPinnedKeycloak`
+(`api/internal/identitytest/recoveradmin_trigger_functional_test.go`), the trigger that submits
+`identity.recover_admin`. It runs as the runner user in `test (api with coverage)`, under the same
+`RASPUTIN_IDENTITY_FUNCTIONAL=required` switch, against the imported baseline. Each subtest builds
+its own job ledger, a real `jobs.Runner` over in-process NATS and the api's session, as one api
+process would.
+
+| Subtest | Proves |
+|---|---|
+| TC-1127-15 (row T83) | `failureFactor+1` (read from the baseline) of each of: client-credentials logins as `rasputin-admin` with the door leaf, with a foreign-CA leaf, and with the door leaf and a client secret; password grants for `service-account-rasputin-admin`; and login-form sign-ins as that user through `signin.PasswordCodeFlow`. Afterwards the trigger is not due, the api leaf's login and the session's realm read answer 200, the service account's brute-force status reads not disabled, and the ledger holds no job. |
+| TC-1127-16 (row T81) | With `rasputin-admin` deleted, the real scheduler's first tick submits exactly one job, which succeeds; the restored hook is called once with its id; the session reads the realm and creates and deletes a user; the trigger is no longer due; the temporary secret is in no record. |
+| TC-1127-17 (row T82) | With the service account's realm-management roles removed, the session's realm read answers 403 and the trigger is due; the job succeeds and the read answers 200. |
+| TC-1127-18 | With `rasputin-admin` deleted and the baseline unreadable, the job fails with the baseline sentence; after two more scheduler ticks (30 s apart, waited on as ticks) the ledger still holds that one job, and the alerts list carries `job-failed:<id>` and `identity:admin-client-refused`. |
+
 **The units.** The two root tests write the pair as runtime unit files under
 `/run/systemd/system`, related as `keycloak-db.service` and `keycloak.service` are (`Requires=`
 and `After=`), and start them through a test target that `Wants=` both, as `multi-user.target`
@@ -342,3 +357,7 @@ Then run the self-test as above.
 | TC-979-01 | `TestIdentityState_DatabaseDown` (CI) |
 | TC-979-02 | `TestIdentitySystemd_OutOfMemory` (CI, root step) |
 | TC-979-04 | `TestIdentitySystemd_FullPartition` (CI, root step) |
+| TC-1127-15 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-15 (CI) |
+| TC-1127-16 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-16 (CI) |
+| TC-1127-17 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-17 (CI) |
+| TC-1127-18 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-18 (CI) |
