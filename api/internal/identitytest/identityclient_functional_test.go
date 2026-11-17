@@ -18,7 +18,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -28,7 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -289,39 +287,7 @@ func TestIdentityClient_AgainstPinnedKeycloak(t *testing.T) {
 			t.Fatalf("after deleting %s its login = %v, want ErrDenied", baselineAdminClient, err)
 		}
 
-		https, mgmt := env.ports.get()
-		units := &envUnits{env: env, home: filepath.Join(env.root, "kc"), conf: filepath.Join(env.root, "keycloak.conf"), https: https, mgmt: mgmt}
-		var bootOut []byte
-		var secretText string
-		rec2, err := recoveradmin.New(recoveradmin.Deps{
-			Identity: client, Units: units, Unit: "keycloak (identitytest)",
-			Bootstrap: func(ctx context.Context, args, extra []string) error {
-				for _, e := range extra {
-					if v, ok := strings.CutPrefix(e, recoveradmin.SecretEnv+"="); ok {
-						secretText = v
-					}
-				}
-				for _, a := range args {
-					if secretText != "" && strings.Contains(a, secretText) {
-						t.Errorf("argument %q carries the secret", a)
-					}
-				}
-				out, err := execrun.CombinedOutputEnv(ctx, append(env.kcEnv(), extra...),
-					filepath.Join(units.home, "bin", "kc.sh"), append([]string{"--config-file=" + units.conf}, args...)...)
-				bootOut = out
-				if err != nil {
-					t.Logf("kc.sh bootstrap-admin output:\n%s", tail(out, 40))
-				}
-				return err
-			},
-			ReadBaseline: func() ([]byte, error) {
-				return os.ReadFile(filepath.Join("..", "..", "..", "identity", "realm-baseline.json"))
-			},
-			Rand: env.h.cfg.Rand, Log: env.log, StepTimeout: 10 * time.Minute,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
+		rec2, seen := newEnvRecoverer(t, env, client, readRepoBaseline, func(context.Context, string) error { return nil })
 		before := login.n.Load()
 		res, err := rec2.Workflow().Steps[0].Do(&jobs.StepCtx{Ctx: t.Context(), JobID: "01TC978029"})
 		if err != nil {
@@ -355,10 +321,11 @@ func TestIdentityClient_AgainstPinnedKeycloak(t *testing.T) {
 		if n := psqlCount(t, env, "SELECT count(*) FROM client c JOIN realm r ON c.realm_id = r.id WHERE r.name = 'master' AND c.client_id LIKE '"+recoveradmin.TempClientPrefix+"%'"); n != "0" {
 			t.Errorf("rasputin-recover-* clients in realm master = %s, want 0", n)
 		}
+		secretText := seen.secret()
 		if len(secretText) != 43 {
 			t.Fatalf("the recovery command's environment carried a %d-character secret, want 43", len(secretText))
 		}
-		if strings.Contains(rec.Text(), secretText) || strings.Contains(string(bootOut), secretText) {
+		if strings.Contains(rec.Text(), secretText) || strings.Contains(string(seen.output()), secretText) {
 			t.Error("the temporary secret appears in a log record or in kc.sh's output")
 		}
 		if len(rec.Records()) == 0 {

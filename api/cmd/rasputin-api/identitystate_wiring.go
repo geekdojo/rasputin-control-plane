@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
@@ -108,12 +109,21 @@ func (w identityState) start(ctx context.Context) {
 	}
 }
 
-// wireAlerts hands the monitor's alert to the alerts aggregator.
+// wireAlerts hands the monitor's alert, and the admin trigger's still-refused
+// alert when there is a trigger (#1127), to the alerts aggregator as one
+// source.
 func (w identityState) wireAlerts(svc interface {
 	SetIdentityAlerts(func(context.Context, time.Time) []proto.Alert)
-}) {
-	if w.monitor != nil {
+}, trig *recoveradmin.Trigger) {
+	switch {
+	case w.monitor == nil:
+	case trig == nil:
 		svc.SetIdentityAlerts(w.monitor.Alerts)
+	default:
+		mon := w.monitor
+		svc.SetIdentityAlerts(func(ctx context.Context, now time.Time) []proto.Alert {
+			return append(mon.Alerts(ctx, now), trig.Alerts(ctx, now)...)
+		})
 	}
 }
 

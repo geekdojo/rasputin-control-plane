@@ -162,7 +162,7 @@ func TestIdentityStateWiring(t *testing.T) {
 	}
 
 	svc := newOutcomeEnv(t).alertsService(t, mustReader(t))
-	w.wireAlerts(svc)
+	w.wireAlerts(svc, nil)
 	all, err := svc.List(t.Context())
 	if err != nil {
 		t.Fatalf("List with the identity service down: %v", err)
@@ -192,7 +192,7 @@ func TestIdentityStateWiring(t *testing.T) {
 		reg := &fakeRegistry{}
 		w.register(reg)
 		hook := &alertsHook{}
-		w.wireAlerts(hook)
+		w.wireAlerts(hook, nil)
 		w.start(t.Context())
 		if w.monitor != nil || len(reg.wfs) != 0 || w.entries() != nil || hook.fn != nil || c.total() != 0 {
 			t.Fatalf("%s: monitor %v, %d workflows, entries %v, alerts wired %t, %d calls; want none",
