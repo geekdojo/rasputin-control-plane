@@ -20,38 +20,40 @@ import (
 // reads NotFound, which every delete treats as done; the opposite order could
 // leave an entry or key no delete can ever find.
 
-// indexTable is one runtime index table. Only these two constants are ever
-// placed in a statement, so no name from a caller reaches the SQL text.
-type indexTable string
-
-const (
-	runtimeSecretsTable indexTable = "app_runtime_secrets"
-	transitKeysTable    indexTable = "app_transit_keys"
-)
-
-// what is the table's rows as an error names them.
-func (t indexTable) what() string {
-	if t == transitKeysTable {
-		return "transit key"
-	}
-	return "runtime secret"
+// indexTable is one runtime index table: its rows' name for errors and its
+// three statements, each a constant, so no SQL is built at run time.
+type indexTable struct {
+	what, insert, remove, list string
 }
+
+var (
+	runtimeIndexTable = indexTable{
+		what:   "runtime secret",
+		insert: `INSERT OR IGNORE INTO app_runtime_secrets (app_id, name) VALUES (?, ?)`,
+		remove: `DELETE FROM app_runtime_secrets WHERE app_id = ? AND name = ?`,
+		list:   `SELECT name FROM app_runtime_secrets WHERE app_id = ? ORDER BY name`,
+	}
+	keyIndexTable = indexTable{
+		what:   "transit key",
+		insert: `INSERT OR IGNORE INTO app_transit_keys (app_id, name) VALUES (?, ?)`,
+		remove: `DELETE FROM app_transit_keys WHERE app_id = ? AND name = ?`,
+		list:   `SELECT name FROM app_transit_keys WHERE app_id = ? ORDER BY name`,
+	}
+)
 
 // record records name for appID in t. It is idempotent; a missing app fails
 // on the foreign key.
 func (s *Store) record(ctx context.Context, t indexTable, appID, name string) error {
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT OR IGNORE INTO `+string(t)+` (app_id, name) VALUES (?, ?)`, appID, name); err != nil {
-		return fmt.Errorf("apps: record %s %s/%s: %w", t.what(), appID, name, err)
+	if _, err := s.db.ExecContext(ctx, t.insert, appID, name); err != nil {
+		return fmt.Errorf("apps: record %s %s/%s: %w", t.what, appID, name, err)
 	}
 	return nil
 }
 
 // forget removes appID's row for name in t. A row that is absent is success.
 func (s *Store) forget(ctx context.Context, t indexTable, appID, name string) error {
-	if _, err := s.db.ExecContext(ctx,
-		`DELETE FROM `+string(t)+` WHERE app_id = ? AND name = ?`, appID, name); err != nil {
-		return fmt.Errorf("apps: forget %s %s/%s: %w", t.what(), appID, name, err)
+	if _, err := s.db.ExecContext(ctx, t.remove, appID, name); err != nil {
+		return fmt.Errorf("apps: forget %s %s/%s: %w", t.what, appID, name, err)
 	}
 	return nil
 }
@@ -60,32 +62,32 @@ func (s *Store) forget(ctx context.Context, t indexTable, appID, name string) er
 // It is idempotent. A missing app fails (the foreign key), so no row can name
 // an app that is gone.
 func (s *Store) RecordRuntimeSecret(ctx context.Context, appID, name string) error {
-	return s.record(ctx, runtimeSecretsTable, appID, name)
+	return s.record(ctx, runtimeIndexTable, appID, name)
 }
 
 // ForgetRuntimeSecret removes app appID's row for name. A row that is absent
 // is success.
 func (s *Store) ForgetRuntimeSecret(ctx context.Context, appID, name string) error {
-	return s.forget(ctx, runtimeSecretsTable, appID, name)
+	return s.forget(ctx, runtimeIndexTable, appID, name)
 }
 
 // RuntimeSecretNames returns the runtime entry names app appID's rows record,
 // sorted.
 func (s *Store) RuntimeSecretNames(ctx context.Context, appID string) ([]string, error) {
-	return indexNames(ctx, s.db, runtimeSecretsTable, appID)
+	return indexNames(ctx, s.db, runtimeIndexTable, appID)
 }
 
 // RecordTransitKey records that app appID may hold the Transit key name
 // (geekdojo/geekdojo-brain#1084). It is idempotent. A missing app fails (the
 // foreign key).
 func (s *Store) RecordTransitKey(ctx context.Context, appID, name string) error {
-	return s.record(ctx, transitKeysTable, appID, name)
+	return s.record(ctx, keyIndexTable, appID, name)
 }
 
 // ForgetTransitKey removes app appID's row for key name. A row that is absent
 // is success.
 func (s *Store) ForgetTransitKey(ctx context.Context, appID, name string) error {
-	return s.forget(ctx, transitKeysTable, appID, name)
+	return s.forget(ctx, keyIndexTable, appID, name)
 }
 
 // HasTransitKey reports whether app appID's rows record key name.
@@ -103,26 +105,26 @@ func (s *Store) HasTransitKey(ctx context.Context, appID, name string) (bool, er
 
 // TransitKeyNames returns the key names app appID's rows record, sorted.
 func (s *Store) TransitKeyNames(ctx context.Context, appID string) ([]string, error) {
-	return indexNames(ctx, s.db, transitKeysTable, appID)
+	return indexNames(ctx, s.db, keyIndexTable, appID)
 }
 
 // indexNames returns the names appID's rows in t record, sorted.
 func indexNames(ctx context.Context, q queryer, t indexTable, appID string) ([]string, error) {
-	rows, err := q.QueryContext(ctx, `SELECT name FROM `+string(t)+` WHERE app_id = ? ORDER BY name`, appID)
+	rows, err := q.QueryContext(ctx, t.list, appID)
 	if err != nil {
-		return nil, fmt.Errorf("apps: %ss of %s: %w", t.what(), appID, err)
+		return nil, fmt.Errorf("apps: %ss of %s: %w", t.what, appID, err)
 	}
 	defer func() { _ = rows.Close() }()
 	var out []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			return nil, fmt.Errorf("apps: %ss of %s: %w", t.what(), appID, err)
+			return nil, fmt.Errorf("apps: %ss of %s: %w", t.what, appID, err)
 		}
 		out = append(out, name)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("apps: %ss of %s: %w", t.what(), appID, err)
+		return nil, fmt.Errorf("apps: %ss of %s: %w", t.what, appID, err)
 	}
 	return out, nil
 }

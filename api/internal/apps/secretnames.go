@@ -102,11 +102,11 @@ func (s *Store) DeleteWithSecretNames(ctx context.Context, id string) (names, ru
 		return nil, nil, nil, err
 	}
 	names = secretNames(refs, compose, previous)
-	runtimeNames, err = indexNames(ctx, tx, runtimeSecretsTable, id)
+	runtimeNames, err = indexNames(ctx, tx, runtimeIndexTable, id)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	transitKeys, err = indexNames(ctx, tx, transitKeysTable, id)
+	transitKeys, err = indexNames(ctx, tx, keyIndexTable, id)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -242,11 +242,11 @@ func secretNamesByTargetNode(ctx context.Context, q queryer, nodeID string) ([]A
 		if err != nil {
 			return nil, err
 		}
-		runtime, err := indexNames(ctx, q, runtimeSecretsTable, r.id)
+		runtime, err := indexNames(ctx, q, runtimeIndexTable, r.id)
 		if err != nil {
 			return nil, err
 		}
-		keys, err := indexNames(ctx, q, transitKeysTable, r.id)
+		keys, err := indexNames(ctx, q, keyIndexTable, r.id)
 		if err != nil {
 			return nil, err
 		}
