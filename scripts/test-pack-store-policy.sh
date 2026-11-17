@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # test-pack-store-policy.sh — tests for scripts/pack-store-policy.sh
-# (geekdojo/geekdojo-brain#804, TC-804-09).
+# (geekdojo/geekdojo-brain#804, TC-804-09; #1084, TC-1084-30).
 #
 # Run:  ./scripts/test-pack-store-policy.sh
 #
@@ -29,7 +29,7 @@ want="$(cd "$SRC" && ls -1 -- *.hcl)"
 got="$(cd "$tmp/real/openbao-policy" && ls -1A)"
 if [ -n "$want" ] && [ "$got" = "$want" ]; then ok "openbao-policy/ holds exactly storepolicy/'s .hcl files ($(echo "$want" | tr '\n' ' '))"
 else fail "openbao-policy/ holds exactly storepolicy/'s .hcl files" "want: $want got: $got"; fi
-for name in rasputin-api.hcl rasputin-seal-rotate.hcl; do
+for name in rasputin-api.hcl rasputin-seal-rotate.hcl rasputin-author.hcl rasputin-app-keys.hcl; do
 	if [ -f "$tmp/real/openbao-policy/$name" ]; then ok "openbao-policy/$name is packed"; else fail "openbao-policy/$name is packed"; fi
 done
 for f in "$SRC"/*.hcl; do

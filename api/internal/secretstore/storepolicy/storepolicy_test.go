@@ -291,11 +291,11 @@ func checkAPI(text []byte) error {
 	return nil
 }
 
-// TC-804-01, TC-805-01: Names is exactly the four policies, Text returns the
-// embedded bytes (the files in this directory, byte for byte), and an unknown
-// name is refused with a message naming it.
+// TC-804-01, TC-805-01, TC-1084-30: Names is exactly the six policies, Text
+// returns the embedded bytes (the files in this directory, byte for byte), and
+// an unknown name is refused with a message naming it.
 func TestNamesAndText(t *testing.T) {
-	want := []string{APIPolicy, BindablePolicy, ProvisionerPolicy, SealRotatePolicy}
+	want := []string{APIPolicy, AppKeysPolicy, AuthorPolicy, BindablePolicy, ProvisionerPolicy, SealRotatePolicy}
 	if got := Names(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Names() = %v, want exactly %v", got, want)
 	}

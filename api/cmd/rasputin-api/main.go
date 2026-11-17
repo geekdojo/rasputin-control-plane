@@ -619,8 +619,16 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store session", "err", err.Error())
 		os.Exit(1)
 	}
+	// The api's key session at the store (geekdojo/geekdojo-brain#1084): the
+	// rasputin-app-keys identity, over its own leaf and client, kept off the
+	// readiness observer. Only the secrets service's key ops use it.
+	storeKeySession, err := storeKeySessionWiring(storeW.keyLogin, storeW.keyTransit, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store key session", "err", err.Error())
+		os.Exit(1)
+	}
 	// The secrets service and its KV repository (geekdojo/geekdojo-brain#761).
-	secretsSvc, err := secretsWiring(storeSession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
+	secretsSvc, err := secretsWiring(storeSession, storeKeySession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
@@ -2311,8 +2319,9 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 //   - headscale exists only for the self-hosted Docker backend. The mock has no
 //     container, and an external Headscale brings its own certificate — neither
 //     is ours to renew.
-//   - the three store-CA leaves (the store's server leaf, the api's client
-//     leaf and the store provisioner's leaf, #805) exist only when
+//   - the four store-CA leaves (the store's server leaf, the api's client
+//     leaf, the store provisioner's leaf, #805, and the api's key leaf,
+//     #1084) exist only when
 //     RASPUTIN_SECRETSTORE_BACKEND is openbao. They are registered with the
 //     store CA's own sweeper, so the caller checks the union of both
 //     sweepers' names.
@@ -2325,7 +2334,7 @@ func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []s
 		want = append(want, mesh.HeadscaleLeafName)
 	}
 	if storeSelected {
-		want = append(want, storeServerLeafName, storeClientLeafName, storeProvisionerLeafName)
+		want = append(want, storeServerLeafName, storeClientLeafName, storeProvisionerLeafName, storeAppKeysLeafName)
 	}
 	return want
 }

@@ -73,6 +73,11 @@ func (f *fakeAppSecretDeleter) Delete(ctx context.Context, _ secrets.Actor, r se
 	return nil
 }
 
+// DestroyKey records the key as Delete records an entry.
+func (f *fakeAppSecretDeleter) DestroyKey(ctx context.Context, a secrets.Actor, r secrets.Ref) error {
+	return f.Delete(ctx, a, r)
+}
+
 func (f *fakeAppSecretDeleter) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -180,6 +180,7 @@ func TestStartWith_RefusesBadBootstrap(t *testing.T) {
 		{"duplicate role", Bootstrap{Mount: "kv", Roles: []Role{good(), good()}}, `Bootstrap.Roles[1].Name "r" is a duplicate role`},
 		{"empty policy text", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", Policy: "p"}}}, "Bootstrap.Roles[0].PolicyText is empty"},
 		{"role name outside the name rule", Bootstrap{Mount: "kv", Roles: []Role{{Name: "1bad", Policy: "p", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].Name "1bad" is not a name matching ^[A-Za-z_][A-Za-z0-9_-]*$`},
+		{"common name outside the name rule", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", CommonName: "a,b", Policy: "p", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].CommonName "a,b" is not a name matching ^[A-Za-z_][A-Za-z0-9_-]*$`},
 		{"policy name outside the name rule", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", Policy: "a/b", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].Policy "a/b" is not a name`},
 		{"empty policy name", Bootstrap{Mount: "kv", Roles: []Role{{Name: "r", PolicyText: []byte("x")}}}, `Bootstrap.Roles[0].Policy "" is not a name`},
 		{"one policy, two texts", Bootstrap{Mount: "kv", Roles: []Role{good(), {Name: "s", Policy: "p", PolicyText: []byte("y")}}}, `Bootstrap.Roles[1].Policy "p" is given two different texts`},
@@ -467,5 +468,46 @@ func TestLogin_Unreachable(t *testing.T) {
 	s2, _ := loginStore(t, func(string, string) (int, string) { return http.StatusOK, `{"auth":{}}` })
 	if _, err := s2.Login(t.Context(), "a", "a"); err == nil || !strings.Contains(err.Error(), "answered 200 with no token") {
 		t.Errorf("Login answered 200 with no token = %v", err)
+	}
+}
+
+// geekdojo/geekdojo-brain#1084: a role's CommonName, when set, is the one it
+// admits in place of its name (the author role admits the provisioner's
+// leaf); a role without one still admits only its name.
+func TestRenderInitJSON_CommonName(t *testing.T) {
+	b := Bootstrap{Mount: "kv", Roles: []Role{
+		{Name: "rasputin-author", CommonName: "rasputin-provisioner", Policy: "p", PolicyText: []byte("x")},
+		{Name: "plain", Policy: "p", PolicyText: []byte("x")},
+	}}
+	if err := b.validate(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := renderInitJSON(b, []byte("ca"), func(name string) string { return "/p/" + name })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Initialize []map[string]struct {
+			Request []map[string]initRequest `json:"request"`
+		} `json:"initialize"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	cns := map[string]any{}
+	for _, block := range doc.Initialize {
+		for _, stanza := range block {
+			for _, named := range stanza.Request {
+				for _, r := range named {
+					if v, ok := r.Data["allowed_common_names"]; ok {
+						cns[r.Path] = v
+					}
+				}
+			}
+		}
+	}
+	want := map[string]any{"auth/cert/certs/rasputin-author": []any{"rasputin-provisioner"}, "auth/cert/certs/plain": []any{"plain"}}
+	if !reflect.DeepEqual(cns, want) {
+		t.Errorf("allowed_common_names by path = %v, want %v", cns, want)
 	}
 }

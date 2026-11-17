@@ -42,3 +42,23 @@ func (Disabled) Delete(_ context.Context, _ secret.Value, p KVPath) error {
 func (Disabled) CertLogin(context.Context, string) (secret.Value, error) {
 	return secret.Value{}, &Error{Op: "login", Kind: ErrDisabled}
 }
+
+// TransitCreateKey returns ErrDisabled.
+func (Disabled) TransitCreateKey(_ context.Context, _ secret.Value, k TransitKey) error {
+	return fail("transit_create", k.kvPath(), ErrDisabled, nil)
+}
+
+// TransitEncrypt returns ErrDisabled.
+func (Disabled) TransitEncrypt(_ context.Context, _ secret.Value, k TransitKey, _ secret.Value) (secret.Value, error) {
+	return secret.Value{}, fail("transit_encrypt", k.kvPath(), ErrDisabled, nil)
+}
+
+// TransitDecrypt returns ErrDisabled.
+func (Disabled) TransitDecrypt(_ context.Context, _ secret.Value, k TransitKey, _ secret.Value) (secret.Value, error) {
+	return secret.Value{}, fail("transit_decrypt", k.kvPath(), ErrDisabled, nil)
+}
+
+// TransitDestroyKey returns ErrDisabled.
+func (Disabled) TransitDestroyKey(_ context.Context, _ secret.Value, k TransitKey) error {
+	return fail("transit_destroy", k.kvPath(), ErrDisabled, nil)
+}

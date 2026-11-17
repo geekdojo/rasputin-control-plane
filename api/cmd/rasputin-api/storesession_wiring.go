@@ -15,6 +15,12 @@ import (
 // (geekdojo/geekdojo-brain#804, #759).
 const storeAPIRole = "rasputin-api"
 
+// storeAppKeysRole is the store cert role the api's key identity logs in as
+// (geekdojo/geekdojo-brain#1084): the role the store provisioner creates, which
+// admits only the key leaf's CommonName (storeAppKeysCN) and grants the
+// rasputin-app-keys policy.
+const storeAppKeysRole = "rasputin-app-keys"
+
 // noAuditObserver is the login observer when no store backend is requested.
 // There is no readiness monitor then, the store is Disabled and its login
 // makes no call, so there is no alert to raise or clear.
@@ -45,5 +51,27 @@ func storeSessionWiring(login storesession.Login, store storesession.Store, obse
 	}
 	return storesession.New(storesession.Config{
 		Role: storeAPIRole, Login: login, Store: store, Observer: obs, Log: logger,
+	})
+}
+
+// storeKeySessionWiring builds the api's key session at the store
+// (geekdojo/geekdojo-brain#1084): login and transit are storeWiring.keyLogin
+// and keyTransit. It has NO readiness observer: on a store initialised before
+// the release that adds rasputin-app-keys its login is refused, and that must
+// not mark the store not-ready for every kv caller. Its failures surface only
+// on key calls, as the relay's ERROR apprelay.store_failed.
+//
+// It makes no store call: the first key call logs in.
+func storeKeySessionWiring(login storesession.Login, transit storesession.Transit, logger *slog.Logger) (*storesession.Session, error) {
+	switch {
+	case login == nil:
+		return nil, errors.New("store key session: the login is nil")
+	case transit == nil:
+		return nil, errors.New("store key session: the Transit store is nil")
+	case logger == nil:
+		return nil, errors.New("store key session: the logger is nil")
+	}
+	return storesession.New(storesession.Config{
+		Role: storeAppKeysRole, Login: login, Transit: transit, Observer: noAuditObserver{}, Log: logger,
 	})
 }

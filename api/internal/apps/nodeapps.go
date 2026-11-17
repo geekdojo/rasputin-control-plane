@@ -77,12 +77,12 @@ func (n *NodeApps) CheckSecrets(ctx context.Context, nodeID string) error {
 		return &NodeSecretsError{Kind: ErrNodeSecretsUnreadable, Cause: err,
 			Sentence: "The recorded secrets of the node's apps could not be read, so the node was not removed."}
 	}
-	// An app's runtime entries (geekdojo/geekdojo-brain#1081) are names in
-	// the store and recorded ones.
+	// An app's runtime entries (geekdojo/geekdojo-brain#1081) and Transit
+	// keys (#1084) are names in the store and recorded ones.
 	var names, refs int
 	for _, a := range apps {
-		names += len(a.Names) + len(a.RuntimeNames)
-		refs += a.RecordedRefs + len(a.RuntimeNames)
+		names += len(a.Names) + len(a.RuntimeNames) + len(a.TransitKeys)
+		refs += a.RecordedRefs + len(a.RuntimeNames) + len(a.TransitKeys)
 	}
 	if names == 0 {
 		return nil
@@ -100,8 +100,8 @@ func (n *NodeApps) CheckSecrets(ctx context.Context, nodeID string) error {
 }
 
 // Remove deletes the rows of every app on nodeID, and their refs, then every
-// secret those apps had in the store, the entries they wrote at runtime
-// included, on user's behalf, and returns the
+// secret those apps had in the store, the entries they wrote at runtime and
+// their Transit keys included, on user's behalf, and returns the
 // removed app ids. A database error is returned as it is, and nothing is
 // deleted from the store. When only store deletes fail, the ids come back
 // with a NodeSecretsError of kind ErrSecretsLeft naming each entry left.
@@ -120,6 +120,7 @@ func (n *NodeApps) Remove(ctx context.Context, user, nodeID string) ([]string, e
 		ids[i] = a.AppID
 		refs = append(refs, appRefs(a.AppID, a.Names)...)
 		refs = append(refs, runtimeRefs(a.AppID, a.RuntimeNames)...)
+		refs = append(refs, keyRefs(a.AppID, a.TransitKeys)...)
 	}
 	if len(refs) == 0 || !n.d.Store.Configured() {
 		// With no store, CheckSecrets refused any recorded reference, so

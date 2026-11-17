@@ -4,7 +4,7 @@
 // It has three layers, and no endpoint: each consumer adds its own.
 //
 //   - Ref is a typed, validated secret reference, apps/<app ID>/<name> or
-//     devices/<kind>/<name>. AppSecret and DeviceSecret are the parse points
+//     devices/<kind>/<name>. AppSecret, AppKey and DeviceSecret are the parse points
 //     an endpoint or job calls (SEC-INPUT), and the only way to name a secret.
 //   - KVRepository (the model service) maps a Ref to its path in the
 //     rasputin-secrets kv-v2 mount and stores exactly one JSON-string "value"
@@ -36,6 +36,9 @@ const (
 	// refAppRuntime is an entry an app wrote itself at runtime, through its
 	// relay socket (geekdojo/geekdojo-brain#1081): apps/<ID>/_runtime/<name>.
 	refAppRuntime
+	// refAppKey is one of an app's own Transit keys
+	// (geekdojo/geekdojo-brain#1084): app-<ID>-<name> in the app-keys mount.
+	refAppKey
 )
 
 // appRuntimeSegment is the path segment the entries an app writes at runtime
@@ -79,6 +82,20 @@ func AppRuntimeSecret(appID, name string) (Ref, error) {
 	return r, nil
 }
 
+// AppKey is the reference to app appID's Transit key name
+// (geekdojo/geekdojo-brain#1084). appID and name follow AppSecret's rules. The
+// key's name in the store is app-<ID>-<name>: an ID is 26 Crockford
+// characters with no '-', so each key name parses back to exactly one (app,
+// name) pair.
+func AppKey(appID, name string) (Ref, error) {
+	r, err := AppSecret(appID, name)
+	if err != nil {
+		return Ref{}, err
+	}
+	r.kind = refAppKey
+	return r, nil
+}
+
 // DeviceSecret is the reference to device secret name of kind. Both must be
 // DNS-1123 labels. The service refuses every operation on it for now: no
 // consumer exists yet, and the first one adds its actor and its rule.
@@ -93,7 +110,8 @@ func DeviceSecret(kind, name string) (Ref, error) {
 }
 
 // String is the reference's path under the mount, apps/<ID>/<name> or
-// devices/<kind>/<name>, and empty for the zero Ref. It is for logs: names
+// devices/<kind>/<name>, transit:app-<ID>-<name> for an app key, and empty
+// for the zero Ref. It is for logs: names
 // are not secret.
 func (r Ref) String() string {
 	switch r.kind {
@@ -103,8 +121,13 @@ func (r Ref) String() string {
 		return "apps/" + r.owner + "/" + appRuntimeSegment + "/" + r.name
 	case refDevice:
 		return "devices/" + r.owner + "/" + r.name
+	case refAppKey:
+		return "transit:" + r.keyName()
 	}
 	return ""
 }
+
+// keyName is an app key's name in the Transit mount, app-<ID>-<name>.
+func (r Ref) keyName() string { return "app-" + r.owner + "-" + r.name }
 
 func (r Ref) valid() bool { return r.kind != refNone }

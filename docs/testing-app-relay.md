@@ -5,24 +5,28 @@ socket its node's agent opens for it, never the secret store itself
 ([geekdojo-brain#1081](https://github.com/geekdojo/geekdojo-brain/issues/1081)). The agent
 mounts the socket's directory into that app's containers, stamps the app's id on every call
 that arrives on it, and carries the call over the bus to the api. The api authorizes the call
-and calls the store with its own login. Three functional tests cover the parts that unit tests
-cannot show.
+and calls the store with its own login. The same socket carries the app's own Transit keys
+([geekdojo-brain#1084](https://github.com/geekdojo/geekdojo-brain/issues/1084)): it creates,
+encrypts and decrypts under, and destroys keys named `app-<its id>-<name>`, which the api
+reaches with a second store identity, `rasputin-app-keys`. Four functional tests cover the parts
+that unit tests cannot show.
 
 | Test | File | Real dependencies |
 |---|---|---|
 | `TestAppRelay_ScopeRuleAgainstTheRealStore` | `api/internal/apprelay/functional_test.go` | OpenBao, NATS with the auth callout enforcing, the delete saga |
+| `TestAppRelay_KeysOnAPreviousReleaseStore` | `api/internal/apprelay/functional_test.go` | OpenBao, NATS with the auth callout enforcing |
 | `TestRelaySocket_Functional` | `agent/internal/apprelay/functional_test.go` | Unix socket, TLS 1.3, NATS |
 | `TestRelayOverrideFunctional_MountStatusAndRemoval` | `agent/internal/docker/relayoverride_functional_test.go` | Docker Compose and the Docker daemon |
 
-All three run in the required `backend (vet + test + build)` CI job on every PR into `main`.
-The api test runs in the `test (api with coverage)` step, which sets
+All four run in the required `backend (vet + test + build)` CI job on every PR into `main`.
+The api tests run in the `test (api with coverage)` step, which sets
 `RASPUTIN_SECRETSTORE_BIN` and `RASPUTIN_SECRETSTORE_FUNCTIONAL=required`. The two agent tests
 run in the `test (remaining modules)` step, which sets `RASPUTIN_APPSECRET_FUNCTIONAL=required`.
 None of them can pass by skipping.
 
 ## The switches
 
-- The api test uses the secret store's switch, described in
+- The api tests use the secret store's switch, described in
   [testing-secret-store.md](testing-secret-store.md): `RASPUTIN_SECRETSTORE_BIN` names the
   pinned `bao` binary. With `RASPUTIN_SECRETSTORE_FUNCTIONAL=required` a missing binary fails
   the test. Without that setting, a missing binary skips it.
@@ -36,8 +40,13 @@ None of them can pass by skipping.
 
 **`TestAppRelay_ScopeRuleAgainstTheRealStore`** runs the api's relay endpoint and service, as
 `main` wires them, over the real secrets service and the real store chain (client, readiness
-monitor, login session and repository). The store is the pinned OpenBao under the shipped
-`rasputin-api` policy. The bus is the embedded NATS server with the auth callout enforcing, and
+monitor, login session and repository) for kv, and a second client and login session, over the
+api's key leaf (CommonName `rasputin-app-keys`), for keys. The store is the pinned OpenBao
+bootstrapped as the image's self-init makes it, with the shipped `rasputin-api`,
+`rasputin-seal-rotate`, `rasputin-provisioner`, `rasputin-bindable` and `rasputin-author`
+policies. Before the api logs in, the test does what the store provisioner does on such a
+store: logged in as `rasputin-author` with a provisioner leaf, it mounts Transit at
+`rasputin-app-keys`, writes the shipped `rasputin-app-keys` policy and creates its role. The bus is the embedded NATS server with the auth callout enforcing, and
 nodes N and M connect with join tokens bound to them. App A is granted and runs on N. App B is
 granted and runs on M.
 
@@ -50,11 +59,30 @@ granted and runs on M.
 - N acting as B, which runs on M, answers `forbidden`. M acting as A, which runs on N, also
   answers `forbidden`.
 - The broker refuses M a publish on N's relay subject, and a subscribe to N's reply lane.
+- Keys (TC-1084-24). A and B each create a key named `wrap` and encrypt the same plaintext,
+  and each decrypts its own back. A decrypting B's ciphertext answers `invalid` and never
+  returns B's plaintext. A's key operations under the names of its kv entries answer
+  `not_found` (encrypt, decrypt) or succeed with nothing to destroy, and no kv entry's version
+  changes. After A destroys and re-creates `wrap`, its old ciphertext answers `invalid`.
 - After A's real `app.delete` saga runs (stop, leaf teardown, relay teardown, remove,
-  `destroy_secrets`), a call naming A answers `forbidden`, and each of A's runtime entries
-  reads 404 at the store's metadata endpoint.
-- Every reply carries a code, a message and a correlation id. No written value appears in any
-  api log record, job log event or step result.
+  `destroy_secrets`), a call naming A answers `forbidden`, each of A's runtime entries
+  reads 404 at the store's metadata endpoint, A's key rows are gone, A's key is gone from the
+  store, and B's key still decrypts.
+- Every reply carries a code, a message and a correlation id. No written value, plaintext or
+  ciphertext appears in any api log record, job log event or step result.
+
+**`TestAppRelay_KeysOnAPreviousReleaseStore`** (TC-1084-06) runs the same wiring on a store
+bootstrapped as the previous release's self-init makes it: no `rasputin-author`, no Transit
+mount and no `rasputin-app-keys` role, so the api's key login is refused.
+
+- A key create answers `unavailable`, with one ERROR `apprelay.store_failed` record whose `err`
+  names the refused `rasputin-app-keys` login. The key's index row stays.
+- An encrypt or decrypt under a name never created answers `not_found` at WARN, and neither
+  logs in nor calls the store.
+- An encrypt and a destroy under the recorded name answer `unavailable`.
+- The app's runtime secret reads back with the same value and version, the readiness monitor
+  still reads ready, and it raises no `secret-store:` alert: the key session reports to no
+  readiness observer.
 
 **`TestRelaySocket_Functional`** opens a real socket under the agent's `Manager`, with a
 certificate from a test CA over the key the Manager generated. A real NATS server and a stub
@@ -82,10 +110,13 @@ a relay directory that holds `ca.pem` and a listening socket.
 
 ## What they do not prove
 
-- **Hardware, and the image's dockerd.** None of the three proves that a non-root container
+- **Hardware, and the image's dockerd.** None of the four proves that a non-root container
   user can reach the socket under the OS image's daemon, or that a real first-party app
   completes a round trip. That is the bench case,
   [geekdojo-brain#1082](https://github.com/geekdojo/geekdojo-brain/issues/1082).
+- **The image's own provisioning of keys.** The api tests do the author's three writes
+  themselves. That the OS image's `init.json` and store provisioner make the same store is
+  rasputin-os's test, and the bench case for geekdojo-brain#1084.
 - **arm64.** CI runs linux/amd64. No code here is specific to one architecture.
 - **The socket inside a container on macOS.** Docker Desktop shares files with its VM, but not
   Unix sockets. On macOS the Compose test checks `ca.pem` and the read-only mount, logs that it
@@ -106,15 +137,20 @@ of "Local secret store" in [AGENTS.md](../AGENTS.md), or run `scripts/install-op
 Compose test needs `docker` on your `PATH`, with the Compose plugin and a running daemon. To
 check, run `docker compose version` and `docker info`.
 
-**The api test**, with the binary installed at `$HOME/.cache/openbao/bao`:
+**The api tests**, with the binary installed at `$HOME/.cache/openbao/bao`:
 
 ```sh
 RASPUTIN_SECRETSTORE_BIN="$HOME/.cache/openbao/bao" RASPUTIN_SECRETSTORE_FUNCTIONAL=required \
-  go test -count=1 -v -run TestAppRelay_ScopeRuleAgainstTheRealStore ./api/internal/apprelay
+  go test -count=1 -v -run 'TestAppRelay_' ./api/internal/apprelay
 ```
 
-Expect `--- PASS: TestAppRelay_ScopeRuleAgainstTheRealStore` with three passing subtests, and
-exit status 0.
+Expect `--- PASS: TestAppRelay_ScopeRuleAgainstTheRealStore` with four passing subtests,
+`--- PASS: TestAppRelay_KeysOnAPreviousReleaseStore`, and exit status 0.
+
+What the store does with the `rasputin-author` and `rasputin-app-keys` policies on their own,
+including the replay of the attack chain against the author, is
+`TestAppKeys_AgainstTheRealStore` in `api/internal/secretstore/storepolicy`, run the same way
+with `-run TestAppKeys_ ./api/internal/secretstore/storepolicy`.
 
 **The socket test:**
 

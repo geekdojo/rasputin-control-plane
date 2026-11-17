@@ -1,16 +1,21 @@
 package apprelay_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -53,6 +58,8 @@ const (
 	fnValue1 = "sentinel-relay-value-one-1081"
 	fnValue2 = "sentinel-relay-value-two-1081"
 	fnPushed = "sentinel-pushed-value-1081"
+	// fnKeyPlain is the plaintext the apps encrypt (TC-1084-24).
+	fnKeyPlain = "sentinel-key-plaintext-1084"
 )
 
 // appNodes is secrets.AppTargets over the apps store, as main's is.
@@ -101,71 +108,92 @@ func busHost() string {
 	return "127.0.0.1"
 }
 
-// TC-1081-27: the scope rule end to end. A bus enforcing the auth callout
-// with credentials minted for nodes N and M; the real secrets service on the
-// real chain against the pinned OpenBao under the shipped rasputin-api
-// policy; the relay endpoint and service as main wires them; and the real
-// delete saga.
-func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
+// relayRig is the relay as main wires it, on a bus enforcing the auth
+// callout with credentials minted for nodes N and M, the real secrets service
+// on the real chain against the pinned OpenBao, the apps and inventory stores
+// with app A granted on N and B granted on M, and N's agent answering the
+// delete saga's calls.
+type relayRig struct {
+	ctx      context.Context
+	dir      string
+	log      *slog.Logger
+	rec      *logkittest.Recorder
+	store    *secretstoretest.Store
+	sess     *storesession.Session
+	keySess  *storesession.Session
+	keyCalls *countingTransit
+	monitor  *storestate.Monitor
+	appStore *apps.Store
+	inv      *inventory.Store
+	svc      *secrets.Service
+	srv      *bus.Server
+	identity apps.AppIdentity
+	ncN, ncM *nats.Conn
+	permErrs map[string]chan error
+}
+
+// newRelayRig starts the store with b, then runs provision (nil for none)
+// before anything logs in.
+func newRelayRig(t *testing.T, b secretstoretest.Bootstrap, provision func(*secretstoretest.Store)) (*relayRig, bool) {
+	t.Helper()
 	bin := os.Getenv(binEnv)
 	if bin == "" {
 		functest.SkipOrFail(t, switchEnv, "%s is not set, so there is no secret store binary to run", binEnv)
-		return
+		return nil, false
 	}
 	if _, err := os.Stat(bin); err != nil {
 		functest.SkipOrFail(t, switchEnv, "%s=%s: no secret store binary there: %v", binEnv, bin, err)
-		return
+		return nil, false
 	}
-	ctx := context.Background()
-	log, rec := logkittest.New()
-	dir := t.TempDir()
+	r := &relayRig{ctx: context.Background(), dir: t.TempDir(), permErrs: map[string]chan error{}}
+	ctx, dir := r.ctx, r.dir
+	r.log, r.rec = logkittest.New()
+	log := r.log
 
-	// The real store chain, as the secrets functional test builds it.
-	apiPolicy, err := storepolicy.Text(storepolicy.APIPolicy)
-	if err != nil {
-		t.Fatal(err)
-	}
 	h, err := secretstoretest.New(secretstoretest.Config{BinaryPath: bin, TempParent: t.TempDir(), Logger: slog.New(slog.DiscardHandler), Now: time.Now, Rand: rand.Reader})
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := h.StartWith(t.Context(), secretstoretest.Bootstrap{Mount: storepolicy.Mount, Roles: []secretstoretest.Role{
-		{Name: storepolicy.APIPolicy, Policy: storepolicy.APIPolicy, PolicyText: apiPolicy},
-	}})
+	st, err := h.StartWith(t.Context(), b)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close(context.Background()) })
-	sess := realSession(t, st, log)
-	repo, err := secrets.NewRepository(sess)
+	r.store = st
+	if provision != nil {
+		provision(st)
+	}
+	r.sess, r.monitor = realSession(t, st, log)
+	r.keySess, r.keyCalls = realKeySession(t, st, log)
+	repo, err := secrets.NewRepository(r.sess)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// The apps and inventory stores: A granted on N, B granted on M.
-	appStore, err := apps.OpenStore(ctx, filepath.Join(dir, "apps.db"))
+	r.appStore, err = apps.OpenStore(ctx, filepath.Join(dir, "apps.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = appStore.Close() })
-	inv, err := inventory.OpenStore(ctx, filepath.Join(dir, "inv.db"))
+	t.Cleanup(func() { _ = r.appStore.Close() })
+	r.inv, err = inventory.OpenStore(ctx, filepath.Join(dir, "inv.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = inv.Close() })
+	t.Cleanup(func() { _ = r.inv.Close() })
 	now := time.Now().UTC()
 	for _, n := range []string{fnNodeN, fnNodeM} {
-		if err := inv.Insert(ctx, &proto.Node{ID: n, Role: proto.RoleCompute, Hostname: n + ".test", FirstSeen: now, LastSeen: now}); err != nil {
+		if err := r.inv.Insert(ctx, &proto.Node{ID: n, Role: proto.RoleCompute, Hostname: n + ".test", FirstSeen: now, LastSeen: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	for id, node := range map[string]string{fnAppA: fnNodeN, fnAppB: fnNodeM} {
-		if err := appStore.Create(ctx, &apps.App{ID: id, Name: "app-" + id[len(id)-1:], ComposeYAML: "services: {}\n", TargetNode: node,
+		if err := r.appStore.Create(ctx, &apps.App{ID: id, Name: "app-" + id[len(id)-1:], ComposeYAML: "services: {}\n", TargetNode: node,
 			SourceTile: fnTile, LastStatus: proto.AppStatusRunning, CreatedAt: now, UpdatedAt: now}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: appNodes{s: appStore}, Switch: noSwitch{}, Log: log})
+	r.svc, err = secrets.NewService(secrets.Deps{Repo: repo, Transit: r.keySess, Apps: appNodes{s: r.appStore}, Switch: noSwitch{}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,22 +212,21 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = tokens.Close() })
 	kit := bustlstest.Bus(t)
-	srv, err := bus.Start(ctx, bus.Config{Host: busHost(), Port: -1, StoreDir: filepath.Join(dir, "nats"), AuthEnforce: true,
+	r.srv, err = bus.Start(ctx, bus.Config{Host: busHost(), Port: -1, StoreDir: filepath.Join(dir, "nats"), AuthEnforce: true,
 		IssuerPublicKey: issuer.PublicKey(), APIUser: "rasputin-api", APIPass: "test-secret", TLS: kit.Server})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(srv.Stop)
-	if err := tokens.SetNodeRegistry(ctx, inv.Registry()); err != nil {
+	t.Cleanup(r.srv.Stop)
+	if err := tokens.SetNodeRegistry(ctx, r.inv.Registry()); err != nil {
 		t.Fatal(err)
 	}
-	resp := busauth.NewResponder(srv.Conn(), issuer, tokens)
+	resp := busauth.NewResponder(r.srv.Conn(), issuer, tokens)
 	if err := resp.Start(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(resp.Stop)
-	clientURL, _ := srv.ClientURL()
-	permErrs := map[string]chan error{}
+	clientURL, _ := r.srv.ClientURL()
 	connect := func(node string) *nats.Conn {
 		t.Helper()
 		tok, _, err := tokens.MintBound(ctx, node, node, "compute")
@@ -207,7 +234,7 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 			t.Fatal(err)
 		}
 		errs := make(chan error, 8)
-		permErrs[node] = errs
+		r.permErrs[node] = errs
 		nc, err := nats.Connect(clientURL, kit.Option, nats.UserInfo(node, tok), nats.MaxReconnects(0),
 			nats.ErrorHandler(func(_ *nats.Conn, _ *nats.Subscription, e error) { errs <- e }))
 		if err != nil {
@@ -216,19 +243,19 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 		t.Cleanup(nc.Close)
 		return nc
 	}
-	ncN, ncM := connect(fnNodeN), connect(fnNodeM)
+	r.ncN, r.ncM = connect(fnNodeN), connect(fnNodeM)
 
 	// The api side, as main wires it.
 	ca := tlscatest.Controlplane(t, filepath.Join(dir, "trust"))
-	iss, err := apprelay.NewIssuer(apprelay.IssuerDeps{Bus: srv.Conn(), Signer: ca, CACert: ca.Cert, CAPEM: ca.CertPEM, Silence: inv})
+	iss, err := apprelay.NewIssuer(apprelay.IssuerDeps{Bus: r.srv.Conn(), Signer: ca, CACert: ca.Cert, CAPEM: ca.CertPEM, Silence: r.inv})
 	if err != nil {
 		t.Fatal(err)
 	}
-	identity, err := apps.NewAppIdentity([]string{fnTile}, iss)
+	r.identity, err = apps.NewAppIdentity([]string{fnTile}, iss)
 	if err != nil {
 		t.Fatal(err)
 	}
-	relaySvc, err := apprelay.NewService(apprelay.ServiceDeps{Apps: appStore, Grants: identity, Index: appStore, Secrets: svc})
+	relaySvc, err := apprelay.NewService(apprelay.ServiceDeps{Apps: r.appStore, Grants: r.identity, Index: r.appStore, Secrets: r.svc})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,10 +263,10 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := handler.Subscribe(srv.Conn()); err != nil {
+	if _, err := handler.Subscribe(r.srv.Conn()); err != nil {
 		t.Fatal(err)
 	}
-	if err := srv.Conn().Flush(); err != nil {
+	if err := r.srv.Conn().Flush(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -251,40 +278,126 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 		proto.AppRelaySubject(fnNodeN): proto.AppRelayAck{OK: true},
 	} {
 		b, _ := json.Marshal(ack)
-		if _, err := ncN.Subscribe(subj, func(m *nats.Msg) { _ = m.Respond(b) }); err != nil {
+		if _, err := r.ncN.Subscribe(subj, func(m *nats.Msg) { _ = m.Respond(b) }); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := ncN.Flush(); err != nil {
+	if err := r.ncN.Flush(); err != nil {
 		t.Fatal(err)
 	}
+	return r, true
+}
 
-	// call publishes c as node's agent does and waits for the api's reply.
-	call := func(t *testing.T, nc *nats.Conn, node string, c proto.AppSecretCall) proto.AppSecretReply {
-		t.Helper()
-		reply := proto.AppSecretReplyPrefix(node) + rand.Text()
-		sub, err := nc.SubscribeSync(reply)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() { _ = sub.Unsubscribe() }()
-		b, _ := json.Marshal(c)
-		if err := nc.PublishRequest(proto.AppSecretCallSubject(node), reply, b); err != nil {
-			t.Fatal(err)
-		}
-		m, err := sub.NextMsg(10 * time.Second)
-		if err != nil {
-			t.Fatalf("no reply: %v", err)
-		}
-		var r proto.AppSecretReply
-		if err := json.Unmarshal(m.Data, &r); err != nil {
-			t.Fatal(err)
-		}
-		if r.CorrelationID == "" || r.Message == "" {
-			t.Errorf("reply %+v has no correlation id or message", r)
-		}
-		return r
+// call publishes c as node's agent does and waits for the api's reply.
+func (r *relayRig) call(t *testing.T, nc *nats.Conn, node string, c proto.AppSecretCall) proto.AppSecretReply {
+	t.Helper()
+	reply := proto.AppSecretReplyPrefix(node) + rand.Text()
+	sub, err := nc.SubscribeSync(reply)
+	if err != nil {
+		t.Fatal(err)
 	}
+	defer func() { _ = sub.Unsubscribe() }()
+	b, _ := json.Marshal(c)
+	if err := nc.PublishRequest(proto.AppSecretCallSubject(node), reply, b); err != nil {
+		t.Fatal(err)
+	}
+	m, err := sub.NextMsg(10 * time.Second)
+	if err != nil {
+		t.Fatalf("no reply: %v", err)
+	}
+	var rep proto.AppSecretReply
+	if err := json.Unmarshal(m.Data, &rep); err != nil {
+		t.Fatal(err)
+	}
+	if rep.CorrelationID == "" || rep.Message == "" {
+		t.Errorf("reply %+v has no correlation id or message", rep)
+	}
+	return rep
+}
+
+// authorProvisioned is the store PR 2's release makes: the production role
+// set, rasputin-author admitting the provisioner's leaf, and the author
+// path's engine, policy and role (geekdojo/geekdojo-brain#1084, TC-1084-28).
+func authorProvisioned(t *testing.T) (secretstoretest.Bootstrap, func(*secretstoretest.Store)) {
+	t.Helper()
+	b := previousRelease(t)
+	b.Roles = append(b.Roles, secretstoretest.Role{Name: storepolicy.AuthorPolicy, CommonName: "rasputin-provisioner",
+		Policy: storepolicy.AuthorPolicy, PolicyText: policyText(t, storepolicy.AuthorPolicy)})
+	return b, func(st *secretstoretest.Store) {
+		v, err := st.Login(t.Context(), "rasputin-provisioner", storepolicy.AuthorPolicy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer v.Destroy()
+		tc, err := st.ClientTLSFor("rasputin-provisioner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := &http.Client{Transport: &http.Transport{TLSClientConfig: tc}}
+		defer c.CloseIdleConnections()
+		for _, w := range []struct {
+			method, path string
+			body         any
+		}{
+			{http.MethodPost, "sys/mounts/" + storepolicy.AppKeysMount, map[string]string{"type": "transit"}},
+			{http.MethodPut, "sys/policies/acl/" + storepolicy.AppKeysPolicy, map[string]string{"policy": string(policyText(t, storepolicy.AppKeysPolicy))}},
+			{http.MethodPost, "auth/cert/certs/" + storepolicy.AppKeysPolicy, map[string]string{"certificate": string(st.StoreCA().CertPEM),
+				"allowed_common_names": storepolicy.AppKeysPolicy, "token_policies": storepolicy.AppKeysPolicy,
+				"token_no_default_policy": "true", "token_ttl": "1h"}},
+		} {
+			b, _ := json.Marshal(w.body)
+			req, _ := http.NewRequestWithContext(t.Context(), w.method, st.URL()+"/v1/"+w.path, bytes.NewReader(b))
+			req.Header.Set("X-Vault-Token", string(v.Reveal()))
+			resp, err := c.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Fatalf("author %s %s = %d", w.method, w.path, resp.StatusCode)
+			}
+		}
+	}
+}
+
+// previousRelease is the store the previous release's init.json makes: the
+// fixed policies and roles, rasputin-bindable, and no author, Transit mount
+// or key role (TC-1084-06).
+func previousRelease(t *testing.T) secretstoretest.Bootstrap {
+	t.Helper()
+	role := func(name string) secretstoretest.Role {
+		return secretstoretest.Role{Name: name, Policy: name, PolicyText: policyText(t, name)}
+	}
+	return secretstoretest.Bootstrap{Mount: storepolicy.Mount,
+		Roles:    []secretstoretest.Role{role(storepolicy.APIPolicy), role(storepolicy.SealRotatePolicy), role(storepolicy.ProvisionerPolicy)},
+		Policies: []secretstoretest.Policy{{Name: storepolicy.BindablePolicy, Text: policyText(t, storepolicy.BindablePolicy)}},
+	}
+}
+
+func policyText(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := storepolicy.Text(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// TC-1081-27: the scope rule end to end. A bus enforcing the auth callout
+// with credentials minted for nodes N and M; the real secrets service on the
+// real chain against the pinned OpenBao under the shipped rasputin-api
+// policy; the relay endpoint and service as main wires them; and the real
+// delete saga. TC-1084-24 extends it to keys, on a store the author path
+// provisioned, with the api's kv leaf for kv and its key leaf for keys.
+func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
+	b, provision := authorProvisioned(t)
+	rg, ok := newRelayRig(t, b, provision)
+	if !ok {
+		return
+	}
+	ctx, log, rec, sess, svc, appStore, inv, srv := rg.ctx, rg.log, rg.rec, rg.sess, rg.svc, rg.appStore, rg.inv, rg.srv
+	ncN, ncM, identity, permErrs, dir := rg.ncN, rg.ncM, rg.identity, rg.permErrs, rg.dir
+	call := rg.call
 	asA := func(op, name, value string) proto.AppSecretCall {
 		return proto.AppSecretCall{AppID: fnAppA, Op: op, Name: name, Value: value}
 	}
@@ -365,6 +478,80 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 		}
 	})
 
+	// TC-1084-24: keys, end to end. A and B each create wrap and encrypt the
+	// same plaintext; each round-trips its own; A decrypting B's ciphertext
+	// is invalid and never B's plaintext; A's key ops under its kv entries'
+	// names change no kv version; a destroyed and re-created wrap no longer
+	// decrypts A's old ciphertext.
+	keyPlain := base64.StdEncoding.EncodeToString([]byte(fnKeyPlain))
+	var bCipher string
+	t.Run("TC-1084-24 keys: each app its own", func(t *testing.T) {
+		asB := func(op, name, value string) proto.AppSecretCall {
+			return proto.AppSecretCall{AppID: fnAppB, Op: op, Name: name, Value: value}
+		}
+		cipher := map[string]string{}
+		for _, side := range []struct {
+			app  string
+			nc   *nats.Conn
+			node string
+			as   func(op, name, value string) proto.AppSecretCall
+		}{{fnAppA, ncN, fnNodeN, asA}, {fnAppB, ncM, fnNodeM, asB}} {
+			if r := call(t, side.nc, side.node, side.as(proto.AppKeyCreate, "wrap", "")); r.Code != proto.AppSecretOK {
+				t.Fatalf("%s create wrap = %+v", side.app, r)
+			}
+			r := call(t, side.nc, side.node, side.as(proto.AppKeyEncrypt, "wrap", keyPlain))
+			if r.Code != proto.AppSecretOK || !strings.HasPrefix(r.Value, "vault:v1:") {
+				t.Fatalf("%s encrypt = %+v", side.app, r)
+			}
+			cipher[side.app] = r.Value
+			if r := call(t, side.nc, side.node, side.as(proto.AppKeyDecrypt, "wrap", cipher[side.app])); r.Code != proto.AppSecretOK || r.Value != keyPlain {
+				t.Errorf("%s round trip = %s (%d bytes)", side.app, r.Code, len(r.Value))
+			}
+		}
+		bCipher = cipher[fnAppB]
+		if r := call(t, ncN, fnNodeN, asA(proto.AppKeyDecrypt, "wrap", cipher[fnAppB])); r.Code != proto.AppSecretInvalid || r.Value != "" {
+			t.Errorf("A decrypting B's ciphertext = %+v; want invalid and no plaintext", r)
+		}
+		before, err := sess.Versions(ctx, runtimePath(fnAppA, "keep-me"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// A key never reaches a kv entry: with no key row, encrypt and
+		// decrypt are not_found; a destroy of a key that does not exist is
+		// done, and touches no entry.
+		for _, k := range []struct {
+			c    proto.AppSecretCall
+			code string
+		}{
+			{asA(proto.AppKeyEncrypt, "keep-me", keyPlain), proto.AppSecretNotFound},
+			{asA(proto.AppKeyDecrypt, "keep-me", cipher[fnAppA]), proto.AppSecretNotFound},
+			{asA(proto.AppKeyDestroy, "keep-me", ""), proto.AppSecretOK},
+			{asA(proto.AppKeyEncrypt, "db-password", keyPlain), proto.AppSecretNotFound},
+		} {
+			if r := call(t, ncN, fnNodeN, k.c); r.Code != k.code || r.Value != "" {
+				t.Errorf("A %s %s = %+v; want %s", k.c.Op, k.c.Name, r, k.code)
+			}
+		}
+		after, err := sess.Versions(ctx, runtimePath(fnAppA, "keep-me"))
+		if err != nil || after.CurrentVersion != before.CurrentVersion {
+			t.Errorf("keep-me's version %d -> %d (%v): a key op changed a kv entry", before.CurrentVersion, after.CurrentVersion, err)
+		}
+		if r := call(t, ncN, fnNodeN, asA(proto.AppSecretRead, "keep-me", "")); r.Code != proto.AppSecretOK || r.Value != fnValue1 {
+			t.Errorf("keep-me after the key ops = %s", r.Code)
+		}
+		for _, op := range []string{proto.AppKeyDestroy, proto.AppKeyCreate} {
+			if r := call(t, ncN, fnNodeN, asA(op, "wrap", "")); r.Code != proto.AppSecretOK {
+				t.Fatalf("A %s wrap = %+v", op, r)
+			}
+		}
+		if r := call(t, ncN, fnNodeN, asA(proto.AppKeyDecrypt, "wrap", cipher[fnAppA])); r.Code != proto.AppSecretInvalid || r.Value != "" {
+			t.Errorf("A's old ciphertext under the re-created wrap = %+v; want invalid", r)
+		}
+		if names, err := appStore.TransitKeyNames(ctx, fnAppA); err != nil || !slices.Equal(names, []string{"wrap"}) {
+			t.Errorf("A's key rows = %v, %v; want [wrap]", names, err)
+		}
+	})
+
 	t.Run("after A's delete saga", func(t *testing.T) {
 		jst, err := jobs.OpenStore(ctx, filepath.Join(dir, "jobs.db"))
 		if err != nil {
@@ -394,6 +581,19 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 				t.Errorf("apps/A/_runtime/%s metadata after delete: %v; want 404", name, err)
 			}
 		}
+		// TC-1084-24: A's key rows and store keys are gone; B's key still
+		// decrypts.
+		if names, err := appStore.TransitKeyNames(ctx, fnAppA); err != nil || len(names) != 0 {
+			t.Errorf("A's key rows after delete = %v, %v; want none", names, err)
+		}
+		wrapA, _ := secretstore.NewTransitKey(storepolicy.AppKeysMount, "app-"+fnAppA+"-wrap")
+		if _, err := rg.keySess.TransitDecrypt(ctx, wrapA, secret.New([]byte(bCipher))); !errors.Is(err, secretstore.ErrNotFound) {
+			t.Errorf("A's wrap in the store after delete: %v; want not found", err)
+		}
+		asB := proto.AppSecretCall{AppID: fnAppB, Op: proto.AppKeyDecrypt, Name: "wrap", Value: bCipher}
+		if r := call(t, ncM, fnNodeM, asB); r.Code != proto.AppSecretOK || r.Value != keyPlain {
+			t.Errorf("B's decrypt after A's delete = %s", r.Code)
+		}
 
 		// No value in any api log record, job log line or step result.
 		var texts []string
@@ -409,7 +609,7 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 		if len(rec.Records()) == 0 || len(events) == 0 {
 			t.Fatal("nothing was captured, so the scan would read nothing")
 		}
-		for _, v := range []string{fnValue1, fnValue2, fnPushed} {
+		for _, v := range []string{fnValue1, fnValue2, fnPushed, fnKeyPlain, keyPlain, bCipher} {
 			for _, s := range texts {
 				if strings.Contains(s, v) {
 					t.Errorf("a value reached a log or the job: %.200s", s)
@@ -421,7 +621,7 @@ func TestAppRelay_ScopeRuleAgainstTheRealStore(t *testing.T) {
 
 // realSession is the api's login session over the production client, a real
 // readiness Monitor and its ObservedStore, for the rasputin-api role.
-func realSession(t *testing.T, s *secretstoretest.Store, logger *slog.Logger) *storesession.Session {
+func realSession(t *testing.T, s *secretstoretest.Store, logger *slog.Logger) (*storesession.Session, *storestate.Monitor) {
 	t.Helper()
 	tc, err := s.ClientTLSFor(storepolicy.APIPolicy)
 	if err != nil {
@@ -452,5 +652,179 @@ func realSession(t *testing.T, s *secretstoretest.Store, logger *slog.Logger) *s
 	if err != nil {
 		t.Fatal(err)
 	}
-	return sess
+	return sess, monitor
+}
+
+// countingTransit counts the Transit calls and logins that reach the key
+// client.
+type countingTransit struct {
+	c      *secretstore.Client
+	logins atomic.Int32
+	calls  atomic.Int32
+}
+
+func (c *countingTransit) CertLogin(ctx context.Context, role string) (secret.Value, error) {
+	c.logins.Add(1)
+	return c.c.CertLogin(ctx, role)
+}
+
+func (c *countingTransit) TransitCreateKey(ctx context.Context, tok secret.Value, k secretstore.TransitKey) error {
+	c.calls.Add(1)
+	return c.c.TransitCreateKey(ctx, tok, k)
+}
+
+func (c *countingTransit) TransitEncrypt(ctx context.Context, tok secret.Value, k secretstore.TransitKey, v secret.Value) (secret.Value, error) {
+	c.calls.Add(1)
+	return c.c.TransitEncrypt(ctx, tok, k, v)
+}
+
+func (c *countingTransit) TransitDecrypt(ctx context.Context, tok secret.Value, k secretstore.TransitKey, v secret.Value) (secret.Value, error) {
+	c.calls.Add(1)
+	return c.c.TransitDecrypt(ctx, tok, k, v)
+}
+
+func (c *countingTransit) TransitDestroyKey(ctx context.Context, tok secret.Value, k secretstore.TransitKey) error {
+	c.calls.Add(1)
+	return c.c.TransitDestroyKey(ctx, tok, k)
+}
+
+// realKeySession is the api's key session as main wires it
+// (geekdojo/geekdojo-brain#1084): the production client presenting the key
+// leaf, CN rasputin-app-keys, logging in as rasputin-app-keys, with no
+// readiness observer.
+func realKeySession(t *testing.T, s *secretstoretest.Store, logger *slog.Logger) (*storesession.Session, *countingTransit) {
+	t.Helper()
+	tc, err := s.ClientTLSFor(storepolicy.AppKeysPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(s.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := secretstore.New(secretstore.Config{Addr: u, TLS: tc, CallTimeout: 10 * time.Second, Logger: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	ct := &countingTransit{c: client}
+	sess, err := storesession.New(storesession.Config{Role: storepolicy.AppKeysPolicy, Login: ct, Transit: ct,
+		Observer: noObserver{}, Log: logger})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sess, ct
+}
+
+// noObserver is main's noAuditObserver: the key session reports to no one.
+type noObserver struct{}
+
+func (noObserver) ObserveAudited(context.Context, error) {}
+
+// TC-1084-06: a store initialised by the previous release (no author, no
+// Transit mount, no key role). A granted app holding one runtime secret: its
+// key create answers unavailable with one ERROR apprelay.store_failed naming
+// the refused rasputin-app-keys login, and leaves the row (F-1084-09); an
+// encrypt or decrypt under a never-created name answers not_found at WARN
+// with no store call (F-1084-02); encrypt and destroy under the row answer
+// unavailable; the runtime secret reads back unchanged; and the kv readiness
+// is untouched: no secret-store alert, and the monitor reads ready.
+func TestAppRelay_KeysOnAPreviousReleaseStore(t *testing.T) {
+	rg, ok := newRelayRig(t, previousRelease(t), nil)
+	if !ok {
+		return
+	}
+	ctx, rec := rg.ctx, rg.rec
+	as := func(op, name, value string) proto.AppSecretCall {
+		return proto.AppSecretCall{AppID: fnAppA, Op: op, Name: name, Value: value}
+	}
+	if r := rg.call(t, rg.ncN, fnNodeN, as(proto.AppSecretCreate, "session-key", fnValue1)); r.Code != proto.AppSecretOK {
+		t.Fatalf("runtime create = %+v", r)
+	}
+	r, err := secrets.AppRuntimeSecret(fnAppA, "session-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _ := secretstore.NewKVPath(storepolicy.Mount, r.String())
+	before, err := rg.sess.Versions(ctx, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := base64.StdEncoding.EncodeToString([]byte(fnKeyPlain))
+
+	// since is the records written after the first n, at level.
+	since := func(n int, level slog.Level) []slog.Record {
+		var out []slog.Record
+		for _, r := range rec.Records()[n:] {
+			if r.Level == level {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	mark := len(rec.Records())
+	create := rg.call(t, rg.ncN, fnNodeN, as(proto.AppKeyCreate, "wrap", ""))
+	if create.Code != proto.AppSecretUnavailable {
+		t.Fatalf("create on a previous-release store = %+v; want unavailable", create)
+	}
+	var failed []slog.Record
+	for _, e := range since(mark, slog.LevelError) {
+		if ev, _ := logkittest.Attr(e, "event"); ev == "apprelay.store_failed" {
+			failed = append(failed, e)
+		}
+	}
+	if len(failed) != 1 {
+		t.Fatalf("%d apprelay.store_failed records, want 1:\n%s", len(failed), rec.Text())
+	}
+	for k, want := range map[string]string{"component": "apprelay", "node": fnNodeN, "app_id": fnAppA, "op": proto.AppKeyCreate,
+		"name": "wrap", "correlation_id": create.CorrelationID} {
+		if got, _ := logkittest.Attr(failed[0], k); got != want {
+			t.Errorf("%s = %q, want %q", k, got, want)
+		}
+	}
+	if e, _ := logkittest.Attr(failed[0], "err"); !strings.Contains(e, "log in as "+storepolicy.AppKeysPolicy) {
+		t.Errorf("err = %q, want it to name the refused %s login", e, storepolicy.AppKeysPolicy)
+	}
+	if ok, err := rg.appStore.HasTransitKey(ctx, fnAppA, "wrap"); !ok || err != nil {
+		t.Errorf("the wrap row after the refused create = %t, %v; want kept (F-1084-09)", ok, err)
+	}
+
+	logins, calls := rg.keyCalls.logins.Load(), rg.keyCalls.calls.Load()
+	for _, c := range []proto.AppSecretCall{as(proto.AppKeyEncrypt, "ghost", plain), as(proto.AppKeyDecrypt, "ghost", "vault:v1:"+plain)} {
+		mark := len(rec.Records())
+		r := rg.call(t, rg.ncN, fnNodeN, c)
+		if r.Code != proto.AppSecretNotFound {
+			t.Errorf("%s ghost = %+v; want not_found", c.Op, r)
+		}
+		if len(since(mark, slog.LevelError)) != 0 || len(since(mark, slog.LevelWarn)) != 1 {
+			t.Errorf("%s ghost: want one WARN refusal and no ERROR:\n%s", c.Op, rec.Text())
+		}
+	}
+	if rg.keyCalls.logins.Load() != logins || rg.keyCalls.calls.Load() != calls {
+		t.Errorf("the ghost calls reached the store: %d logins, %d calls more", rg.keyCalls.logins.Load()-logins, rg.keyCalls.calls.Load()-calls)
+	}
+	for _, c := range []proto.AppSecretCall{as(proto.AppKeyEncrypt, "wrap", plain), as(proto.AppKeyDestroy, "wrap", "")} {
+		if r := rg.call(t, rg.ncN, fnNodeN, c); r.Code != proto.AppSecretUnavailable {
+			t.Errorf("%s wrap = %+v; want unavailable", c.Op, r)
+		}
+	}
+
+	if r := rg.call(t, rg.ncN, fnNodeN, as(proto.AppSecretRead, "session-key", "")); r.Code != proto.AppSecretOK || r.Value != fnValue1 {
+		t.Errorf("the runtime secret after the key calls = %s", r.Code)
+	}
+	after, err := rg.sess.Versions(ctx, p)
+	if err != nil || after.CurrentVersion != before.CurrentVersion {
+		t.Errorf("the runtime secret's version %d -> %d (%v)", before.CurrentVersion, after.CurrentVersion, err)
+	}
+	if st, err := rg.monitor.State(ctx); err != nil || st != storestate.Ready {
+		t.Errorf("readiness = %s, %v; want ready", st, err)
+	}
+	for _, a := range rg.monitor.Alerts(ctx, time.Now()) {
+		if strings.HasPrefix(a.ID, "secret-store:") {
+			t.Errorf("alert %s raised", a.ID)
+		}
+	}
+	if strings.Contains(rec.Text(), fnKeyPlain) || strings.Contains(rec.Text(), plain) || strings.Contains(rec.Text(), fnValue1) {
+		t.Error("a value reached a log record")
+	}
 }

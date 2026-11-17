@@ -51,14 +51,18 @@ func (a appStoreState) State(ctx context.Context) (storestate.State, error) {
 
 // secretsWiring builds the secrets service (geekdojo/geekdojo-brain#761) over
 // the api's store session: the KV repository, and the service that authorizes
-// every call against the apps table. It makes no store call.
+// every call against the apps table. keys is the api's key session
+// (geekdojo/geekdojo-brain#1084), the service's Transit store and nothing
+// else's. It makes no store call.
 //
 // sw is the store's switch marker (geekdojo/geekdojo-brain#604), which every
 // operator write sets first: storeSwitchFor's choice.
-func secretsWiring(session *storesession.Session, appsStore *apps.Store, sw secrets.Switch, logger *slog.Logger) (*secrets.Service, error) {
+func secretsWiring(session, keys *storesession.Session, appsStore *apps.Store, sw secrets.Switch, logger *slog.Logger) (*secrets.Service, error) {
 	switch {
 	case session == nil:
 		return nil, errors.New("secrets: the store session is nil")
+	case keys == nil:
+		return nil, errors.New("secrets: the store key session is nil")
 	case appsStore == nil:
 		return nil, errors.New("secrets: the apps store is nil")
 	case sw == nil:
@@ -70,7 +74,7 @@ func secretsWiring(session *storesession.Session, appsStore *apps.Store, sw secr
 	if err != nil {
 		return nil, err
 	}
-	return secrets.NewService(secrets.Deps{Repo: repo, Apps: appTargetNodes{store: appsStore}, Switch: sw, Log: logger})
+	return secrets.NewService(secrets.Deps{Repo: repo, Transit: keys, Apps: appTargetNodes{store: appsStore}, Switch: sw, Log: logger})
 }
 
 // storeSwitchReader is the switch marker as the boot read sees it.

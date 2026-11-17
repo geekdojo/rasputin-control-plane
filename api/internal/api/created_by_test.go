@@ -19,7 +19,8 @@ import (
 // collaborators for endpoint tests, which never reach the store.
 type noopSecretDeleter struct{}
 
-func (noopSecretDeleter) Delete(context.Context, secrets.Actor, secrets.Ref) error { return nil }
+func (noopSecretDeleter) Delete(context.Context, secrets.Actor, secrets.Ref) error     { return nil }
+func (noopSecretDeleter) DestroyKey(context.Context, secrets.Actor, secrets.Ref) error { return nil }
 
 type readyStoreState struct{}
 

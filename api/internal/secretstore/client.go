@@ -221,7 +221,7 @@ func (c *Client) RotateRoot(ctx context.Context, token secret.Value) error {
 
 // failed writes the client's one record for a failed call and returns e. The
 // level is DEBUG for the outcomes a caller expects (not found, a lost
-// check-and-set race), ERROR for a protocol error, and WARN for the rest.
+// check-and-set race, a ciphertext that does not decrypt), ERROR for a protocol error, and WARN for the rest.
 //
 // A Health call that finds the store sealed, uninitialised or unreachable is
 // DEBUG too: asking whether the store is ready is how its callers find out it
@@ -231,7 +231,7 @@ func (c *Client) RotateRoot(ctx context.Context, token secret.Value) error {
 func (c *Client) failed(ctx context.Context, e *Error) error {
 	level := slog.LevelWarn
 	switch e.Kind {
-	case ErrNotFound, ErrCASMismatch:
+	case ErrNotFound, ErrCASMismatch, ErrInvalidCiphertext:
 		level = slog.LevelDebug
 	case ErrProtocol:
 		level = slog.LevelError
@@ -539,6 +539,9 @@ func (c *Client) statusError(ctx context.Context, op string, p KVPath, status in
 		e.Kind = ErrProtocol
 		if slices.ContainsFunc(e.StoreMessages, func(m string) bool { return strings.Contains(m, casMismatchText) }) {
 			e.Kind = ErrCASMismatch
+		}
+		if strings.HasPrefix(op, transitOpPrefix) {
+			e.Kind = transitKind(e.StoreMessages)
 		}
 	case status == http.StatusServiceUnavailable:
 		e.Kind = ErrUnreachable
