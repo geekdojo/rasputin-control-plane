@@ -211,7 +211,7 @@ func TestRestore_PreSwitchArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secretsWiring(sess, as, storeSwitchFor(storeModeOpenBao, marker), log)
+	svc, err := secretsWiring(sess, offKeySession(t), as, storeSwitchFor(storeModeOpenBao, marker), log)
 	if err != nil {
 		t.Fatal(err)
 	}

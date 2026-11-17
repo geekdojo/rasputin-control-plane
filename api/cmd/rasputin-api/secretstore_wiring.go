@@ -31,9 +31,9 @@ import (
 //
 //   - unset or empty: the store is off (secretstore.Disabled), at INFO;
 //   - exactly "mock": the in-memory secretstore.Mock, at WARN;
-//   - exactly "openbao": the real client, the two store-CA leaves it needs
-//     and the store provisioner's leaf (#805), registered with a sweeper of
-//     their own;
+//   - exactly "openbao": the real client, the two store-CA leaves it needs,
+//     the store provisioner's leaf (#805), and the api's key identity's leaf
+//     and client (#1084), registered with a sweeper of their own;
 //   - anything else, a refused address, or no store CA: off, with one ERROR
 //     record carrying configfault=true and the setting. The api still starts,
 //     as the agent's configfault rule has it.
@@ -50,6 +50,12 @@ const (
 	// storeProvisionerLeafName is the store provisioner's leaf (#805), which
 	// rasputin-os's rasputin-store-provision oneshot presents at the store.
 	storeProvisionerLeafName = "openbao-provisioner"
+	// storeAppKeysLeafName is the api's key identity's leaf
+	// (geekdojo/geekdojo-brain#1084), which the key client presents.
+	storeAppKeysLeafName = "openbao-app-keys"
+	// storeAppKeysCN is the key leaf's CommonName. The store's
+	// rasputin-app-keys cert role pins allowed_common_names to it.
+	storeAppKeysCN = "rasputin-app-keys"
 	// storeClientCN is the client leaf's CommonName. The store's cert role
 	// (#804) pins allowed_common_names to it.
 	storeClientCN = "rasputin-api"
@@ -87,6 +93,11 @@ type storeWiring struct {
 	// login is the store's cert login (#759): the client under openbao, the
 	// same Mock under mock, and Disabled when the store is off or refused.
 	login storesession.Login
+	// keyLogin and keyTransit are the api's key identity at the store
+	// (geekdojo/geekdojo-brain#1084): its own client over its own leaf under
+	// openbao, the same Mock under mock, Disabled otherwise.
+	keyLogin   storesession.Login
+	keyTransit storesession.Transit
 	// client and sweeper are set only in the openbao mode.
 	client  *secretstore.Client
 	sweeper *tlsca.LeafSweeper
@@ -112,7 +123,8 @@ type runFunc func(ctx context.Context, name string, args ...string) ([]byte, err
 // each time the server leaf's reload restarts the store (#833); it is
 // required under openbao.
 func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr string, storeCA *tlsca.CA, dataDir string, run runFunc, afterStoreRestart func(context.Context)) (storeWiring, error) {
-	off := storeWiring{mode: storeModeOff, store: secretstore.Disabled{}, login: secretstore.Disabled{}}
+	off := storeWiring{mode: storeModeOff, store: secretstore.Disabled{}, login: secretstore.Disabled{},
+		keyLogin: secretstore.Disabled{}, keyTransit: secretstore.Disabled{}}
 	configFault := func(setting, value, reason string) (storeWiring, error) {
 		logger.ErrorContext(ctx, "secret store off: configuration refused",
 			"configfault", true, "setting", setting, "value", value, "reason", reason)
@@ -126,7 +138,7 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 		logger.WarnContext(ctx, "secret store is the in-memory mock: nothing it holds survives a restart",
 			"setting", "RASPUTIN_SECRETSTORE_BACKEND")
 		mock := secretstore.NewMock(time.Now)
-		return storeWiring{mode: storeModeMock, store: mock, login: mock}, nil
+		return storeWiring{mode: storeModeMock, store: mock, login: mock, keyLogin: mock, keyTransit: mock}, nil
 	case storeModeOpenBao:
 		if afterStoreRestart == nil {
 			return off, errors.New("secret store: the after-restart hook is nil under openbao")
@@ -149,6 +161,17 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 		return configFault("RASPUTIN_SECRETSTORE_BACKEND", backend, err.Error())
 	}
 	client, err := secretstore.New(secretstore.Config{Addr: u, TLS: tlsCfg, CallTimeout: storeCallTimeout, Logger: logger})
+	if err != nil {
+		return configFault("RASPUTIN_SECRETSTORE_ADDR", addr, err.Error())
+	}
+
+	keyDir := filepath.Join(dataDir, "tls", storeAppKeysLeafName)
+	keyPaths := tlsca.LeafPathsIn(keyDir)
+	keyTLS, err := secretstore.NewTLSConfig(storeCA.CertPEM, keyPaths.CertPath, keyPaths.KeyPath)
+	if err != nil {
+		return configFault("RASPUTIN_SECRETSTORE_BACKEND", backend, err.Error())
+	}
+	keyClient, err := secretstore.New(secretstore.Config{Addr: u, TLS: keyTLS, CallTimeout: storeCallTimeout, Logger: logger})
 	if err != nil {
 		return configFault("RASPUTIN_SECRETSTORE_ADDR", addr, err.Error())
 	}
@@ -184,7 +207,29 @@ func wireSecretStore(ctx context.Context, logger *slog.Logger, backend, addr str
 	}); err != nil {
 		return off, fmt.Errorf("secret store: %w", err)
 	}
-	return storeWiring{mode: storeModeOpenBao, store: client, login: client, client: client, sweeper: sweeper}, nil
+	// The key identity's leaf (geekdojo/geekdojo-brain#1084): its own
+	// CommonName, so the store binds it to rasputin-app-keys alone, and its
+	// own client, whose idle connections its reload closes.
+	if err := sweeper.Register(tlsca.LeafConsumer{
+		Name: storeAppKeysLeafName,
+		Dir:  keyDir,
+		Spec: func() (tlsca.LeafSpec, error) { return storeAppKeysLeafSpec(), nil },
+		Reload: func(context.Context, tlsca.LeafPaths) error {
+			keyClient.CloseIdleConnections()
+			return nil
+		},
+	}); err != nil {
+		return off, fmt.Errorf("secret store: %w", err)
+	}
+	return storeWiring{mode: storeModeOpenBao, store: client, login: client, keyLogin: keyClient, keyTransit: keyClient,
+		client: client, sweeper: sweeper}, nil
+}
+
+// storeAppKeysLeafSpec is the api's key identity's leaf
+// (geekdojo/geekdojo-brain#1084): clientAuth, with the CommonName the store's
+// rasputin-app-keys cert role allows.
+func storeAppKeysLeafSpec() tlsca.LeafSpec {
+	return tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: storeAppKeysCN}
 }
 
 // storeServerLeafSpec is the store listener's leaf: serverAuth, for the one

@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log/slog"
 )
@@ -96,6 +97,38 @@ const (
 	AppSecretDelete  = "delete"
 )
 
+// The operations an app performs on its own Transit keys
+// (geekdojo/geekdojo-brain#1084), on the same subject and reply lane as its
+// runtime secrets. Value carries the input: on encrypt the plaintext as
+// standard base64, on decrypt Transit's vault:v<N>:<base64> ciphertext. The
+// reply's Value carries the output: the ciphertext, or the plaintext as
+// standard base64.
+const (
+	AppKeyCreate  = "key.create"
+	AppKeyEncrypt = "key.encrypt"
+	AppKeyDecrypt = "key.decrypt"
+	AppKeyDestroy = "key.destroy"
+)
+
+// AppKeyMaxPlaintextBytes bounds one plaintext an app encrypts, decoded. Its
+// largest ciphertext, with a 10-digit key version, is
+// len("vault:v")+10+1 + 4*ceil((12+32768+16)/3) = 43,746 characters, under
+// AppRelayMaxValueBytes, so whatever the relay accepts to encrypt it accepts
+// back to decrypt (F-1084-03).
+const AppKeyMaxPlaintextBytes = 32 << 10
+
+// AppKeyPlaintextFits reports whether b64, standard padded base64, decodes to
+// at most AppKeyMaxPlaintextBytes. It counts from the length and padding
+// alone, so the agent and the api bound the same input the same way; whether
+// b64 is valid base64 is the api's check.
+func AppKeyPlaintextFits(b64 string) bool {
+	n := base64.StdEncoding.DecodedLen(len(b64))
+	for i := len(b64) - 1; i >= 0 && i >= len(b64)-2 && b64[i] == '='; i-- {
+		n--
+	}
+	return n <= AppKeyMaxPlaintextBytes
+}
+
 // AppSecretCall is one call an app made on its relay socket, as the agent
 // carries it to the api. AppID is the app the socket belongs to, stamped by
 // the agent and never read from the app's request.
@@ -103,7 +136,8 @@ type AppSecretCall struct {
 	AppID string `json:"appId"`
 	Op    string `json:"op"`
 	Name  string `json:"name"`
-	// Value is set on create and replace only.
+	// Value is set on create and replace, and on a key's encrypt and
+	// decrypt.
 	Value string `json:"value,omitempty"`
 }
 
@@ -130,7 +164,7 @@ const (
 
 // AppSecretReply is the api's answer to an AppSecretCall. Message is a
 // sentence safe to hand the app; CorrelationID names the api's log record of
-// the call. Value is set on a successful read only.
+// the call. Value is set on a successful read, encrypt or decrypt only.
 type AppSecretReply struct {
 	Code          string `json:"code"`
 	Message       string `json:"message,omitempty"`

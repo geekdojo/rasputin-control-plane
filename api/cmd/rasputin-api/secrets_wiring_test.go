@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -77,12 +79,17 @@ func TestSecretsWiring(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			svc, err := secretsWiring(sess, as, storeSwitchFor(backend, testSwitch(t)), log)
+			keyLogin := &countingLogin{inner: w.keyLogin}
+			keys, err := storeKeySessionWiring(keyLogin, w.keyTransit, log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc, err := secretsWiring(sess, keys, as, storeSwitchFor(backend, testSwitch(t)), log)
 			if err != nil || svc == nil {
 				t.Fatalf("secretsWiring = %v, %v; want a service", svc, err)
 			}
-			if login.calls.Load() != 0 || store.calls.Load() != 0 {
-				t.Fatalf("wiring made %d logins and %d store calls", login.calls.Load(), store.calls.Load())
+			if login.calls.Load() != 0 || keyLogin.calls.Load() != 0 || store.calls.Load() != 0 {
+				t.Fatalf("wiring made %d logins, %d key logins and %d store calls", login.calls.Load(), keyLogin.calls.Load(), store.calls.Load())
 			}
 			if backend != "" {
 				return
@@ -111,17 +118,32 @@ func TestSecretsWiring(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if s, err := secretsWiring(nil, as, testSwitch(t), log); err == nil || s != nil {
+		keys := offKeySession(t)
+		if s, err := secretsWiring(nil, keys, as, testSwitch(t), log); err == nil || s != nil {
 			t.Errorf("nil session: %v, %v; want an error", s, err)
 		}
-		if s, err := secretsWiring(sess, nil, testSwitch(t), log); err == nil || s != nil {
+		if s, err := secretsWiring(sess, nil, as, testSwitch(t), log); err == nil || s != nil {
+			t.Errorf("nil key session: %v, %v; want an error", s, err)
+		}
+		if s, err := secretsWiring(sess, keys, nil, testSwitch(t), log); err == nil || s != nil {
 			t.Errorf("nil apps store: %v, %v; want an error", s, err)
 		}
-		if s, err := secretsWiring(sess, as, testSwitch(t), nil); err == nil || s != nil {
+		if s, err := secretsWiring(sess, keys, as, testSwitch(t), nil); err == nil || s != nil {
 			t.Errorf("nil logger: %v, %v; want an error", s, err)
 		}
-		if s, err := secretsWiring(sess, as, nil, log); err == nil || s != nil {
+		if s, err := secretsWiring(sess, keys, as, nil, log); err == nil || s != nil {
 			t.Errorf("nil switch: %v, %v; want an error", s, err)
 		}
 	})
+}
+
+// offKeySession is the key session main wires with the store off: Disabled
+// login and Transit store.
+func offKeySession(t *testing.T) *storesession.Session {
+	t.Helper()
+	keys, err := storeKeySessionWiring(secretstore.Disabled{}, secretstore.Disabled{}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keys
 }

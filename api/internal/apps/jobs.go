@@ -1241,7 +1241,7 @@ func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
-		names, runtimeNames, err := store.DeleteWithSecretNames(sc.Ctx, spec.AppID)
+		names, runtimeNames, transitKeys, err := store.DeleteWithSecretNames(sc.Ctx, spec.AppID)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
@@ -1255,7 +1255,7 @@ func deleteRemove(store *Store, nc *nats.Conn) jobs.DoFn {
 		}
 		emitChange(nc, spec.AppID, proto.AppDeleted, proto.AppStatusStopped, "deleted", time.Now().UTC())
 		sc.Log("info", "removed from the app list")
-		return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "true", SecretNames: names, RuntimeNames: runtimeNames})
+		return json.Marshal(removeResult{AppID: spec.AppID, Deleted: "true", SecretNames: names, RuntimeNames: runtimeNames, TransitKeys: transitKeys})
 	}
 }
 

@@ -24,6 +24,9 @@ import (
 type noAppSecretDeletes struct{}
 
 func (noAppSecretDeletes) Delete(context.Context, secrets.Actor, secrets.Ref) error { return nil }
+func (noAppSecretDeletes) DestroyKey(context.Context, secrets.Actor, secrets.Ref) error {
+	return nil
+}
 
 // The four push-family app sagas register through main's helper with the
 // app-identity switch it builds off (geekdojo/geekdojo-brain#1080), and none of
@@ -130,4 +133,12 @@ func (noRuntimeSecrets) Create(context.Context, secrets.Actor, secrets.Ref, secr
 func (noRuntimeSecrets) Replace(context.Context, secrets.Actor, secrets.Ref, secret.Value) (int, error) {
 	return 0, nil
 }
-func (noRuntimeSecrets) Delete(context.Context, secrets.Actor, secrets.Ref) error { return nil }
+func (noRuntimeSecrets) Delete(context.Context, secrets.Actor, secrets.Ref) error    { return nil }
+func (noRuntimeSecrets) CreateKey(context.Context, secrets.Actor, secrets.Ref) error { return nil }
+func (noRuntimeSecrets) Encrypt(context.Context, secrets.Actor, secrets.Ref, secret.Value) (secret.Value, error) {
+	return secret.Value{}, nil
+}
+func (noRuntimeSecrets) Decrypt(context.Context, secrets.Actor, secrets.Ref, secret.Value) (secret.Value, error) {
+	return secret.Value{}, nil
+}
+func (noRuntimeSecrets) DestroyKey(context.Context, secrets.Actor, secrets.Ref) error { return nil }

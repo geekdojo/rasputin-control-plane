@@ -125,7 +125,7 @@ func apiChain(t *testing.T, s *secretstoretest.Store, logger *slog.Logger, jobRu
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: fnApps{}, Switch: realSwitch(t, logger), Log: logger})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Transit: secretstoretest.NoTransit{}, Apps: fnApps{}, Switch: realSwitch(t, logger), Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

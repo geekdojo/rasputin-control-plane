@@ -656,7 +656,7 @@ func TestIdentityLeaves_NilCAWiring(t *testing.T) {
 	if err := json.Unmarshal(raw, &rep); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"api-https", storeProvisionerLeafName, storeServerLeafName, storeClientLeafName}
+	want := []string{"api-https", storeProvisionerLeafName, storeServerLeafName, storeClientLeafName, storeAppKeysLeafName}
 	if !slices.Equal(rep.Renewed, want) || rep.Checked != len(want) {
 		t.Errorf("job report %+v, want the controlplane and store leaves only: %v", rep, want)
 	}

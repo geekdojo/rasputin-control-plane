@@ -50,7 +50,7 @@ func TestDeploySource_RestoreReCreatesEntriesEqualToHKDF(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secretsWiring(sess, as, testSwitch(t), log)
+	svc, err := secretsWiring(sess, offKeySession(t), as, testSwitch(t), log)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,21 +33,37 @@ type Switch interface {
 	MarkSwitched(ctx context.Context) error
 }
 
+// TransitStore is the token-free Transit store the key operations call
+// (geekdojo/geekdojo-brain#1084): the composition root's key session, logged
+// in as rasputin-app-keys, never the kv session.
+type TransitStore interface {
+	TransitCreateKey(ctx context.Context, k secretstore.TransitKey) error
+	TransitEncrypt(ctx context.Context, k secretstore.TransitKey, plaintext secret.Value) (secret.Value, error)
+	TransitDecrypt(ctx context.Context, k secretstore.TransitKey, ciphertext secret.Value) (secret.Value, error)
+	TransitDestroyKey(ctx context.Context, k secretstore.TransitKey) error
+}
+
+// keysMount is the Transit mount every app key lives in. A unit test holds it
+// equal to storepolicy.AppKeysMount, which shipped code does not import.
+const keysMount = "rasputin-app-keys"
+
 // Deps is everything a Service needs. NewService refuses an incomplete one.
 type Deps struct {
-	Repo   Repository
-	Apps   AppTargets
-	Switch Switch
-	Log    *slog.Logger
+	Repo    Repository
+	Transit TransitStore
+	Apps    AppTargets
+	Switch  Switch
+	Log     *slog.Logger
 }
 
 // Service is the business service for secrets: it authorizes every call and
 // owns the create, replace and delete semantics.
 type Service struct {
-	repo Repository
-	apps AppTargets
-	sw   Switch
-	log  *slog.Logger
+	repo    Repository
+	transit TransitStore
+	apps    AppTargets
+	sw      Switch
+	log     *slog.Logger
 }
 
 // NewService checks d and returns a Service. It does no I/O.
@@ -55,6 +71,8 @@ func NewService(d Deps) (*Service, error) {
 	switch {
 	case d.Repo == nil:
 		return nil, errors.New("secrets: NewService: Deps.Repo is nil")
+	case d.Transit == nil:
+		return nil, errors.New("secrets: NewService: Deps.Transit is nil")
 	case d.Apps == nil:
 		return nil, errors.New("secrets: NewService: Deps.Apps is nil")
 	case d.Switch == nil:
@@ -62,7 +80,7 @@ func NewService(d Deps) (*Service, error) {
 	case d.Log == nil:
 		return nil, errors.New("secrets: NewService: Deps.Log is nil")
 	}
-	return &Service{repo: d.Repo, apps: d.Apps, sw: d.Switch, log: d.Log}, nil
+	return &Service{repo: d.Repo, transit: d.Transit, apps: d.Apps, sw: d.Switch, log: d.Log}, nil
 }
 
 // The operations, as authorization and the log records name them.
@@ -72,7 +90,22 @@ const (
 	opReplace = "replace"
 	opDelete  = "delete"
 	opExists  = "exists"
+	// The key operations (geekdojo/geekdojo-brain#1084), named as the relay's
+	// ops are.
+	opKeyCreate  = "key.create"
+	opKeyEncrypt = "key.encrypt"
+	opKeyDecrypt = "key.decrypt"
+	opKeyDestroy = "key.destroy"
 )
+
+// isKeyOp reports whether op is one of the key operations.
+func isKeyOp(op string) bool {
+	switch op {
+	case opKeyCreate, opKeyEncrypt, opKeyDecrypt, opKeyDestroy:
+		return true
+	}
+	return false
+}
 
 // Read returns r's latest value. Only a deploy job for r's own app, on that
 // app's target node, may read it: operators never read a secret back (S21).
@@ -180,6 +213,81 @@ func (s *Service) Delete(ctx context.Context, a Actor, r Ref) error {
 	return nil
 }
 
+// CreateKey creates r's Transit key with the one key type the store's policy
+// pins. Only r's own app, at runtime from its target node, may create it. A key
+// that already exists is left as it is.
+func (s *Service) CreateKey(ctx context.Context, a Actor, r Ref) error {
+	k, err := s.authorizeKey(ctx, opKeyCreate, a, r)
+	if err != nil {
+		return err
+	}
+	if err := s.transit.TransitCreateKey(ctx, k); err != nil {
+		return fmt.Errorf("secrets: create key %s: %w", r, err)
+	}
+	s.keyDone(ctx, opKeyCreate, a, r, "app key created")
+	return nil
+}
+
+// Encrypt encrypts plaintext, standard base64, under r's key and returns the
+// ciphertext; the caller destroys it. Only r's own app, at runtime from its
+// target node, may encrypt.
+func (s *Service) Encrypt(ctx context.Context, a Actor, r Ref, plaintext secret.Value) (secret.Value, error) {
+	k, err := s.authorizeKey(ctx, opKeyEncrypt, a, r)
+	if err != nil {
+		return secret.Value{}, err
+	}
+	v, err := s.transit.TransitEncrypt(ctx, k, plaintext)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secrets: encrypt under %s: %w", r, err)
+	}
+	return v, nil
+}
+
+// Decrypt decrypts ciphertext under r's key and returns the plaintext,
+// standard base64; the caller destroys it. A ciphertext that does not
+// decrypt under the key is secretstore.ErrInvalidCiphertext, and an absent key
+// secretstore.ErrNotFound. Only r's own app, at runtime from its target node,
+// may decrypt.
+func (s *Service) Decrypt(ctx context.Context, a Actor, r Ref, ciphertext secret.Value) (secret.Value, error) {
+	k, err := s.authorizeKey(ctx, opKeyDecrypt, a, r)
+	if err != nil {
+		return secret.Value{}, err
+	}
+	v, err := s.transit.TransitDecrypt(ctx, k, ciphertext)
+	if err != nil {
+		return secret.Value{}, fmt.Errorf("secrets: decrypt under %s: %w", r, err)
+	}
+	return v, nil
+}
+
+// DestroyKey destroys r's key, and with it every value encrypted under it. r's
+// own app at runtime may destroy it, and so may an operator, whose app delete
+// or node removal destroys every key the app had. A key that is already absent
+// is success: the end state holds either way.
+func (s *Service) DestroyKey(ctx context.Context, a Actor, r Ref) error {
+	k, err := s.authorizeKey(ctx, opKeyDestroy, a, r)
+	if err != nil {
+		return err
+	}
+	if err := s.transit.TransitDestroyKey(ctx, k); err != nil && !errors.Is(err, secretstore.ErrNotFound) {
+		return fmt.Errorf("secrets: destroy key %s: %w", r, err)
+	}
+	s.keyDone(ctx, opKeyDestroy, a, r, "app key destroyed")
+	return nil
+}
+
+// authorizeKey authorizes a key op and returns r's key in the mount.
+func (s *Service) authorizeKey(ctx context.Context, op string, a Actor, r Ref) (secretstore.TransitKey, error) {
+	if err := s.authorize(ctx, op, a, r); err != nil {
+		return secretstore.TransitKey{}, err
+	}
+	k, err := secretstore.NewTransitKey(keysMount, r.keyName())
+	if err != nil {
+		return secretstore.TransitKey{}, fmt.Errorf("%w: %w", ErrInvalidRef, err)
+	}
+	return k, nil
+}
+
 // markSwitched sets the switch marker before an operator's value reaches the
 // store, so rasputin.db says "switched" before the store holds anything that
 // cannot be derived. A deploy job's create stores the derived value, which
@@ -209,6 +317,10 @@ func (s *Service) markSwitched(ctx context.Context, a Actor, r Ref) error {
 //     (RuntimeActor), from the node it is deployed to, and deleted by an
 //     operator when the app or its node is removed. A runtime caller never
 //     reaches any other reference, the values pushed at deploy included.
+//   - An app's keys (refAppKey, geekdojo/geekdojo-brain#1084) follow the same
+//     rule: created, used and destroyed only by that app at runtime from its
+//     node, and destroyed by an operator. A key op never takes a kv
+//     reference, and a kv op never takes a key.
 //
 // An app lookup that fails refuses with its error (ERR-CLOSED).
 func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) error {
@@ -220,8 +332,10 @@ func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) erro
 		return s.forbid(ctx, op, a, r, "no actor")
 	case r.kind == refDevice:
 		return s.forbid(ctx, op, a, r, "device secrets have no consumer yet")
+	case isKeyOp(op) != (r.kind == refAppKey):
+		return s.forbid(ctx, op, a, r, "a key operation reaches only an app key, and an app key only a key operation")
 	}
-	if a.kind == actorRuntime || r.kind == refAppRuntime {
+	if a.kind == actorRuntime || r.kind == refAppRuntime || r.kind == refAppKey {
 		return s.authorizeRuntime(ctx, op, a, r)
 	}
 	switch {
@@ -270,16 +384,17 @@ func (s *Service) authorize(ctx context.Context, op string, a Actor, r Ref) erro
 	return s.forbid(ctx, op, a, r, "unknown actor")
 }
 
-// authorizeRuntime is authorize for a runtime actor or a runtime entry: the
-// app's own entries, from its own node, and an operator's delete.
+// authorizeRuntime is authorize for a runtime actor, a runtime entry or an
+// app key (geekdojo/geekdojo-brain#1084): the app's own entries and keys, from
+// its own node, and an operator's delete or destroy.
 func (s *Service) authorizeRuntime(ctx context.Context, op string, a Actor, r Ref) error {
 	switch {
-	case a.kind == actorOperator && r.kind == refAppRuntime && op == opDelete:
+	case a.kind == actorOperator && (r.kind == refAppRuntime && op == opDelete || r.kind == refAppKey && op == opKeyDestroy):
 		// App delete and node removal: the app row may already be gone.
 		return nil
 	case a.kind != actorRuntime:
 		return s.forbid(ctx, op, a, r, "an app's runtime secrets belong to that app alone")
-	case r.kind != refAppRuntime:
+	case r.kind != refAppRuntime && r.kind != refAppKey:
 		return s.forbid(ctx, op, a, r, "an app at runtime reaches only its own runtime secrets")
 	case op == opExists:
 		return s.forbid(ctx, op, a, r, "only the reference check asks whether a secret exists")
@@ -297,6 +412,11 @@ func (s *Service) authorizeRuntime(ctx context.Context, op string, a Actor, r Re
 		return s.forbid(ctx, op, a, r, "the node is not the app's target node")
 	}
 	return nil
+}
+
+// keyDone writes the one INFO record of a key created or destroyed.
+func (s *Service) keyDone(ctx context.Context, op string, a Actor, r Ref, msg string) {
+	s.log.LogAttrs(ctx, slog.LevelInfo, msg, s.attrs(ctx, "secrets."+op, op, a, r)...)
 }
 
 // forbid logs the refusal and returns ErrForbidden.

@@ -23,6 +23,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -703,7 +704,7 @@ func TestStoreSource_UpgradeAndRollbackKeepTheCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	nodes := &fakeNodes{nodes: map[string]string{appID: node}}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: nodes, Switch: realSwitch(t, log), Log: log})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Transit: secretstoretest.NoTransit{}, Apps: nodes, Switch: realSwitch(t, log), Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

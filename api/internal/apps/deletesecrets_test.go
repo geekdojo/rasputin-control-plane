@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstoretest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -86,6 +87,14 @@ func (f *fakeSecretDeleter) Delete(ctx context.Context, a secrets.Actor, r secre
 		}
 	}
 	return nil
+}
+
+// DestroyKey records the call as Delete does, and fails by ref.String().
+func (f *fakeSecretDeleter) DestroyKey(ctx context.Context, a secrets.Actor, r secrets.Ref) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, deleteCall{jobID: jobs.JobIDFromContext(ctx), actor: a, ref: r})
+	return f.failRef[r.String()]
 }
 
 func (f *fakeSecretDeleter) recorded() []deleteCall {
@@ -281,7 +290,7 @@ func TestDelete_TC783_09_RowDeleteReturnsTheNames(t *testing.T) {
 		t.Errorf("after delete: %d app rows, %d refs; want 0, 0", apps, refs)
 	}
 
-	if _, _, err := store.DeleteWithSecretNames(ctx, delAppID); !errors.Is(err, sql.ErrNoRows) {
+	if _, _, _, err := store.DeleteWithSecretNames(ctx, delAppID); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("DeleteWithSecretNames on a missing row = %v; want sql.ErrNoRows", err)
 	}
 	out, err = deleteRemove(store, nc)(newStepCtxNATS(`{"appId":"`+delAppID+`"}`, nc))
@@ -299,7 +308,7 @@ func TestDeleteWithSecretNames_RefusedComposeNamesNothing(t *testing.T) {
 	ctx := context.Background()
 	store, _ := seedOnlineApp(t, "n", delAppID, "immich")
 	withSecrets(t, store, delAppID, "x: ${secret:Bad_Name}\n", "", "db-password")
-	names, _, err := store.DeleteWithSecretNames(ctx, delAppID)
+	names, _, _, err := store.DeleteWithSecretNames(ctx, delAppID)
 	if err != nil || !slices.Equal(names, []string{"db-password"}) {
 		t.Fatalf("DeleteWithSecretNames = %v, %v; want [db-password]", names, err)
 	}
@@ -486,7 +495,7 @@ func TestDestroySecrets_TC783_14_NoOperatorFailsClosed(t *testing.T) {
 	}
 
 	repo := &fakeRepo{}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: noApps{}, Switch: noSwitch{}, Log: discardLog()})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Transit: secretstoretest.NoTransit{}, Apps: noApps{}, Switch: noSwitch{}, Log: discardLog()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -661,7 +670,7 @@ func TestDelete_TC783_33_RefusedComposeNamesNoSecret(t *testing.T) {
 		if st.stateReads() != 0 || len(agent.stops()) != 2 {
 			t.Errorf("state reads = %d, stops = %v; want no read and two stops", st.stateReads(), agent.stops())
 		}
-		names, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		names, _, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
 		if err != nil || len(names) != 0 {
 			t.Fatalf("remove = %v, %v; want no names", names, err)
 		}
@@ -678,7 +687,7 @@ func TestDelete_TC783_33_RefusedComposeNamesNoSecret(t *testing.T) {
 		if _, err := run(st); err != nil {
 			t.Fatalf("deleteStop: %v", err)
 		}
-		names, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
+		names, _, _, err := store.DeleteWithSecretNames(context.Background(), delAppID)
 		if err != nil || !slices.Equal(names, []string{"r"}) {
 			t.Fatalf("remove = %v, %v; want [r]", names, err)
 		}

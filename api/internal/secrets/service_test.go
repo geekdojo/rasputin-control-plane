@@ -551,14 +551,16 @@ func TestConstructors_RefuseNil(t *testing.T) {
 	repo := mustRepo(t, &fakeStore{})
 	apps := fakeApps{}
 	sw := &fakeSwitch{log: &fakeRepo{}}
+	keys := &fakeTransit{}
 	for name, d := range map[string]secrets.Deps{
-		"Repo":   {Apps: apps, Switch: sw, Log: log},
-		"Apps":   {Repo: repo, Switch: sw, Log: log},
-		"Switch": {Repo: repo, Apps: apps, Log: log}, // TC-604-05
-		"Log":    {Repo: repo, Apps: apps, Switch: sw},
+		"Repo":    {Transit: keys, Apps: apps, Switch: sw, Log: log},
+		"Transit": {Repo: repo, Apps: apps, Switch: sw, Log: log}, // TC-1084-11
+		"Apps":    {Repo: repo, Transit: keys, Switch: sw, Log: log},
+		"Switch":  {Repo: repo, Transit: keys, Apps: apps, Log: log}, // TC-604-05
+		"Log":     {Repo: repo, Transit: keys, Apps: apps, Switch: sw},
 	} {
-		if s, err := secrets.NewService(d); err == nil || s != nil {
-			t.Errorf("NewService with nil %s = %v, %v; want an error", name, s, err)
+		if s, err := secrets.NewService(d); err == nil || s != nil || !strings.Contains(err.Error(), "Deps."+name) {
+			t.Errorf("NewService with nil %s = %v, %v; want an error naming it", name, s, err)
 		}
 	}
 }

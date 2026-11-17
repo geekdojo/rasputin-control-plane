@@ -176,7 +176,7 @@ func TestWireSecretStore_Selection(t *testing.T) {
 				if w.client == nil || w.store != secretStore(w.client) {
 					t.Errorf("store = %T, want the real client", w.store)
 				}
-				if !slices.Equal(w.registeredNames(), []string{storeClientLeafName, storeProvisionerLeafName, storeServerLeafName}) {
+				if !slices.Equal(w.registeredNames(), []string{storeAppKeysLeafName, storeClientLeafName, storeProvisionerLeafName, storeServerLeafName}) {
 					t.Errorf("registered = %v", w.registeredNames())
 				}
 				if errs := rec.AtLevel(slog.LevelError); len(errs) != 0 {
@@ -246,9 +246,9 @@ func TestStoreStartupSweep(t *testing.T) {
 	if !slices.Equal(run.got(), restartPair) {
 		t.Errorf("run calls = %v, want %v", run.got(), restartPair)
 	}
-	if !slices.Equal(rep.Renewed, []string{storeProvisionerLeafName, storeServerLeafName, storeClientLeafName}) ||
-		!slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName}) || len(rep.Failed) != 0 {
-		t.Errorf("report = %+v, want all three minted, and the server and client leaves reloaded once", rep)
+	if !slices.Equal(rep.Renewed, []string{storeProvisionerLeafName, storeServerLeafName, storeClientLeafName, storeAppKeysLeafName}) ||
+		!slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName, storeAppKeysLeafName}) || len(rep.Failed) != 0 {
+		t.Errorf("report = %+v, want all four minted, and the server, client and key leaves reloaded once", rep)
 	}
 
 	// TC-758-19: the leaves' content.
@@ -368,9 +368,9 @@ func TestLeafSweepJob_RenewsTheStoreLeaves(t *testing.T) {
 
 	clock.advance(310 * 24 * time.Hour) // 55 days left of a 365-day leaf: inside the 60-day window
 	rep := sweep()
-	want := []string{"api-https", storeProvisionerLeafName, storeServerLeafName, storeClientLeafName}
-	if !slices.Equal(rep.Renewed, want) || !slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName}) || rep.Checked != 4 {
-		t.Errorf("report = %+v, want renewed %v and both store reloads", rep, want)
+	want := []string{"api-https", storeProvisionerLeafName, storeServerLeafName, storeClientLeafName, storeAppKeysLeafName}
+	if !slices.Equal(rep.Renewed, want) || !slices.Equal(rep.Reloaded, []string{storeServerLeafName, storeClientLeafName, storeAppKeysLeafName}) || rep.Checked != 5 {
+		t.Errorf("report = %+v, want renewed %v and the three store reloads", rep, want)
 	}
 	after := serials(t, dataDir)
 	for name, s := range before {
@@ -471,7 +471,7 @@ func TestStoreClientLeafReload_ClosesIdleConnections(t *testing.T) {
 func serials(t *testing.T, dataDir string) map[string]*big.Int {
 	t.Helper()
 	out := map[string]*big.Int{}
-	for _, name := range []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName} {
+	for _, name := range []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName, storeAppKeysLeafName} {
 		out[name] = parseLeaf(t, filepath.Join(dataDir, "tls", name, "leaf.pem")).SerialNumber
 	}
 	return out
@@ -481,7 +481,7 @@ func serials(t *testing.T, dataDir string) map[string]*big.Int {
 // not register its client leaf.
 func TestRequiredLeafConsumers_StoreSelected(t *testing.T) {
 	required := requiredLeafConsumers(false, false, true)
-	if !slices.Equal(required, []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName}) {
+	if !slices.Equal(required, []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName, storeAppKeysLeafName}) {
 		t.Fatalf("required = %v", required)
 	}
 	err := verifyLeafConsumers([]string{storeServerLeafName, storeProvisionerLeafName}, required)
