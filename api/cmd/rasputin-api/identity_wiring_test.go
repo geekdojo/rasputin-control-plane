@@ -27,7 +27,7 @@ import (
 
 // The identity client's wiring (geekdojo/geekdojo-brain#978).
 
-func noRunEnv(context.Context, []string, string, ...string) ([]byte, error) {
+func noRunIn(context.Context, []string, []byte, string, ...string) ([]byte, error) {
 	return nil, errors.New("not run")
 }
 
@@ -87,7 +87,7 @@ func TestWireIdentity_Selection(t *testing.T) {
 	} {
 		t.Run("backend="+tc.backend, func(t *testing.T) {
 			log, rec := logkittest.New()
-			w, err := wireIdentity(t.Context(), log, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+			w, err := wireIdentity(t.Context(), log, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 			if err != nil {
 				t.Fatalf("wireIdentity: %v", err)
 			}
@@ -128,7 +128,7 @@ func TestWireIdentity_RefusedAddresses(t *testing.T) {
 					mgmt = v
 				}
 				log, rec := logkittest.New()
-				w, err := wireIdentity(t.Context(), log, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+				w, err := wireIdentity(t.Context(), log, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -185,7 +185,7 @@ func newIdentityServer(t *testing.T, ca *tlsca.CA) *identityServer {
 // server sees no request.
 func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+	w, err := wireIdentity(t.Context(), log, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	srv := newIdentityServer(t, ca)
-	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak {
 		t.Fatalf("wireIdentity = %v, %v", w.mode, err)
 	}
@@ -224,7 +224,7 @@ func TestWireIdentity_KeycloakAndLeafReload(t *testing.T) {
 	srv := newIdentityServer(t, ca)
 	dataDir := t.TempDir()
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak || w.recoverer == nil || w.reload == nil {
 		t.Fatalf("wireIdentity = %+v, %v", w, err)
 	}
@@ -293,7 +293,7 @@ func TestWireIdentity_UpgradeFromThePreviousRelease(t *testing.T) {
 
 	log, rec := logkittest.New()
 	w, err := wireIdentity(t.Context(), log, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		ca, dataDir, (&scriptedRun{}).run, noRunEnv, &atomic.Pointer[restoredFunc]{})
+		ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeOff {
 		t.Fatalf("wireIdentity = %q, %v; want off", w.mode, err)
 	}
@@ -354,34 +354,82 @@ func TestIdentityUnits(t *testing.T) {
 	}
 }
 
-// The production recovery command: the installed kc.sh with the config file
-// first, the unit's JVM environment and PATH, plus the secret's variable, and
-// nothing inherited (F-978-03).
+// launcherRun is a runInFunc that records one call and keeps the stdin slice
+// it was given, not a copy, so a test can see what the caller did to it.
+type launcherRun struct {
+	calls int
+	name  string
+	args  []string
+	env   []string
+	stdin []byte // the caller's own slice
+	in    string // its contents during the call
+	err   error
+}
+
+func (r *launcherRun) run(_ context.Context, env []string, stdin []byte, name string, args ...string) ([]byte, error) {
+	r.calls++
+	r.name, r.args, r.env = name, slices.Clone(args), slices.Clone(env)
+	r.stdin, r.in = stdin, string(stdin)
+	return []byte("launcher output"), r.err
+}
+
+// TC-1131-03: the production recovery command is the OS's launcher with
+// exactly ["run", clientID], an environment of exactly PATH (nothing
+// inherited, F-978-03), and the secret as one line on stdin; the secret is in
+// no argument and no environment entry.
 func TestIdentityBootstrap_CommandAndEnvironment(t *testing.T) {
-	var gotEnv []string
-	var gotName string
-	var gotArgs []string
-	boot := identityBootstrap(func(_ context.Context, env []string, name string, args ...string) ([]byte, error) {
-		gotEnv, gotName, gotArgs = slices.Clone(env), name, args
-		return nil, nil
-	})
-	if err := boot(t.Context(), []string{"bootstrap-admin", "service"}, []string{"RASPUTIN_RECOVER_CLIENT_SECRET=s3cr3t"}); err != nil {
+	const clientID = "rasputin-recover-01JTESTJOB0000000000000000"
+	const text = "s3cr3t-43chars-AAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	r := &launcherRun{}
+	if err := identityBootstrap(r.run)(t.Context(), clientID, secret.New([]byte(text))); err != nil {
 		t.Fatal(err)
 	}
-	if gotName != "/usr/lib/keycloak/bin/kc.sh" || !slices.Equal(gotArgs, []string{"--config-file=/etc/rasputin/identity/keycloak.conf", "bootstrap-admin", "service"}) {
-		t.Errorf("command = %s %v", gotName, gotArgs)
+	if r.calls != 1 {
+		t.Fatalf("the runner ran %d times, want once", r.calls)
 	}
-	names := map[string]bool{}
-	for _, e := range gotEnv {
-		k, _, _ := strings.Cut(e, "=")
-		names[k] = true
+	if r.name != "/usr/lib/rasputin/identity/rasputin-keycloak-recover-admin.sh" {
+		t.Errorf("command = %q, want the recovery launcher", r.name)
 	}
-	for _, k := range []string{"PATH", "JAVA_HOME", "MALLOC_ARENA_MAX", "JAVA_OPTS_KC_HEAP", "JAVA_OPTS_APPEND", "RASPUTIN_RECOVER_CLIENT_SECRET"} {
-		if !names[k] {
-			t.Errorf("env lacks %s", k)
+	if !slices.Equal(r.args, []string{"run", clientID}) {
+		t.Errorf("args = %q, want [run %s]", r.args, clientID)
+	}
+	if !slices.Equal(r.env, []string{"PATH=/usr/bin:/bin"}) {
+		t.Errorf("env = %q, want exactly [PATH=/usr/bin:/bin]", r.env)
+	}
+	if r.in != text+"\n" {
+		t.Errorf("stdin = %d bytes, want the secret and a newline", len(r.in))
+	}
+	for _, v := range append(slices.Clone(r.args), r.env...) {
+		if strings.Contains(v, text) {
+			t.Errorf("%q carries the secret", v)
 		}
 	}
-	if len(gotEnv) != 6 || !slices.Contains(gotEnv, "PATH=/usr/bin:/bin") {
-		t.Errorf("env = %d entries, want exactly the six", len(gotEnv))
+}
+
+// TC-1131-04: the stdin line is a copy zeroed on return, whether the runner
+// succeeded or failed; the caller's Value still reveals the secret, so the
+// temporary login can use it; the runner's error is returned unchanged.
+func TestIdentityBootstrap_ZeroesItsCopyAndKeepsTheSecret(t *testing.T) {
+	const text = "s3cr3t-43chars-BBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	enoent := &os.PathError{Op: "fork/exec", Path: "/usr/lib/rasputin/identity/rasputin-keycloak-recover-admin.sh", Err: os.ErrNotExist}
+	for _, runErr := range []error{nil, enoent} {
+		r := &launcherRun{err: runErr}
+		sec := secret.New([]byte(text))
+		err := identityBootstrap(r.run)(t.Context(), "rasputin-recover-J", sec)
+		if runErr == nil && err != nil {
+			t.Errorf("err = %v, want nil", err)
+		}
+		if runErr != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("err = %v, want the runner's no-such-file error", err)
+		}
+		if r.in != text+"\n" {
+			t.Errorf("runner error %v: stdin during the call was %d bytes, want the secret and a newline", runErr, len(r.in))
+		}
+		if len(r.stdin) != len(text)+1 || slices.ContainsFunc(r.stdin, func(b byte) bool { return b != 0 }) {
+			t.Errorf("runner error %v: the stdin buffer is not all zero bytes after return", runErr)
+		}
+		if string(sec.Reveal()) != text {
+			t.Errorf("runner error %v: the caller's secret no longer reveals its bytes", runErr)
+		}
 	}
 }

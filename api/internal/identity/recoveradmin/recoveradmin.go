@@ -7,7 +7,10 @@
 // Keycloak's own recovery command, kc.sh bootstrap-admin service, runs only
 // while the service is stopped and makes a temporary master-realm client
 // authenticated by a client secret (register row E39). The job makes that
-// secret, hands it to the command only through its environment, uses the
+// secret and hands it to Deps.Bootstrap, which the composition root wires to
+// the OS's recovery launcher: the secret reaches the command on the
+// launcher's standard input and from there only the command's own
+// environment (geekdojo/geekdojo-brain#1131). The job uses the
 // temporary client to put rasputin-admin back exactly as the baseline
 // declares it, deletes every temporary client, and reports restored only
 // once rasputin-admin itself has logged in by client-x509 and read the realm.
@@ -54,8 +57,6 @@ const (
 	// TempClientPrefix starts every temporary client's id; the job's id
 	// follows it.
 	TempClientPrefix = "rasputin-recover-"
-	// SecretEnv is the variable the temporary secret reaches kc.sh in.
-	SecretEnv = "RASPUTIN_RECOVER_CLIENT_SECRET"
 	// secretBytes is how many random bytes the temporary secret carries.
 	secretBytes = 32
 )
@@ -80,10 +81,10 @@ type Deps struct {
 	Units    units
 	// Unit names the unit in records.
 	Unit string
-	// Bootstrap runs kc.sh with args and exactly env as its environment
-	// additions; the composition root adds the config file and the unit's
-	// JVM variables.
-	Bootstrap func(ctx context.Context, args, env []string) error
+	// Bootstrap runs Keycloak's bootstrap-admin service command for the
+	// temporary client id with clientSecret as its secret. It must not keep
+	// or destroy clientSecret: the step logs in with it afterwards.
+	Bootstrap func(ctx context.Context, clientID string, clientSecret secret.Value) error
 	// ReadBaseline returns the shipped realm baseline, the administrator
 	// client's only source.
 	ReadBaseline func() ([]byte, error)
@@ -165,13 +166,6 @@ type baselineAdmin struct {
 	scopeRoles  []string // realm-management roles in its scope
 }
 
-// bootstrapArgs is kc.sh's recovery command for the temporary client id. It
-// names the secret's variable, never the secret.
-func bootstrapArgs(clientID string) []string {
-	return []string{"bootstrap-admin", "service", "--optimized", "--no-prompt",
-		"--client-id", clientID, "--client-secret:env", SecretEnv}
-}
-
 func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	ctx := sc.Ctx
 	temp := TempClientPrefix + sc.JobID
@@ -203,9 +197,7 @@ func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	jobs.LogStep(r.d.Log, sc, slog.LevelInfo, "The identity service is stopped for the admin client's recovery.",
 		append(attrs, "event", "identity.recover_admin_stopped")...)
 
-	env := []string{SecretEnv + "=" + string(sec.Reveal())}
-	bootErr := r.d.Bootstrap(ctx, bootstrapArgs(temp), env)
-	clear(env) // drops the slice's reference; the string itself cannot be zeroed
+	bootErr := r.d.Bootstrap(ctx, temp, sec)
 	if bootErr == nil {
 		jobs.LogStep(r.d.Log, sc, slog.LevelInfo, "The identity service's recovery command made the temporary client.",
 			append(attrs, "event", "identity.recover_admin_bootstrapped")...)
@@ -297,7 +289,7 @@ func (r *Recoverer) readBaseline() (baselineAdmin, error) {
 }
 
 // tempSecret is 32 bytes from Rand as unpadded base64url: 43 printable ASCII
-// characters, which an environment entry and the JVM both carry unchanged
+// characters, which a line on stdin, an environment entry and the JVM all carry unchanged
 // (F-978-01). The raw bytes and the encoding buffer are zeroed.
 func (r *Recoverer) tempSecret() (secret.Value, error) {
 	raw := make([]byte, secretBytes)

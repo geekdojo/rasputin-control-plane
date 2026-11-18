@@ -6,6 +6,7 @@
 package execrun
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -20,16 +21,18 @@ func CombinedOutput(ctx context.Context, name string, args ...string) ([]byte, e
 	return combined(exec.CommandContext(ctx, name, args...), name, args)
 }
 
-// CombinedOutputEnv is CombinedOutput with env as the command's whole
-// environment: nothing is inherited from this process's. It is how a value
-// that must not appear on a command line (geekdojo/geekdojo-brain#978's
+// CombinedOutputInput is CombinedOutput with env as the command's whole
+// environment, nothing inherited from this process's, and stdin as its
+// standard input; a nil stdin reads as empty. It is how a value that must not
+// appear on a command line or in a file (geekdojo/geekdojo-brain#1131's
 // temporary identity client secret) reaches a child. The error names the
 // command, its arguments and the output, as CombinedOutput's does, and never
-// an environment value.
-func CombinedOutputEnv(ctx context.Context, env []string, name string, args ...string) ([]byte, error) {
+// an environment value or the input.
+func CombinedOutputInput(ctx context.Context, env []string, stdin []byte, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	// A nil Env would inherit everything; an empty, non-nil one gives none.
 	cmd.Env = append(make([]string, 0, len(env)), env...)
+	cmd.Stdin = bytes.NewReader(stdin)
 	return combined(cmd, name, args)
 }
 
