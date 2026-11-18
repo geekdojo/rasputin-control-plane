@@ -12,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // readRepoBaseline is the repo's identity/realm-baseline.json, the
@@ -19,6 +20,10 @@ import (
 func readRepoBaseline() ([]byte, error) {
 	return os.ReadFile(filepath.Join("..", "..", "..", "identity", "realm-baseline.json"))
 }
+
+// recoverSecretEnv is the variable the OS's recovery launcher hands kc.sh the
+// temporary secret in.
+const recoverSecretEnv = "RASPUTIN_RECOVER_CLIENT_SECRET"
 
 // envRecovery is what one Recoverer over an Env saw: the temporary secret
 // its recovery command's environment carried and the command's output.
@@ -52,20 +57,20 @@ func newEnvRecoverer(t *testing.T, env *Env, client *idclient.Client, readBaseli
 	seen := &envRecovery{}
 	rec, err := recoveradmin.New(recoveradmin.Deps{
 		Identity: client, Units: units, Unit: "keycloak (identitytest)",
-		Bootstrap: func(ctx context.Context, args, extra []string) error {
-			var secretText string
-			for _, e := range extra {
-				if v, ok := strings.CutPrefix(e, recoveradmin.SecretEnv+"="); ok {
-					secretText = v
-				}
-			}
+		// The launcher's exec mode as this Env runs it: kc.sh bootstrap-admin
+		// against its own database and keycloak.conf, with the secret only in
+		// the command's environment (geekdojo/geekdojo-brain#1131).
+		Bootstrap: func(ctx context.Context, clientID string, sec secret.Value) error {
+			secretText := string(sec.Reveal())
+			args := []string{"--config-file=" + units.conf, "bootstrap-admin", "service", "--optimized", "--no-prompt",
+				"--client-id", clientID, "--client-secret:env", recoverSecretEnv}
 			for _, a := range args {
 				if secretText != "" && strings.Contains(a, secretText) {
 					t.Errorf("argument %q carries the secret", a)
 				}
 			}
-			out, err := execrun.CombinedOutputEnv(ctx, append(env.kcEnv(), extra...),
-				filepath.Join(units.home, "bin", "kc.sh"), append([]string{"--config-file=" + units.conf}, args...)...)
+			out, err := execrun.CombinedOutputInput(ctx, append(env.kcEnv(), recoverSecretEnv+"="+secretText), nil,
+				filepath.Join(units.home, "bin", "kc.sh"), args...)
 			seen.mu.Lock()
 			seen.secretText, seen.bootOut = secretText, out
 			seen.mu.Unlock()

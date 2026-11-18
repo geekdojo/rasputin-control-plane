@@ -54,8 +54,8 @@ type fakeWorld struct {
 	readyErr                   error
 	tempLoginErr, proofErr     error
 
-	bootArgs, bootEnv []string
-	tempSecret        string
+	bootClient, bootSecret string
+	tempSecret             string
 }
 
 func (f *fakeWorld) add(s string) {
@@ -77,9 +77,11 @@ func (f *fakeWorld) Active(context.Context) (bool, error) {
 }
 func (f *fakeWorld) Ready(context.Context) error { f.add("ready"); return f.readyErr }
 
-func (f *fakeWorld) bootstrap(_ context.Context, args, env []string) error {
+// bootstrap records the client id and a copy of the secret's bytes: the step
+// destroys its Value when it ends.
+func (f *fakeWorld) bootstrap(_ context.Context, clientID string, s secret.Value) error {
 	f.add("bootstrap")
-	f.bootArgs, f.bootEnv = slices.Clone(args), slices.Clone(env)
+	f.bootClient, f.bootSecret = clientID, string(s.Reveal())
 	return f.bootErr
 }
 
@@ -178,25 +180,21 @@ func runRestore(t *testing.T, w *fakeWorld, rnd io.Reader, baseline func() ([]by
 	return run{w: w, rec: rec, result: res, err: err, steps: steps}
 }
 
-// TC-978-21: argv is exactly the recovery command with the temporary client
-// id and the secret's variable name; the secret is in env exactly once,
-// printable base64url text carrying 32 bytes of Rand with no NUL, in no argv
-// element, and the same text is what the temporary login sends; another Rand
-// gives another secret.
+// TC-1131-05 (TC-978-21 rewritten): Bootstrap gets the temporary client id
+// rasputin-recover-<job id> and a secret whose bytes are those the temporary
+// login later sends: printable base64url text carrying 32 bytes of Rand with
+// no NUL. No record or step log line carries it, and another Rand gives
+// another secret. restore itself makes no Reveal call; secretlint proves that
+// against .github/secret-reveal-allow.tsv.
 func TestRestore_NoSecretOnTheCommandLine(t *testing.T) {
 	r := runRestore(t, healthyWorld(), seededRand(1), readRepoBaseline)
 	if r.err != nil {
 		t.Fatalf("restore: %v", r.err)
 	}
-	want := []string{"bootstrap-admin", "service", "--optimized", "--no-prompt",
-		"--client-id", "rasputin-recover-" + jobID, "--client-secret:env", "RASPUTIN_RECOVER_CLIENT_SECRET"}
-	if !slices.Equal(r.w.bootArgs, want) {
-		t.Errorf("argv = %q, want %q", r.w.bootArgs, want)
+	if r.w.bootClient != "rasputin-recover-"+jobID {
+		t.Errorf("Bootstrap client id = %q, want %q", r.w.bootClient, "rasputin-recover-"+jobID)
 	}
-	if len(r.w.bootEnv) != 1 || !strings.HasPrefix(r.w.bootEnv[0], "RASPUTIN_RECOVER_CLIENT_SECRET=") {
-		t.Fatalf("env = %d entries, want exactly the secret's variable", len(r.w.bootEnv))
-	}
-	sec := strings.TrimPrefix(r.w.bootEnv[0], "RASPUTIN_RECOVER_CLIENT_SECRET=")
+	sec := r.w.bootSecret
 	if len(sec) != 43 || strings.ContainsFunc(sec, func(c rune) bool {
 		return !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_')
 	}) {
@@ -207,13 +205,8 @@ func TestRestore_NoSecretOnTheCommandLine(t *testing.T) {
 	if dec, err := base64.RawURLEncoding.DecodeString(sec); err != nil || !bytes.Equal(dec, raw) {
 		t.Errorf("the secret decodes to %x (%v), want Rand's 32 bytes %x", dec, err, raw)
 	}
-	for _, a := range r.w.bootArgs {
-		if strings.Contains(a, sec) {
-			t.Errorf("argv element %q carries the secret", a)
-		}
-	}
 	if r.w.tempSecret != sec {
-		t.Error("the temporary login sent a different secret from the one in env")
+		t.Error("the temporary login sent a different secret from the one Bootstrap got")
 	}
 	if strings.Contains(r.rec.Text(), sec) || strings.Contains(strings.Join(r.steps, "\n"), sec) {
 		t.Error("a record or step log line carries the secret")
@@ -477,7 +470,7 @@ func runCancelled(t *testing.T, u *ctxUnits, blockBoot bool) (*logkittest.Record
 	defer cancel()
 	boot := u.bootstrap
 	if blockBoot {
-		boot = func(ctx context.Context, args, env []string) error {
+		boot = func(ctx context.Context, _ string, _ secret.Value) error {
 			u.add("bootstrap")
 			cancel()
 			<-ctx.Done()

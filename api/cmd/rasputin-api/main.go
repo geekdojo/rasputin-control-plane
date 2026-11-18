@@ -564,7 +564,7 @@ func main() {
 	// The restored alert's holder (#1127): set once the alerts service exists.
 	adminRestored := &atomic.Pointer[restoredFunc]{}
 	identityW, err := wireIdentity(ctx, logger, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputEnv, adminRestored)
+		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputInput, adminRestored)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity service", "err", err.Error())
 		os.Exit(1)

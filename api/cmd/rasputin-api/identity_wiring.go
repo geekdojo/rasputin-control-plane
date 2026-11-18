@@ -58,32 +58,24 @@ const (
 	// that, and decides nothing else.
 	identityRecoverStepTimeout = 15 * time.Minute
 
-	// The identity service's installed files on an appliance (rasputin-os,
-	// #973) and the baseline the api tarball installs
+	// identityRecoverLauncher is the OS's admin recovery launcher
+	// (rasputin-os, geekdojo/geekdojo-brain#1131): it runs kc.sh
+	// bootstrap-admin as keycloak.service's own user, with that unit's
+	// credentials and sandbox, and reads the secret from its stdin.
+	identityRecoverLauncher = "/usr/lib/rasputin/identity/rasputin-keycloak-recover-admin.sh"
+	// identityBaseline is the baseline the api tarball installs
 	// (scripts/build-release.sh).
-	identityKCSh       = "/usr/lib/keycloak/bin/kc.sh"
-	identityKCConf     = "/etc/rasputin/identity/keycloak.conf"
-	identityBaseline   = "/usr/share/rasputin/identity/realm-baseline.json"
-	identityConfigFlag = "--config-file=" + identityKCConf
+	identityBaseline = "/usr/share/rasputin/identity/realm-baseline.json"
+	// identityLauncherPath is the launcher's whole environment: nothing is
+	// inherited from the api's own (F-978-03). The launcher takes everything
+	// else from keycloak.service itself.
+	identityLauncherPath = "PATH=/usr/bin:/bin"
 )
 
-// identityBootstrapEnv is kc.sh's whole environment for the recovery
-// command, before the secret's variable: PATH, and keycloak.service's JVM
-// variables (platform.md §3.2). Nothing is inherited from the api's own
-// environment (F-978-03).
-var identityBootstrapEnv = []string{
-	"PATH=/usr/bin:/bin",
-	"JAVA_HOME=/usr/lib/temurin-jre",
-	"MALLOC_ARENA_MAX=2",
-	"JAVA_OPTS_KC_HEAP=-Xms128m -Xmx384m",
-	"JAVA_OPTS_APPEND=-XX:-UsePerfData -XX:ErrorFile=/dev/null -XX:-CreateCoredumpOnCrash -Djava.awt.headless=true " +
-		"-Djava.net.preferIPv4Stack=true " +
-		"-Dcom.arjuna.ats.internal.arjuna.utils.processImplementation=com.arjuna.ats.internal.arjuna.utils.UuidProcessId",
-}
-
-// runEnvFunc runs a command with exactly env as its environment and returns
-// its combined output (execrun.CombinedOutputEnv's shape).
-type runEnvFunc func(ctx context.Context, env []string, name string, args ...string) ([]byte, error)
+// runInFunc runs a command with exactly env as its environment and stdin as
+// its standard input, and returns its combined output
+// (execrun.CombinedOutputInput's shape).
+type runInFunc func(ctx context.Context, env []string, stdin []byte, name string, args ...string) ([]byte, error)
 
 // identityClient is the composition root's view of whichever client was
 // selected: *idclient.Client or idclient.Disabled.
@@ -122,7 +114,7 @@ func (w identityWiring) register(r interface{ Register(jobs.Workflow) }) {
 // holder the composition root sets to the restored alert once the alerts
 // service exists (recoveradmin_trigger_wiring.go).
 func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtAddr string, ca *tlsca.CA, dataDir string,
-	run runFunc, runEnv runEnvFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
+	run runFunc, runIn runInFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
 	disabled := func(mode string, kind error) (identityWiring, error) {
 		c := idclient.Disabled{Kind: kind}
 		s, err := identitySession(c, logger)
@@ -145,7 +137,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtA
 			"setting", "RASPUTIN_IDENTITY_BACKEND")
 		return disabled(identityModeMock, idclient.ErrMock)
 	case identityModeKeycloak:
-		if run == nil || runEnv == nil || restored == nil {
+		if run == nil || runIn == nil || restored == nil {
 			return identityWiring{}, errors.New("identity service: a command runner or the restored holder is nil under keycloak")
 		}
 	default:
@@ -180,7 +172,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtA
 		Identity:     client,
 		Units:        identityUnits{run: run},
 		Unit:         identityUnit,
-		Bootstrap:    identityBootstrap(runEnv),
+		Bootstrap:    identityBootstrap(runIn),
 		ReadBaseline: func() ([]byte, error) { return os.ReadFile(identityBaseline) },
 		Rand:         rand.Reader,
 		Restored:     restoredVia(restored),
@@ -210,14 +202,16 @@ func identitySession(c identityClient, logger *slog.Logger) (*idclient.Session, 
 	return s, nil
 }
 
-// identityBootstrap runs kc.sh's recovery command with the installed config
-// file and identityBootstrapEnv plus env, which carries the temporary secret;
-// the secret never reaches an argument.
-func identityBootstrap(runEnv runEnvFunc) func(ctx context.Context, args, env []string) error {
-	return func(ctx context.Context, args, env []string) error {
-		full := append(append([]string{}, identityBootstrapEnv...), env...)
-		defer clear(full)
-		_, err := runEnv(ctx, full, identityKCSh, append([]string{identityConfigFlag}, args...)...)
+// identityBootstrap runs the recovery launcher for clientID with the secret
+// as one line on its stdin, never an argument, an environment entry or a
+// file. The line is a copy, zeroed on return; the caller's Value is left
+// as it was.
+func identityBootstrap(runIn runInFunc) func(ctx context.Context, clientID string, clientSecret secret.Value) error {
+	return func(ctx context.Context, clientID string, clientSecret secret.Value) error {
+		in := make([]byte, 0, clientSecret.Len()+1)
+		in = append(append(in, clientSecret.Reveal()...), '\n')
+		defer clear(in)
+		_, err := runIn(ctx, []string{identityLauncherPath}, in, identityRecoverLauncher, "run", clientID)
 		return err
 	}
 }
