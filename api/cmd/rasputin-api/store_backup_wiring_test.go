@@ -79,7 +79,7 @@ func TestRestoreBootIsNotAFalseBlank(t *testing.T) {
 			if rebase {
 				rebaseAfterRestore(ctx, marker, rep)
 			}
-			outcomes, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run, marker.ObserveInit)
+			outcomes, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run, outcomeObservers{init: marker.ObserveInit, provision: noObserve, migrate: noObserve})
 			if err != nil {
 				t.Fatal(err)
 			}

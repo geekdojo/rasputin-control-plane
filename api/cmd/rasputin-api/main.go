@@ -52,8 +52,10 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemarker"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemigrate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
@@ -422,7 +424,23 @@ func main() {
 	// into the job ledger just before READY, and again after each store
 	// restart the api performs; their alert joins the aggregator below. The
 	// store's init record also feeds the marker (#765).
-	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput, storeMarker.ObserveInit)
+	//
+	// The store's roll-forward (geekdojo/geekdojo-brain#1132) observes two
+	// of them: its trigger keeps the last provision record, and its Hold is
+	// released by a migrate record once an abort left it on.
+	migrateFiles, err := storemigrate.NewStateDir(storemigrate.ProductionDir, nil)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store migration state", "err", err.Error())
+		os.Exit(1)
+	}
+	migrateHold, err := storemigrate.NewHold(migrateFiles, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store migration hold", "err", err.Error())
+		os.Exit(1)
+	}
+	provisionSeen := &storemigrate.LastRecord{}
+	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput,
+		outcomeObservers{init: storeMarker.ObserveInit, provision: provisionSeen.Observe, migrate: migrateHold.Observe})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: os outcomes", "err", err.Error())
 		os.Exit(1)
@@ -611,6 +629,21 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store update copy", "err", err.Error())
 		os.Exit(1)
 	}
+	// The same control, quiescing for the store's roll-forward
+	// (geekdojo/geekdojo-brain#1132). An api that died mid-migration left
+	// its files behind: Recover finishes them now, before the secrets
+	// service, the app relay or the job runner exists, so nothing reads a
+	// store that is not yet back on its old data.
+	storeMigrateControl, err := storeBackupWiring(storeBackend, storestate.QuiesceMigration, readiness.monitor, readiness.store, sealFiles,
+		execrun.CombinedOutput, outcomes.AfterStoreRestart, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration control", "err", err.Error())
+		os.Exit(1)
+	}
+	if err := storeMigrateRecover(ctx, storeW.mode, migrateFiles, storeMigrateControl, logger); err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration recovery", "err", err.Error())
+		os.Exit(1)
+	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
 	// logs in on the first call that needs a token, not here. #761's
 	// repository is its first consumer.
@@ -628,7 +661,9 @@ func main() {
 		os.Exit(1)
 	}
 	// The secrets service and its KV repository (geekdojo/geekdojo-brain#761).
-	secretsSvc, err := secretsWiring(storeSession, storeKeySession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
+	// Under openbao both sessions sit behind the roll-forward's Hold (#1132).
+	heldSession, heldKeySession := storeMigrateHeld(storeW.mode, migrateHold, storeSession, storeKeySession)
+	secretsSvc, err := secretsWiring(heldSession, heldKeySession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
@@ -1227,11 +1262,36 @@ func main() {
 	rollback, err := storeRollbackWiring(storeRollbackDeps{
 		mode: storeW.mode, copyStore: storeUpdateCopy, lock: sealRot.updateLock(),
 		storeDataDir: storeDataDir, copyPath: filepath.Join(dataDir, "openbao-preupdate.tar"),
-		refs: appSecretRefs{store: appsStore}, secrets: secretsSvc, monitor: readiness.monitor,
+		refs: appSecretRefs{store: appsStore}, secrets: secretsSvc,
 		runner: runner, log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store rollback", "err", err.Error())
+		os.Exit(1)
+	}
+	// The store's roll-forward (geekdojo/geekdojo-brain#1132): its job, and
+	// the store's one first-ready coordinator, which submits the migration
+	// or the reference check above, and orders the check after the
+	// migration. Its repository reads and writes over the raw session: the
+	// Hold keeps everything else off the store while it runs.
+	migrateRecords, err := newOutcomeRecords(outcomeRunDir)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
+		os.Exit(1)
+	}
+	migrateRepo, err := secrets.NewRepository(storeSession)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
+		os.Exit(1)
+	}
+	storeMig, err := storeMigrateWiring(storeMigrateDeps{
+		mode: storeW.mode, hold: migrateHold, files: migrateFiles, provision: provisionSeen, inventory: appsStore,
+		repo: migrateRepo, control: storeMigrateControl, lock: sealRot.captureLock(), marker: storeMarker,
+		settings: setupStore, records: migrateRecords, run: execrun.CombinedOutput, bootID: fileBootID(procBootIDPath),
+		monitor: readiness.monitor, runner: runner, check: rollback.check, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
 		os.Exit(1)
 	}
 	// The same hosts' update of themselves commits only once their own store
@@ -1350,9 +1410,6 @@ func main() {
 	// Ordered after ResumeSelfUpdates because it waits on the child that call
 	// drives — starting it first would just poll for longer.
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
-	// The store reference check, once per process on the first ready
-	// reading: a store's data can only be put back before boot (#800).
-	rollback.arm(ctx)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn(), logger)
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
@@ -2150,8 +2207,14 @@ func main() {
 	// outcome records are read first, so the seal-key job is in the ledger
 	// before READY=1 (#833, #853), and the empty-store marker is armed on
 	// existing store data after them (#765, F-765-01).
+	//
+	// The store's first-ready coordinator is armed in the same place, after
+	// the read, so this boot's provision record is observed before it
+	// decides (#1132): it submits the roll-forward, or the reference check
+	// (#800) once per process on the first ready reading.
 	readyAfterOutcomes(ctx, outcomes, func(ctx context.Context) {
 		storeMarker.Arm(ctx, storeDataPresent(storeDataDir))
+		storeMig.arm(ctx)
 	}, sdnotify.Ready)
 	sdnotify.StartWatchdog(ctx, func(pctx context.Context) error {
 		_, err := authStore.CountUsers(pctx)

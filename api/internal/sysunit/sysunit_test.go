@@ -48,3 +48,35 @@ func TestRestartUnits(t *testing.T) {
 		t.Fatalf("err = %v, want the restart's", err)
 	}
 }
+
+// Show makes one systemctl show call naming the units in order and parses
+// one block per unit; no unit, a failed call and a block count that does not
+// match are errors (geekdojo/geekdojo-brain#1132).
+func TestShow(t *testing.T) {
+	var calls []string
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return []byte("ActiveState=active\nSubState=running\nInvocationID=0123456789abcdef0123456789abcdef\n"), nil
+	}
+	u, err := Show(t.Context(), run, "openbao.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Unit{{ActiveState: "active", SubState: "running", InvocationID: "0123456789abcdef0123456789abcdef"}}
+	if !reflect.DeepEqual(u, want) {
+		t.Fatalf("units = %+v, want %+v", u, want)
+	}
+	if len(calls) != 1 || calls[0] != "systemctl show --property=ActiveState,SubState,InvocationID openbao.service" {
+		t.Fatalf("calls = %q", calls)
+	}
+	if _, err := Show(t.Context(), run); err == nil {
+		t.Error("no unit named: no error")
+	}
+	if _, err := Show(t.Context(), run, "a.service", "b.service"); err == nil {
+		t.Error("one block for two units: no error")
+	}
+	fail := func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("no bus") }
+	if _, err := Show(t.Context(), fail, "openbao.service"); err == nil || !strings.Contains(err.Error(), "no bus") {
+		t.Errorf("err = %v, want the run error wrapped", err)
+	}
+}

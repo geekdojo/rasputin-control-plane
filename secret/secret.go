@@ -29,6 +29,7 @@
 package secret
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"io"
 	"log/slog"
@@ -78,6 +79,13 @@ func (v Value) Destroy() {
 		v.p.b[i] = 0
 	}
 	v.p.b = nil
+}
+
+// Equal reports whether a and b hold the same bytes, in time that does not
+// depend on where they differ (crypto/subtle). No byte leaves. Two zero or
+// destroyed Values are equal.
+func Equal(a, b Value) bool {
+	return subtle.ConstantTimeCompare(a.Reveal(), b.Reveal()) == 1
 }
 
 // String renders the redaction marker.

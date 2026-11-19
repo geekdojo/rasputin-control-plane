@@ -169,6 +169,58 @@ func TestRebase(t *testing.T) {
 	}
 }
 
+// TC-1132-17 (Rebase, its error returned) and TC-1132-18: RebaseChecked
+// returns the set-up boot it replaced, moves the marker to this boot and
+// clears a blank start; a read or write it cannot do is returned, never only
+// logged (F-1132-04). RestoreSetUp writes the previous boot back.
+func TestRebaseCheckedAndRestoreSetUp(t *testing.T) {
+	ctx := context.Background()
+	s := realSettings(t)
+	if err := s.Set(ctx, KeySetUpBootID, bootA); err != nil {
+		t.Fatal(err)
+	}
+	m, rec := newMarker(t, s, bootB)
+	prev, err := m.RebaseChecked(ctx)
+	if err != nil || prev != bootA {
+		t.Fatalf("RebaseChecked = (%q, %v), want (%s, nil)", prev, err, bootA)
+	}
+	if v := get(t, s, KeySetUpBootID); v != bootB {
+		t.Fatalf("set_up_boot_id = %q, want %s", v, bootB)
+	}
+	if err := m.RestoreSetUp(ctx, prev); err != nil {
+		t.Fatal(err)
+	}
+	if v := get(t, s, KeySetUpBootID); v != bootA {
+		t.Fatalf("after RestoreSetUp set_up_boot_id = %q, want %s", v, bootA)
+	}
+	if len(rec.Records()) != 0 {
+		t.Fatalf("RebaseChecked logged; its caller logs:\n%s", rec.Text())
+	}
+
+	if _, err := newMarkerOrDie(t, failingSettings{Settings: s}, bootB).RebaseChecked(ctx); err == nil {
+		t.Error("a failed write was not returned")
+	}
+	if _, err := newMarkerOrDie(t, failingSettings{Settings: s, getErr: errors.New("disk I/O error")}, bootB).RebaseChecked(ctx); err == nil {
+		t.Error("a failed read was not returned")
+	}
+	if err := newMarkerOrDie(t, failingSettings{Settings: s}, bootB).RestoreSetUp(ctx, bootA); err == nil {
+		t.Error("RestoreSetUp's failed write was not returned")
+	}
+	noBoot, err := New(Deps{Settings: s, BootID: func() (string, error) { return "", errors.New("no boot id") }, Log: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := noBoot.RebaseChecked(ctx); err == nil {
+		t.Error("an unreadable boot id was not returned")
+	}
+}
+
+func newMarkerOrDie(t *testing.T, s Settings, boot string) *Marker {
+	t.Helper()
+	m, _ := newMarker(t, s, boot)
+	return m
+}
+
 // readyStore is a store answering 200 initialised and unsealed.
 type readyStore struct{}
 

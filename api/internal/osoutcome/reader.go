@@ -54,6 +54,7 @@ type Spec struct {
 	RunID   string `json:"runId,omitempty"`
 	KeyID   string `json:"keyId,omitempty"`
 	Reason  string `json:"reason,omitempty"`
+	Author  string `json:"author,omitempty"`
 	Path    string `json:"path"`
 }
 
@@ -190,6 +191,22 @@ func (r *Reader) read(ctx context.Context, s Source) {
 	}
 }
 
+// ReadFile reads and parses src's record now, for a caller that acts on the
+// record's fact rather than the ledger's (the store's roll-forward,
+// geekdojo/geekdojo-brain#1132). An absent record is an error wrapping
+// fs.ErrNotExist; it records nothing.
+func ReadFile(src Source) (Record, error) {
+	b, err := readCapped(src.Path)
+	if err != nil {
+		return Record{}, fmt.Errorf("osoutcome: read %s: %w", src.Path, err)
+	}
+	rec, err := Parse(src, b)
+	if err != nil {
+		return Record{}, fmt.Errorf("osoutcome: %s: %w", src.Path, err)
+	}
+	return rec, nil
+}
+
 // readCapped reads at most one byte past maxRecord, so an oversized record
 // is refused by Parse without being read whole.
 func readCapped(path string) ([]byte, error) {
@@ -228,7 +245,7 @@ func (r *Reader) record(ctx context.Context, s Source, rec Record, key string, o
 		attrs = append(attrs, "err", cause.Error())
 	}
 	spec, err := json.Marshal(Spec{Source: s.Kind, Outcome: rec.Outcome, BootID: rec.BootID, RunID: rec.RunID,
-		KeyID: rec.KeyID, Reason: rec.Reason, Path: s.Path})
+		KeyID: rec.KeyID, Reason: rec.Reason, Author: rec.Author, Path: s.Path})
 	if err == nil {
 		now := r.d.Now().UTC()
 		j := &jobs.Job{ID: id, Kind: s.Kind, Spec: spec, Status: jobs.StatusSucceeded, CreatedBy: createdBy,
@@ -277,6 +294,9 @@ func (r *Reader) attrs(s Source, rec Record, id string) []any {
 	}
 	if s.has(FieldReason) || rec.Outcome == OutcomeUnreadable {
 		a = append(a, "reason", rec.Reason)
+	}
+	if s.has(FieldAuthor) {
+		a = append(a, "author", rec.Author)
 	}
 	return a
 }
