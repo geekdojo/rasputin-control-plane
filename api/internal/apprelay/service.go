@@ -7,6 +7,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -110,7 +111,8 @@ func NewService(d ServiceDeps) (*Service, error) {
 // Create records the index row before the store create, and delete forgets
 // it after the store delete (apps.RecordRuntimeSecret has why). A failed
 // store call leaves the row. A key's create and destroy keep the same order
-// in the key index, and its encrypt and decrypt check the row first.
+// in the key index, except that a create the store refused forgets the row
+// it added (createKey), and its encrypt and decrypt check the row first.
 func (s *Service) Do(ctx context.Context, c Call) (secret.Value, error) {
 	app, err := s.d.Apps.Get(ctx, c.AppID)
 	if err != nil {
@@ -151,10 +153,7 @@ func (s *Service) Do(ctx context.Context, c Call) (secret.Value, error) {
 		}
 		return secret.Value{}, s.d.Index.ForgetRuntimeSecret(ctx, c.AppID, c.Name)
 	case proto.AppKeyCreate:
-		if err := s.d.Index.RecordTransitKey(ctx, c.AppID, c.Name); err != nil {
-			return secret.Value{}, err
-		}
-		return secret.Value{}, s.d.Secrets.CreateKey(ctx, actor, c.Ref)
+		return secret.Value{}, s.createKey(ctx, actor, c)
 	case proto.AppKeyEncrypt, proto.AppKeyDecrypt:
 		if err := s.hasKey(ctx, c); err != nil {
 			return secret.Value{}, err
@@ -170,6 +169,33 @@ func (s *Service) Do(ctx context.Context, c Call) (secret.Value, error) {
 		return secret.Value{}, s.d.Index.ForgetTransitKey(ctx, c.AppID, c.Name)
 	}
 	return secret.Value{}, fmt.Errorf("%w: unknown operation %q", secrets.ErrInvalidRef, c.Op)
+}
+
+// createKey records the key's row, then creates the key in the store. When
+// the store answered and refused, so the key was certainly not created, a row
+// this call added is forgotten again (F-1084-22): otherwise the app's delete
+// would try to destroy a key the store never held, and on a store that cannot
+// serve keys fail, naming that key as left behind. A row that was there
+// before the call stays, since its key may exist. An unreachable store
+// (secretstore.ErrUnreachable: a timeout, a lost answer, a 5xx) may have
+// created the key, so the row stays too and the delete destroys it, where an
+// absent key counts as done.
+func (s *Service) createKey(ctx context.Context, actor secrets.Actor, c Call) error {
+	had, err := s.d.Index.HasTransitKey(ctx, c.AppID, c.Name)
+	if err != nil {
+		return err
+	}
+	if err := s.d.Index.RecordTransitKey(ctx, c.AppID, c.Name); err != nil {
+		return err
+	}
+	err = s.d.Secrets.CreateKey(ctx, actor, c.Ref)
+	if err == nil || had || errors.Is(err, secretstore.ErrUnreachable) {
+		return err
+	}
+	if ferr := s.d.Index.ForgetTransitKey(ctx, c.AppID, c.Name); ferr != nil {
+		return errors.Join(err, fmt.Errorf("apprelay: forget the row of key %s the store refused to create: %w", c.Name, ferr))
+	}
+	return err
 }
 
 // hasKey refuses an encrypt or decrypt under a key the app's index does not

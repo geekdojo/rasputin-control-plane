@@ -32,6 +32,8 @@ type spy struct {
 	value   string
 	// noKey makes HasTransitKey answer that the app has no such key.
 	noKey bool
+	// forgetKey, when set, is ForgetTransitKey's answer instead of index.
+	forgetKey error
 }
 
 func (s *spy) note(c string) {
@@ -76,6 +78,9 @@ func (s *spy) RecordTransitKey(_ context.Context, _, name string) error {
 }
 func (s *spy) ForgetTransitKey(_ context.Context, _, name string) error {
 	s.note("forget key " + name)
+	if s.forgetKey != nil {
+		return s.forgetKey
+	}
 	return s.index
 }
 func (s *spy) HasTransitKey(_ context.Context, _, name string) (bool, error) {
