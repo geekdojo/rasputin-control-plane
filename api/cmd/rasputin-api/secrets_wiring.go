@@ -9,7 +9,6 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storesession"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
@@ -53,11 +52,12 @@ func (a appStoreState) State(ctx context.Context) (storestate.State, error) {
 // the api's store session: the KV repository, and the service that authorizes
 // every call against the apps table. keys is the api's key session
 // (geekdojo/geekdojo-brain#1084), the service's Transit store and nothing
-// else's. It makes no store call.
+// else's. Under openbao both arrive behind the store roll-forward's Hold
+// (storeMigrateHeld, geekdojo/geekdojo-brain#1132). It makes no store call.
 //
 // sw is the store's switch marker (geekdojo/geekdojo-brain#604), which every
 // operator write sets first: storeSwitchFor's choice.
-func secretsWiring(session, keys *storesession.Session, appsStore *apps.Store, sw secrets.Switch, logger *slog.Logger) (*secrets.Service, error) {
+func secretsWiring(session secrets.Store, keys secrets.TransitStore, appsStore *apps.Store, sw secrets.Switch, logger *slog.Logger) (*secrets.Service, error) {
 	switch {
 	case session == nil:
 		return nil, errors.New("secrets: the store session is nil")

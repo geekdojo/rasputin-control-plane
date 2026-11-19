@@ -51,8 +51,9 @@ const (
 	// out of time on the client's own bound at that moment (#684 guard 4).
 	AuditBlocked State = "audit-blocked"
 	// Quiesced: the store is not ready while a running job holds a quiesce
-	// for a backup (F4.1), a seal-key rotation (#830) or an OS update's
-	// pre-update copy (geekdojo/geekdojo-brain#800).
+	// for a backup (F4.1), a seal-key rotation (#830), an OS update's
+	// pre-update copy (geekdojo/geekdojo-brain#800) or the store's
+	// roll-forward (#1132).
 	Quiesced State = "quiesced"
 	// Blank: sys/health answers 200 unsealed, but the store started empty on
 	// a cluster whose database says it was set up, or that verdict cannot be
@@ -78,6 +79,9 @@ const (
 	// QuiesceOSUpdate: an OS update of the store's host copies the store
 	// before it installs (geekdojo/geekdojo-brain#800).
 	QuiesceOSUpdate
+	// QuiesceMigration: the store's roll-forward restarts it on a new layout
+	// (geekdojo/geekdojo-brain#1132).
+	QuiesceMigration
 )
 
 // String names the reason in log fields.
@@ -87,6 +91,8 @@ func (r QuiesceReason) String() string {
 		return "seal-rotation"
 	case QuiesceOSUpdate:
 		return "os-update"
+	case QuiesceMigration:
+		return "store-migrate"
 	}
 	return "backup"
 }
@@ -98,6 +104,8 @@ func (r QuiesceReason) phrase() string {
 		return "a seal-key rotation"
 	case QuiesceOSUpdate:
 		return "an OS update"
+	case QuiesceMigration:
+		return "a secret store upgrade"
 	}
 	return "a backup"
 }
@@ -498,6 +506,12 @@ func alertFor(st State, reason QuiesceReason) (proto.Alert, bool) {
 			a.Title = "The secret store is paused for a seal-key rotation."
 			a.Detail = "The secret store is paused while its seal key is rotated. " +
 				"Apps that use secrets cannot be deployed until the rotation finishes." + unaffected
+			break
+		}
+		if reason == QuiesceMigration {
+			a.Title = "The secret store is paused for an upgrade."
+			a.Detail = "The secret store is paused while its data is moved to the current layout. " +
+				"Apps that use secrets cannot be deployed until the upgrade finishes." + unaffected
 			break
 		}
 		if reason == QuiesceOSUpdate {

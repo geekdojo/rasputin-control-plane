@@ -218,21 +218,8 @@ func (s *Store) SecretNamesByTargetNode(ctx context.Context, nodeID string) ([]A
 }
 
 func secretNamesByTargetNode(ctx context.Context, q queryer, nodeID string) ([]AppSecretNames, error) {
-	rows, err := q.QueryContext(ctx, `SELECT id, compose_yaml, previous_compose_yaml FROM apps WHERE target_node = ? ORDER BY id`, nodeID)
-	if err != nil {
-		return nil, fmt.Errorf("apps: apps of node %s: %w", nodeID, err)
-	}
-	type row struct{ id, compose, previous string }
-	var read []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.compose, &r.previous); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("apps: apps of node %s: %w", nodeID, err)
-		}
-		read = append(read, r)
-	}
-	err = errors.Join(rows.Err(), rows.Close())
+	read, err := readSecretRows(ctx, q, `SELECT id, compose_yaml, previous_compose_yaml, operator_secrets, previous_operator_secrets
+		FROM apps WHERE target_node = ? ORDER BY id`, nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("apps: apps of node %s: %w", nodeID, err)
 	}
@@ -252,6 +239,91 @@ func secretNamesByTargetNode(ctx context.Context, q queryer, nodeID string) ([]A
 		}
 		out = append(out, AppSecretNames{AppID: r.id, Names: secretNames(refs, r.compose, r.previous), RecordedRefs: len(refs),
 			RuntimeNames: runtime, TransitKeys: keys})
+	}
+	return out, nil
+}
+
+// secretRow is one apps row's columns that name secrets.
+type secretRow struct{ id, compose, previous, declared, previousDeclared string }
+
+// readSecretRows reads every row query selects as id, compose_yaml,
+// previous_compose_yaml, operator_secrets and previous_operator_secrets, and
+// closes the rows before returning, so a caller in a transaction can query
+// again.
+func readSecretRows(ctx context.Context, q queryer, query string, args ...any) ([]secretRow, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	var read []secretRow
+	for rows.Next() {
+		var r secretRow
+		if err := rows.Scan(&r.id, &r.compose, &r.previous, &r.declared, &r.previousDeclared); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		read = append(read, r)
+	}
+	if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+		return nil, err
+	}
+	return read, nil
+}
+
+// AppSecretInventory is one app's store entries as the secret store's
+// roll-forward copies them (geekdojo/geekdojo-brain#1132): every name the app
+// may hold under apps/<ID>/, and every name it wrote itself at runtime.
+type AppSecretInventory struct {
+	AppID        string
+	Names        []string
+	RuntimeNames []string
+}
+
+// SecretInventory reads AppSecretInventory for every app, ordered by app id,
+// in one read transaction. Names is secretNames over the recorded references
+// and both composes, with every name either operator-secret declaration
+// declares: an operator secret is set only when declared, and its reference
+// is recorded after the store write, so the declaration is what names an
+// entry whose reference is missing. RuntimeNames are the app_runtime_secrets
+// rows. A declaration column that does not decode, or any read that fails,
+// is an error and no partial list (ERR-CLOSED). It writes nothing.
+func (s *Store) SecretInventory(ctx context.Context) (out []AppSecretInventory, err error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("apps: secret inventory: %w", err)
+	}
+	defer func() {
+		if rerr := tx.Rollback(); rerr != nil && !errors.Is(rerr, sql.ErrTxDone) && err == nil {
+			out, err = nil, fmt.Errorf("apps: secret inventory: %w", rerr)
+		}
+	}()
+	read, err := readSecretRows(ctx, tx, `SELECT id, compose_yaml, previous_compose_yaml, operator_secrets, previous_operator_secrets
+		FROM apps ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("apps: secret inventory: %w", err)
+	}
+	out = make([]AppSecretInventory, 0, len(read))
+	for _, r := range read {
+		refs, err := secretRefNames(ctx, tx, r.id)
+		if err != nil {
+			return nil, err
+		}
+		names := secretNames(refs, r.compose, r.previous)
+		for _, col := range []struct{ name, raw string }{{"operator_secrets", r.declared}, {"previous_operator_secrets", r.previousDeclared}} {
+			decls, err := decodeOperatorSecrets(r.id, col.name, col.raw)
+			if err != nil {
+				return nil, err
+			}
+			for _, d := range decls {
+				names = append(names, d.Name)
+			}
+		}
+		slices.Sort(names)
+		runtime, err := indexNames(ctx, tx, runtimeIndexTable, r.id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, AppSecretInventory{AppID: r.id, Names: slices.Compact(names), RuntimeNames: runtime})
 	}
 	return out, nil
 }

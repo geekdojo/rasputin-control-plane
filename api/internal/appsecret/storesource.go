@@ -2,7 +2,6 @@ package appsecret
 
 import (
 	"context"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -178,7 +177,7 @@ func (s *StoreSource) value(ctx context.Context, actor secrets.Actor, appID, nam
 	if err != nil {
 		return secret.Value{}, s.refuse(ctx, appID, ref, "read-back", err)
 	}
-	if !sameValue(back.Value, derived) {
+	if !secret.Equal(back.Value, derived) {
 		back.Value.Destroy()
 		s.log.LogAttrs(ctx, slog.LevelError, "secret refused: the stored value does not match the derived value",
 			s.attrs(ctx, appID, ref.String(), CodeValueConflict, slog.String("step", "read-back"))...)
@@ -231,10 +230,4 @@ func (s *StoreSource) attrs(ctx context.Context, appID, ref, outcome string, ext
 		slog.String("job_id", jobs.JobIDFromContext(ctx)),
 	}
 	return append(attrs, extra...)
-}
-
-// sameValue reports whether a and b hold the same bytes, in time that does
-// not depend on where they differ. No byte leaves.
-func sameValue(a, b secret.Value) bool {
-	return subtle.ConstantTimeCompare(a.Reveal(), b.Reveal()) == 1
 }

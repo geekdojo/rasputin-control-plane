@@ -4,7 +4,8 @@
 //
 // A record is a small KEY=VALUE file under /run that a oneshot unit writes on
 // every run: the seal key (#803), the store's first init (#804), the store
-// provisioner (#805) and the store's version gate (#801). Each is declared once, as a Source; the reader
+// provisioner (#805), the store's version gate (#801) and the store's
+// roll-forward (#1132), among others. Each is declared once, as a Source; the reader
 // has no per-source code, so a new record is one more declaration.
 //
 // The ledger is the one source of truth. A record becomes exactly one job per
@@ -40,6 +41,10 @@ const (
 	FieldInvocationID = "invocation_id"
 	FieldExitCode     = "exit_code"
 	FieldExitStatus   = "exit_status"
+	// FieldAuthor is the store provisioner's read of whether the store
+	// holds the rasputin-author role (geekdojo/geekdojo-brain#1132):
+	// present, absent, or - when the run did not finish reading it.
+	FieldAuthor = "author"
 )
 
 // fieldOutcome is the line every record carries.
@@ -53,6 +58,7 @@ const OutcomeUnreadable = "unreadable"
 var knownFields = map[string]bool{
 	FieldBootID: true, FieldRunID: true, FieldKeyID: true, FieldReason: true,
 	FieldInvocationID: true, FieldExitCode: true, FieldExitStatus: true,
+	FieldAuthor: true,
 }
 
 // keyFields are the fields that may be a record's idempotency key.
@@ -63,8 +69,9 @@ type Source struct {
 	// Observe, when set, is given each record of this source that parses,
 	// after it is recorded, at start and after each store restart. It is
 	// never called for an absent, unreadable or malformed record. The secret
-	// store's empty-store marker is the one consumer
-	// (geekdojo/geekdojo-brain#765, storemarker.Marker.ObserveInit).
+	// store's empty-store marker observes the store's init record
+	// (geekdojo/geekdojo-brain#765, storemarker.Marker.ObserveInit), and the
+	// store's roll-forward its provision and migrate records (#1132).
 	Observe func(ctx context.Context, rec Record)
 	// Kind is the job kind, for example os.seal_key.
 	Kind string

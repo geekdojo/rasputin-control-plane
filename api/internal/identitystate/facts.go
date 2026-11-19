@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/osoutcome"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/sysunit"
 )
 
 // The facts the Monitor reads, as #973's unit hooks leave them (plan's
@@ -24,74 +25,35 @@ import (
 // (execrun.CombinedOutput's shape).
 type RunFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// Unit is one unit's systemd properties.
-type Unit struct {
-	ActiveState  string
-	SubState     string
-	InvocationID string
-}
+// Unit is one unit's systemd properties (sysunit.Unit).
+type Unit = sysunit.Unit
 
 // Units are Keycloak's unit and its database's.
 type Units struct {
 	KC, DB Unit
 }
 
-// unitProps are the properties SystemctlUnits asks for, in one call.
-var unitProps = []string{"ActiveState", "SubState", "InvocationID"}
-
 // SystemctlUnits reads both units' properties with one
-// `systemctl show --property=ActiveState,SubState,InvocationID <kc> <db>`.
+// `systemctl show --property=ActiveState,SubState,InvocationID <kc> <db>`
+// (sysunit.Show).
 func SystemctlUnits(run RunFunc, kcUnit, dbUnit string) func(ctx context.Context) (Units, error) {
 	return func(ctx context.Context) (Units, error) {
-		out, err := run(ctx, "systemctl", "show", "--property="+strings.Join(unitProps, ","), kcUnit, dbUnit)
+		u, err := sysunit.Show(ctx, run, kcUnit, dbUnit)
 		if err != nil {
-			return Units{}, fmt.Errorf("reading the state of %s and %s: %w", kcUnit, dbUnit, err)
+			return Units{}, err
 		}
-		return ParseUnits(out)
+		return Units{KC: u[0], DB: u[1]}, nil
 	}
 }
 
-// ParseUnits parses `systemctl show` output for two units: two blocks of
-// KEY=VALUE lines, separated by a blank line, in the order the units were
-// named. Each block must carry ActiveState, SubState and InvocationID (which
-// is empty for a unit that never ran); anything else is an error.
+// ParseUnits parses `systemctl show` output for two units (sysunit.ParseUnits),
+// Keycloak's first.
 func ParseUnits(out []byte) (Units, error) {
-	var blocks []map[string]string
-	cur := map[string]string{}
-	for i, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" {
-			if len(cur) > 0 {
-				blocks = append(blocks, cur)
-				cur = map[string]string{}
-			}
-			continue
-		}
-		k, v, ok := strings.Cut(line, "=")
-		if !ok || k == "" {
-			return Units{}, fmt.Errorf("systemctl show line %d is not KEY=VALUE", i+1)
-		}
-		cur[k] = v
+	u, err := sysunit.ParseUnits(out, 2)
+	if err != nil {
+		return Units{}, err
 	}
-	if len(cur) > 0 {
-		blocks = append(blocks, cur)
-	}
-	if len(blocks) != 2 {
-		return Units{}, fmt.Errorf("systemctl show printed %d units, want 2", len(blocks))
-	}
-	var units [2]Unit
-	for i, b := range blocks {
-		for _, p := range unitProps {
-			if _, ok := b[p]; !ok {
-				return Units{}, fmt.Errorf("systemctl show printed no %s for unit %d", p, i+1)
-			}
-		}
-		if b["ActiveState"] == "" {
-			return Units{}, fmt.Errorf("systemctl show printed an empty ActiveState for unit %d", i+1)
-		}
-		units[i] = Unit{ActiveState: b["ActiveState"], SubState: b["SubState"], InvocationID: b["InvocationID"]}
-	}
-	return Units{KC: units[0], DB: units[1]}, nil
+	return Units{KC: u[0], DB: u[1]}, nil
 }
 
 // The pair's states, as unitrecover reads a unit's ActiveState.

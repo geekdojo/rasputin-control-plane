@@ -453,13 +453,6 @@ type rollbackRunner interface {
 	Submit(ctx context.Context, kind string, spec any, createdBy string) (*jobs.Job, error)
 }
 
-// readyReader is the readiness monitor as the reference check's trigger
-// uses it.
-type readyReader interface {
-	OnFirstReady(ctx context.Context, fn func(context.Context))
-	State(ctx context.Context) (storestate.State, error)
-}
-
 // storeRollbackDeps is what the store's rollback wiring takes from main
 // (geekdojo/geekdojo-brain#800).
 type storeRollbackDeps struct {
@@ -475,7 +468,6 @@ type storeRollbackDeps struct {
 	copyPath     string
 	refs         appsecret.RefLister
 	secrets      appsecret.SecretChecker
-	monitor      readyReader
 	runner       rollbackRunner
 	log          *slog.Logger
 }
@@ -487,10 +479,11 @@ type storeRollback struct {
 	// retirer is the same copier, as the self-update store check retires
 	// its copy at the commit (#873): nil with copier.
 	retirer updater.CopyRetirer
-	// arm, run once after runner.Recover, submits the reference check on
-	// the first reading that finds the store ready; it does nothing when the
-	// check is not wired.
-	arm func(ctx context.Context)
+	// check submits the reference check, with one ERROR when the submit
+	// fails. It is nil when the check is not wired (any mode but openbao).
+	// The store's first-ready coordinator decides when it runs
+	// (storemigrate.Trigger, geekdojo/geekdojo-brain#1132).
+	check func(ctx context.Context)
 }
 
 // noStoreRotationLock is the copy's lock when a backend other than the mock
@@ -505,9 +498,10 @@ func (noStoreRotationLock) Release(string)                                 {}
 // storeRollbackWiring builds the OS update's copy of the store and the
 // reference check that runs after a store's data is put back
 // (geekdojo/geekdojo-brain#800). The copier exists whenever copyStore does;
-// the check is registered, and armed, only under openbao.
+// the check is registered, and its submit built, only under openbao. When it
+// runs is the store's first-ready coordinator's call (storeMigrateWiring).
 func storeRollbackWiring(d storeRollbackDeps) (storeRollback, error) {
-	off := storeRollback{arm: func(context.Context) {}}
+	off := storeRollback{}
 	if d.log == nil {
 		return off, errors.New("store rollback: the logger is nil")
 	}
@@ -528,27 +522,18 @@ func storeRollbackWiring(d storeRollbackDeps) (storeRollback, error) {
 	if d.mode != storeModeOpenBao {
 		return out, nil
 	}
-	if d.monitor == nil || d.runner == nil {
-		return off, errors.New("store rollback: the readiness monitor or the runner is nil under openbao")
+	if d.runner == nil {
+		return off, errors.New("store rollback: the runner is nil under openbao")
 	}
 	wf, err := appsecret.ReferenceCheckWorkflow(appsecret.ReferenceCheckDeps{Refs: d.refs, Secrets: d.secrets, Log: d.log})
 	if err != nil {
 		return off, fmt.Errorf("store rollback: %w", err)
 	}
 	d.runner.Register(wf)
-	out.arm = func(ctx context.Context) {
-		d.monitor.OnFirstReady(ctx, func(ctx context.Context) {
-			if _, err := d.runner.Submit(ctx, appsecret.ReferenceCheckKind, nil, storeRollbackCreatedBy); err != nil {
-				d.log.ErrorContext(ctx, "secret store reference check not submitted",
-					"component", "appsecret", "event", "appsecret.reference_check_submit_failed", "err", err.Error())
-			}
-		})
-		// One reading now, under the client's own per-call bound: a store
-		// already ready submits the check at once; otherwise the next ready
-		// reading by any reader does. Its answer is recorded by the monitor.
-		if _, err := d.monitor.State(ctx); err != nil {
-			d.log.WarnContext(ctx, "secret store readiness not read at start; the next reading arms the reference check",
-				"component", "appsecret", "err", err.Error())
+	out.check = func(ctx context.Context) {
+		if _, err := d.runner.Submit(ctx, appsecret.ReferenceCheckKind, nil, storeRollbackCreatedBy); err != nil {
+			d.log.ErrorContext(ctx, "secret store reference check not submitted",
+				"component", "appsecret", "event", "appsecret.reference_check_submit_failed", "err", err.Error())
 		}
 	}
 	return out, nil
