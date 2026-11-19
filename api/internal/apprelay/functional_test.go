@@ -724,11 +724,12 @@ func (noObserver) ObserveAudited(context.Context, error) {}
 // TC-1084-06: a store initialised by the previous release (no author, no
 // Transit mount, no key role). A granted app holding one runtime secret: its
 // key create answers unavailable with one ERROR apprelay.store_failed naming
-// the refused rasputin-app-keys login, and leaves the row (F-1084-09); an
-// encrypt or decrypt under a never-created name answers not_found at WARN
-// with no store call (F-1084-02); encrypt and destroy under the row answer
-// unavailable; the runtime secret reads back unchanged; and the kv readiness
-// is untouched: no secret-store alert, and the monitor reads ready.
+// the refused rasputin-app-keys login, and forgets the row it added
+// (F-1084-22); an encrypt or decrypt under a never-created name, wrap
+// included, answers not_found at WARN with no store call (F-1084-02); a
+// destroy of wrap answers unavailable; the runtime secret reads back
+// unchanged; the kv readiness is untouched: no secret-store alert, and the
+// monitor reads ready; and the app's delete succeeds (F-1084-22).
 func TestAppRelay_KeysOnAPreviousReleaseStore(t *testing.T) {
 	rg, ok := newRelayRig(t, previousRelease(t), nil)
 	if !ok {
@@ -785,28 +786,26 @@ func TestAppRelay_KeysOnAPreviousReleaseStore(t *testing.T) {
 	if e, _ := logkittest.Attr(failed[0], "err"); !strings.Contains(e, "log in as "+storepolicy.AppKeysPolicy) {
 		t.Errorf("err = %q, want it to name the refused %s login", e, storepolicy.AppKeysPolicy)
 	}
-	if ok, err := rg.appStore.HasTransitKey(ctx, fnAppA, "wrap"); !ok || err != nil {
-		t.Errorf("the wrap row after the refused create = %t, %v; want kept (F-1084-09)", ok, err)
+	if ok, err := rg.appStore.HasTransitKey(ctx, fnAppA, "wrap"); ok || err != nil {
+		t.Errorf("the wrap row after the refused create = %t, %v; want forgotten (F-1084-22)", ok, err)
 	}
 
 	logins, calls := rg.keyCalls.logins.Load(), rg.keyCalls.calls.Load()
-	for _, c := range []proto.AppSecretCall{as(proto.AppKeyEncrypt, "ghost", plain), as(proto.AppKeyDecrypt, "ghost", "vault:v1:"+plain)} {
+	for _, c := range []proto.AppSecretCall{as(proto.AppKeyEncrypt, "ghost", plain), as(proto.AppKeyDecrypt, "ghost", "vault:v1:"+plain), as(proto.AppKeyEncrypt, "wrap", plain)} {
 		mark := len(rec.Records())
 		r := rg.call(t, rg.ncN, fnNodeN, c)
 		if r.Code != proto.AppSecretNotFound {
-			t.Errorf("%s ghost = %+v; want not_found", c.Op, r)
+			t.Errorf("%s %s = %+v; want not_found", c.Op, c.Name, r)
 		}
 		if len(since(mark, slog.LevelError)) != 0 || len(since(mark, slog.LevelWarn)) != 1 {
-			t.Errorf("%s ghost: want one WARN refusal and no ERROR:\n%s", c.Op, rec.Text())
+			t.Errorf("%s %s: want one WARN refusal and no ERROR:\n%s", c.Op, c.Name, rec.Text())
 		}
 	}
 	if rg.keyCalls.logins.Load() != logins || rg.keyCalls.calls.Load() != calls {
-		t.Errorf("the ghost calls reached the store: %d logins, %d calls more", rg.keyCalls.logins.Load()-logins, rg.keyCalls.calls.Load()-calls)
+		t.Errorf("the never-created key calls reached the store: %d logins, %d calls more", rg.keyCalls.logins.Load()-logins, rg.keyCalls.calls.Load()-calls)
 	}
-	for _, c := range []proto.AppSecretCall{as(proto.AppKeyEncrypt, "wrap", plain), as(proto.AppKeyDestroy, "wrap", "")} {
-		if r := rg.call(t, rg.ncN, fnNodeN, c); r.Code != proto.AppSecretUnavailable {
-			t.Errorf("%s wrap = %+v; want unavailable", c.Op, r)
-		}
+	if r := rg.call(t, rg.ncN, fnNodeN, as(proto.AppKeyDestroy, "wrap", "")); r.Code != proto.AppSecretUnavailable {
+		t.Errorf("destroy wrap = %+v; want unavailable", r)
 	}
 
 	if r := rg.call(t, rg.ncN, fnNodeN, as(proto.AppSecretRead, "session-key", "")); r.Code != proto.AppSecretOK || r.Value != fnValue1 {
@@ -826,5 +825,33 @@ func TestAppRelay_KeysOnAPreviousReleaseStore(t *testing.T) {
 	}
 	if strings.Contains(rec.Text(), fnKeyPlain) || strings.Contains(rec.Text(), plain) || strings.Contains(rec.Text(), fnValue1) {
 		t.Error("a value reached a log record")
+	}
+
+	// F-1084-22: the app's delete succeeds: it has no key to destroy, and
+	// its runtime secret is deleted.
+	jst, err := jobs.OpenStore(ctx, filepath.Join(rg.dir, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = jst.Close() })
+	w, err := apps.DeleteWorkflow(rg.appStore, rg.inv, rg.srv.Conn(), nil, apps.DeleteSecretsDeps{Secrets: rg.svc, Store: readyStore{}, Log: rg.log}, rg.identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := jobs.NewRunner(jst, rg.srv.Conn())
+	runner.Register(w)
+	j, err := runner.Submit(ctx, "app.delete", apps.DeleteSpec{AppID: fnAppA}, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Wait()
+	if got, _ := jst.GetJob(ctx, j.ID); got == nil || got.Status != jobs.StatusSucceeded {
+		t.Fatalf("app.delete = %+v; want succeeded", got)
+	}
+	if names, err := rg.appStore.TransitKeyNames(ctx, fnAppA); err != nil || len(names) != 0 {
+		t.Errorf("A's key rows after delete = %v, %v; want none", names, err)
+	}
+	if _, err := rg.sess.Versions(ctx, p); !errors.Is(err, secretstore.ErrNotFound) {
+		t.Errorf("the runtime secret after delete: %v; want not found", err)
 	}
 }

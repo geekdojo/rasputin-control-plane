@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS app_runtime_secrets (
 -- The deletion index of the keys, as app_runtime_secrets is of the entries,
 -- and the fact an encrypt or decrypt checks before it calls the store. A row
 -- is recorded before its key is created and forgotten after its key is
--- destroyed. Deleting the app removes its rows.
+-- destroyed, or when the store refuses the create that added it. Deleting the
+-- app removes its rows.
 CREATE TABLE IF NOT EXISTS app_transit_keys (
     app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
     name   TEXT NOT NULL,

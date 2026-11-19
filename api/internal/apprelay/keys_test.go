@@ -27,13 +27,18 @@ func keyCall(t *testing.T, op, name string) Call {
 	return Call{Node: nodeN, AppID: appA, Op: op, Ref: ref, Name: name, Value: secret.New([]byte("aGk="))}
 }
 
-// TC-1084-12: the key index order. Create records the row before the store
-// create, and a failed create leaves it; destroy forgets the row after a
-// successful store destroy, and a failed destroy leaves it. Encrypt and
-// decrypt check the row and touch no other index.
+// TC-1084-12: the key index order. Create checks for and records the row
+// before the store create; destroy forgets the row after a successful store
+// destroy, and a failed destroy leaves it. Encrypt and decrypt check the row
+// and touch no other index. F-1084-22: a create the store refused forgets the
+// row it added; a row that was there before, or a store that was unreachable
+// (it may have created the key), keeps the row.
 func TestService_KeyIndexOrder(t *testing.T) {
 	k := "transit:app-" + appA + "-wrap"
 	storeDown := errors.New("store down")
+	refused := &secretstore.Error{Op: "login", Mount: "auth/cert", Path: "login", Status: 400, Kind: secretstore.ErrProtocol}
+	unreachable := &secretstore.Error{Op: "transit_create", Kind: secretstore.ErrUnreachable}
+	created := []string{"has key wrap", "record key wrap", "create " + k}
 	for _, tc := range []struct {
 		name    string
 		s       *spy
@@ -41,8 +46,12 @@ func TestService_KeyIndexOrder(t *testing.T) {
 		want    []string
 		wantErr error
 	}{
-		{"create", &spy{app: appOn(appA, nodeN), granted: true}, proto.AppKeyCreate, []string{"record key wrap", "create " + k}, nil},
-		{"failed create leaves the row", &spy{app: appOn(appA, nodeN), granted: true, store: storeDown}, proto.AppKeyCreate, []string{"record key wrap", "create " + k}, storeDown},
+		{"create", &spy{app: appOn(appA, nodeN), granted: true, noKey: true}, proto.AppKeyCreate, created, nil},
+		{"a refused create forgets the row it added", &spy{app: appOn(appA, nodeN), granted: true, noKey: true, store: refused}, proto.AppKeyCreate, append(slices.Clone(created), "forget key wrap"), secretstore.ErrProtocol},
+		{"a refused create keeps a row that was there", &spy{app: appOn(appA, nodeN), granted: true, store: refused}, proto.AppKeyCreate, created, secretstore.ErrProtocol},
+		{"an unreachable store keeps the row", &spy{app: appOn(appA, nodeN), granted: true, noKey: true, store: unreachable}, proto.AppKeyCreate, created, secretstore.ErrUnreachable},
+		{"a failed create of a row that was there leaves it", &spy{app: appOn(appA, nodeN), granted: true, store: storeDown}, proto.AppKeyCreate, created, storeDown},
+		{"an index failure stops the create", &spy{app: appOn(appA, nodeN), granted: true, index: storeDown}, proto.AppKeyCreate, []string{"has key wrap"}, storeDown},
 		{"destroy", &spy{app: appOn(appA, nodeN), granted: true}, proto.AppKeyDestroy, []string{"destroy " + k, "forget key wrap"}, nil},
 		{"failed destroy leaves the row", &spy{app: appOn(appA, nodeN), granted: true, store: storeDown}, proto.AppKeyDestroy, []string{"destroy " + k}, storeDown},
 		{"encrypt checks the row", &spy{app: appOn(appA, nodeN), granted: true, value: "vault:v1:x"}, proto.AppKeyEncrypt, []string{"has key wrap", "encrypt " + k}, nil},
@@ -300,4 +309,20 @@ func TestHandler_KeyErrorCodes(t *testing.T) {
 			}
 		}
 	})
+}
+
+// F-1084-22: when forgetting the row of a refused create fails, the call
+// returns both the store's refusal and the index failure, so the reply still
+// maps from the store's kind and the log names the row left behind.
+func TestService_RefusedCreateForgetFails(t *testing.T) {
+	refused := &secretstore.Error{Op: "transit_create", Status: 400, Kind: secretstore.ErrProtocol}
+	dbDown := errors.New("db down")
+	s := &spy{app: appOn(appA, nodeN), granted: true, noKey: true, store: refused, forgetKey: dbDown}
+	_, err := newSpyService(t, s).Do(t.Context(), keyCall(t, proto.AppKeyCreate, "wrap"))
+	if !errors.Is(err, secretstore.ErrProtocol) || !errors.Is(err, dbDown) {
+		t.Fatalf("Do = %v; want the refusal and the index failure", err)
+	}
+	if !strings.Contains(err.Error(), "forget the row of key wrap") {
+		t.Errorf("err = %q; want it to name the row left behind", err)
+	}
 }
