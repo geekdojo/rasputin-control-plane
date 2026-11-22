@@ -144,6 +144,9 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(impact.MeshDeviceHSIDs) > 0 {
+		s.reconcileTailnetDNS(ctx, "node delete")
+	}
 
 	if _, err := s.fw.DeleteNodeState(ctx, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "delete firewall state: "+err.Error())

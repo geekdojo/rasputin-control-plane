@@ -125,6 +125,10 @@ func (s *Server) handleInstallCatalogTile(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, appNameRuleMsg)
 		return
 	}
+	if proto.IsReservedLabel(name) {
+		s.writeAppNameReserved(w, r, name)
+		return
+	}
 
 	// Validate the target node exists and can run apps.
 	node, err := s.inv.Get(r.Context(), req.TargetNode)

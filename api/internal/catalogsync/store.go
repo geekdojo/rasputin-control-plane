@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -66,8 +67,9 @@ type Store struct {
 	// (ADR-0006 Decision 7, #162). Held rather than only logged because a
 	// catalog that quietly loses tiles is a worse failure than one that fails
 	// loudly: the operator's symptom is an app that simply is not there, with
-	// nothing to search for. Empty whenever the floor is in effect — the floor
-	// is validated strictly, so it cannot have any.
+	// nothing to search for. While the floor is in effect it holds only the
+	// floor's reserved-id refusals (rejectReserved): the floor is otherwise
+	// validated strictly, so it cannot have any other.
 	rejected []tileschema.TileRejection
 }
 
@@ -86,11 +88,16 @@ func New(stateDir string, v Verifier, floor tileschema.Bundle) (*Store, error) {
 	if err := floor.Validate(); err != nil {
 		return nil, fmt.Errorf("catalogsync: the embedded floor is not a valid bundle: %w", err)
 	}
+	floor, floorRejected := rejectReserved(floor, nil)
+	for _, r := range floorRejected {
+		log.Printf("catalog: embedded floor v%d tile %q refused, serving the rest: %s", floor.Version, r.ID, r.Reason)
+	}
 	s := &Store{
-		current: floor,
-		floor:   floor,
-		dir:     filepath.Join(stateDir, dirName),
-		verify:  v,
+		current:  floor,
+		floor:    floor,
+		dir:      filepath.Join(stateDir, dirName),
+		verify:   v,
+		rejected: floorRejected,
 	}
 	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
 		return nil, fmt.Errorf("catalogsync: %w", err)
@@ -112,6 +119,29 @@ func New(stateDir string, v Verifier, floor tileschema.Bundle) (*Store, error) {
 		s.lastNote = fmt.Sprintf("embedded floor v%d supersedes the cached catalog v%d", floor.Version, b.Version)
 	}
 	return s, nil
+}
+
+// rejectReserved moves every tile whose id is a label the sign-in doors
+// reserve (proto.IsReservedLabel) out of b and into rejected
+// (geekdojo/geekdojo-brain#983). A tile's id is its default app name, so a
+// signin tile would install at the app door's own name. It runs on every load
+// a cluster makes, the floor, a fetch and the persisted bundle, so the
+// refusal is reported through Rejected() and the per-tile log line like any
+// other. b's tile slice is copied, never edited in place.
+func rejectReserved(b tileschema.Bundle, rejected []tileschema.TileRejection) (tileschema.Bundle, []tileschema.TileRejection) {
+	kept := make([]tileschema.BundleTile, 0, len(b.Tiles))
+	for _, bt := range b.Tiles {
+		if proto.IsReservedLabel(bt.Tile.ID) {
+			rejected = append(rejected, tileschema.TileRejection{
+				ID:     bt.Tile.ID,
+				Reason: fmt.Sprintf("Tile id %s is kept for the cluster's sign-in addresses.", bt.Tile.ID),
+			})
+			continue
+		}
+		kept = append(kept, bt)
+	}
+	b.Tiles = kept
+	return b, rejected
 }
 
 // Current returns the effective catalog.
@@ -211,6 +241,7 @@ func (s *Store) Apply(bundlePath, sigPath string) error {
 	if err != nil {
 		return s.fail(err)
 	}
+	b, rejected = rejectReserved(b, rejected)
 
 	s.mu.Lock()
 	have := s.current.Version
@@ -316,6 +347,7 @@ func (s *Store) loadPersisted() (tileschema.Bundle, []tileschema.TileRejection, 
 	if err != nil {
 		return tileschema.Bundle{}, nil, fmt.Errorf("cached catalog v%d: %w", version, err)
 	}
+	b, rejected = rejectReserved(b, rejected)
 	if b.Version != version {
 		return tileschema.Bundle{}, nil, fmt.Errorf("cached catalog claims v%d but the pointer says v%d", b.Version, version)
 	}

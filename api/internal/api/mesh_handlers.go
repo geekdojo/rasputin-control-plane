@@ -131,7 +131,18 @@ func (s *Server) handleDeleteMeshDevice(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.reconcileTailnetDNS(r.Context(), "mesh device delete")
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// reconcileTailnetDNS re-projects the tailnet names after a device unbind,
+// so a removed control-plane device drops the sign-in door's MagicDNS record
+// now rather than on the next reconcile tick (geekdojo/geekdojo-brain#983).
+// A failure is logged; the mesh.reconcile step is the safety net.
+func (s *Server) reconcileTailnetDNS(ctx context.Context, after string) {
+	if err := s.mesh.ReconcileAppDNS(ctx); err != nil {
+		s.log.WarnContext(ctx, "tailnet DNS projection failed", "after", after, "err", err.Error())
+	}
 }
 
 // GET /api/mesh/enroll-defaults/{nodeId} — suggested form values for the

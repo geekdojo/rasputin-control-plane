@@ -315,7 +315,7 @@ func TestDomainsAreRoutingOnly(t *testing.T) {
 			t.Errorf("domain %q is not routing-only; it would capture all DNS", d)
 		}
 	}
-	want := []string{"~rasputin.local", "~rasputin.internal"}
+	want := []string{"~rasputin.local", "~rasputin.internal", "~signin.rasputin.internal"}
 	got := Domains("rasputin")
 	if len(got) != len(want) {
 		t.Fatalf("Domains() = %v, want %v", got, want)
@@ -351,7 +351,7 @@ func TestRenderContainsDNSAndDomains(t *testing.T) {
 	for _, want := range []string{
 		"[Resolve]",
 		"DNS=10.0.0.5",
-		"Domains=~home1.local ~home1.internal",
+		"Domains=~home1.local ~home1.internal ~signin.home1.internal",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("rendered config missing %q:\n%s", want, body)

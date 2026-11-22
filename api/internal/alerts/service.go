@@ -349,6 +349,23 @@ func (s *Service) appAlerts(ctx context.Context, _ time.Time) ([]proto.Alert, er
 	}
 	out := make([]proto.Alert, 0)
 	for _, a := range all {
+		// An app that took a label the sign-in doors reserve, before the
+		// name was refused, withholds the app sign-in address while it
+		// exists (geekdojo/geekdojo-brain#983). Computed on read, so the
+		// alert clears the moment the app is removed.
+		if proto.IsReservedLabel(a.Name) {
+			out = append(out, proto.Alert{
+				ID:       "app-reserved-name:" + a.ID,
+				Severity: proto.AlertWarn,
+				Source:   proto.AlertSourceApp,
+				Title:    fmt.Sprintf("App %s holds a name kept for sign-in", a.Name),
+				Detail: fmt.Sprintf("The app %s uses a name kept for the cluster's sign-in addresses, so the app sign-in address is withheld. "+
+					"Remove the app, and reinstall it under another name, to bring the app sign-in address back.", a.Name),
+				Since:       a.CreatedAt,
+				RelatedKind: "app",
+				RelatedID:   a.ID,
+			})
+		}
 		if a.LastStatus != proto.AppStatusFailed {
 			continue
 		}

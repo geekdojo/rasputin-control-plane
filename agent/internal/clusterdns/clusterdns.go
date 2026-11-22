@@ -139,6 +139,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/agent/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -308,14 +309,21 @@ func (c *Config) applyDefaults() {
 }
 
 // Domains returns the routing-only domains we claim for the cluster: the mDNS
-// name the bus and tailscaled dial, and the internal zone apex the CP
-// nameserver is authoritative for. Both are prefixed "~" — routing-only, so
-// they steer these names at the CP without making it the node's resolver for
-// anything else.
+// name the bus and tailscaled dial, the internal zone apex the CP nameserver
+// is authoritative for, and the app sign-in door's own name. All are prefixed
+// "~" — routing-only, so they steer these names at the CP without making it
+// the node's resolver for anything else.
+//
+// The door's name sits under the zone apex already; it is listed on its own
+// so systemd-resolved's longest match sends it to the CP's nameserver, and
+// its LAN address, even where MagicDNS claims the base domain on the tailnet
+// link (geekdojo/geekdojo-brain#983). Both names come from proto, the one
+// constructor the api's records and the door's leaf use.
 func Domains(clusterID string) []string {
 	return []string{
 		"~" + clusterID + ".local",
-		"~" + clusterID + ".internal",
+		"~" + proto.BaseDomain(clusterID),
+		"~" + proto.SignInFQDN(clusterID),
 	}
 }
 

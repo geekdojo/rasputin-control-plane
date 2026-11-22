@@ -84,6 +84,10 @@ const (
 	// its compose is not YAML or not a compose's shape, so the publish
 	// cannot be checked.
 	codeWebPortComposeUnreadable = "web_port_compose_unreadable"
+	// codeAppNameReserved: an app name is a label the sign-in doors keep for
+	// themselves (proto.IsReservedLabel), so no app was created
+	// (geekdojo/geekdojo-brain#983).
+	codeAppNameReserved = "app_name_reserved"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

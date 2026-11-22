@@ -148,6 +148,7 @@ func (f *fakeMeshClient) DeleteNode(_ context.Context, nodeID string) error {
 	delete(f.nodes, nodeID)
 	return nil
 }
+func (f *fakeMeshClient) RenameNode(context.Context, string, string) error { return nil }
 func (f *fakeMeshClient) CreatePreAuthKey(_ context.Context, in mesh.CreatePreAuthKeyInput) (string, string, error) {
 	f.createCalls++
 	f.lastCreate = in

@@ -85,3 +85,7 @@ func (u *UnavailableClient) DeleteNode(context.Context, string) error {
 func (u *UnavailableClient) EnsureUser(context.Context, string) error {
 	return u.err("ensure user")
 }
+
+func (u *UnavailableClient) RenameNode(context.Context, string, string) error {
+	return u.err("rename node")
+}

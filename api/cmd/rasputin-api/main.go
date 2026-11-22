@@ -746,6 +746,21 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: node trust", "err", err.Error())
 		os.Exit(1)
 	}
+	// The sign-in door table (geekdojo/geekdojo-brain#983), built once from
+	// the cluster id, and the one predicate that withholds the app door while
+	// an app holds a reserved name or the apps list cannot be read. The same
+	// table and predicate go to the mesh projection here, and to the
+	// nameserver, the door leaves and :443's certificate selection below.
+	doorTable, doorErr := doorTableFromEnv()
+	doorsOn := wireDoorTable(ctx, logger, doorTable, doorErr)
+	appDoor := appDoorWithholding{ctx: ctx, apps: appsStore, log: logger}
+	appDoorHost := ""
+	if doorsOn {
+		appDoorHost = doorTable.App.Host
+		warnIfWithheld(ctx, logger, appDoor)
+	}
+	// The renamed-device alert's holder: set once the alerts service exists.
+	deviceRenamed := &atomic.Pointer[deviceRenamedFunc]{}
 	meshSvc := mesh.NewService(mesh.Config{
 		LoginServer:       mw.login,
 		DefaultUser:       envOr("RASPUTIN_MESH_DEFAULT_USER", "rasputin-operator"),
@@ -755,6 +770,11 @@ func main() {
 		TrustFingerprint:  nodeTrust,
 		LegacyTrustBundle: nodeBundle,
 		ClusterID:         strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
+		AppDoorHost:       appDoorHost,
+		SelfNodeID:        selfNodeID,
+		AppDoorWithheld:   appDoor.withheld,
+		DeviceRenamed:     deviceRenamedVia(deviceRenamed, logger),
+		Log:               logger,
 	}, meshStore, mw.client, mw.sup)
 	// The node↔mesh-device join (geekdojo/geekdojo-brain#401): every reader
 	// of a node's status — /api/nodes, the transition ticker, the alerts
@@ -1538,10 +1558,7 @@ func main() {
 	// after construction (below); nil when the nameserver is disabled/unstarted.
 	var nsResp *nameserver.Responder
 	if envOr("RASPUTIN_DNS", "on") != "off" {
-		zone := "rasputin.internal"
-		if id := strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")); id != "" {
-			zone = id + ".internal"
-		}
+		zone := proto.BaseDomain(os.Getenv("RASPUTIN_CLUSTER_ID"))
 		// Project node + app A records live from inventory + apps, under the
 		// **.lan subzone** (ADR-0004 §9): <hostname>.lan.<zone> → node LAN IP,
 		// <app>.lan.<zone> → its target node's LAN IP. The bare base domain is the
@@ -1575,9 +1592,13 @@ func main() {
 				}
 				return out
 			})
-		nsResp = nameserver.NewResponder(zone,
-			nameserver.NewSelfSource(zone, clusterHostname(), lanWatch.PrimaryIP),
-			clusterSrc)
+		nsSources := []nameserver.Source{nameserver.NewSelfSource(zone, clusterHostname(), lanWatch.PrimaryIP), clusterSrc}
+		if doorsOn {
+			// The app door's record: the LAN IP, read per query, while the
+			// door is not withheld (geekdojo/geekdojo-brain#983).
+			nsSources = append(nsSources, nameserver.NewDoorSource(doorTable.App.Host, lanWatch.PrimaryIP, appDoor.withheld))
+		}
+		nsResp = nameserver.NewResponder(zone, nsSources...)
 		nsListeners := nameserver.NewListeners(ctx, 53, nsResp)
 		defer func() { _ = nsListeners.Close() }()
 		followLANNameserver(lanWatch, nsListeners, zone)
@@ -1940,6 +1961,8 @@ func main() {
 	}
 	defer alertsStore.Close()
 	alertsSvc := alerts.New(invStore, jobStore, appsStore, setupSvc, alertsStore, busSrv.Conn(), busAuthEnforce)
+	raiseRenamed := deviceRenamedFunc(alertsSvc.RaiseTailnetDeviceRenamed)
+	deviceRenamed.Store(&raiseRenamed)
 	// A bus key or certificate that did not load is a standing crit alert
 	// naming the file; an available bus raises none (bustls.State.Alert).
 	alertsSvc.SetBusTLSAlert(busState.Alert)
@@ -2073,6 +2096,9 @@ func main() {
 	// gate. Declared out here because the node listener serves it too, for
 	// every collector — while itself starting long before the leaf exists.
 	var leaf *apiLeaf
+	// The sign-in doors' leaves (geekdojo/geekdojo-brain#983), only with
+	// HTTPS and doors both on; nil otherwise.
+	var doorL *doorLeaves
 	if httpsAddr != "" {
 		// Served from memory through GetCertificate rather than from files at
 		// ListenAndServeTLS, so a LAN address change re-mints the leaf's IP SAN
@@ -2116,6 +2142,14 @@ func main() {
 			},
 		}
 		httpsSrv.TLSConfig.GetCertificate = leaf.getCertificate
+		if doorsOn {
+			dl := newDoorLeaves(cpCA, dataDir, doorTable, appDoor)
+			if err := dl.register(leafSweeper); err != nil {
+				log.Fatalf("rasputin-api: leaf sweep: %v", err)
+			}
+			doorL = &dl
+			httpsSrv.TLSConfig.GetCertificate = sniCertificate(leaf, dl.byHost())
+		}
 		// HTTP demotes to the bootstrap surface right away so the node is
 		// reachable immediately; HTTPS comes up asynchronously once the clock
 		// is trustworthy (below). Minting the leaf must NOT block main() —
@@ -2143,6 +2177,9 @@ func main() {
 			if err := leaf.load(lanWatch.PrimaryIP()); err != nil {
 				log.Fatalf("rasputin-api: https leaf: %v", err)
 			}
+			if doorL != nil {
+				doorL.load(ctx, logger)
+			}
 			// Re-mint when the primary LAN address changes. A failure keeps the
 			// previous leaf in service and is not retried on a timer; the next
 			// address change, or a restart, tries again.
@@ -2162,8 +2199,21 @@ func main() {
 	// the one renewal driver or it is not, and there is no third state — so say
 	// which, here, while the answer is still cheap. See requiredLeafConsumers.
 	if err := verifyLeafConsumers(append(append(leafSweeper.RegisteredNames(), storeW.registeredNames()...), identitySweeper.RegisteredNames()...),
-		append(requiredLeafConsumers(httpsAddr != "", selfHostedMesh, storeW.mode == storeModeOpenBao), identityLeafNames(identityCA != nil)...)); err != nil {
+		append(requiredLeafConsumers(httpsAddr != "", selfHostedMesh, storeW.mode == storeModeOpenBao, doorsOn), identityLeafNames(identityCA != nil)...)); err != nil {
 		log.Fatalf("rasputin-api: %v", err)
+	}
+
+	// The AppDeleted fact (geekdojo/geekdojo-brain#983): removing the app
+	// that withheld the app door mints and loads its leaf and re-projects its
+	// MagicDNS record now, rather than at the next sweep or reconcile.
+	if doorsOn {
+		var appHolder *apiLeaf
+		if doorL != nil {
+			appHolder = doorL.app.holder
+		}
+		if _, err := subscribeAppDeleted(busSrv.Conn(), appDeletedHandler(ctx, logger, appHolder, meshSvc.ReconcileAppDNS)); err != nil {
+			logger.WarnContext(ctx, "app sign-in address: not subscribed to app removals; the leaf sweep and the mesh reconcile still restore it", "err", err.Error())
+		}
 	}
 
 	// The node listener. Built and started HERE — outside the httpsAddr block
@@ -2395,10 +2445,15 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 //     RASPUTIN_SECRETSTORE_BACKEND is openbao. They are registered with the
 //     store CA's own sweeper, so the caller checks the union of both
 //     sweepers' names.
-func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []string {
+func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected, doorsOn bool) []string {
 	var want []string
 	if httpsEnabled {
 		want = append(want, "api-https")
+	}
+	// The door leaves are registered only inside the HTTPS block, so they are
+	// required only when HTTPS and doors are both on (F-983-07).
+	if httpsEnabled && doorsOn {
+		want = append(want, signInHomeLeafName, signInAppLeafName)
 	}
 	if selfHostedMesh {
 		want = append(want, mesh.HeadscaleLeafName)
