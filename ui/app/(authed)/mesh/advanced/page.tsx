@@ -19,9 +19,9 @@ export default function MeshAdvancedPage() {
 
   return (
     <>
-      <SectionLabel>HEADPLANE — Headscale admin UI</SectionLabel>
+      <SectionLabel>HEADPLANE — mesh admin UI</SectionLabel>
       <Hint style={{ marginBottom: 16 }}>
-        Headplane is the upstream Headscale admin UI. Use it for anything Rasputin doesn&apos;t expose:{' '}
+        Headplane is the mesh coordinator&apos;s own admin UI. Use it for anything Rasputin doesn&apos;t expose:{' '}
         <Tok>ACL HuJSON</Tok>, DNS overrides, exit-node selection, DERP map. It runs as a sibling tab —
         single sign-on shares the same session cookie.
       </Hint>

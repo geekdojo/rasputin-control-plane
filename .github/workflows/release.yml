@@ -207,6 +207,11 @@ jobs:
               || { echo "::error::$t identity/pins.json names Keycloak $got, but pin.go pins $kc."; exit 1; }
             [ -d "$x/identity/theme" ] \
               || { echo "::error::$t holds no identity/theme/ slot."; exit 1; }
+            # The built sign-in theme (geekdojo/geekdojo-brain#988, TC-988-29).
+            for f in login/theme.properties resource-allowlist.json; do
+              [ -f "$x/identity/theme/$f" ] \
+                || { echo "::error::$t holds no identity/theme/$f, so the sign-in theme is missing."; exit 1; }
+            done
             rm -rf "$x"
           done
           [ "$n" -eq 2 ] || { echo "::error::found $n api tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
@@ -220,7 +225,7 @@ jobs:
             rm -f "$l"
           done
           [ "$a" -eq 2 ] || { echo "::error::found $a agent tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
-          echo "every api tarball carries identity/ (baseline and build options byte-equal to $src, pins.json at Keycloak $kc, theme/); no agent tarball does"
+          echo "every api tarball carries identity/ (baseline and build options byte-equal to $src, pins.json at Keycloak $kc, the built theme/); no agent tarball does"
 
       # Tag push → publish a GitHub Release with the tarballs + checksums.
       # rasputin-os fetches these from

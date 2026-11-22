@@ -1,0 +1,53 @@
+{
+  "comment": "The sha256 of every base login module and of common rfc4648 at this release, read from the dist's jars. The base snapshot test re-reads the jars and fails when this list differs; build.mjs reads the paths as the base files a reference may resolve to.",
+  "files": [
+    {
+      "sha256": "636e4813e3ab3d7eaf261b3c6f5b6c872391b807a5b7048b6e96519b9abdc6d0",
+      "path": "login/resources/js/authChecker.js"
+    },
+    {
+      "sha256": "454ba2fb1cd034276ceb499c6fcf48f52c1b8cddb8e85c65995bcf14bd4bc6d5",
+      "path": "login/resources/js/common.js"
+    },
+    {
+      "sha256": "3687d48855ae47171ba31d955a52c2d175081bb73392e0eea2a89b647bad9302",
+      "path": "login/resources/js/kcMultivalued.js"
+    },
+    {
+      "sha256": "68920f612c034e757e5a3bdd904425d7ca5974a4416be6cdf87ab32f9cdd0532",
+      "path": "login/resources/js/kcNumberFormat.js"
+    },
+    {
+      "sha256": "ba983ce24297fbdd00dc408efa9399dd6ccf968cab86de99e2373894bcf3c3d4",
+      "path": "login/resources/js/kcNumberUnFormat.js"
+    },
+    {
+      "sha256": "05579fc9e75ea0c18ac7e97b3e528031c6e217c323c5fda54b2d69d0075750e3",
+      "path": "login/resources/js/menu-button-links.js"
+    },
+    {
+      "sha256": "287afb27bf56157243159ea7098cc04ee1db52f9410aff0409e4a869bb371810",
+      "path": "login/resources/js/passkeysConditionalAuth.js"
+    },
+    {
+      "sha256": "6df35fb0b98bfc3b78bb9936fceca7d91bb53dcc0cd3df7399b4fa3537c565ed",
+      "path": "login/resources/js/passwordVisibility.js"
+    },
+    {
+      "sha256": "b7fb8958cd4c2b53182ca65e1205c15810c408df58ba0c2eb4693c1d26eea2ea",
+      "path": "login/resources/js/userProfile.js"
+    },
+    {
+      "sha256": "0889bb492f6a0848f3c38e21ddb9dbf26e6f161d9cabe958767284c2fc5dfd88",
+      "path": "login/resources/js/webauthnAuthenticate.js"
+    },
+    {
+      "sha256": "f3b2c7a541e0ff78d4fa502c6d4fb6672c059c898993ecf7034b91624250b661",
+      "path": "login/resources/js/webauthnRegister.js"
+    },
+    {
+      "sha256": "c8b0b095a25e903ac6faa0f05c307ca082d37d0feeb6bc113bda1889f0254f9f",
+      "path": "common/keycloak/vendor/rfc4648/rfc4648.js"
+    }
+  ]
+}

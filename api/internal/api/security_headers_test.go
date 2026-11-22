@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -175,5 +176,34 @@ func assertNoHSTS(t *testing.T, label string, h http.Header) {
 	t.Helper()
 	if v := h.Values("Strict-Transport-Security"); len(v) != 0 {
 		t.Errorf("%s: Strict-Transport-Security = %q, want none", label, v)
+	}
+}
+
+// TC-988-15: the console's policy names no host source. The UI bundles its
+// font, so no directive reaches another host: every source is a keyword
+// ('self', 'none', 'unsafe-inline', 'wasm-unsafe-eval'), data: or blob:, and
+// font-src is exactly 'self' data: (geekdojo/geekdojo-brain#988).
+func TestCSPNamesNoHostSource(t *testing.T) {
+	directives := map[string][]string{}
+	for _, d := range strings.Split(contentSecurityPolicy, ";") {
+		f := strings.Fields(d)
+		if len(f) == 0 {
+			continue
+		}
+		directives[f[0]] = f[1:]
+		for _, src := range f[1:] {
+			keyword := strings.HasPrefix(src, "'") && strings.HasSuffix(src, "'")
+			if !keyword && src != "data:" && src != "blob:" {
+				t.Errorf("CSP directive %s names the source %q, want only keywords, data: and blob:", f[0], src)
+			}
+		}
+	}
+	if got := strings.Join(directives["font-src"], " "); got != "'self' data:" {
+		t.Errorf("font-src = %q, want %q", got, "'self' data:")
+	}
+	for _, host := range []string{"googleapis", "gstatic"} {
+		if strings.Contains(contentSecurityPolicy, host) {
+			t.Errorf("the CSP names %s: %s", host, contentSecurityPolicy)
+		}
 	}
 }

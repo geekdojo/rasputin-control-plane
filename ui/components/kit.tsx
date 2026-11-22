@@ -144,31 +144,27 @@ function longestMatch(pathname: string, tabs: PageTab[]): string | null {
   return best?.href ?? null;
 }
 
+// The style constants below are exported because the sign-in theme's CSS is
+// generated from them (ui/identity-theme/styles.ts), so the kit stays the one
+// source for both surfaces (ui.md §4.2, geekdojo/geekdojo-brain#988).
+export const sectionLabelStyle: CSSProperties = {
+  color: DIM,
+  fontSize: 9,
+  fontFamily: MONO,
+  letterSpacing: '0.12em',
+  padding: '4px 0',
+  borderBottom: `1px solid ${HAIR_SOFT}`,
+  marginBottom: 10,
+};
+
 export function SectionLabel({ children, style }: { children: ReactNode; style?: CSSProperties }) {
-  return (
-    <div
-      style={{
-        color: DIM,
-        fontSize: 9,
-        fontFamily: MONO,
-        letterSpacing: '0.12em',
-        padding: '4px 0',
-        borderBottom: `1px solid ${HAIR_SOFT}`,
-        marginBottom: 10,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  );
+  return <div style={{ ...sectionLabelStyle, ...style }}>{children}</div>;
 }
 
+export const hintStyle: CSSProperties = { color: DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0 };
+
 export function Hint({ children, warn = false, style }: { children: ReactNode; warn?: boolean; style?: CSSProperties }) {
-  return (
-    <p style={{ color: warn ? '#facc15' : DIM, fontSize: 10, fontFamily: MONO, lineHeight: 1.6, margin: 0, ...style }}>
-      {children}
-    </p>
-  );
+  return <p style={{ ...hintStyle, ...(warn ? { color: '#facc15' } : {}), ...style }}>{children}</p>;
 }
 
 // Inline code-ish token for embedding identifiers/paths in hint text.
@@ -176,16 +172,21 @@ export function Tok({ children }: { children: ReactNode }) {
   return <span style={{ color: FG }}>{children}</span>;
 }
 
-type BtnVariant = 'primary' | 'default' | 'danger' | 'ghost';
+export type BtnVariant = 'primary' | 'default' | 'danger' | 'ghost';
 
-const BTN_COLORS: Record<BtnVariant, { border: string; bg: string; hover: string; text: string }> = {
+export const BTN_COLORS: Record<BtnVariant, { border: string; bg: string; hover: string; text: string }> = {
   primary: { border: accentA(0.35), bg: accentA(0.08), hover: accentA(0.16), text: ACCENT },
   default: { border: 'rgba(var(--rasp-fg-rgb),0.22)', bg: 'rgba(var(--rasp-fg-rgb),0.04)', hover: 'rgba(var(--rasp-fg-rgb),0.1)', text: FG },
-  danger: { border: 'rgba(248,113,113,0.45)', bg: 'rgba(248,113,113,0.07)', hover: 'rgba(248,113,113,0.15)', text: '#f87171' },
+  danger: {
+    border: 'rgba(var(--rasp-danger-rgb),0.45)',
+    bg: 'rgba(var(--rasp-danger-rgb),0.07)',
+    hover: 'rgba(var(--rasp-danger-rgb),0.15)',
+    text: 'var(--rasp-danger)',
+  },
   ghost: { border: 'transparent', bg: 'transparent', hover: 'rgba(var(--rasp-fg-rgb),0.06)', text: DIM },
 };
 
-function btnStyle(variant: BtnVariant, small: boolean, hover: boolean, disabled: boolean): CSSProperties {
+export function btnStyle(variant: BtnVariant, small: boolean, hover: boolean, disabled: boolean): CSSProperties {
   const c = BTN_COLORS[variant];
   return {
     display: 'inline-flex',

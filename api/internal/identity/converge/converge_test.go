@@ -227,8 +227,10 @@ func TestRun_ClientsAndFallbackKeys(t *testing.T) {
 			t.Errorf("PUT %s = %s, want %s", path, bodies[path], want)
 		}
 	}
-	if len(bodies) != 4 {
-		t.Errorf("%d PUTs, want 4 client PUTs and no realm PUT: %v", len(bodies), bodies)
+	// The console's redirect URI also gives the realm its console origin
+	// (geekdojo/geekdojo-brain#988), so the one realm PUT is that attribute.
+	if len(bodies) != 5 || !strings.Contains(bodies[realmPath], `"rasputin.console-url":"https://console.home.example"`) {
+		t.Errorf("%d PUTs, want 4 client PUTs and the realm PUT of rasputin.console-url: %v", len(bodies), bodies)
 	}
 	if !slices.Equal(deletes, []string{realmPath + "/components/fb-1", realmPath + "/components/fb-2"}) {
 		t.Errorf("deletes = %v", deletes)
@@ -411,4 +413,109 @@ func TestDesired_Hash(t *testing.T) {
 	if a.Hash() == NewDesired(Inputs{InstallName: "B"}).Hash() {
 		t.Error("a different install name hashes the same")
 	}
+}
+
+// geekdojo/geekdojo-brain#988 (F-988-01): the console's one https origin
+// becomes rasputin.console-url; no URI, a non-https URI or two origins hold
+// the attribute absent.
+func TestNewDesired_ConsoleURL(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		uris []string
+		want string
+	}{
+		{"one https URI", []string{"https://bench.local/api/auth/callback"}, "https://bench.local"},
+		{"two URIs, one origin", []string{"https://bench.local/a", "https://bench.local/b"}, "https://bench.local"},
+		{"a port is part of the origin", []string{"https://bench.local:8443/cb"}, "https://bench.local:8443"},
+		{"none", nil, ""},
+		{"not https", []string{"http://bench.local/cb"}, ""},
+		{"relative", []string{"/cb"}, ""},
+		{"two origins", []string{"https://bench.local/cb", "https://other.local/cb"}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got := NewDesired(Inputs{RedirectURIs: map[string][]string{"rasputin-console": c.uris}}).ConsoleURL
+			if got != c.want {
+				t.Errorf("ConsoleURL = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
+// geekdojo/geekdojo-brain#988 (F-988-01): a missing or stale
+// rasputin.console-url is written in the whole attribute map as read, with
+// every other attribute kept, and a stale one is deleted when there is no
+// console origin.
+func TestRun_ConsoleURLAttribute(t *testing.T) {
+	const want = "https://bench.local"
+	console := map[string][]string{"rasputin-console": {want + "/api/auth/callback"}}
+
+	attrsSent := func(t *testing.T, r *rig) map[string]string {
+		t.Helper()
+		var sent map[string]string
+		if err := json.Unmarshal(realmPUT(t, r.kc)["attributes"], &sent); err != nil {
+			t.Fatal(err)
+		}
+		return sent
+	}
+
+	t.Run("missing is set", func(t *testing.T) {
+		r := newRig(t)
+		r.inputs.RedirectURIs = console
+		setConsoleRedirect(r.kc, console["rasputin-console"])
+		fields, err := r.c.Run(t.Context())
+		if err != nil || !slices.Equal(fields, []string{"realm.attributes.rasputin.console-url"}) {
+			t.Fatalf("Run = %v, %v; want [realm.attributes.rasputin.console-url]", fields, err)
+		}
+		sent := attrsSent(t, r)
+		if sent[attrConsoleURL] != want || sent["CreateDefaultClientScopes"] != "true" || sent["cibaExpiresIn"] != "120" {
+			t.Errorf("attributes sent = %v, want the map as read plus %s=%s", sent, attrConsoleURL, want)
+		}
+	})
+
+	t.Run("stale is rewritten", func(t *testing.T) {
+		r := newRig(t)
+		r.inputs.RedirectURIs = console
+		setConsoleRedirect(r.kc, console["rasputin-console"])
+		r.kc.realm["attributes"].(map[string]any)[attrConsoleURL] = "https://old.local"
+		if _, err := r.c.Run(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got := attrsSent(t, r)[attrConsoleURL]; got != want {
+			t.Errorf("%s sent = %q, want %q", attrConsoleURL, got, want)
+		}
+	})
+
+	t.Run("stale with no console origin is deleted", func(t *testing.T) {
+		r := newRig(t)
+		r.kc.realm["attributes"].(map[string]any)[attrConsoleURL] = "https://old.local"
+		fields, err := r.c.Run(t.Context())
+		if err != nil || !slices.Equal(fields, []string{"realm.attributes.rasputin.console-url"}) {
+			t.Fatalf("Run = %v, %v", fields, err)
+		}
+		sent := attrsSent(t, r)
+		if _, ok := sent[attrConsoleURL]; ok {
+			t.Errorf("attributes sent = %v, want %s left out", sent, attrConsoleURL)
+		}
+		if sent["CreateDefaultClientScopes"] != "true" {
+			t.Errorf("attributes sent = %v, want the other attributes kept", sent)
+		}
+	})
+
+	t.Run("hash changes with the value", func(t *testing.T) {
+		a := NewDesired(Inputs{InstallName: "A", RedirectURIs: console})
+		b := NewDesired(Inputs{InstallName: "A", RedirectURIs: map[string][]string{"rasputin-console": {"https://other.local/cb"}}})
+		if a.Hash() == b.Hash() || a.Hash() == NewDesired(Inputs{InstallName: "A"}).Hash() {
+			t.Error("a different console origin hashes the same")
+		}
+	})
+}
+
+// setConsoleRedirect gives the fake's console client its redirect URIs, so
+// only the attribute drifts.
+func setConsoleRedirect(kc *fakeKC, uris []string) {
+	list := make([]any, len(uris))
+	for i, u := range uris {
+		list[i] = u
+	}
+	kc.client("rasputin-console")["redirectUris"] = list
 }

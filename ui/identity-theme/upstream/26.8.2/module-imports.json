@@ -1,0 +1,28 @@
+{
+  "comment": "Each base login/resources/js module's import specifiers at this release, read from the dist's themes jar. build.mjs refuses a parent-base module we reference that imports a bare specifier; base_snapshot_functional_test.go re-reads the jar and fails when this list is out of date.",
+  "imports": {
+    "authChecker.js": [],
+    "common.js": [],
+    "kcMultivalued.js": [],
+    "kcNumberFormat.js": [
+      "./common.js",
+      "./userProfile.js"
+    ],
+    "kcNumberUnFormat.js": [
+      "./common.js",
+      "./userProfile.js"
+    ],
+    "menu-button-links.js": [],
+    "passkeysConditionalAuth.js": [
+      "./webauthnAuthenticate.js"
+    ],
+    "passwordVisibility.js": [],
+    "userProfile.js": [],
+    "webauthnAuthenticate.js": [
+      "rfc4648"
+    ],
+    "webauthnRegister.js": [
+      "rfc4648"
+    ]
+  }
+}

@@ -406,3 +406,72 @@ upgrade across Keycloak versions (there is one pin), and redirect URIs from a re
 | TC-981-04 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-04 (CI) |
 | TC-981-10 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-10 (CI) |
 | TC-981-17 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-17 (CI) |
+
+## The sign-in theme walk
+
+The Rasputin login theme (`ui/identity-theme/`, geekdojo/geekdojo-brain#988) is rendered by the
+pinned Keycloak in the same backend job. The job builds it with
+`node ui/identity-theme/build.mjs "$RUNNER_TEMP/identity-theme"` and points
+`RASPUTIN_IDENTITY_THEME` at the result. The harness links that directory as the Env's
+`themes/rasputin`, the path Identity 2.3 links on a node, and each dist `themes/` entry beside
+it.
+
+| `RASPUTIN_IDENTITY_THEME` | With `RASPUTIN_IDENTITY_FUNCTIONAL=required` | Otherwise |
+|---|---|---|
+| unset | The walk and the baseline sign-in fail, naming the variable | They skip, naming it |
+| a directory with `login/theme.properties` | They run | They run |
+| anything else | Every Env fails to start, naming the path | The same |
+
+To run it locally, add the theme to the command in [How to run it](#how-to-run-it):
+
+```sh
+node ui/identity-theme/build.mjs /tmp/rasputin-identity-theme
+RASPUTIN_IDENTITY_THEME=/tmp/rasputin-identity-theme RASPUTIN_IDENTITY_HOME="$HOME/.cache/rasputin-identity" \
+  RASPUTIN_IDENTITY_FUNCTIONAL=required go test -v -run 'ThemeWalk|BaselineImported|BaseThemeSnapshot' ./api/internal/identitytest/
+```
+
+`build.mjs` needs only Node (22 or later) and refuses to write into a directory that already holds
+files, so give it a new path each time.
+
+What it proves at the pin:
+
+- `TestIdentity_BaselineImportedWorks` (TC-980-25 with TC-988-27): the baseline, imported
+  unchanged, selects the theme. Every page of each client's sign-in carries `data-rasputin-theme`,
+  and the harness still reads the page fields capability row T98 names.
+- `TestIdentity_ThemeWalk` (TC-988-18 to TC-988-25) renders every page the baseline and its own
+  Admin-API setup reach. That setup is the install name, the three link attributes, registration,
+  reset and passkey sign-in turned on, two app clients, a SAML client and users. On each page the
+  walk checks:
+  - the theme marker and the install name show;
+  - no word from `ui/forbidden-words.json` is in the page text, the title or a download name;
+  - every request stays on the front's origin and answers 2xx or 3xx;
+  - every `/resources/` request is in the built `resource-allowlist.json`;
+  - there is no inline script and no `on*` handler, and the console shows no error;
+  - every input and button has an accessible name, there is one `h1`, and the message block has
+    the alert role;
+  - Tab moves a focus that has a visible outline;
+  - inputs and buttons are at least 16 px.
+- The walk also proves:
+  - the per-client links of ui.md §4.3, with each attribute removed in turn;
+  - the three passkey choices' `create()` hints and attachments, the in-page name, and no dialog;
+  - passkey sign-in through the moved script;
+  - the authenticator app's `otpauth` issuer, decoded from the QR code;
+  - the recovery-code download's name;
+  - the SAML auto-post with no click.
+- The walk prints its page table: each page id as walked, deferred to the issue that builds its
+  flow, or never rendered, with the reason. A page the realm renders that is not in the table
+  fails it.
+- `TestIdentity_BaseThemeSnapshotEqualsThePin` (TC-988-26) checks `ui/identity-theme/upstream/<v>/`
+  against the dist's own themes jar. The templates and the English bundle must match byte for
+  byte, every base login module and `rfc4648` must match by sha256, and each module's imports
+  must equal the list `build.mjs` uses. It needs only `RASPUTIN_IDENTITY_HOME`.
+
+What it does not prove:
+
+- the pages that later items' flows render, which the page table names (Identity 4.5 and 4.10);
+- the door's script policy and its allowlist enforcement (Identity 4.3);
+- the look of the pages;
+- iOS's zoom on small inputs.
+
+The walk runs on `https://localhost:<port>` (`Config.FrontHost`), because WebAuthn refuses an IP
+address as its relying party.

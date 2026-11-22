@@ -10,6 +10,40 @@
 import { win } from './dom-globals';
 import { act, type ReactElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { describeHits, findForbidden } from '../lib/forbidden-words';
+import { forbiddenList } from './forbidden-list';
+
+// The attributes a person reads besides the text (ui.md §4.4).
+const READ_ATTRIBUTES = ['title', 'aria-label', 'placeholder', 'alt'];
+
+/**
+ * Fails, naming each word and where it was read, when the rendered DOM under
+ * root shows a forbidden word (ui/forbidden-words.json) in its text or in a
+ * title, aria-label, placeholder or alt attribute. render() and click() call
+ * it, so every DOM test asserts the scan (geekdojo/geekdojo-brain#988).
+ */
+export function assertNoForbiddenWords(root: Node): void {
+  const problems: string[] = [];
+  const texts: string[] = [];
+  const walk = (n: Node) => {
+    if (n.nodeType === 3) texts.push(n.nodeValue ?? '');
+    if (n.nodeType === 1) {
+      const el = n as Element;
+      for (const a of READ_ATTRIBUTES) {
+        const v = el.getAttribute(a);
+        if (v) {
+          const hits = findForbidden(forbiddenList, v);
+          if (hits.length) problems.push(describeHits(hits, `the ${a} attribute of <${el.tagName.toLowerCase()}>`));
+        }
+      }
+    }
+    n.childNodes.forEach(walk);
+  };
+  walk(root);
+  const hits = findForbidden(forbiddenList, texts.join(' '));
+  if (hits.length) problems.push(describeHits(hits, 'the text'));
+  if (problems.length) throw new Error(`a page shows a forbidden word: ${problems.join('; ')}`);
+}
 
 export interface Rendered {
   container: HTMLElement;
@@ -26,6 +60,14 @@ export async function render(ui: ReactElement): Promise<Rendered> {
     root.render(ui);
   });
   await settle();
+  try {
+    assertNoForbiddenWords(container);
+  } catch (e) {
+    // Leave nothing behind for the next test's scan of document.body.
+    await act(async () => root?.unmount());
+    container.remove();
+    throw e;
+  }
   return {
     container,
     unmount: async () => {
@@ -59,6 +101,7 @@ export async function click(el: Element): Promise<void> {
     (el as HTMLElement).click();
   });
   await settle();
+  assertNoForbiddenWords(document.body);
 }
 
 /** The button whose visible text or aria-label is exactly `name`. */

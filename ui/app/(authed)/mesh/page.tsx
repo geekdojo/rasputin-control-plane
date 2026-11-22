@@ -37,7 +37,7 @@ export default function MeshOverview() {
         <Link href="/mesh/keys" style={{ color: ACCENT, textDecoration: 'none' }}>
           KEYS
         </Link>{' '}
-        — a single-use pre-auth key bootstraps the Tailscale client. Anything Rasputin doesn&apos;t model
+        — a single-use pre-auth key bootstraps the private-network app. Anything Rasputin doesn&apos;t model
         (ACL HuJSON, exit nodes, DERP map) lives in Headplane — see{' '}
         <Link href="/mesh/advanced" style={{ color: ACCENT, textDecoration: 'none' }}>
           ADVANCED

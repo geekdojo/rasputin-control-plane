@@ -122,7 +122,7 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
           }}
         >
           <Hint warn>
-            ⚠ Headscale is in mock mode (file-backed), explicitly selected by{' '}
+            ⚠ The mesh coordinator is in mock mode (file-backed), explicitly selected by{' '}
             <Tok>RASPUTIN_MESH_BACKEND=mock</Tok>. Enrollments and tailnet addresses shown here are SIMULATED — they
             are generated from the node id, not obtained from a tailnet. See wiki{' '}
             <Tok>design/control-plane/mesh.md §2</Tok>.
@@ -140,7 +140,7 @@ export default function MeshLayout({ children }: { children: React.ReactNode }) 
           <Hint warn>
             ⚠ No mesh backend is configured on this controlplane, so enroll and device listing will fail. Nothing is
             being simulated in its place — set <Tok>RASPUTIN_HEADSCALE_URL</Tok> +{' '}
-            <Tok>RASPUTIN_HEADSCALE_API_KEY</Tok> for an external Headscale, or install the docker CLI for the
+            <Tok>RASPUTIN_HEADSCALE_API_KEY</Tok> for an external mesh coordinator, or install the docker CLI for the
             self-hosted one. See wiki <Tok>design/control-plane/mesh.md §2</Tok>.
           </Hint>
         </div>

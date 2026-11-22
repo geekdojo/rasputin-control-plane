@@ -26,7 +26,7 @@ export function trustFingerprintLabel(fingerprint?: string): string {
 /** The stale badge's hover text. */
 export function staleTrustTitle(trust: Pick<MeshDeviceTrust, 'fingerprint'>): string {
   if (trust.fingerprint === 'reload-pending') {
-    return 'this node installed the current controlplane CA but tailscaled has not reloaded it (reload pending) — the next trust convergence retries the reload';
+    return 'this node installed the current controlplane CA but its mesh client has not reloaded it (reload pending) — the next trust convergence retries the reload';
   }
   return `this node trusts controlplane CA ${trustFingerprintLabel(trust.fingerprint)}, not the current one — the next trust convergence re-delivers it`;
 }

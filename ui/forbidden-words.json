@@ -1,0 +1,32 @@
+{
+  "comment": "The words people never read on a Rasputin page: engine names and authenticator brands (ui.md §4.4; principles.md:78-90 and :100-105). One list, read by every scan: the sign-in theme's (ui/identity-theme/test), the console source scan (ui/test/forbidden-words-console.test.ts), the DOM test hook (ui/test/dom.ts) and the CI walk (api/internal/identitytest). Matching is case-insensitive from a word start, with a multi-word entry matched across any white space (lib/forbidden-words.ts). An exemption is one exact string in one file, with its reason; it covers nothing else.",
+  "words": [
+    "Keycloak",
+    "realm",
+    "PatternFly",
+    "Quarkus",
+    "PostgreSQL",
+    "OpenBao",
+    "Headscale",
+    "FreeRADIUS",
+    "Tailscale",
+    "Java",
+    "FreeOTP",
+    "Google Authenticator",
+    "Microsoft Authenticator",
+    "Authy",
+    "1Password",
+    "Bitwarden",
+    "Touch ID",
+    "Face ID",
+    "Windows Hello",
+    "YubiKey"
+  ],
+  "exemptions": [
+    {
+      "file": "app/(authed)/mesh/keys/page.tsx",
+      "text": "tailscale up --login-server=<your-rasputin-mesh-url> --auth-key=",
+      "reason": "The private-network app's install command, which a person copies and pastes verbatim; Bryce's ruling D23 (2026-11-02) makes the app's store name and install command the second exception to the vendor-neutral copy rule."
+    }
+  ]
+}

@@ -134,6 +134,17 @@ type Config struct {
 	Run CmdRunner
 	// Procs lists live processes for the teardown proof.
 	Procs ProcLister
+	// ThemeDir is the built Rasputin login theme (ui/identity-theme's
+	// build output), linked as the Env's themes/rasputin, the path Identity
+	// 2.3 links on a node. "" runs Keycloak without it; a test that renders
+	// the theme treats that as a missing dependency (ThemeEnv).
+	ThemeDir string
+	// FrontHost is the host name in the front's URL, and so in Keycloak's
+	// hostname, the realm's issuer and every page address. "" is 127.0.0.1.
+	// A test that registers a passkey sets "localhost": WebAuthn refuses an
+	// IP address as its relying party, and localhost is the one name a
+	// browser resolves to loopback by itself.
+	FrontHost string
 
 	// pgRestartable, set only by this package's tests, runs PostgreSQL so a
 	// test can docker stop and docker start it under a running Keycloak
@@ -149,7 +160,9 @@ type Harness struct {
 	cfg Config
 }
 
-// New checks cfg and returns a Harness. It does no I/O.
+// New checks cfg and returns a Harness. Its one I/O is checking a set
+// ThemeDir: a directory holding login/theme.properties, so a broken theme
+// fails before anything starts.
 func New(cfg Config) (*Harness, error) {
 	missing := ""
 	switch {
@@ -177,7 +190,29 @@ func New(cfg Config) (*Harness, error) {
 	if missing != "" {
 		return nil, errors.New("identitytest: Config." + missing)
 	}
+	if cfg.ThemeDir != "" {
+		if err := checkThemeDir(cfg.ThemeDir); err != nil {
+			return nil, err
+		}
+	}
 	return &Harness{cfg: cfg}, nil
+}
+
+// checkThemeDir refuses a theme that is not a directory holding
+// login/theme.properties, naming the path.
+func checkThemeDir(dir string) error {
+	info, err := os.Stat(dir)
+	switch {
+	case err != nil:
+		return fmt.Errorf("identitytest: the login theme %s cannot be used: %w", dir, err)
+	case !info.IsDir():
+		return fmt.Errorf("identitytest: the login theme %s is not a directory", dir)
+	}
+	props := filepath.Join(dir, "login", "theme.properties")
+	if info, err := os.Stat(props); err != nil || info.IsDir() {
+		return fmt.Errorf("identitytest: the login theme %s holds no login/theme.properties, so it is not a built theme (npm run identity-theme:build)", dir)
+	}
+	return nil
 }
 
 // Env is one running identity service with its database and front, and the
@@ -200,6 +235,8 @@ type Env struct {
 	ports  *reportedPorts
 	front  *httptest.Server
 	issuer string
+	// frontURL is https://<FrontHost or 127.0.0.1>:<port>, Keycloak's hostname.
+	frontURL string
 	// refusals counts the requests the front's admin-account guard refused.
 	refusals atomic.Int64
 
@@ -223,8 +260,9 @@ type Env struct {
 // hostname is the front's URL.
 func (e *Env) Issuer() string { return e.issuer }
 
-// FrontURL is the front's https://127.0.0.1:<port>.
-func (e *Env) FrontURL() string { return e.front.URL }
+// FrontURL is the front's https://127.0.0.1:<port>, or with Config.FrontHost
+// as its host.
+func (e *Env) FrontURL() string { return e.frontURL }
 
 // FrontRefusals is how many requests the front's admin-account guard has
 // refused, each answered 400 and forwarded nowhere.
@@ -354,6 +392,14 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 	}
 	e.front = front
 	frontURL := "https://" + front.Listener.Addr().String()
+	if cfg.FrontHost != "" {
+		_, port, err := net.SplitHostPort(front.Listener.Addr().String())
+		if err != nil {
+			return fmt.Errorf("identitytest: the front's address: %w", err)
+		}
+		frontURL = "https://" + net.JoinHostPort(cfg.FrontHost, port)
+	}
+	e.frontURL = frontURL
 	e.issuer = frontURL + "/realms/" + Realm
 
 	home, err := e.makeKeycloakHome()
@@ -405,7 +451,8 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 		return err
 	}
 	e.log.Info("identity service started", "addr", "127.0.0.1:"+strconv.Itoa(https),
-		"mgmt_addr", "127.0.0.1:"+strconv.Itoa(mgmt), "pid", p.Pid(), "version", version, "jvm", jvm, "dir", e.root)
+		"mgmt_addr", "127.0.0.1:"+strconv.Itoa(mgmt), "pid", p.Pid(), "version", version, "jvm", jvm, "dir", e.root,
+		"theme", cfg.ThemeDir)
 	return nil
 }
 
@@ -513,7 +560,7 @@ func (e *Env) makeTLS() error {
 		return fmt.Errorf("identitytest: server leaf: %w", err)
 	}
 	if e.frontLeaf, err = ca.MintLeafToDisk(filepath.Join(e.root, "front"), tlsca.LeafSpec{
-		Usage: tlsca.UsageServer, CommonName: "identitytest front", IPAddresses: loopback,
+		Usage: tlsca.UsageServer, CommonName: "identitytest front", IPAddresses: loopback, DNSNames: []string{"localhost"},
 	}); err != nil {
 		return fmt.Errorf("identitytest: front leaf: %w", err)
 	}
@@ -539,6 +586,8 @@ func (e *Env) makeTLS() error {
 // resolves its home here; every other entry of the installed dist links to
 // it, and data/ is this Env's own, so two packages can run Keycloak at once.
 // Keycloak writes only under data/ (#958), which is why linking lib/ is safe.
+// With a ThemeDir, themes/ is a directory of its own: each entry of the
+// dist's themes/ links into it, and themes/rasputin links to ThemeDir.
 func (e *Env) makeKeycloakHome() (string, error) {
 	src := e.h.cfg.KeycloakHome
 	home := filepath.Join(e.root, "kc")
@@ -549,12 +598,22 @@ func (e *Env) makeKeycloakHome() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("identitytest: keycloak home: %w", err)
 	}
+	theme := e.h.cfg.ThemeDir
 	for _, ent := range ents {
 		switch ent.Name() {
 		case "bin", "data":
 			continue
+		case "themes":
+			if theme != "" {
+				continue
+			}
 		}
 		if err := os.Symlink(filepath.Join(src, ent.Name()), filepath.Join(home, ent.Name())); err != nil {
+			return "", fmt.Errorf("identitytest: keycloak home: %w", err)
+		}
+	}
+	if theme != "" {
+		if err := linkThemes(filepath.Join(src, "themes"), filepath.Join(home, "themes"), theme); err != nil {
 			return "", fmt.Errorf("identitytest: keycloak home: %w", err)
 		}
 	}
@@ -571,6 +630,28 @@ func (e *Env) makeKeycloakHome() (string, error) {
 		}
 	}
 	return home, nil
+}
+
+// linkThemes makes dst a directory, links each entry of the dist's src into
+// it (src may be absent: the dist's own themes are in its jars), and links
+// dst/rasputin to theme.
+func linkThemes(src, dst, theme string) error {
+	if err := os.Mkdir(dst, 0o700); err != nil {
+		return err
+	}
+	ents, err := os.ReadDir(src)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	for _, ent := range ents {
+		if ent.Name() == "rasputin" {
+			continue
+		}
+		if err := os.Symlink(filepath.Join(src, ent.Name()), filepath.Join(dst, ent.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Symlink(theme, filepath.Join(dst, "rasputin"))
 }
 
 // copyFile copies a file of the installed dist, keeping its mode.

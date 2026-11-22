@@ -355,3 +355,16 @@ func TestIDTokenClaims(t *testing.T) {
 		t.Error("an undecodable payload was accepted")
 	}
 }
+
+// TC-988-27: a page the Rasputin login theme rendered carries its marker,
+// which ParsePage reads beside the page id; a page without one reads "".
+func TestParsePage_ThemeMarker(t *testing.T) {
+	p, err := ParsePage([]byte(`<html><body data-page-id="login-login" data-rasputin-theme="rasputin"><form id="kc-form-login" action="/a" method="post"><input name="username"></form></body></html>`))
+	if err != nil || p.Theme != "rasputin" || p.ID != "login-login" {
+		t.Fatalf("ParsePage = %+v, %v; want login-login with theme rasputin", p, err)
+	}
+	p, err = ParsePage([]byte(`<html><body data-page-id="login-login"></body></html>`))
+	if err != nil || p.Theme != "" {
+		t.Fatalf("ParsePage = %+v, %v; want no theme", p, err)
+	}
+}

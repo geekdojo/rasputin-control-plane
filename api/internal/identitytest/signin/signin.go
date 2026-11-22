@@ -79,7 +79,10 @@ func New(cfg Config) (*Client, error) {
 // ID token's claims. The tokens themselves are never returned.
 type Result struct {
 	PageIDs []string
-	Claims  Claims
+	// Themes is each page's data-rasputin-theme marker, "" where a page
+	// carries none, in PageIDs' order (geekdojo/geekdojo-brain#988).
+	Themes []string
+	Claims Claims
 }
 
 // Claims are the ID token claims a test asserts. The token's signature is
@@ -138,6 +141,7 @@ type flow struct {
 	state  string
 	nonce  string
 	pages  []string
+	themes []string
 	posted bool
 }
 
@@ -187,16 +191,16 @@ func (c *Client) PasswordCodeFlow(ctx context.Context, user string, password sec
 	}
 	code, err := f.walk(ctx, c.cfg.Issuer+"/protocol/openid-connect/auth?"+q.Encode(), user, password)
 	if err != nil {
-		return Result{PageIDs: f.pages}, err
+		return Result{PageIDs: f.pages, Themes: f.themes}, err
 	}
 	claims, err := f.exchange(ctx, code, verifier)
 	if err != nil {
-		return Result{PageIDs: f.pages}, err
+		return Result{PageIDs: f.pages, Themes: f.themes}, err
 	}
 	if claims.Nonce != nonce {
-		return Result{PageIDs: f.pages}, ErrNonceMismatch
+		return Result{PageIDs: f.pages, Themes: f.themes}, ErrNonceMismatch
 	}
-	return Result{PageIDs: f.pages, Claims: claims}, nil
+	return Result{PageIDs: f.pages, Themes: f.themes, Claims: claims}, nil
 }
 
 // walk follows redirects and pages from start until a redirect to
@@ -235,6 +239,7 @@ func (f *flow) walk(ctx context.Context, start, user string, password secret.Val
 				return "", err
 			}
 			f.pages = append(f.pages, page.ID)
+			f.themes = append(f.themes, page.Theme)
 			f.c.cfg.Logger.Debug("sign-in page", "page_id", page.ID, "status", resp.StatusCode)
 			if req, err = f.next(ctx, resp.Request.URL, page, user, password); err != nil {
 				return "", err

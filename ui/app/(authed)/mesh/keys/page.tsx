@@ -174,7 +174,7 @@ function FreshKeyBanner({ intent, onClose }: { intent: MeshIntent; onClose: () =
         {spec.deviceHint && ` · ${spec.deviceHint}`}
       </span>
       <CopyBlock value={value} />
-      <Hint>On the device, install Tailscale, then run:</Hint>
+      <Hint>On the device, install the private-network app, then run:</Hint>
       <CopyBlock value={command} />
       <div>
         <Btn variant="primary" small onClick={onClose}>

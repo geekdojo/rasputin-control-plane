@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"net/url"
 	"slices"
 	"strconv"
 	"time"
@@ -78,6 +79,10 @@ type Desired struct {
 	DisabledClients           []string            `json:"disabledClients"`
 	RedirectURIs              map[string][]string `json:"redirectUris"`
 	KeyProviders              []string            `json:"keyProviders"`
+	// ConsoleURL is the realm attribute rasputin.console-url: the console's
+	// origin, which the sign-in pages link to (geekdojo/geekdojo-brain#988).
+	// "" holds the attribute absent.
+	ConsoleURL string `json:"consoleUrl"`
 }
 
 // NewDesired is the desired state for in.
@@ -100,7 +105,28 @@ func NewDesired(in Inputs) Desired {
 	for _, c := range RasputinClients {
 		d.RedirectURIs[c] = sorted(in.RedirectURIs[c])
 	}
+	d.ConsoleURL = consoleOrigin(in.RedirectURIs["rasputin-console"])
 	return d
+}
+
+// consoleOrigin is the one https origin the console's redirect URIs share,
+// "https://<host>", or "" when there are none, one is not an absolute https
+// URL, or they name more than one origin. The sign-in pages leave a link out
+// rather than guess which address is the console.
+func consoleOrigin(uris []string) string {
+	origin := ""
+	for _, raw := range uris {
+		u, err := url.Parse(raw)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			return ""
+		}
+		o := "https://" + u.Host
+		if origin != "" && o != origin {
+			return ""
+		}
+		origin = o
+	}
+	return origin
 }
 
 // Hash is the sha256 of d's canonical JSON, in hex.
