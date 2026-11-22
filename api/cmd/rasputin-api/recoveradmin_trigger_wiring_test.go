@@ -93,7 +93,7 @@ func TestIdentityAdminRestored_Holder(t *testing.T) {
 	srv := newIdentityServer(t, ca)
 	log, rec := logkittest.New()
 	holder := &atomic.Pointer[restoredFunc]{}
-	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, holder)
+	w, err := wireIdentity(t.Context(), log, false, "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, holder)
 	if err != nil || w.recoverer == nil {
 		t.Fatalf("wireIdentity: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestIdentityAdminRestored_Holder(t *testing.T) {
 	if !slices.Equal(raised, []string{"J2"}) || len(rec.Records()) != 1 {
 		t.Errorf("raised %v, records:\n%s", raised, rec.Text())
 	}
-	if _, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, nil); err == nil {
+	if _, err := wireIdentity(t.Context(), log, false, "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, nil); err == nil {
 		t.Error("a nil holder under keycloak was accepted")
 	}
 }

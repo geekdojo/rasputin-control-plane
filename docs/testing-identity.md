@@ -17,6 +17,9 @@ it, and the package's `TestMain` tears it down with proof. `api/internal/identit
 the Go headless sign-in client, which signs in through Keycloak's own pages
 ([geekdojo-brain#966](https://github.com/geekdojo/geekdojo-brain/issues/966)).
 
+To choose the identity service the api itself runs against locally (off, the mock, or
+`keycloak`), see [Local identity service](../AGENTS.md#local-identity-service) in `AGENTS.md`.
+
 It is an **enforced gate**. The required `backend (vet + test + build)` CI job installs
 everything with `scripts/install-identity.sh` and sets `RASPUTIN_IDENTITY_HOME` and
 `RASPUTIN_IDENTITY_FUNCTIONAL=required` on its `test (api with coverage)` step, so on every PR

@@ -575,14 +575,13 @@ func main() {
 	// sweeper of their own; nil, and skipped, when the identity CA did not
 	// load. See identityca_wiring.go.
 	// The identity service's client (geekdojo/geekdojo-brain#978):
-	// RASPUTIN_IDENTITY_BACKEND selects it, and a refused setting turns it
-	// off with a configfault. It is wired before the identity leaves, so its
+	// RASPUTIN_IDENTITY_BACKEND selects it, and a refused setting, or the
+	// mock on a release build, turns it off with a configfault. It is wired before the identity leaves, so its
 	// CloseIdleConnections is the api client leaf's reload. See
 	// identity_wiring.go.
 	// The restored alert's holder (#1127): set once the alerts service exists.
 	adminRestored := &atomic.Pointer[restoredFunc]{}
-	identityW, err := wireIdentity(ctx, logger, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputInput, adminRestored)
+	identityW, err := wireIdentityFromEnv(ctx, logger, identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputInput, adminRestored)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity service", "err", err.Error())
 		os.Exit(1)

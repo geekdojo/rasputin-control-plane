@@ -81,7 +81,9 @@ asking first (proposed and declined 2026-07-08).
 **repo root** so the default `./data` dir resolves; `data/rasputin.db` already
 holds Bryce's account and passkey credential. The api has no secret store
 unless `RASPUTIN_SECRETSTORE_BACKEND` names one; to opt in, see
-[Local secret store](#local-secret-store) below.
+[Local secret store](#local-secret-store) below. Likewise it has no identity
+service unless `RASPUTIN_IDENTITY_BACKEND` names one; see
+[Local identity service](#local-identity-service).
 
 Run `scripts/pki-init.sh` and copy its `root-ca.pem` into `data/trust/` if it
 is not there, and put `RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem` in
@@ -116,6 +118,10 @@ invents `100.64.0.x` tailnet addresses that `/api/mesh/devices` then serves as
 real, so inferring it on a controlplane means the control plane reports a mesh
 that does not exist. Without the var the api boots fine and every other page
 works; the mesh pages show an "unavailable" banner and mesh verbs refuse.
+
+Handy always-visible kit components for styling checks: `/metrics` (range Select),
+`/firewall/rules` (proto + target Selects in the ADD RULE form). All shared UI
+primitives live in `ui/components/kit.tsx` — fix styling there, not per-page.
 
 ### Local secret store
 
@@ -212,9 +218,31 @@ and 4, and so does a fresh `data/` (a new store CA, which the role pins) or a
 `minted a fresh leaf` line for `openbao-server` in the api log. Ctrl-C stops
 both processes.
 
-Handy always-visible kit components for styling checks: `/metrics` (range Select),
-`/firewall/rules` (proto + target Selects in the ADD RULE form). All shared UI
-primitives live in `ui/components/kit.tsx` — fix styling there, not per-page.
+### Local identity service
+
+`RASPUTIN_IDENTITY_BACKEND` selects the identity service, and nothing infers
+one. The startup log names the result as
+`identity service wired mode=<off|mock|keycloak>`.
+
+- **unset or empty:** no identity service, logged at INFO as
+  `identity service off: not configured`.
+- **`mock`:** logged at WARN as
+  `identity service is the mock: every identity call is refused`. The mock
+  serves nothing: every identity call refuses, and nothing in the api or the
+  console consumes identity locally yet.
+- **`mock` on a release build, or any other value** (`Mock`, `KEYCLOAK`, `openbao`, …;
+  the match is exact): one ERROR record `identity service off: configuration refused`
+  with `configfault=true`, naming the setting and the value. Identity stays
+  off, and the api still starts. A release binary carries a compile-time
+  marker (`-tags release`) no setting or file can remove, so the mock is never
+  live on an appliance.
+- **`keycloak`:** the real identity service, over the api's identity-CA client
+  leaf on loopback. The pinned Keycloak, PostgreSQL and headless sign-in run on
+  Linux x86_64, in CI and through `go test`; see
+  [Testing against the real identity service](docs/testing-identity.md).
+
+The mock is your opt-in, never a default: put `RASPUTIN_IDENTITY_BACKEND=mock`
+in front of the local-stack command when you start it.
 
 ## Next.js version skew (`ui/`)
 

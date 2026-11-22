@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -28,8 +29,14 @@ import (
 // one:
 //
 //   - unset or empty: off (idclient.Disabled with ErrDisabled), at INFO;
-//   - exactly "mock": idclient.Disabled with ErrMock, at WARN; the mock's
-//     behaviour is Identity 3.6's (#982);
+//   - exactly "mock" on a dev build: idclient.Disabled with ErrMock, at WARN.
+//     The mock refuses every call; nothing consumes identity locally until
+//     the console signs in through it (Identity 4.7,
+//     geekdojo/geekdojo-brain#989);
+//   - exactly "mock" on a release build (artifactsig.ReleaseBuild, a
+//     compile-time marker no setting or file can remove): off, with one
+//     configfault ERROR, so a dev relaxation is never live on an appliance
+//     (geekdojo/geekdojo-brain#982, auth-methodology.md §8 gate 3);
 //   - exactly "keycloak": the real client over the api's identity-CA client
 //     leaf, its Admin API session, and the identity.recover_admin job;
 //   - anything else, a refused address, or an identity CA that did not load:
@@ -106,14 +113,24 @@ func (w identityWiring) register(r interface{ Register(jobs.Workflow) }) {
 	}
 }
 
+// wireIdentityFromEnv is main's one call: wireIdentity with this binary's
+// release marker and the RASPUTIN_IDENTITY_* settings. It is bound here, not
+// in main, so the release-tag test runs the same binding (TC-982-06).
+func wireIdentityFromEnv(ctx context.Context, logger *slog.Logger, ca *tlsca.CA, dataDir string,
+	run runFunc, runIn runInFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
+	return wireIdentity(ctx, logger, artifactsig.ReleaseBuild(), identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
+		ca, dataDir, run, runIn, restored)
+}
+
 // wireIdentity selects the identity service from backend and builds its
-// client. It never reads the leaf files: a leaf absent at wiring is every
+// client. release is the binary's release marker, passed in by the
+// composition root: under it the mock is refused. It never reads the leaf files: a leaf absent at wiring is every
 // first boot, minted moments later by the identity leaf sweep. It returns an
 // error only for a programming error, which main treats as fatal; every
 // refused setting is a configfault and the off client. restored is the
 // holder the composition root sets to the restored alert once the alerts
 // service exists (recoveradmin_trigger_wiring.go).
-func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtAddr string, ca *tlsca.CA, dataDir string,
+func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backend, addr, mgmtAddr string, ca *tlsca.CA, dataDir string,
 	run runFunc, runIn runInFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
 	disabled := func(mode string, kind error) (identityWiring, error) {
 		c := idclient.Disabled{Kind: kind}
@@ -133,6 +150,9 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, backend, addr, mgmtA
 		logger.InfoContext(ctx, "identity service off: not configured", "setting", "RASPUTIN_IDENTITY_BACKEND")
 		return disabled(identityModeOff, idclient.ErrDisabled)
 	case identityModeMock:
+		if release {
+			return configFault("RASPUTIN_IDENTITY_BACKEND", backend, "the mock is refused on a release build")
+		}
 		logger.WarnContext(ctx, "identity service is the mock: every identity call is refused",
 			"setting", "RASPUTIN_IDENTITY_BACKEND")
 		return disabled(identityModeMock, idclient.ErrMock)
