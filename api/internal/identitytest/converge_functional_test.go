@@ -235,11 +235,24 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 			beforePolicy[k] = rep[k]
 		}
 		attrs, _ := rep["attributes"].(map[string]any)
+		// Every attribute the realm holds now must survive converge's
+		// whole-map write. (CreateDefaultClientScopes is not among them:
+		// Keycloak's import removes it, RealmManager.isCreateDefaultClientScopes.)
+		var kept []string
+		for k := range attrs {
+			if k != "frontendUrl" {
+				kept = append(kept, k)
+			}
+		}
+		kept = append(kept, migrations.RecordAttr)
 		attrs["frontendUrl"] = "https://drift.example"
 		attrs[migrations.RecordAttr] = "0"
 		rep["webAuthnPolicyRpId"], rep["webAuthnPolicyPasswordlessRpId"] = "drift.example", "drift.example"
 		rep["smtpServer"] = map[string]any{"host": "smtp.drift.example", "from": "drift@drift.example"}
 		api.must(http.StatusNoContent, http.MethodPut, "", rep)
+		// frontendUrl changes the realm's issuer, so the token above no
+		// longer validates: take a new one.
+		api = raw(t, baselineRealm)
 		cliID, cli := api.clientRep("admin-cli")
 		cli["enabled"], cli["directAccessGrantsEnabled"] = true, true
 		api.must(http.StatusNoContent, http.MethodPut, "/clients/"+cliID, cli)
@@ -253,6 +266,7 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 
 		fields := rig.converge(t)
 		t.Logf("TC-981-02: repaired %v", fields)
+		api = raw(t, baselineRealm) // the issuer changed back
 		got = realmRep(t, api)
 		gotAttrs, _ := got["attributes"].(map[string]any)
 		if _, ok := gotAttrs["frontendUrl"]; ok {
@@ -269,7 +283,7 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		if smtp, _ := got["smtpServer"].(map[string]any); len(smtp) != 0 {
 			t.Errorf("smtpServer = %v, want empty", smtp)
 		}
-		for _, k := range []string{"CreateDefaultClientScopes", migrations.RecordAttr} {
+		for _, k := range kept {
 			if _, ok := gotAttrs[k]; !ok {
 				t.Errorf("attribute %s lost", k)
 			}
@@ -324,6 +338,7 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 
 		fields := rig.converge(t)
 		t.Logf("TC-981-03: repaired %v", fields)
+		api = raw(t, baselineRealm)
 		checkConverged(t, api)
 		if got := clientSecret(t, api, meshID); got != secretBefore || got == "" {
 			t.Error("rasputin-mesh's client secret changed across converge")
@@ -372,8 +387,12 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		}
 		importRealms(t, env, names)
 		rigs := map[string]*realmRig{}
+		imported := map[string][]string{}
 		for _, name := range names {
 			rigs[name] = newRealmRig(t, env, client, name)
+			for k := range realmRep(t, raw(t, name))["attributes"].(map[string]any) {
+				imported[name] = append(imported[name], k)
+			}
 		}
 		run := func(r *realmRig, list []migrations.Migration) {
 			t.Helper()
@@ -406,7 +425,7 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 			if attrs[migrations.RecordAttr] != fmt.Sprint(n) {
 				t.Errorf("%s: %s = %v, want %d", name, migrations.RecordAttr, attrs[migrations.RecordAttr], n)
 			}
-			for _, k := range []string{"CreateDefaultClientScopes", "rasputin.fixture"} {
+			for _, k := range append(imported[name], "rasputin.fixture") {
 				if _, ok := attrs[k]; !ok {
 					t.Errorf("%s: attribute %s lost", name, k)
 				}
