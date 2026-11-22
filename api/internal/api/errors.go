@@ -76,6 +76,14 @@ const (
 	// codeWebPortWithoutCompose: PUT /api/apps/{id}/compose carried "webPort"
 	// without "composeYaml", the only variant a web port goes beside.
 	codeWebPortWithoutCompose = "web_port_without_compose"
+	// codeWebPortNotLoopback: a custom app's compose does not publish its web
+	// port on 127.0.0.1 only, the tile's loopback rule
+	// (geekdojo/geekdojo-brain#1091).
+	codeWebPortNotLoopback = "web_port_not_loopback"
+	// codeWebPortComposeUnreadable: a custom app has a web port in effect and
+	// its compose is not YAML or not a compose's shape, so the publish
+	// cannot be checked.
+	codeWebPortComposeUnreadable = "web_port_compose_unreadable"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

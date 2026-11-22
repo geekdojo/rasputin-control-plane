@@ -129,7 +129,9 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 // 65535, stored where a tile's web port is (geekdojo/geekdojo-brain#1089).
 // Absent or null is no port. A port that is not a JSON integer is refused as
 // the body is decoded, before any other field is judged; one out of range is
-// refused after the name, compose, node and role checks.
+// refused after the name, compose, node and role checks. With a port, the
+// compose must then publish it on 127.0.0.1 only (refuseWebPortPublish,
+// geekdojo/geekdojo-brain#1091); with none, the compose is not read.
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
@@ -184,6 +186,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	webPort, ok := parseWebPort(req.WebPort)
 	if !ok {
 		s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortInvalid, msgWebPortInvalid, slog.String("cause", "range"))
+		return
+	}
+	if s.refuseWebPortPublish(w, r, req.ComposeYAML, webPort) {
 		return
 	}
 
@@ -756,6 +761,9 @@ func userName(r *http.Request) string {
 // its web port when webPort is not 0 (geekdojo/geekdojo-brain#1089). The
 // installed compose with no port, or with the stored one, is the 200 no-op;
 // with a different port it is a port-only edit, run as app.edit like any other.
+// Anything else must publish the port in effect, declared or stored, on
+// 127.0.0.1 only (geekdojo/geekdojo-brain#1091); an app with neither is not
+// checked.
 func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string, webPort int, deleteVolumes []string) {
 	if strings.TrimSpace(compose) == "" {
 		writeError(w, http.StatusBadRequest, "composeYaml must not be empty")
@@ -767,6 +775,16 @@ func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *app
 	}
 	if apps.ComposeHash(compose) == app.ComposeSHA256 && (webPort == 0 || webPort == app.PublishedPort) {
 		s.writeAppView(w, r, app)
+		return
+	}
+	// The port the app will be served on once this lands: the declared one,
+	// or the stored one, which EditCompose keeps when none is declared
+	// (geekdojo/geekdojo-brain#1091).
+	effective := webPort
+	if effective == 0 {
+		effective = app.PublishedPort
+	}
+	if s.refuseWebPortPublish(w, r, compose, effective, slog.String("app_id", app.ID)) {
 		return
 	}
 	if s.composeStash == nil {

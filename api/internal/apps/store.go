@@ -272,7 +272,10 @@ var ErrEditCatalogApp = errors.New(`this app was installed from the catalog, so 
 // caller to have checked. An unknown id is sql.ErrNoRows, a catalog app is
 // ErrEditCatalogApp, a stale hash is ErrComposeChanged.
 //
-// The compose is not validated, as it is not at custom create (ADR-0006 D12).
+// The compose is not validated here. The api checks only that it publishes
+// the web port in effect on loopback (CheckWebPortPublish,
+// geekdojo/geekdojo-brain#1091), as at custom create; nothing else in it is
+// judged (ADR-0006 D12).
 func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML string, webPort int, now time.Time) error {
 	res, err := s.db.ExecContext(ctx, `
         UPDATE apps SET previous_compose_yaml = compose_yaml,

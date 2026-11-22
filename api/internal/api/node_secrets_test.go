@@ -346,7 +346,8 @@ func TestAppsCompose_TC783_55_RecordsTheOperator(t *testing.T) {
 	}
 	for _, tc := range []struct{ kind, id, body string }{
 		{"app.upgrade", "cat", catalogBody},
-		{"app.edit", "custom", composeYAMLBody(t, "services:\n  web:\n    image: me/web:2\n")},
+		// seedUpgradeApp's port, published on loopback for the web-port rule.
+		{"app.edit", "custom", composeYAMLBody(t, "services:\n  web:\n    image: me/web:2\n    ports: [\"127.0.0.1:1234:80\"]\n")},
 		{"app.revert", "back", shaBody(customOld)},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
