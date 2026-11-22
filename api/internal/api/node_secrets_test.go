@@ -341,7 +341,7 @@ func TestAppsCompose_TC783_55_RecordsTheOperator(t *testing.T) {
 	seedUpgradeApp(t, f, "cat", "vw", "vaultwarden", "services: {old: {}}\n", 3)
 	seedUpgradeApp(t, f, "custom", "mine", "", customOld, 0)
 	seedUpgradeApp(t, f, "back", "back", "", customOld, 0)
-	if err := f.appsStore.EditCompose(f.ctx, "back", apps.ComposeHash(customOld), "services:\n  web:\n    image: me/web:3\n", time.Now().UTC()); err != nil {
+	if err := f.appsStore.EditCompose(f.ctx, "back", apps.ComposeHash(customOld), "services:\n  web:\n    image: me/web:3\n", 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ kind, id, body string }{

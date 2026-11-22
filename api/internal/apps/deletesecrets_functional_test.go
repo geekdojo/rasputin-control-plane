@@ -352,7 +352,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		record(t, idE, "x", "y")
 		release := func(t *testing.T, jobID, from, to string) {
 			t.Helper()
-			if err := appStore.EditCompose(ctx, idE, apps.ComposeHash(from), to, time.Now().UTC()); err != nil {
+			if err := appStore.EditCompose(ctx, idE, apps.ComposeHash(from), to, 0, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			out, err := apps.ReleaseUnusedSecrets(appStore, deps)(&jobs.StepCtx{Ctx: ctx, JobID: jobID, CreatedBy: "alice",

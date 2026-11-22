@@ -186,7 +186,7 @@ func TestStore_PrivilegeTierFollowsTheCompose(t *testing.T) {
 	if err := s.Create(ctx, custom); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EditCompose(ctx, "c", ComposeHash(custom.ComposeYAML), "services: {b: {}}\n", time.Now().UTC()); err != nil {
+	if err := s.EditCompose(ctx, "c", ComposeHash(custom.ComposeYAML), "services: {b: {}}\n", 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := s.Get(ctx, "c"); got.PrivilegeTier != "" {

@@ -70,6 +70,12 @@ const (
 	// codeJobSystemOnly: POST /api/jobs named a kind only the system starts,
 	// so no job was created (geekdojo/geekdojo-brain#978).
 	codeJobSystemOnly = "job_system_only"
+	// codeWebPortInvalid: a custom app's "webPort" is not a whole number from
+	// 1 to 65535 (geekdojo/geekdojo-brain#1089).
+	codeWebPortInvalid = "web_port_invalid"
+	// codeWebPortWithoutCompose: PUT /api/apps/{id}/compose carried "webPort"
+	// without "composeYaml", the only variant a web port goes beside.
+	codeWebPortWithoutCompose = "web_port_without_compose"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

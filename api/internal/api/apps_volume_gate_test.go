@@ -149,7 +149,7 @@ func seedGateApp(t *testing.T, f *apiFixture, kind string) {
 		t.Fatal(err)
 	}
 	if kind == "custom-with-previous" {
-		if err := f.appsStore.EditCompose(f.ctx, gateID, apps.ComposeHash(customOld), customNew, now); err != nil {
+		if err := f.appsStore.EditCompose(f.ctx, gateID, apps.ComposeHash(customOld), customNew, 0, now); err != nil {
 			t.Fatal(err)
 		}
 	}

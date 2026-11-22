@@ -33,18 +33,30 @@ import (
 // was submitted for.
 type ComposeStash struct {
 	mu   sync.Mutex
-	held map[string]string
+	held map[string]HeldEdit
+}
+
+// HeldEdit is what an owner submitted for one app.edit job: the compose, and
+// the web port declared beside it (geekdojo/geekdojo-brain#1089). The port
+// travels here rather than in the spec for the same reason the compose does:
+// only PUT /api/apps/{id}/compose writes the stash, while any POST /api/jobs
+// caller can write a spec.
+type HeldEdit struct {
+	ComposeYAML string
+	// WebPort is the custom app's web port, 1-65535, or 0 when the owner
+	// declared none, which leaves the stored port as it is.
+	WebPort int
 }
 
 func NewComposeStash() *ComposeStash {
-	return &ComposeStash{held: make(map[string]string)}
+	return &ComposeStash{held: make(map[string]HeldEdit)}
 }
 
-// Put holds compose for jobID. Refuses an empty id and an id already holding
-// one: a job id is minted fresh for every job, so a second Put is a bug, and
+// Put holds e for jobID. Refuses an empty id and an id already holding one: a
+// job id is minted fresh for every job, so a second Put is a bug, and
 // replacing a compose a running job may already have pulled would install
 // one nobody pulled.
-func (s *ComposeStash) Put(jobID, compose string) error {
+func (s *ComposeStash) Put(jobID string, e HeldEdit) error {
 	if jobID == "" {
 		return errors.New("apps: compose stash: empty job id")
 	}
@@ -53,16 +65,16 @@ func (s *ComposeStash) Put(jobID, compose string) error {
 	if _, ok := s.held[jobID]; ok {
 		return fmt.Errorf("apps: compose stash: job %s already holds a compose", jobID)
 	}
-	s.held[jobID] = compose
+	s.held[jobID] = e
 	return nil
 }
 
-// Get returns the compose held for jobID.
-func (s *ComposeStash) Get(jobID string) (string, bool) {
+// Get returns the edit held for jobID.
+func (s *ComposeStash) Get(jobID string) (HeldEdit, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c, ok := s.held[jobID]
-	return c, ok
+	e, ok := s.held[jobID]
+	return e, ok
 }
 
 // Discard drops the compose held for jobID, if any. Idempotent, as an
@@ -177,17 +189,17 @@ func editPullSource(stash *ComposeStash) pullSource {
 		if app.SourceTile != "" {
 			return pullTarget{}, ErrEditCatalogApp
 		}
-		compose, ok := heldCompose(stash, sc.JobID)
+		held, ok := heldCompose(stash, sc.JobID)
 		if !ok {
 			return pullTarget{}, errEditComposeNotHeld
 		}
-		return pullTarget{ComposeYAML: compose, DeployBudgetSeconds: app.DeployBudgetSeconds}, nil
+		return pullTarget{ComposeYAML: held.ComposeYAML, DeployBudgetSeconds: app.DeployBudgetSeconds}, nil
 	}
 }
 
-func heldCompose(stash *ComposeStash, jobID string) (string, bool) {
+func heldCompose(stash *ComposeStash, jobID string) (HeldEdit, bool) {
 	if stash == nil {
-		return "", false
+		return HeldEdit{}, false
 	}
 	return stash.Get(jobID)
 }
@@ -208,33 +220,53 @@ func editPersist(store *Store, inv *inventory.Store, nc *nats.Conn, stash *Compo
 		if err != nil {
 			return abandon(fmt.Errorf("compose edit not applied: %w", err))
 		}
-		compose, ok := heldCompose(stash, sc.JobID)
+		held, ok := heldCompose(stash, sc.JobID)
 		if !ok {
 			return abandon(errEditComposeNotHeld)
 		}
-		toHash := ComposeHash(compose)
+		toHash := ComposeHash(held.ComposeYAML)
 		if toHash != pulled.ComposeSHA256 {
 			return abandon(fmt.Errorf("compose edit not applied: the compose held for this job is not the one pulled, and nothing on the node was changed: %w", ErrComposeChanged))
 		}
 		if app.ComposeSHA256 == toHash {
+			if held.WebPort != 0 && held.WebPort != app.PublishedPort {
+				// A port-only edit (geekdojo/geekdojo-brain#1089): the handler
+				// starts a job for the installed compose only when the owner
+				// declared a different web port beside it.
+				if err := store.SetCustomWebPort(sc.Ctx, app.ID, app.ComposeSHA256, held.WebPort, time.Now().UTC()); err != nil {
+					return abandon(editWriteError("set web port", err))
+				}
+				sc.Log("info", fmt.Sprintf("web port set to %d (was %d)", held.WebPort, app.PublishedPort))
+				return json.Marshal(map[string]any{"appId": app.ID, "persisted": true, "composeSha256": toHash, "webPort": held.WebPort})
+			}
 			// The handler answers a compose that is already installed with a
 			// no-op and starts no job, so another job installed it during the
 			// pull. Pushing it is still what this job was asked to bring about.
 			sc.Log("info", "the row already holds the submitted compose; deploying it")
 			return json.Marshal(map[string]any{"appId": app.ID, "persisted": false, "composeSha256": toHash})
 		}
-		if err := store.EditCompose(sc.Ctx, app.ID, app.ComposeSHA256, compose, time.Now().UTC()); err != nil {
-			switch {
-			case errors.Is(err, ErrComposeChanged):
-				return abandon(fmt.Errorf("compose edit not applied: the app's compose changed while this edit was starting, and nothing on the node was changed — check the app and submit the compose again: %w", err))
-			case errors.Is(err, ErrEditCatalogApp):
-				return abandon(err)
-			}
-			return abandon(fmt.Errorf("compose edit not applied: persist compose: %w", err))
+		if err := store.EditCompose(sc.Ctx, app.ID, app.ComposeSHA256, held.ComposeYAML, held.WebPort, time.Now().UTC()); err != nil {
+			return abandon(editWriteError("persist compose", err))
 		}
 		sc.Log("info", fmt.Sprintf("compose replaced (%.12s → %.12s)", app.ComposeSHA256, toHash))
-		return json.Marshal(map[string]any{
+		result := map[string]any{
 			"appId": app.ID, "persisted": true, "fromComposeSha256": app.ComposeSHA256, "toComposeSha256": toHash,
-		})
+		}
+		if held.WebPort != 0 {
+			result["webPort"] = held.WebPort
+		}
+		return json.Marshal(result)
 	}
+}
+
+// editWriteError words a failed write of an edit to the app row. what names
+// the write, for an error that is neither of the store's refusals.
+func editWriteError(what string, err error) error {
+	switch {
+	case errors.Is(err, ErrComposeChanged):
+		return fmt.Errorf("compose edit not applied: the app's compose changed while this edit was starting, and nothing on the node was changed — check the app and submit the compose again: %w", err)
+	case errors.Is(err, ErrEditCatalogApp):
+		return err
+	}
+	return fmt.Errorf("compose edit not applied: %s: %w", what, err)
 }

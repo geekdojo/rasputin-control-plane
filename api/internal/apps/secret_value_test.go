@@ -158,12 +158,12 @@ func deployFamilyCases(id string) []deployFamilyCase {
 			store, inv := seedComposeApp(t, id, customV1)
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 			stash := NewComposeStash()
-			put := func(jobID string) error { return stash.Put(jobID, secretComposeV2) }
+			put := func(jobID string) error { return stash.Put(jobID, HeldEdit{ComposeYAML: secretComposeV2}) }
 			return store, wf(t)(EditWorkflow(store, inv, nc, nil, stash, src, testSecretDeps(), AppIdentity{})), ComposeChangeSpec{AppID: id}, put, secretComposeV2
 		}},
 		{"app.revert", func(t *testing.T, nc *nats.Conn, src SecretSource) (*Store, jobs.Workflow, any, func(string) error, string) {
 			store, inv := seedComposeApp(t, id, secretComposeV1)
-			if err := store.EditCompose(context.Background(), id, ComposeHash(secretComposeV1), customV2, time.Now().UTC()); err != nil {
+			if err := store.EditCompose(context.Background(), id, ComposeHash(secretComposeV1), customV2, 0, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)

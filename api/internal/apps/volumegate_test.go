@@ -113,7 +113,7 @@ func gateVariants() []gateVariant {
 		{"edit", func(t *testing.T, nc *nats.Conn) (*Store, *inventory.Store, func([]string) workflowRun) {
 			store, inv := seedCustomApp(t, gateAppID)
 			stash := NewComposeStash()
-			if err := stash.Put("job-edit", customV2); err != nil {
+			if err := stash.Put("job-edit", HeldEdit{ComposeYAML: customV2}); err != nil {
 				t.Fatal(err)
 			}
 			return store, inv, func(dv []string) workflowRun {
