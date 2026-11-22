@@ -7,8 +7,8 @@ import (
 )
 
 // Disabled is the client of a configuration with no identity service (Kind
-// ErrDisabled), or whose backend is the mock (Kind ErrMock, which serves
-// nothing until Identity 3.6, geekdojo/geekdojo-brain#982). Every call
+// ErrDisabled), or whose backend is the explicitly chosen local mock (Kind
+// ErrMock: refuses every call, geekdojo/geekdojo-brain#982). Every call
 // returns Kind and makes no network call, so a consumer is never handed a nil
 // client and never mistakes "off" for an empty service.
 type Disabled struct{ Kind error }

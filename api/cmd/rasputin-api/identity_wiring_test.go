@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -49,6 +50,11 @@ func assertRefuses(t *testing.T, w identityWiring, kind error) {
 		if !errors.Is(err, kind) {
 			t.Errorf("call %d: err = %v, want %v", i, err, kind)
 		}
+		for _, other := range []error{idclient.ErrDisabled, idclient.ErrMock} {
+			if other != kind && errors.Is(err, other) {
+				t.Errorf("call %d: err = %v, also %v", i, err, other)
+			}
+		}
 	}
 }
 
@@ -63,31 +69,42 @@ func assertKindUnknown(t *testing.T, w identityWiring) {
 	}
 }
 
-// TC-978-01, TC-978-02, TC-978-03: absent and empty are off at INFO; exactly
-// mock is one WARN and ErrMock; any other value is off with one configfault
-// naming the setting and the value. Outside keycloak the job is not
-// registered.
+// TC-978-01, TC-978-02, TC-978-03, and the fail-closed selector table of
+// geekdojo/geekdojo-brain#982 (auth-methodology.md §8 gate 4): every backend
+// under both release markers. Absent and empty are off at INFO; exactly mock
+// on a dev build is one WARN and ErrMock; mock on a release build, and any
+// other value under either marker, is off with one configfault naming the
+// setting and the value. Outside keycloak the job is not registered.
 func TestWireIdentity_Selection(t *testing.T) {
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
-	for _, tc := range []struct {
+	type row struct {
+		tc      string
 		backend string
+		release bool
 		mode    string
 		kind    error
 		level   slog.Level
 		fault   bool
-	}{
-		{"", identityModeOff, idclient.ErrDisabled, slog.LevelInfo, false},
-		{"mock", identityModeMock, idclient.ErrMock, slog.LevelWarn, false},
-		{"Keycloak", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-		{"KEYCLOAK", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-		{" keycloak", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-		{"keycloak ", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-		{"openbao", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-		{"keycloakx", identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
-	} {
-		t.Run("backend="+tc.backend, func(t *testing.T) {
+	}
+	var rows []row
+	for _, release := range []bool{false, true} {
+		// TC-982-03: empty fails closed under both markers.
+		rows = append(rows, row{"TC-982-03", "", release, identityModeOff, idclient.ErrDisabled, slog.LevelInfo, false})
+		// TC-982-04: nothing near keycloak or mock reaches either, under both markers.
+		for _, v := range []string{"Keycloak", "KEYCLOAK", " keycloak", "keycloak ", "openbao", "keycloakx", "Mock", "MOCK", " mock", "mock "} {
+			rows = append(rows, row{"TC-982-04", v, release, identityModeOff, idclient.ErrDisabled, slog.LevelError, true})
+		}
+	}
+	rows = append(rows,
+		// TC-982-01: the mock on a dev build is one WARN and ErrMock.
+		row{"TC-982-01", "mock", false, identityModeMock, idclient.ErrMock, slog.LevelWarn, false},
+		// TC-982-02: the mock on a release build is refused, and identity stays off.
+		row{"TC-982-02", "mock", true, identityModeOff, idclient.ErrDisabled, slog.LevelError, true},
+	)
+	for _, tc := range rows {
+		t.Run(fmt.Sprintf("%s/backend=%q/release=%v", tc.tc, tc.backend, tc.release), func(t *testing.T) {
 			log, rec := logkittest.New()
-			w, err := wireIdentity(t.Context(), log, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+			w, err := wireIdentity(t.Context(), log, tc.release, tc.backend, defaultIdentityAddr, defaultIdentityMgmtAddr, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 			if err != nil {
 				t.Fatalf("wireIdentity: %v", err)
 			}
@@ -102,8 +119,19 @@ func TestWireIdentity_Selection(t *testing.T) {
 			if a["setting"] != "RASPUTIN_IDENTITY_BACKEND" {
 				t.Errorf("the record names setting %q", a["setting"])
 			}
-			if tc.fault && (a["configfault"] != "true" || a["value"] != tc.backend || a["reason"] == "") {
-				t.Errorf("configfault record attrs = %v", a)
+			switch {
+			case tc.fault:
+				if recs[0].Message != "identity service off: configuration refused" || a["configfault"] != "true" || a["value"] != tc.backend || a["reason"] == "" {
+					t.Errorf("configfault record %q attrs = %v", recs[0].Message, a)
+				}
+			case tc.mode == identityModeMock:
+				if recs[0].Message != "identity service is the mock: every identity call is refused" {
+					t.Errorf("mock record = %q", recs[0].Message)
+				}
+			default:
+				if recs[0].Message != "identity service off: not configured" {
+					t.Errorf("off record = %q", recs[0].Message)
+				}
 			}
 			assertRefuses(t, w, tc.kind)
 			assertKindUnknown(t, w)
@@ -128,7 +156,7 @@ func TestWireIdentity_RefusedAddresses(t *testing.T) {
 					mgmt = v
 				}
 				log, rec := logkittest.New()
-				w, err := wireIdentity(t.Context(), log, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+				w, err := wireIdentity(t.Context(), log, false, "keycloak", addr, mgmt, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -185,7 +213,7 @@ func newIdentityServer(t *testing.T, ca *tlsca.CA) *identityServer {
 // server sees no request.
 func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+	w, err := wireIdentity(t.Context(), log, false, "keycloak", defaultIdentityAddr, defaultIdentityMgmtAddr, nil, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +226,7 @@ func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	srv := newIdentityServer(t, ca)
-	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+	w, err = wireIdentity(t.Context(), slog.New(slog.DiscardHandler), false, "keycloak", srv.URL, srv.URL, ca, t.TempDir(), (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak {
 		t.Fatalf("wireIdentity = %v, %v", w.mode, err)
 	}
@@ -219,12 +247,16 @@ func TestWireIdentity_UnreadableInputsFailClosed(t *testing.T) {
 // job, the api client leaf's reload drops idle connections, and after the
 // leaf on disk is replaced and the reload runs the next call presents the
 // new leaf. main logs the mode.
+//
+// TC-982-05: it is wired with the release marker set, so the mock's release
+// refusal never turns the real service off: mode keycloak, the job
+// registered, and no record at all, so no configfault.
 func TestWireIdentity_KeycloakAndLeafReload(t *testing.T) {
 	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
 	srv := newIdentityServer(t, ca)
 	dataDir := t.TempDir()
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+	w, err := wireIdentity(t.Context(), log, true, "keycloak", srv.URL, srv.URL, ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeKeycloak || w.recoverer == nil || w.reload == nil {
 		t.Fatalf("wireIdentity = %+v, %v", w, err)
 	}
@@ -292,8 +324,7 @@ func TestWireIdentity_UpgradeFromThePreviousRelease(t *testing.T) {
 	}
 
 	log, rec := logkittest.New()
-	w, err := wireIdentity(t.Context(), log, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+	w, err := wireIdentityFromEnv(t.Context(), log, ca, dataDir, (&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
 	if err != nil || w.mode != identityModeOff {
 		t.Fatalf("wireIdentity = %q, %v; want off", w.mode, err)
 	}
