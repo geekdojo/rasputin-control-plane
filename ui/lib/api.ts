@@ -539,12 +539,23 @@ export async function listApps(): Promise<App[]> {
   return (await jsonFetch<App[] | null>('/api/apps')) ?? [];
 }
 
+/**
+ * The custom-app create form's one fallback sentence: for a refusal with no
+ * readable reason and for a request that never reached the api. It claims
+ * neither that the api answered nor that it did not (#1090).
+ */
+export const CREATE_APP_FAILED = 'The app could not be added.';
+
 export function createApp(input: {
   name: string;
   composeYaml: string;
   targetNode: string;
   // Opt the app into LAN reachability (ADR-0004 §9). Absent → tailnet-only.
   exposeLan?: boolean;
+  // The port on the node the compose publishes for the app's web page (#1089).
+  // Sent as the form read it: the api is the one validator, and refuses a bad
+  // value in its own words. Absent → no web port; JSON.stringify drops the key.
+  webPort?: number | string;
 }): Promise<App> {
   return jsonFetch<App>('/api/apps', {
     method: 'POST',

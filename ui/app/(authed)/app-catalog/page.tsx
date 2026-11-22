@@ -3,11 +3,13 @@
 import { ExternalLink, FilePlus2, HardDrive, RefreshCw, Search, ShieldAlert, Store, UploadCloud } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import {
+  CREATE_APP_FAILED,
   createApp,
   deployApp,
   getBackupSchedule,
   getCatalogStatus,
   getCatalogTile,
+  errorSentence,
   getSetupState,
   installCatalogApp,
   listBackupTargets,
@@ -23,6 +25,7 @@ import type { App, CatalogCollection, CatalogStatus, CatalogTile, Node } from '.
 import { coLocatedSecretsWarning, grantLabel, isRoutine, TIER_COPY, tierOf } from '../../../lib/privilege';
 import { appAccess } from '../../../lib/appurl';
 import { defaultDeployTarget, deployTargetLabel, offMeshTargetWarning } from '../../../lib/deploy-target';
+import { WEB_PORT_EMPTY_ON_CREATE, WEB_PORT_LABEL, WEB_PORT_MEANING, webPortValue } from '../../../lib/web-port';
 import {
   backupsConfigured,
   criticalVolumes,
@@ -1056,6 +1059,7 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
   const [name, setName] = useState('');
   const [targetNode, setTargetNode] = useState('');
   const [composeYaml, setComposeYaml] = useState('');
+  const [port, setPort] = useState('');
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [installed, setInstalled] = useState<App | null>(null);
@@ -1074,9 +1078,10 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
     setBusy(true);
     setErr(null);
     try {
-      setInstalled(await createApp({ name, targetNode: selectedTarget, composeYaml }));
+      setInstalled(await createApp({ name, targetNode: selectedTarget, composeYaml, webPort: webPortValue(port) }));
     } catch (e) {
-      setErr(String(e));
+      // The api's own sentence, never the request URL and status (ERR-MESSAGE).
+      setErr(errorSentence(e, CREATE_APP_FAILED));
     } finally {
       setBusy(false);
     }
@@ -1128,6 +1133,21 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
               )}
             </div>
             <div>
+              <SectionLabel>{WEB_PORT_LABEL}</SectionLabel>
+              <Input
+                value={port}
+                onChange={(e) => setPort(e.target.value)}
+                inputMode="numeric"
+                autoComplete="off"
+                placeholder="optional (e.g. 8080)"
+                aria-label="Web port"
+                style={{ width: 200 }}
+              />
+              <Hint style={{ marginTop: 6 }}>
+                Optional. {WEB_PORT_MEANING} {WEB_PORT_EMPTY_ON_CREATE}
+              </Hint>
+            </div>
+            <div>
               <SectionLabel>COMPOSE</SectionLabel>
               <Textarea
                 placeholder={'services:\n  web:\n    image: nginx:alpine\n    ports:\n      - "8080:80"'}
@@ -1142,7 +1162,11 @@ function CustomDrawer({ deployTargets, clusterId, onClose }: { deployTargets: No
               <Btn variant="primary" disabled={busy || !name || !selectedTarget || !composeYaml} onClick={create}>
                 <UploadCloud size={11} /> {busy ? 'ADDING…' : 'ADD APP'}
               </Btn>
-              {err && <span style={{ color: '#f87171', fontSize: 10 }}>{err}</span>}
+              {err && (
+                <span role="alert" style={{ color: '#f87171', fontSize: 10 }}>
+                  {err}
+                </span>
+              )}
             </div>
             <Hint>Adds the app; deploy is a separate step so you can review it first.</Hint>
           </>
