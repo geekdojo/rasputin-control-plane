@@ -2,6 +2,7 @@ package mesh
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -250,6 +252,7 @@ type hsPreAuthKey struct {
 type hsNode struct {
 	ID              string    `json:"id"`
 	Name            string    `json:"name"`
+	GivenName       string    `json:"givenName"`
 	IPAddresses     []string  `json:"ipAddresses,omitempty"`
 	LastSeen        time.Time `json:"lastSeen,omitempty"`
 	Online          bool      `json:"online"`
@@ -432,6 +435,20 @@ func (c *RealClient) SetNodeRoutes(ctx context.Context, nodeID string, cidrs []s
 	return nil
 }
 
+// RenameNode sets the node's given name (its MagicDNS name) through
+// POST /api/v1/node/{id}/rename/{newName}, Headscale 0.28.0 (third-party
+// capability T96).
+func (c *RealClient) RenameNode(ctx context.Context, nodeID, newName string) error {
+	if nodeID == "" || newName == "" {
+		return errors.New("mesh: RenameNode: empty nodeID or name")
+	}
+	path := "/api/v1/node/" + url.PathEscape(nodeID) + "/rename/" + url.PathEscape(newName)
+	if err := c.do(ctx, http.MethodPost, path, nil, nil); err != nil {
+		return fmt.Errorf("rename node %s: %w", nodeID, err)
+	}
+	return nil
+}
+
 // DeleteNode is idempotent: HTTP 404 / "not found" / gRPC NotFound from
 // Headscale resolves to a nil return so callers can use this to clean up
 // a stale local-cache row whose Headscale counterpart was already removed.
@@ -501,7 +518,7 @@ func toHSNode(n hsNode) HSNode {
 		ID:               n.ID,
 		User:             n.User.Name,
 		Hostname:         n.Name,
-		GivenName:        n.Name,
+		GivenName:        cmp.Or(n.GivenName, n.Name),
 		IPv4:             ipv4,
 		IPv6:             ipv6,
 		Tags:             append([]string(nil), n.Tags...),

@@ -53,6 +53,11 @@ type Client interface {
 
 	// EnsureUser creates the user if it doesn't exist; idempotent.
 	EnsureUser(ctx context.Context, name string) error
+
+	// RenameNode sets a node's given name, which is its MagicDNS name
+	// (geekdojo/geekdojo-brain#983: a device that took a reserved label is
+	// renamed off it).
+	RenameNode(ctx context.Context, nodeID, newName string) error
 }
 
 // CreatePreAuthKeyInput captures the params for a key.
@@ -261,6 +266,18 @@ func (m *MockClient) DeleteNode(_ context.Context, nodeID string) error {
 		return nil // idempotent
 	}
 	delete(m.state.Nodes, nodeID)
+	return m.persistLocked()
+}
+
+func (m *MockClient) RenameNode(_ context.Context, nodeID, newName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n, ok := m.state.Nodes[nodeID]
+	if !ok {
+		return fmt.Errorf("node %s not found", nodeID)
+	}
+	n.GivenName = newName
+	m.state.Nodes[nodeID] = n
 	return m.persistLocked()
 }
 

@@ -28,6 +28,7 @@ func (s *stubClient) ListPreAuthKeys(context.Context, string) ([]HSPreAuthKey, e
 func (s *stubClient) ListNodes(context.Context) ([]HSNode, error)           { return nil, nil }
 func (s *stubClient) SetNodeRoutes(context.Context, string, []string) error { return nil }
 func (s *stubClient) DeleteNode(context.Context, string) error              { return nil }
+func (s *stubClient) RenameNode(context.Context, string, string) error      { return nil }
 
 func waitFor(t *testing.T, cond func() bool, msg string) {
 	t.Helper()

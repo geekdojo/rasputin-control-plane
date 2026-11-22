@@ -160,6 +160,10 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, appNameRuleMsg)
 		return
 	}
+	if proto.IsReservedLabel(req.Name) {
+		s.writeAppNameReserved(w, r, req.Name)
+		return
+	}
 	if strings.TrimSpace(req.ComposeYAML) == "" {
 		writeError(w, http.StatusBadRequest, "composeYaml is required")
 		return
@@ -911,6 +915,15 @@ const appTargetRoleMsg = "apps run on compute nodes only — the controlplane no
 // the post-normalization rule (input is already lower-cased), so it omits the
 // case requirement to avoid confusing an operator who typed mixed case.
 const appNameRuleMsg = "name must be a DNS-safe label: 1-32 chars of lowercase letters, digits, and hyphens, not starting or ending with a hyphen"
+
+// writeAppNameReserved refuses an app name the sign-in doors reserve: an app
+// at signin.<cid>.internal would take the app door's name
+// (geekdojo/geekdojo-brain#983).
+func (s *Server) writeAppNameReserved(w http.ResponseWriter, r *http.Request, name string) {
+	s.writeCodedError(w, r, http.StatusBadRequest, codeAppNameReserved,
+		fmt.Sprintf("The name %s is kept for the cluster's sign-in addresses, so no app can use it. Choose another name.", name),
+		slog.String("name", name))
+}
 
 // validAppName reports whether s is a strict RFC 1123 DNS label short enough to
 // be an app name, the constraint ADR-0004 §5 requires now that the name is

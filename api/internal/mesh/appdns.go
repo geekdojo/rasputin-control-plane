@@ -60,5 +60,28 @@ func (s *Service) ReconcileAppDNS(ctx context.Context) error {
 		// are byte-identical (appleaf.go).
 		fqdnToIP[appTailnetFQDN(s.cfg.ClusterID, a.Name)] = ip
 	}
+	if host, ip := s.appDoorRecord(bound); host != "" {
+		fqdnToIP[host] = ip
+	}
 	return s.sup.ReconcileAppRecords(fqdnToIP)
+}
+
+// appDoorRecord is the app sign-in door's MagicDNS record, the door's host
+// to the control plane's own tailnet IP (geekdojo/geekdojo-brain#983). It is
+// "" unless the door is configured, the withheld predicate is set and says
+// no, and the control plane's node has exactly one bound device with a
+// tailnet IP. It rides in the same write as the app records, so an unbind,
+// a withheld door or a lost IP drops it on the next projection.
+func (s *Service) appDoorRecord(bound map[string]*Device) (host, ip string) {
+	if s.cfg.AppDoorHost == "" || s.cfg.SelfNodeID == "" {
+		return "", ""
+	}
+	if s.cfg.AppDoorWithheld == nil || s.cfg.AppDoorWithheld() {
+		return "", ""
+	}
+	d := bound[s.cfg.SelfNodeID]
+	if d == nil || d.TailnetIP == "" {
+		return "", ""
+	}
+	return s.cfg.AppDoorHost, d.TailnetIP
 }

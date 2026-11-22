@@ -66,6 +66,13 @@ func (s *Server) handleMintBusToken(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid nodeId %q: %s", body.NodeID, busauth.NodeIDRule))
 		return
 	}
+	// Refused at mint only, never in ValidNodeID: the bus checks that on every
+	// connect, so a node already called signin would be locked out on upgrade
+	// (geekdojo/geekdojo-brain#983).
+	if proto.IsReservedLabel(body.NodeID) {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("The node id %s is kept for the cluster's sign-in addresses, so no node can use it. Choose another node id.", body.NodeID))
+		return
+	}
 
 	// Every token is bound to the role of the node it is for (busauth role.go):
 	// the bus refuses a token that names none, so minting one would hand the

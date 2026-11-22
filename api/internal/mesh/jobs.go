@@ -246,6 +246,31 @@ func reconcileAppDNS(svc *Service) jobs.DoFn {
 	}
 }
 
+// renameReservedDevices renames every tailnet device whose given name, its
+// MagicDNS name, is a label the sign-in doors reserve, to <label>-<hsID>, and
+// tells cfg.DeviceRenamed (geekdojo/geekdojo-brain#983). It runs where the
+// api reads Headscale's device list, the scheduled reconcile: Headscale gives
+// the api no event when a device registers. A failed rename is logged and
+// raises nothing; the next reconcile sees the same name and tries again.
+func renameReservedDevices(ctx context.Context, svc *Service, nodes []HSNode) {
+	for _, n := range nodes {
+		if !proto.IsReservedLabel(n.GivenName) {
+			continue
+		}
+		to := n.GivenName + "-" + n.ID
+		if err := svc.Client().RenameNode(ctx, n.ID, to); err != nil {
+			svc.cfg.Log.WarnContext(ctx, "tailnet device not renamed: reserved name",
+				"hs_id", n.ID, "from", n.GivenName, "to", to, "err", err.Error())
+			continue
+		}
+		svc.cfg.Log.WarnContext(ctx, "tailnet device renamed: reserved name",
+			"hs_id", n.ID, "from", n.GivenName, "to", to)
+		if svc.cfg.DeviceRenamed != nil {
+			svc.cfg.DeviceRenamed(ctx, n.ID, n.GivenName, to)
+		}
+	}
+}
+
 func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		keys, err := svc.Client().ListPreAuthKeys(sc.Ctx, "")
@@ -256,6 +281,7 @@ func reconcileFetch(svc *Service, nc *nats.Conn) jobs.DoFn {
 		if err != nil {
 			return nil, fmt.Errorf("list nodes: %w", err)
 		}
+		renameReservedDevices(sc.Ctx, svc, nodes)
 
 		// Sync the mesh_devices table with Headscale's view of reality.
 		//
@@ -910,6 +936,14 @@ func enrollRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 			sc.Log("info", fmt.Sprintf("%s: device %s is no longer bound to it (now %s)", s.NodeID, proto.ShortFingerprint(id), proto.ShortFingerprint(s.HSID)))
 		}
 		pruneSupersededRegistrations(sc, svc, s.NodeID, s.HSID)
+		// The bind is the fact the tailnet names move on: the projection
+		// runs now, so the control plane's sign-in door (and any app on this
+		// node) is answered from this enrol rather than the next reconcile
+		// tick (geekdojo/geekdojo-brain#983). The reconcile_app_dns step is
+		// the safety net for a failure here, so it never fails the enrol.
+		if err := svc.ReconcileAppDNS(sc.Ctx); err != nil {
+			sc.Log("warn", fmt.Sprintf("%s: tailnet DNS projection after enrol: %v (the next mesh reconcile retries)", s.NodeID, err))
+		}
 		publishChange(nc, proto.MeshChangeEvt{
 			Scope:     s.NodeID,
 			Change:    proto.MeshNodeEnrolled,

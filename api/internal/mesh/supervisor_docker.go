@@ -19,6 +19,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/execrun"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
@@ -1013,20 +1014,11 @@ type configData struct {
 	TLSKeyPath  string // empty in HTTP mode
 }
 
-// baseDomainFor builds the MagicDNS base domain from the cluster id:
-// "<cluster-id>.internal" — the ICANN-reserved private-use `.internal` TLD, so
-// it can never collide with a public zone. The cluster-id prefix means two
-// clusters in one household don't collide on tailnet names, and compute/app
-// names hang cleanly off it (`<node>.home1.internal`) — mesh.md §6. Empty/dev →
-// "rasputin.internal". The cluster id is already a single DNS-safe label
-// (ADR-0003), so no sanitisation is needed here.
-func baseDomainFor(clusterID string) string {
-	id := strings.TrimSpace(clusterID)
-	if id == "" {
-		id = "rasputin"
-	}
-	return id + ".internal"
-}
+// baseDomainFor builds the MagicDNS base domain from the cluster id,
+// "<cluster-id>.internal", through proto.BaseDomain, the one constructor the
+// nameserver zone, the agent's routing domain and the sign-in door share
+// (geekdojo/geekdojo-brain#983). Empty/dev gives "rasputin.internal".
+func baseDomainFor(clusterID string) string { return proto.BaseDomain(clusterID) }
 
 var configTmpl = template.Must(template.New("headscale-config").Parse(`server_url: {{.ServerURL}}
 listen_addr: {{.ListenAddr}}

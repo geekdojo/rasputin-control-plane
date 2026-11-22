@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	"github.com/geekdojo/rasputin-control-plane/artifactsig"
 )
 
@@ -56,6 +57,16 @@ func rpOriginsFromEnv() []string {
 	return splitCSV(applianceOr(
 		func(h string) string { return "https://" + h },
 		"http://localhost:3000,http://localhost:8080"))
+}
+
+// doorTableFromEnv resolves RASPUTIN_CLUSTER_ID into the sign-in door table:
+// both doors' hosts, issuers and RP IDs (geekdojo/geekdojo-brain#983). The
+// value is trimmed and handed to doors.New, which refuses anything that is not
+// a DNS label short enough for the home door's sso- name; an absent or empty
+// id is doors.ErrNoClusterID. Every error means no doors. Like its
+// neighbours it does not log: wireDoorTable does.
+func doorTableFromEnv() (doors.Table, error) {
+	return doors.New(strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")))
 }
 
 // secretStoreBackendFromEnv resolves RASPUTIN_SECRETSTORE_BACKEND, the secret

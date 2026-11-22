@@ -2,7 +2,9 @@ package mesh
 
 import (
 	"context"
+	"io"
 	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -46,6 +48,24 @@ type Config struct {
 	// projection (<app>.<cluster-id>.internal). "" → the baseDomainFor dev
 	// fallback ("rasputin.internal"). Matches the supervisor's ClusterID.
 	ClusterID string
+
+	// AppDoorHost is the app sign-in door's host, signin.<cid>.internal,
+	// from the door table main builds (geekdojo/geekdojo-brain#983). With
+	// SelfNodeID it adds the door's MagicDNS record, pointing at the control
+	// plane's own tailnet IP. "" (doors off) adds no record.
+	AppDoorHost string
+	// SelfNodeID is the control plane's own rasputin node id, whose bound
+	// device carries the door's tailnet IP.
+	SelfNodeID string
+	// AppDoorWithheld is main's one withheld predicate: true while an app
+	// holds a reserved name, or while the apps list cannot be read. A nil
+	// predicate withholds (fail closed).
+	AppDoorWithheld func() bool
+	// DeviceRenamed is told about each tailnet device the reconcile renamed
+	// off a reserved name. nil only logs.
+	DeviceRenamed func(ctx context.Context, hsID, from, to string)
+	// Log receives the door and rename records. nil discards them.
+	Log *slog.Logger
 }
 
 // Service ties together the store + the Headscale client + the supervisor.
@@ -86,6 +106,9 @@ func NewService(cfg Config, store *Store, client Client, sup Supervisor) *Servic
 	}
 	if cfg.DefaultUser == "" {
 		cfg.DefaultUser = "rasputin-operator"
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Service{cfg: cfg, store: store, client: client, sup: sup}
 }

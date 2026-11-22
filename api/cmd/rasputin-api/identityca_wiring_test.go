@@ -642,7 +642,7 @@ func TestIdentityLeaves_NilCAWiring(t *testing.T) {
 		}()
 		// As main.go builds it.
 		if err := verifyLeafConsumers(append(append(leafSweeper.RegisteredNames(), storeW.registeredNames()...), identitySweeper.RegisteredNames()...),
-			append(requiredLeafConsumers(true, false, storeW.mode == storeModeOpenBao), identityLeafNames(identityCA != nil)...)); err != nil {
+			append(requiredLeafConsumers(true, false, storeW.mode == storeModeOpenBao, false), identityLeafNames(identityCA != nil)...)); err != nil {
 			t.Errorf("verifyLeafConsumers = %v, want nil", err)
 		}
 	}()

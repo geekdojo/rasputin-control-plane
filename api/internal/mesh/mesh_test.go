@@ -39,6 +39,8 @@ type fakeClient struct {
 	setRoutesCalls  int
 	ensureUserCalls int
 	deleteNodeCalls int
+	renames         [][2]string // {nodeID, newName}, in call order
+	renameErr       error
 
 	createKeyErr  error
 	listNodesErr  error
@@ -147,6 +149,8 @@ func (f *fakeClient) ListNodes(_ context.Context) ([]HSNode, error) {
 	for _, n := range f.nodes {
 		out = append(out, n)
 	}
+	// Map iteration is random; sort so tests asserting call order are deterministic.
+	slices.SortFunc(out, func(a, b HSNode) int { return strings.Compare(a.ID, b.ID) })
 	return out, nil
 }
 
@@ -175,6 +179,20 @@ func (f *fakeClient) DeleteNode(_ context.Context, nodeID string) error {
 		return f.deleteNodeErr
 	}
 	delete(f.nodes, nodeID)
+	return nil
+}
+
+func (f *fakeClient) RenameNode(_ context.Context, nodeID, newName string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.renames = append(f.renames, [2]string{nodeID, newName})
+	if f.renameErr != nil {
+		return f.renameErr
+	}
+	if n, ok := f.nodes[nodeID]; ok {
+		n.GivenName = newName
+		f.nodes[nodeID] = n
+	}
 	return nil
 }
 

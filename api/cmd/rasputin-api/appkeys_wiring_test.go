@@ -122,10 +122,10 @@ func TestStoreAppKeysLeaf(t *testing.T) {
 		t.Errorf("handshakes by CN %v; want the kv client's connection kept (1) and the key client's re-made (2)", got)
 	}
 
-	if !slices.Contains(requiredLeafConsumers(false, false, true), storeAppKeysLeafName) {
+	if !slices.Contains(requiredLeafConsumers(false, false, true, false), storeAppKeysLeafName) {
 		t.Error("the key leaf is not required with the store selected")
 	}
-	if slices.Contains(requiredLeafConsumers(true, true, false), storeAppKeysLeafName) {
+	if slices.Contains(requiredLeafConsumers(true, true, false, false), storeAppKeysLeafName) {
 		t.Error("the key leaf is required with the store off or the mock")
 	}
 	var without []string
@@ -134,7 +134,7 @@ func TestStoreAppKeysLeaf(t *testing.T) {
 			without = append(without, n)
 		}
 	}
-	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true)); err == nil || !strings.Contains(err.Error(), storeAppKeysLeafName) {
+	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true, false)); err == nil || !strings.Contains(err.Error(), storeAppKeysLeafName) {
 		t.Errorf("verifyLeafConsumers without the key leaf = %v, want an error naming %s", err, storeAppKeysLeafName)
 	}
 	for _, backend := range []string{"", storeModeMock} {

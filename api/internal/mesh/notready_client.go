@@ -38,3 +38,6 @@ func (c *notReadyClient) SetNodeRoutes(context.Context, string, []string) error 
 }
 func (c *notReadyClient) DeleteNode(context.Context, string) error { return ErrMeshNotReady }
 func (c *notReadyClient) EnsureUser(context.Context, string) error { return ErrMeshNotReady }
+func (c *notReadyClient) RenameNode(context.Context, string, string) error {
+	return ErrMeshNotReady
+}

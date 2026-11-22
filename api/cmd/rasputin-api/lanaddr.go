@@ -98,6 +98,10 @@ func dnsForwardOnFirewallRegistration(submit func(reason string)) func(context.C
 // restart; served through GetCertificate, it follows the address.
 type apiLeaf struct {
 	mint func(lanIP net.IP) (tlsca.LeafPaths, error)
+	// refusal, when set, is the handshake error while no leaf is loaded, in
+	// place of errNoAPILeaf, so a sign-in door's holder names its door
+	// (geekdojo/geekdojo-brain#983).
+	refusal error
 
 	mu     sync.Mutex
 	loaded bool
@@ -151,6 +155,9 @@ var errNoAPILeaf = errors.New("rasputin-api: https leaf not loaded")
 func (l *apiLeaf) getCertificate(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if c := l.cert.Load(); c != nil {
 		return c, nil
+	}
+	if l.refusal != nil {
+		return nil, l.refusal
 	}
 	return nil, errNoAPILeaf
 }

@@ -480,7 +480,7 @@ func serials(t *testing.T, dataDir string) map[string]*big.Int {
 // TC-758-23: startup refuses a configuration that selects the store but did
 // not register its client leaf.
 func TestRequiredLeafConsumers_StoreSelected(t *testing.T) {
-	required := requiredLeafConsumers(false, false, true)
+	required := requiredLeafConsumers(false, false, true, false)
 	if !slices.Equal(required, []string{storeServerLeafName, storeClientLeafName, storeProvisionerLeafName, storeAppKeysLeafName}) {
 		t.Fatalf("required = %v", required)
 	}
@@ -488,7 +488,7 @@ func TestRequiredLeafConsumers_StoreSelected(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), storeClientLeafName) {
 		t.Errorf("err = %v, want it to name %s", err, storeClientLeafName)
 	}
-	for _, n := range requiredLeafConsumers(true, true, false) {
+	for _, n := range requiredLeafConsumers(true, true, false, false) {
 		if strings.HasPrefix(n, "openbao-") {
 			t.Errorf("store not selected, yet %s is required", n)
 		}
@@ -626,10 +626,10 @@ func TestStoreProvisionerLeaf(t *testing.T) {
 		}
 	}
 
-	if !slices.Contains(requiredLeafConsumers(false, false, true), storeProvisionerLeafName) {
+	if !slices.Contains(requiredLeafConsumers(false, false, true, false), storeProvisionerLeafName) {
 		t.Error("the provisioner's leaf is not required with the store selected")
 	}
-	if slices.Contains(requiredLeafConsumers(true, true, false), storeProvisionerLeafName) {
+	if slices.Contains(requiredLeafConsumers(true, true, false, false), storeProvisionerLeafName) {
 		t.Error("the provisioner's leaf is required with the store off")
 	}
 	// The Register removed: the names the wiring would then carry.
@@ -639,7 +639,7 @@ func TestStoreProvisionerLeaf(t *testing.T) {
 			without = append(without, n)
 		}
 	}
-	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true)); err == nil ||
+	if err := verifyLeafConsumers(without, requiredLeafConsumers(false, false, true, false)); err == nil ||
 		!strings.Contains(err.Error(), storeProvisionerLeafName) {
 		t.Errorf("verifyLeafConsumers without the provisioner = %v, want an error naming %s", err, storeProvisionerLeafName)
 	}
