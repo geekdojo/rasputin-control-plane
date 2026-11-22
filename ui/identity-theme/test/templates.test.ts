@@ -34,3 +34,12 @@ for (const [fixture, rule] of [
     assert.ok(problems.some((p) => rule.test(p)), `problems: ${JSON.stringify(problems)}`);
   });
 }
+
+// Keycloak injects an inline history script in front of the head end tag of a
+// page it answers a POST with (BrowserHistoryHelper); the frame writes none,
+// so it injects nothing (found by the CI walk, TC-988-18).
+test('TC-988-01: the frame writes no head end tag, so Keycloak injects no inline script', () => {
+  const frame = read(path.join(SRC, 'template.ftl')).replace(/<#--[\s\S]*?-->/g, '');
+  assert.doesNotMatch(frame, /<\/head\s*>/i);
+  assert.match(frame, /<body /);
+});

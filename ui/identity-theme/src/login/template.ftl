@@ -6,7 +6,8 @@
   as plain text (never displayNameHtml) and a data-rasputin-theme marker; the message block
   announced with role="alert"; the import map, the session-polling modules, the once-link
   guard and the organization switch dropped; "Try another way" moved to js/rasputin-page.js;
-  no locale menu and no positive tabindex.
+  no locale menu and no positive tabindex; no head end tag, so Keycloak injects no inline
+  script into a page it answers a POST with.
 -->
 <#import "footer.ftl" as loginFooter>
 <#macro registrationLayout bodyClass="" displayInfo=false displayMessage=true displayRequiredFields=false>
@@ -41,7 +42,16 @@
             <script src="${script}" type="text/javascript"></script>
         </#list>
     </#if>
-</head>
+<#--
+  No end tag for head, which HTML allows (the body start tag closes it). Keycloak
+  (BrowserHistoryHelper, 26.8.2) writes an inline history.replaceState script
+  in front of the head end tag of a page it answers a POST with; with no tag it
+  writes none, so these pages carry no inline script. The doors' script policy
+  would block that script anyway. What it did: after a POST, the address bar
+  showed the step's own address, so a reload re-rendered the step. Without
+  it, a reload re-sends the form and shows the expired page, whose link
+  continues where the person left off.
+-->
 
 <body class="${properties.kcBodyClass!} ${bodyClass}" data-page-id="login-${pageId}" data-rasputin-theme="rasputin">
 <div class="${properties.kcLoginClass!}">
