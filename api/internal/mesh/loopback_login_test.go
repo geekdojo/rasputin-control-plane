@@ -1,8 +1,7 @@
 package mesh
 
 import (
-	"context"
-	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,47 +37,40 @@ func TestLoopbackLoginServer(t *testing.T) {
 	}
 }
 
-// The rewrite must apply to the control plane and NOTHING else — a compute node
-// pointed at its own loopback would find no Headscale there at all, which is
-// far worse than the delay being fixed.
-func TestIsControlPlaneNode(t *testing.T) {
-	ctx := context.Background()
-	inv, err := inventory.OpenStore(ctx, filepath.Join(t.TempDir(), "inv.db"))
-	if err != nil {
-		t.Fatalf("inventory.OpenStore: %v", err)
-	}
-	t.Cleanup(func() { _ = inv.Close() })
-
+// TC-984-04: the role the dispatch step derives the login server and the
+// settings from is read from the node registry, and every way of not having
+// one is an error rather than a default. That the loopback rewrite applies to
+// the control plane and NOTHING else is asserted on the real dispatch in
+// TestEnrollDispatch_CommandPerRole.
+func TestEnrolTargetRole(t *testing.T) {
+	f := newConvergeFixture(t)
 	now := time.Now().UTC()
-	for id, role := range map[string]proto.NodeRole{
-		"cp-1":      proto.RoleControlPlane,
-		"compute-1": proto.RoleCompute,
-	} {
-		if err := inv.Insert(ctx, &proto.Node{
-			ID: id, Role: role, Hostname: id, FirstSeen: now, LastSeen: now,
-		}); err != nil {
-			t.Fatalf("insert %s: %v", id, err)
-		}
-	}
+	f.addNode(t, "cp-1", proto.RoleControlPlane, now)
+	f.addNode(t, "compute-1", proto.RoleCompute, now)
 
 	for _, tc := range []struct {
 		name, nodeID string
-		want         bool
+		inv          *inventory.Store
+		want         proto.NodeRole
+		wantErr      string
 	}{
-		{"the control plane", "cp-1", true},
-		{"a compute node", "compute-1", false},
-		{"a node we have never seen", "ghost", false},
-		{"empty id", "", false},
+		{"the control plane", "cp-1", f.inv, proto.RoleControlPlane, ""},
+		{"a compute node", "compute-1", f.inv, proto.RoleCompute, ""},
+		{"a node we have never seen", "ghost", f.inv, "", "node ghost is not registered"},
+		{"empty id", "", f.inv, "", "is not registered"},
+		{"nil inventory", "cp-1", nil, "", "inventory unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isControlPlaneNode(ctx, inv, tc.nodeID); got != tc.want {
-				t.Errorf("isControlPlaneNode(%q) = %v, want %v", tc.nodeID, got, tc.want)
+			got, err := enrolTargetRole(tc.inv, tc.nodeID)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("enrolTargetRole(%q) = %q, %v; want an error containing %q", tc.nodeID, got, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Errorf("enrolTargetRole(%q) = %q, %v; want %q", tc.nodeID, got, err, tc.want)
 			}
 		})
-	}
-
-	// A nil store must not panic and must not claim control-plane-ness.
-	if isControlPlaneNode(ctx, nil, "cp-1") {
-		t.Error("nil inventory store reported a control plane")
 	}
 }

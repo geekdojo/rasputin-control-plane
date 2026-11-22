@@ -55,6 +55,10 @@
 //     declares a security floor and an OS node runs below it or runs an
 //     unconfirmed version. Computed on read from inventory, so it clears
 //     the moment the last node reports a version at or above the floor.
+//   - mesh       → app-signin-unjoined (warn), at most one, from the source
+//     SetAppDoorReachAlerts wires (mesh.Service.AppDoorReachAlerts,
+//     geekdojo/geekdojo-brain#984): up while the control plane has not joined
+//     its private network; clears on the bind.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -150,6 +154,9 @@ type Service struct {
 	// cluster has not installed (releases.SecurityWatch.Alerts). Nil means
 	// no such alert.
 	securityUpdateAlerts func(ctx context.Context, now time.Time) ([]proto.Alert, error)
+	// appDoorReachAlerts, when set, reports app sign-in with no private
+	// network record (mesh.Service.AppDoorReachAlerts). Nil means no such alert.
+	appDoorReachAlerts func(ctx context.Context, now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -263,6 +270,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if s.identityAlerts != nil {
 		out = append(out, s.identityAlerts(ctx, now)...)
+	}
+	if s.appDoorReachAlerts != nil {
+		out = append(out, s.appDoorReachAlerts(ctx, now)...)
 	}
 	if s.outcomeAlerts != nil {
 		alerts, err := s.outcomeAlerts(ctx, now)

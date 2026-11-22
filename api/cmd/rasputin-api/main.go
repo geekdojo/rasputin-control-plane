@@ -1454,24 +1454,29 @@ func main() {
 				log.Printf("rasputin-api: seed baseline firewall rules for %s: %v", n.ID, err)
 			}
 		}
-		// Auto-enroll every managed node — firewall INCLUDED — into the mesh so it
-		// receives the controlplane CA (needed to verify the control plane's TLS when
-		// downloading update bundles) and a tailnet identity. The controlplane
-		// self-enrolls during setup. Without this, a day-2 node added through the
+		// Auto-enroll every managed node — firewall and control plane INCLUDED — into
+		// the mesh so it receives the controlplane CA (needed to verify the control
+		// plane's TLS when downloading update bundles) and a tailnet identity. The
+		// control plane joins its own private network this way, with no person
+		// acting (geekdojo/geekdojo-brain#984). Without this, a day-2 node added through the
 		// wizard joins the bus but never the mesh, and its first update fails on the
 		// bundle download with "certificate signed by unknown authority" (found on
 		// bench-compute1 2026-06-22; and on the firewall 2026-07-02 once it became a
 		// deployable A/B OTA target — the firewall was previously excluded here).
 		// The DELETE /api/nodes cascade removes the headscale node + device.
-		// This hook is best-effort fast-path only: the mesh.reconcile workflow's
-		// converge_enrollment step retries any node this misses (e.g. one that
-		// registered before Headscale finished bring-up), every reconcile tick.
-		if slices.Contains(mesh.AutoEnrollRoles, n.Role) {
+		// This hook is best-effort fast-path only, and submits only once the mesh
+		// is ready, so no enrol job fails on ErrMeshNotReady during bring-up: the
+		// mesh.reconcile workflow's converge_enrollment step enrols any node this
+		// leaves (one that registered before Headscale finished bring-up, or whose
+		// enrol failed), every reconcile tick.
+		if slices.Contains(mesh.AutoEnrollRoles, n.Role) && meshSvc.Ready() {
 			if _, err := runner.Submit(hookCtx, "mesh.enroll_node", mesh.EnrollSpec{NodeID: n.ID}, "auto-enroll"); err != nil {
 				log.Printf("rasputin-api: auto mesh-enroll %s: %v", n.ID, err)
 			} else {
 				log.Printf("rasputin-api: auto-enrolling %s (%s) into the mesh", n.ID, n.Role)
 			}
+		} else if slices.Contains(mesh.AutoEnrollRoles, n.Role) {
+			logger.InfoContext(hookCtx, "mesh enrolment left to the mesh reconcile: mesh not ready", "node_id", n.ID, "role", n.Role)
 		}
 	})
 	// This node's own row takes its LAN address from lanWatch, not from the
@@ -2005,6 +2010,7 @@ func main() {
 	alertsSvc.SetBackupTargets(backupStore)
 	// OFF BUS vs OFFLINE (#401): the same join /api/nodes reads.
 	alertsSvc.SetMeshMembership(meshSvc.Membership)
+	alertsSvc.SetAppDoorReachAlerts(meshSvc.AppDoorReachAlerts)
 	srv.SetAlertsService(alertsSvc)
 	// The inventory hook installed before Start can raise alerts from here on.
 	nodeKeyAlerts.Store(alertsSvc)

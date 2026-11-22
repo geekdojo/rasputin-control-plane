@@ -79,9 +79,22 @@ func (s *Service) appDoorRecord(bound map[string]*Device) (host, ip string) {
 	if s.cfg.AppDoorWithheld == nil || s.cfg.AppDoorWithheld() {
 		return "", ""
 	}
-	d := bound[s.cfg.SelfNodeID]
-	if d == nil || d.TailnetIP == "" {
+	d := s.selfDevice(bound)
+	if d == nil {
 		return "", ""
 	}
 	return s.cfg.AppDoorHost, d.TailnetIP
+}
+
+// selfDevice is the control plane's single bound device when it has a tailnet
+// IP, else nil. bound is BoundDevices' one-device map, so a node bound to two
+// devices has no entry and answers nil. The door's record and the
+// app-signin-unjoined warning both read it, so the warning is up exactly when
+// the record is absent for want of a joined control plane.
+func (s *Service) selfDevice(bound map[string]*Device) *Device {
+	d := bound[s.cfg.SelfNodeID]
+	if d == nil || d.TailnetIP == "" {
+		return nil
+	}
+	return d
 }

@@ -132,23 +132,14 @@ func TestEnrollWorkflow_NoResponderIsReadAgainstInventory(t *testing.T) {
 }
 
 // Without inventory to read the silence against, the bus error is relayed
-// as it is — never hidden, never guessed at. (The validate step needs
-// inventory, so the steps before dispatch run with it; the dispatch step
-// itself is built without.)
+// as it is — never hidden, never guessed at. The dispatch step itself no
+// longer runs without inventory (it reads the node's role first and fails
+// closed, geekdojo/geekdojo-brain#984, TC-984-05), so the error builder is
+// asserted directly.
 func TestEnrollWorkflow_NoResponderWithoutInventoryIsRelayed(t *testing.T) {
-	f := newConvergeFixture(t)
-	f.addNode(t, "node-1", proto.RoleCompute, time.Now().UTC().Add(-time.Hour))
-	wf := EnrollNodeWorkflow(f.svc, f.inv, f.nc)
-	spec, _ := json.Marshal(EnrollSpec{NodeID: "node-1"})
-	prior := runEnrollUpTo(t, wf, spec, f.nc, f.ctx, "dispatch")
-	sc := &jobs.StepCtx{Ctx: f.ctx, JobID: "test-job", Spec: spec, NATS: f.nc, PriorResults: prior, Log: func(string, string) {}}
-	_, err := enrollDispatch(f.svc, nil)(sc)
-	key := mintedKey(t, f.client)
+	err := enrollDispatchError(context.Background(), nil, "node-1", proto.MeshEnrollSubject("node-1"), nats.ErrNoResponders, time.Second)
 	if err == nil || !strings.Contains(err.Error(), "enroll rpc: ") || !strings.Contains(err.Error(), "no responders") {
 		t.Errorf("without inventory the bus error must be relayed, got %v", err)
-	}
-	if err != nil && strings.Contains(err.Error(), key) {
-		t.Errorf("step error carries the auth key: %q", err)
 	}
 }
 
