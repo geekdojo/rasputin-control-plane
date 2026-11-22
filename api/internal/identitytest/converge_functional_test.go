@@ -260,8 +260,10 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		if got["webAuthnPolicyRpId"] != "drift.example" || got["webAuthnPolicyPasswordlessRpId"] != "drift.example" {
 			t.Fatalf("the raw drift did not take: RP IDs %v %v", got["webAuthnPolicyRpId"], got["webAuthnPolicyPasswordlessRpId"])
 		}
-		if code := passwordGrant(t, leafHTTP, env); code != "invalid_grant" {
-			t.Fatalf("admin-cli's password grant with the drift answered %q, want invalid_grant (reached the grant)", code)
+		if code, desc := passwordGrant(t, leafHTTP, env); code != "invalid_grant" {
+			_, back := api.clientRep("admin-cli")
+			t.Fatalf("admin-cli's password grant with the drift answered %q (%q), want invalid_grant (reached the grant); admin-cli reads back enabled %v, directAccessGrantsEnabled %v, publicClient %v",
+				code, desc, back["enabled"], back["directAccessGrantsEnabled"], back["publicClient"])
 		}
 
 		fields := rig.converge(t)
@@ -292,8 +294,8 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		if cli["enabled"] != false || cli["directAccessGrantsEnabled"] != false {
 			t.Errorf("admin-cli enabled %v, direct grants %v; want both off", cli["enabled"], cli["directAccessGrantsEnabled"])
 		}
-		code := passwordGrant(t, leafHTTP, env)
-		t.Logf("T92: admin-cli's password grant after converge answers %q", code)
+		code, desc := passwordGrant(t, leafHTTP, env)
+		t.Logf("T92: admin-cli's password grant after converge answers %q (%q)", code, desc)
 		if code == "invalid_grant" || code == "" {
 			t.Errorf("admin-cli's password grant after converge answered %q, want it refused for the client", code)
 		}
@@ -539,8 +541,9 @@ func adminEventCount(t *testing.T, api adminAPI) int {
 }
 
 // passwordGrant asks realm rasputin's token endpoint for admin-cli's password
-// grant for a user that does not exist, and returns the OAuth error code.
-func passwordGrant(t *testing.T, c *http.Client, env *Env) string {
+// grant for a user that does not exist, and returns the OAuth error code and
+// its description.
+func passwordGrant(t *testing.T, c *http.Client, env *Env) (string, string) {
 	t.Helper()
 	form := url.Values{"grant_type": {"password"}, "client_id": {"admin-cli"}, "username": {"tc-981-02-nobody"}, "password": {"not-a-password"}}
 	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
@@ -556,13 +559,14 @@ func passwordGrant(t *testing.T, c *http.Client, env *Env) string {
 	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	var e struct {
-		Error string `json:"error"`
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
 	}
 	_ = json.Unmarshal(body, &e)
 	if resp.StatusCode == http.StatusOK {
 		t.Errorf("admin-cli's password grant answered 200")
 	}
-	return e.Error
+	return e.Error, e.Description
 }
 
 func sameStrings(a, b []string) bool {
