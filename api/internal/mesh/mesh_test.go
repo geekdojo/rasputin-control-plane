@@ -149,6 +149,8 @@ func (f *fakeClient) ListNodes(_ context.Context) ([]HSNode, error) {
 	for _, n := range f.nodes {
 		out = append(out, n)
 	}
+	// Map iteration is random; sort so tests asserting call order are deterministic.
+	slices.SortFunc(out, func(a, b HSNode) int { return strings.Compare(a.ID, b.ID) })
 	return out, nil
 }
 
