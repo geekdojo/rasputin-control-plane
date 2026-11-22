@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/geekdojo/rasputin-control-plane/proto"
 
@@ -475,6 +477,163 @@ func TestGenerate_NormalizesIntoArtifacts(t *testing.T) {
 		}
 		if !strings.Contains(string(b), "RASPUTIN_CLUSTER_ID='home1'\n") {
 			t.Errorf("%s seed should carry the normalized cluster id:\n%s", n.ID, b)
+		}
+	}
+}
+
+// --- cluster-id rules (geekdojo-brain#996, Identity 4.14) --------------------
+
+const (
+	wantP2 = `rasputin-provision: The cluster id "sso-x" starts with "sso-", which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name. Choose a --cluster-id that does not start with "sso-".`
+)
+
+func wantP1(id string) string {
+	return `rasputin-provision: The cluster id "` + id + `" is ` + strconv.Itoa(len(id)) +
+		` characters, and a cluster id allows at most 59 so that its sign-in name, sso-<cluster id>.local, fits in one DNS label. Choose a shorter --cluster-id.`
+}
+
+// assertGoErrorForm checks the error value itself follows the Go convention
+// (ERR-MESSAGE Go note, staticcheck ST1005): lowercase first letter, no
+// closing punctuation. The sentence is only made where it is printed.
+func assertGoErrorForm(t *testing.T, err error) {
+	t.Helper()
+	msg := err.Error()
+	if msg == "" || unicode.IsUpper(rune(msg[0])) {
+		t.Errorf("error value %q should start lowercase", msg)
+	}
+	if strings.HasSuffix(msg, ".") || strings.HasSuffix(msg, "!") {
+		t.Errorf("error value %q should not end with punctuation", msg)
+	}
+}
+
+// TC-996-01: the reserved sso- prefix is refused, after trimming and
+// lowercasing, and rasputin-provision prints exactly sentence P2.
+func TestNormalizeClusterID_RefusesReservedPrefix(t *testing.T) {
+	for _, in := range []string{"sso-x", "SSO-X", " sso-x "} {
+		got, err := normalizeClusterID(in)
+		if err == nil {
+			t.Errorf("normalizeClusterID(%q) = %q, want a refusal", in, got)
+			continue
+		}
+		if line := errorLine(err); line != wantP2 {
+			t.Errorf("normalizeClusterID(%q) prints\n  %s\nwant\n  %s", in, line, wantP2)
+		}
+		assertGoErrorForm(t, err)
+	}
+}
+
+// TC-996-02: a cluster id over 59 characters gets P1 with its own length
+// (not the generic 63 message); the ids that pass come back canonical; the
+// failures normalizeDNSLabel already owned keep their messages.
+func TestNormalizeClusterID_LengthAndPassing(t *testing.T) {
+	for _, n := range []int{60, 64} {
+		in := strings.Repeat("a", n)
+		_, err := normalizeClusterID(in)
+		if err == nil {
+			t.Errorf("a %d-character cluster id was accepted", n)
+			continue
+		}
+		if line := errorLine(err); line != wantP1(in) {
+			t.Errorf("%d characters prints\n  %s\nwant\n  %s", n, line, wantP1(in))
+		}
+		assertGoErrorForm(t, err)
+	}
+
+	ok := []struct{ in, want string }{
+		{"bench", "bench"},
+		{"rasputin", "rasputin"},
+		{"sso", "sso"},
+		{"sso1", "sso1"},
+		{strings.Repeat("a", 59), strings.Repeat("a", 59)},
+		{"Bench", "bench"},
+	}
+	for _, tc := range ok {
+		got, err := normalizeClusterID(tc.in)
+		if err != nil {
+			t.Errorf("normalizeClusterID(%q) refused: %v", tc.in, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("normalizeClusterID(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+
+	// The messages these got before this change, word for word.
+	before := map[string]string{
+		"":    `cluster id is required`,
+		"a.b": `cluster id "a.b" contains "."; only a-z, 0-9 and - are allowed (a dot would make it a multi-label name, which mDNS cannot publish)`,
+		"-a":  `cluster id "-a" must not start or end with a hyphen`,
+	}
+	for in, want := range before {
+		_, err := normalizeClusterID(in)
+		if err == nil {
+			t.Errorf("normalizeClusterID(%q) was accepted", in)
+			continue
+		}
+		if line := errorLine(err); line != "rasputin-provision: "+want {
+			t.Errorf("normalizeClusterID(%q) prints %q, want %q", in, line, "rasputin-provision: "+want)
+		}
+	}
+}
+
+// TC-996-03: a refused cluster id writes nothing; a 59-character id with
+// explicit short node ids provisions and reaches the manifest.
+func TestGenerate_RefusedClusterIDWritesNothing(t *testing.T) {
+	long60 := strings.Repeat("a", 60)
+	for in, want := range map[string]string{"sso-x": wantP2, long60: wantP1(long60)} {
+		dir := t.TempDir()
+		_, err := generate(in, "", dir, nodeList{{Role: "controlplane"}}, true, "")
+		if err == nil {
+			t.Errorf("generate(%q) succeeded, want a refusal", in)
+			continue
+		}
+		if line := errorLine(err); line != want {
+			t.Errorf("generate(%q) prints\n  %s\nwant\n  %s", in, line, want)
+		}
+		entries, rerr := os.ReadDir(dir)
+		if rerr != nil {
+			t.Fatalf("read dir: %v", rerr)
+		}
+		if len(entries) != 0 {
+			t.Errorf("generate(%q) refused but left %d entries in the output directory", in, len(entries))
+		}
+	}
+
+	long59 := strings.Repeat("a", 59)
+	dir := t.TempDir()
+	if _, err := generate(long59, "", dir, nodeList{
+		{Role: "controlplane", ID: "cp1"}, {Role: "firewall", ID: "fw1"},
+	}, true, ""); err != nil {
+		t.Fatalf("generate with a 59-character cluster id: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var m manifest
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("parse manifest: %v", err)
+	}
+	if m.ClusterID != long59 {
+		t.Errorf("manifest clusterId = %q, want the 59-character id", m.ClusterID)
+	}
+}
+
+// TC-996-04: node ids keep the 63 limit and are not subject to the cluster-id
+// rules (TestNormalizeDNSLabel keeps proving 64 fails).
+func TestGenerate_NodeIDsKeepTheirOwnRule(t *testing.T) {
+	for _, nodeID := range []string{strings.Repeat("n", 63), "sso-n1"} {
+		dir := t.TempDir()
+		man, err := generate("bench", "", dir, nodeList{{Role: "controlplane", ID: nodeID}}, true, "")
+		if err != nil {
+			t.Errorf("generate with node id %q: %v", nodeID, err)
+			continue
+		}
+		if len(man.Nodes) != 1 || man.Nodes[0].ID != nodeID {
+			t.Fatalf("manifest nodes = %+v, want one node %q", man.Nodes, nodeID)
+		}
+		if _, err := os.Stat(filepath.Join(dir, man.Nodes[0].SeedFile)); err != nil {
+			t.Errorf("seed for node id %q: %v", nodeID, err)
 		}
 	}
 }
