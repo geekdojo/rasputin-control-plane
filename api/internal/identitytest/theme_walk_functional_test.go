@@ -752,19 +752,10 @@ func (w *walk) saml(t *testing.T, browserCtx context.Context) {
 		t.Fatalf("a SAML sign-in led to %s, want login-saml-post-form", got)
 	}
 	w.checkPage(tb, m, "login-saml-post-form")
-
-	// The real page: its body, and the POST it makes with no click.
-	tb = newTab(t, browserCtx, w.front)
-	w.visit(tb, start, "login-login")
-	m = tb.mark()
-	signIn(tb, name, password)
-	// The post page loads and then posts itself: wait for the fact, the
-	// app's endpoint showing, not for a time.
-	tb.step(chromedp.WaitVisible(chromedp.CSS(`body[data-page-id="rasputin-stub"]`)), "wait for the SAML auto-post to reach the app's endpoint")
+	body := ""
 	reqs, _ := tb.since(m)
-	var body string
 	for _, r := range reqs {
-		if !r.document || strings.Contains(r.url, acsPath) {
+		if !r.document {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
@@ -783,6 +774,14 @@ func (w *walk) saml(t *testing.T, browserCtx context.Context) {
 	if !strings.Contains(body, "/js/rasputin-autosubmit.js") {
 		t.Error("TC-988-25: the SAML post page does not load rasputin-autosubmit.js")
 	}
+
+	// The real page: the POST it makes with no click.
+	tb = newTab(t, browserCtx, w.front)
+	w.visit(tb, start, "login-login")
+	signIn(tb, name, password)
+	// The post page loads and then posts itself: wait for the fact, the
+	// app's endpoint showing, not for a time.
+	tb.step(chromedp.WaitVisible(chromedp.CSS(`body[data-page-id="rasputin-stub"]`)), "wait for the SAML auto-post to reach the app's endpoint")
 	tb.mu.Lock()
 	posts := append([]string(nil), tb.acsPosts...)
 	tb.mu.Unlock()

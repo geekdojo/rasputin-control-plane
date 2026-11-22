@@ -560,7 +560,7 @@ type pageFacts struct {
 	TextContent string   `json:"textContent"`
 	Title       string   `json:"title"`
 	Read        []string `json:"read"`
-	Inline      int      `json:"inline"`
+	Inline      []string `json:"inline"`
 	Handlers    []string `json:"handlers"`
 	H1          int      `json:"h1"`
 	Small       []string `json:"small"`
@@ -588,7 +588,7 @@ const factsJS = `(() => {
   const focusable = [...document.querySelectorAll('a[href],button:not([disabled]),input:not([type=hidden]):not([disabled]),select,textarea')]
     .filter((e) => e.offsetParent !== null).length;
   return { theme: b.dataset.rasputinTheme || '', pageId: b.dataset.pageId || '', text: b.innerText, textContent: b.textContent,
-    title: document.title, read, inline: document.querySelectorAll('script:not([src])').length, handlers,
+    title: document.title, read, inline: [...document.querySelectorAll('script:not([src])')].map((e) => e.outerHTML.slice(0, 200)), handlers,
     h1: document.querySelectorAll('h1').length, small, notAlert, focusable, emptyHrefs };
 })()`
 
@@ -620,8 +620,8 @@ func (w *walk) checkPage(tb *tab, m mark, want string) {
 			t.Errorf("%sthe page reads %s in %.60q", where, h, s)
 		}
 	}
-	if f.Inline != 0 || len(f.Handlers) != 0 {
-		t.Errorf("%s%d inline scripts and the handlers %v, want none", where, f.Inline, f.Handlers)
+	if len(f.Inline) != 0 || len(f.Handlers) != 0 {
+		t.Errorf("%sinline scripts %q and the handlers %v, want none", where, f.Inline, f.Handlers)
 	}
 	if f.H1 != 1 {
 		t.Errorf("%s%d h1 headings, want one", where, f.H1)
