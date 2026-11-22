@@ -39,6 +39,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -116,9 +117,21 @@ type manifest struct {
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "rasputin-provision:", err)
+		fmt.Fprintln(os.Stderr, errorLine(err))
 		os.Exit(1)
 	}
+}
+
+// errorLine is the one line main prints for an error run returned. A
+// refused cluster id (clusterIDError) is rendered as its person-facing
+// sentence here, at the point a person reads it (ERR-MESSAGE); every other
+// error prints as it always has.
+func errorLine(err error) string {
+	var cerr *clusterIDError
+	if errors.As(err, &cerr) {
+		return "rasputin-provision: " + cerr.Sentence()
+	}
+	return "rasputin-provision: " + err.Error()
 }
 
 func run() error {
@@ -145,7 +158,7 @@ func run() error {
 	// write a directory named "Home1" holding a manifest that says "home1", and
 	// tell the operator they had provisioned "Home1". A mismatch like that is
 	// how someone later re-runs with the wrong name and gets a second cluster.
-	normalized, err := normalizeDNSLabel("cluster id", *clusterID)
+	normalized, err := normalizeClusterID(*clusterID)
 	if err != nil {
 		return err
 	}
@@ -252,11 +265,75 @@ func normalizeDNSLabel(kind, v string) (string, error) {
 	return v, nil
 }
 
+// ssoPrefix starts every cluster's sign-in name, sso-<cluster id>.local
+// (Identity D25, signin-origin.md §6.1). A cluster id may not start with it,
+// or that cluster's own name would be another cluster's sign-in name.
+//
+// It belongs in proto beside the sign-in name itself; geekdojo-brain#983 adds
+// that constant there, and this one goes when it lands.
+const ssoPrefix = "sso-"
+
+// clusterIDMaxLen leaves room for ssoPrefix: sso-<cluster id> must still fit
+// in one 63-character DNS label.
+const clusterIDMaxLen = 63 - len(ssoPrefix)
+
+// clusterIDReason is which cluster-id rule a clusterIDError broke.
+type clusterIDReason int
+
+const (
+	clusterIDTooLong clusterIDReason = iota + 1
+	clusterIDReservedPrefix
+)
+
+// clusterIDError is a cluster id refused by a rule only cluster ids have.
+// Its Error text follows the Go convention; Sentence is what the operator
+// reads, rendered by errorLine.
+type clusterIDError struct {
+	reason clusterIDReason
+	id     string
+}
+
+func (e *clusterIDError) Error() string {
+	if e.reason == clusterIDTooLong {
+		return fmt.Sprintf("cluster id %q is %d characters; a cluster id allows at most %d", e.id, len(e.id), clusterIDMaxLen)
+	}
+	return fmt.Sprintf("cluster id %q starts with the reserved prefix %q", e.id, ssoPrefix)
+}
+
+// Sentence is the person-facing sentence for the refusal: the rule, why,
+// and what to do.
+func (e *clusterIDError) Sentence() string {
+	if e.reason == clusterIDTooLong {
+		return fmt.Sprintf("The cluster id %q is %d characters, and a cluster id allows at most %d so that its sign-in name, sso-<cluster id>.local, fits in one DNS label. Choose a shorter --cluster-id.", e.id, len(e.id), clusterIDMaxLen)
+	}
+	return fmt.Sprintf("The cluster id %q starts with %q, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name. Choose a --cluster-id that does not start with %q.", e.id, ssoPrefix, ssoPrefix)
+}
+
+// normalizeClusterID is normalizeDNSLabel for the cluster id, plus the two
+// rules only a cluster id has: at most clusterIDMaxLen characters, and no
+// ssoPrefix. The length check runs first so a 60-63 character id gets the
+// cluster-id sentence, not the generic 63 one. Node ids keep
+// normalizeDNSLabel alone.
+func normalizeClusterID(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if len(v) > clusterIDMaxLen {
+		return "", &clusterIDError{reason: clusterIDTooLong, id: v}
+	}
+	v, err := normalizeDNSLabel("cluster id", v)
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(v, ssoPrefix) {
+		return "", &clusterIDError{reason: clusterIDReservedPrefix, id: v}
+	}
+	return v, nil
+}
+
 // generate assigns ids, validates the set, and writes all artifacts into dir.
 // Returns the manifest. Pure enough to unit-test end-to-end. sshKey ("" = none)
 // is the operator's public key, already validated by resolveSSHKey.
 func generate(clusterID, natsURL, dir string, nodes nodeList, enforce bool, sshKey string) (manifest, error) {
-	clusterID, err := normalizeDNSLabel("cluster id", clusterID)
+	clusterID, err := normalizeClusterID(clusterID)
 	if err != nil {
 		return manifest{}, err
 	}
