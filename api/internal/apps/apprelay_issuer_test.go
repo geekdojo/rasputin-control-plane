@@ -220,7 +220,7 @@ func pushSagas() []pushSaga {
 		{"edit", func(t *testing.T) (*apps.Store, *inventory.Store) { return apps.SeedUpgradeApp(t, apps.TestAppID) },
 			func(t *testing.T, store *apps.Store, inv *inventory.Store, nc *nats.Conn, id apps.AppIdentity) apps.WorkflowRun {
 				stash := apps.NewComposeStash()
-				if err := stash.Put("job-1081", apps.ComposeV2); err != nil {
+				if err := stash.Put("job-1081", apps.HeldEdit{ComposeYAML: apps.ComposeV2}); err != nil {
 					t.Fatal(err)
 				}
 				w, err := apps.EditWorkflow(store, inv, nc, nil, stash, apps.TestSource(t), apps.TestSecretDeps(), id)

@@ -380,7 +380,7 @@ func TestRelease_TC783_45_FailedJobLeavesTheRefForTheRetry(t *testing.T) {
 	a := composeNaming("x")
 	store, inv := seedComposeApp(t, id, a)
 	b := "services:\n  web:\n    image: me/web:2\n"
-	if err := store.EditCompose(ctx, id, ComposeHash(a), b, time.Now().UTC()); err != nil {
+	if err := store.EditCompose(ctx, id, ComposeHash(a), b, 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.RecordSecretRef(ctx, id, "x"); err != nil {
@@ -393,7 +393,7 @@ func TestRelease_TC783_45_FailedJobLeavesTheRefForTheRetry(t *testing.T) {
 	stash := NewComposeStash()
 	w := wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), DeleteSecretsDeps{Secrets: del, Store: &fakeStoreState{}, Log: discardLog()}, AppIdentity{}))
 
-	if err := stash.Put("job-c", "services:\n  web:\n    image: me/web:3\n"); err != nil {
+	if err := stash.Put("job-c", HeldEdit{ComposeYAML: "services:\n  web:\n    image: me/web:3\n"}); err != nil {
 		t.Fatal(err)
 	}
 	run := runWorkflow(t, w, nc, `{"appId":"`+id+`"}`, "job-c")
@@ -405,7 +405,7 @@ func TestRelease_TC783_45_FailedJobLeavesTheRefForTheRetry(t *testing.T) {
 	}
 
 	ok.Store(true)
-	if err := stash.Put("job-d", "services:\n  web:\n    image: me/web:4\n"); err != nil {
+	if err := stash.Put("job-d", HeldEdit{ComposeYAML: "services:\n  web:\n    image: me/web:4\n"}); err != nil {
 		t.Fatal(err)
 	}
 	run = runWorkflow(t, w, nc, `{"appId":"`+id+`"}`, "job-d")
