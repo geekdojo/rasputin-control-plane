@@ -52,7 +52,7 @@ func identityAdminTrigger(mode string, mon *identitystate.Monitor, session *idcl
 	if mon == nil || session == nil || ledger == nil || holder == nil || log == nil {
 		return nil, nil, errors.New("identity admin trigger: a collaborator is nil under keycloak")
 	}
-	trig, err := recoveradmin.NewTrigger(recoveradmin.TriggerDeps{Ready: mon, Admin: session, Ledger: ledger, Log: log})
+	trig, err := recoveradmin.NewTrigger(recoveradmin.TriggerDeps{Ready: mon.ServiceOnly(), Admin: session, Ledger: ledger, Log: log})
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1241,13 +1241,21 @@ func main() {
 		mode: identityW.mode, client: identityW.client, ledger: jobStore, settings: setupStore,
 		outcomes: outcomes, jobRunning: jobRunning(jobStore), run: execrun.CombinedOutput,
 		fsys: os.DirFS("/"), remove: os.Remove, free: storage.FreeBytes, dataDir: dataDir,
-		restores: restoreSessions, now: time.Now, log: logger,
+		restores: restoreSessions, features: identityFeatures(identityW.mode, identityW.session, logger), now: time.Now, log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity state", "err", err.Error())
 		os.Exit(1)
 	}
 	identityState.register(runner)
+	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
+	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
+		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat, now: time.Now, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
+		os.Exit(1)
+	}
+	identityConv.register(runner)
 	// identity.recover_admin's trigger (#1127): due only once the restored
 	// alert's holder is set below, and then on its fact.
 	adminEntry, adminTrigger, err := identityAdminTrigger(identityW.mode, identityState.monitor, identityW.session, jobStore,
@@ -1729,7 +1737,7 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(identityState.entries(), entriesOf(adminEntry)...)...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...)...)...))
 	sched.Start(ctx)
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
@@ -1952,7 +1960,7 @@ func main() {
 	// The identity service's state alert (#979) and the admin client's
 	// still-refused alert (#1127), under keycloak only. Setting the restored
 	// alert's holder is the fact identity.recover_admin's trigger waits on.
-	identityState.wireAlerts(alertsSvc, adminTrigger)
+	identityState.wireAlerts(alertsSvc, adminTrigger, identityConv.alerts)
 	raiseRestored := restoredFunc(alertsSvc.RaiseIdentityAdminRestored)
 	adminRestored.Store(&raiseRestored)
 	// The OS outcome records' crit alert (#833), which replaces the generic

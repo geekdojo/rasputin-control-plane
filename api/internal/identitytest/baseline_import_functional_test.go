@@ -69,21 +69,28 @@ func importBaseline(t *testing.T, env *Env) {
 	if err := os.WriteFile(file, baseline, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	kcCommand(t, env, "import of identity/realm-baseline.json", "import", "--optimized", "--file", file)
+	env.log.Info("realm baseline imported", "realm", baselineRealm, "file", file)
+}
+
+// kcCommand runs a second kc.sh against env's database and keycloak.conf,
+// the running server's own build, under the unit's JVM environment, and
+// fails the test, naming what, unless it succeeds.
+func kcCommand(t *testing.T, env *Env, what string, args ...string) {
+	t.Helper()
 	cfg := env.h.cfg
 	home := filepath.Join(env.root, "kc")
-	out, err := cfg.Run(t.Context(), "/usr/bin/env", "-i",
+	out, err := cfg.Run(t.Context(), "/usr/bin/env", append([]string{"-i",
 		"PATH=/usr/bin:/bin",
-		"HOME="+env.root,
-		"JAVA_HOME="+cfg.JavaHome,
-		"MALLOC_ARENA_MAX="+mallocArenaMax,
-		"JAVA_OPTS_KC_HEAP="+javaOptsHeap,
-		"JAVA_OPTS_APPEND="+javaOptsAppend,
-		filepath.Join(home, "bin", "kc.sh"), "--config-file="+filepath.Join(env.root, "keycloak.conf"),
-		"import", "--optimized", "--file", file)
+		"HOME=" + env.root,
+		"JAVA_HOME=" + cfg.JavaHome,
+		"MALLOC_ARENA_MAX=" + mallocArenaMax,
+		"JAVA_OPTS_KC_HEAP=" + javaOptsHeap,
+		"JAVA_OPTS_APPEND=" + javaOptsAppend,
+		filepath.Join(home, "bin", "kc.sh"), "--config-file=" + filepath.Join(env.root, "keycloak.conf")}, args...)...)
 	if err != nil {
-		t.Fatalf("kc.sh import of identity/realm-baseline.json: %v\n%s", err, tail(out, 40))
+		t.Fatalf("kc.sh %s: %v\n%s", what, err, tail(out, 40))
 	}
-	env.log.Info("realm baseline imported", "realm", baselineRealm, "file", file)
 }
 
 // tail is the last n lines of out.

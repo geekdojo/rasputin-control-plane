@@ -362,3 +362,44 @@ Then run the self-test as above.
 | TC-1127-16 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-16 (CI) |
 | TC-1127-17 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-17 (CI) |
 | TC-1127-18 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-18 (CI) |
+
+## Converge, migrations and the features check
+
+`TestConverge_AgainstPinnedKeycloak` (`api/internal/identitytest/converge_functional_test.go`,
+geekdojo/geekdojo-brain#981) imports the repo's realm baseline into an Env of its own and runs
+`identity.converge`, the features check and the migrations runner against it, over the api's own
+identity client and Admin API session as `rasputin-admin`. It runs in the backend job with the
+other functional tests, under `RASPUTIN_IDENTITY_FUNCTIONAL=required`, and needs nothing more
+than they do.
+
+What it proves at the pin:
+
+- From the freshly imported baseline, one converge run reaches every field converge owns, and a
+  second run repairs nothing, writes nothing and adds no admin event.
+- The drift testing.md's CI TS-17 names (`frontendUrl`, both WebAuthn RP IDs, `admin-cli` with
+  its password grant on, an SMTP host) is put back, and each WebAuthn policy keeps its user
+  verification, resident-key and entity-name settings. `admin-cli`'s password grant is then
+  refused for the client. The drift warning rises on that run and clears on the next.
+- Every other owned field is put back, a `fallback-*` key provider is deleted, and
+  `rasputin-mesh`'s client secret is untouched.
+- The stored-event settings are held: the audit event types, no admin-event details, and a
+  30-day expiry for user and admin events.
+- The shipped `identity/keycloak-build.conf` matches the pin's `GET /admin/serverinfo`, read
+  through the identity client within its body cap, so a real identity state reads ready. With
+  a build conf that disables a feature the pin runs, it reads `features-mismatch`.
+- `migrations.All` followed by two test-only migrations commutes with converge. For each prefix
+  k, a realm migrated k steps, converged, migrated the rest and converged again exports equal,
+  with ids, key material and the realm's name masked, to one migrated fully and then converged.
+
+What it does not prove: the doors' answer to a features mismatch (Identity 4.3 and 4.4), an
+upgrade across Keycloak versions (there is one pin), and redirect URIs from a real door table
+(Identity 4.1).
+
+| Test case | Where |
+|---|---|
+| TC-981-01 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-01 (CI) |
+| TC-981-02 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-02 (CI) |
+| TC-981-03 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-03 (CI) |
+| TC-981-04 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-04 (CI) |
+| TC-981-10 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-10 (CI) |
+| TC-981-17 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-17 (CI) |
