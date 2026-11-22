@@ -254,7 +254,11 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		// longer validates: take a new one.
 		api = raw(t, baselineRealm)
 		cliID, cli := api.clientRep("admin-cli")
-		cli["enabled"], cli["directAccessGrantsEnabled"] = true, true
+		// Keycloak's own admin-cli is public; the baseline's imports as a
+		// confidential client with no secret, which client authentication
+		// refuses before any grant. Make it Keycloak's, so the drift reaches
+		// the grant converge closes (publicClient is not a field converge owns).
+		cli["enabled"], cli["directAccessGrantsEnabled"], cli["publicClient"] = true, true, true
 		api.must(http.StatusNoContent, http.MethodPut, "/clients/"+cliID, cli)
 		got := realmRep(t, api)
 		if got["webAuthnPolicyRpId"] != "drift.example" || got["webAuthnPolicyPasswordlessRpId"] != "drift.example" {
