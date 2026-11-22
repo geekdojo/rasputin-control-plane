@@ -17,10 +17,10 @@ import (
 
 // The OS's pre-api outcome records (geekdojo/geekdojo-brain#833): the seal
 // key (#803), the store's first init (#804), the store provisioner (#805),
-// the store's version gate (#801), and the identity database's first-init
-// gate (#975) and version gate (#1009) each write a record under /run that
-// the api turns into a job and, when it failed or cannot be read, a crit
-// alert.
+// the store's version gate (#801), the store's roll-forward (#1132), and the
+// identity database's first-init gate (#975) and version gate (#1009) each
+// write a record under /run that the api turns into a job and, when it
+// failed or cannot be read, a crit alert.
 
 const (
 	// outcomeRunDir is where rasputin-os writes the records.
@@ -29,12 +29,30 @@ const (
 	procBootIDPath = "/proc/sys/kernel/random/boot_id"
 	// storeProvisionUnit is #805's oneshot; every store start pulls it in.
 	storeProvisionUnit = "rasputin-store-provision.service"
+	// storeProvisionKind and storeMigrateKind are the store provisioner's
+	// and the store roll-forward's records (#805, #1132), which the
+	// roll-forward also reads itself.
+	storeProvisionKind = "os.store_provision"
+	storeMigrateKind   = "os.store_migrate"
 )
 
-// outcomeSources are the declared records, under runDir. observeInit is
-// given each parsed os.store_init record: the empty-store marker's
-// ObserveInit (#765).
-func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.Record)) []osoutcome.Source {
+// outcomeObservers are the Observe hooks the declared records feed. Each is
+// required.
+type outcomeObservers struct {
+	// init is given each parsed os.store_init record: the empty-store
+	// marker's ObserveInit (#765).
+	init func(context.Context, osoutcome.Record)
+	// provision is given each parsed os.store_provision record: the store
+	// roll-forward's trigger keeps the last (#1132).
+	provision func(context.Context, osoutcome.Record)
+	// migrate is given each parsed os.store_migrate record: the roll-forward's
+	// Hold, released by it after an abort that could not confirm the old
+	// tree is live (#1132).
+	migrate func(context.Context, osoutcome.Record)
+}
+
+// outcomeSources are the declared records, under runDir, feeding obs.
+func outcomeSources(runDir string, obs outcomeObservers) []osoutcome.Source {
 	return []osoutcome.Source{
 		{
 			Kind:     "os.seal_key",
@@ -57,12 +75,16 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 			Outcomes:          map[string]osoutcome.Verdict{"initialised": osoutcome.OK, "failed": osoutcome.Alert},
 			Title:             "The secret store did not initialise",
 			AfterStoreRestart: true,
-			Observe:           observeInit,
+			Observe:           obs.init,
 		},
 		{
-			Kind:     "os.store_provision",
-			Path:     filepath.Join(runDir, "rasputin-store-provision", "outcome"),
-			Fields:   []string{osoutcome.FieldBootID, osoutcome.FieldRunID, osoutcome.FieldReason},
+			// author (#1132) is whether the store holds the rasputin-author
+			// role: absent on a store initialised before 2026.11.3, which the
+			// roll-forward migrates; - when the run did not finish reading it.
+			Kind: storeProvisionKind,
+			Path: filepath.Join(runDir, "rasputin-store-provision", "outcome"),
+			Fields: []string{osoutcome.FieldBootID, osoutcome.FieldRunID, osoutcome.FieldReason,
+				osoutcome.FieldAuthor},
 			KeyField: osoutcome.FieldRunID,
 			Outcomes: map[string]osoutcome.Verdict{
 				"applied": osoutcome.OK, "unchanged": osoutcome.OK, "failed": osoutcome.Alert,
@@ -70,6 +92,7 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 			Title:             "The secret store's provisioning failed",
 			AfterStoreRestart: true,
 			StartUnit:         storeProvisionUnit,
+			Observe:           obs.provision,
 		},
 		{
 			// The store's version gate (#801), run in every start of the
@@ -87,6 +110,27 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 			},
 			Title:             "The secret store's data was rolled back, or the store was held stopped",
 			AfterStoreRestart: true,
+		},
+		{
+			// The store's roll-forward step (#1132), run in every start of
+			// the store after the version gate: moved when it set the old
+			// tree aside for a re-initialisation, finished when the api's
+			// commit let it delete that tree, restored when it put the old
+			// tree back, superseded when a restore's data replaced the
+			// migration's, failed when the request could not be acted on. A
+			// start with nothing to do writes no record. Keyed on run_id: a
+			// boot can hold several starts.
+			Kind:     storeMigrateKind,
+			Path:     filepath.Join(runDir, "rasputin-store-migrate", "outcome"),
+			Fields:   []string{osoutcome.FieldBootID, osoutcome.FieldRunID, osoutcome.FieldReason},
+			KeyField: osoutcome.FieldRunID,
+			Outcomes: map[string]osoutcome.Verdict{
+				"moved": osoutcome.OK, "finished": osoutcome.OK,
+				"restored": osoutcome.Alert, "superseded": osoutcome.Alert, "failed": osoutcome.Alert,
+			},
+			Title:             "The secret store's upgrade did not finish",
+			AfterStoreRestart: true,
+			Observe:           obs.migrate,
 		},
 		{
 			// The identity database's first-init gate (#975), run in every
@@ -125,14 +169,14 @@ func outcomeSources(runDir string, observeInit func(context.Context, osoutcome.R
 
 // outcomeReaderWiring builds the reader over the records under runDir, with
 // the api's boot id read from bootIDPath, units started through run, and the
-// store's init record observed by observeInit (required).
+// records observed by obs (each required).
 func outcomeReaderWiring(ledger osoutcome.Ledger, logger *slog.Logger, runDir, bootIDPath string, run runFunc,
-	observeInit func(context.Context, osoutcome.Record)) (*osoutcome.Reader, error) {
+	obs outcomeObservers) (*osoutcome.Reader, error) {
 	if run == nil {
 		return nil, errors.New("os outcomes: the run func is nil")
 	}
-	if observeInit == nil {
-		return nil, errors.New("os outcomes: the store init observer is nil")
+	if obs.init == nil || obs.provision == nil || obs.migrate == nil {
+		return nil, errors.New("os outcomes: a record observer is nil")
 	}
 	r, err := osoutcome.New(osoutcome.Deps{
 		Ledger: ledger,
@@ -146,7 +190,7 @@ func outcomeReaderWiring(ledger osoutcome.Ledger, logger *slog.Logger, runDir, b
 			}
 			return nil
 		},
-	}, outcomeSources(runDir, observeInit))
+	}, outcomeSources(runDir, obs))
 	if err != nil {
 		return nil, fmt.Errorf("os outcomes: %w", err)
 	}

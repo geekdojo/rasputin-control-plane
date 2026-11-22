@@ -38,6 +38,10 @@ var (
 	ErrInvalidValue = errors.New("secretstore: invalid value")
 	// ErrDisabled: no store is configured; see Disabled.
 	ErrDisabled = errors.New("secretstore: disabled")
+	// ErrInvalidCiphertext: a Transit decrypt was refused because the
+	// ciphertext does not decrypt under the key: it was tampered with, made
+	// under another key, or is malformed (geekdojo/geekdojo-brain#1084).
+	ErrInvalidCiphertext = errors.New("secretstore: invalid ciphertext")
 )
 
 // Error is the one error type a store method returns.
@@ -51,7 +55,7 @@ var (
 // caller that maps this error logs the full reason under its own correlation
 // id (geekdojo/geekdojo-brain#758, F-758-06).
 type Error struct {
-	Op     string // health, read, write, versions, delete, login or rotate_root
+	Op     string // health, read, write, versions, delete, login, rotate_root or transit_*
 	Mount  string
 	Path   string
 	Status int // the HTTP status, 0 when none was received

@@ -118,9 +118,14 @@ type Policy struct {
 
 // Role is one cert role and the policy it grants.
 type Role struct {
-	// Name is the role's name and the only CommonName it admits
-	// (allowed_common_names). Log in with Store.Login or Store.TokenFor.
+	// Name is the role's name, and the only CommonName it admits
+	// (allowed_common_names) unless CommonName is set. Log in with
+	// Store.Login or Store.TokenFor.
 	Name string
+	// CommonName, when set, is the one CommonName the role admits instead of
+	// Name, as the image's rasputin-author role admits the provisioner's leaf
+	// (geekdojo/geekdojo-brain#1084). Log in with Store.Login.
+	CommonName string
 	// Policy is the policy's name, the role's only token policy: the role
 	// sets token_no_default_policy, so its tokens carry nothing else.
 	Policy string
@@ -175,6 +180,8 @@ func (b Bootstrap) validate() error {
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].Policy %q is not a name matching %s", i, r.Policy, nameRE)
 		case len(r.PolicyText) == 0:
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].PolicyText is empty", i)
+		case r.CommonName != "" && !nameRE.MatchString(r.CommonName):
+			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].CommonName %q is not a name matching %s", i, r.CommonName, nameRE)
 		case r.TokenTTL < 0 || r.TokenTTL%time.Second != 0:
 			return fmt.Errorf("secretstoretest: Bootstrap.Roles[%d].TokenTTL %v is not zero or a positive whole number of seconds", i, r.TokenTTL)
 		}
@@ -231,9 +238,9 @@ func (b Bootstrap) policies() []policyFile {
 //   - a kv-v2 mount at b.Mount;
 //   - the cert auth method;
 //   - per Role, a cert role trusting the store CA, admitting only the
-//     CommonName Role.Name, with Role.Policy as its only token policy and
-//     token_no_default_policy set (T37), and token_ttl when Role.TokenTTL is
-//     set.
+//     CommonName Role.CommonName, or Role.Name when that is empty, with
+//     Role.Policy as its only token policy and token_no_default_policy set
+//     (T37), and token_ttl when Role.TokenTTL is set.
 //
 // The role's certificate is the store CA PEM itself, inline.
 func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string) string) ([]byte, error) {
@@ -256,9 +263,13 @@ func renderInitJSON(b Bootstrap, storeCAPEM []byte, policyPath func(name string)
 		Data:      map[string]any{"type": "cert"},
 	}}}
 	for _, r := range b.Roles {
+		cn := r.Name
+		if r.CommonName != "" {
+			cn = r.CommonName
+		}
 		data := map[string]any{
 			"certificate":             string(storeCAPEM),
-			"allowed_common_names":    []string{r.Name},
+			"allowed_common_names":    []string{cn},
 			"token_policies":          []string{r.Policy},
 			"token_no_default_policy": true,
 		}

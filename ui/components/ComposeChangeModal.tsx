@@ -28,7 +28,8 @@ import {
 import { TIER_COPY, coLocatedSecretsWarning, grantLabel } from '../lib/privilege';
 import type { App, AppVolumesResponse, DroppedVolume } from '../lib/types';
 import { deleteWarning } from '../lib/volumes';
-import { Btn, DIM, FG, HAIR_SOFT, Textarea } from './kit';
+import { WEB_PORT_EMPTY_ON_EDIT, WEB_PORT_LABEL, WEB_PORT_MEANING, webPortValue } from '../lib/web-port';
+import { Btn, DIM, FG, HAIR_SOFT, Input, Textarea } from './kit';
 import { ModalPortal, useModalChrome } from './modal';
 import { ACCENT, MONO } from './ui-theme';
 import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
@@ -46,7 +47,9 @@ import { VolumeBackupTable, type VolumeTableRow } from './VolumeBackupTable';
 //            UPGRADE stays disabled until the owner ticks consent. The server
 //            enforces it: without acceptPrivilegeTier it answers 409, and
 //            that refusal opens the same prompt.
-//   edit     a custom app's compose, edited here and redeployed in place.
+//   edit     a custom app's compose, edited here and redeployed in place,
+//            with its web port (#1090): the field starts from the stored
+//            port, and left empty it keeps that port.
 //   revert   re-apply a failed app's previous compose. The confirm is one
 //            static prompt, REVERT_PROMPT, and nothing else.
 //
@@ -83,10 +86,12 @@ const TITLES: Record<ComposeChangeKind, string> = {
 export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeChangeModalProps) {
   const { initialFocusRef } = useModalChrome({ open: true, onClose });
   const editorId = useId();
+  const portId = useId();
   const [volumes, setVolumes] = useState<AppVolumesResponse | null>(null);
   // The github.com repo catalog releases come from, for the warning's link.
   const [sourceRepo, setSourceRepo] = useState<string | undefined>(undefined);
   const [draft, setDraft] = useState<string>(kind === 'edit' ? app.composeYaml : '');
+  const [portDraft, setPortDraft] = useState<string>(app.publishedPort === undefined ? '' : String(app.publishedPort));
   // The body of the change that was refused, held only so the resubmit can
   // send the same thing again.
   const [refusedBody, setRefusedBody] = useState<ComposeChangeBody | null>(null);
@@ -173,7 +178,7 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
   function confirm() {
     let body: ComposeChangeBody;
     try {
-      body = bodyFor(kind, app, draft, consentedTier(raise, consented));
+      body = bodyFor(kind, app, draft, consentedTier(raise, consented), webPortValue(portDraft));
     } catch (e: unknown) {
       setError(String(e instanceof Error ? e.message : e));
       return;
@@ -263,6 +268,26 @@ export function ComposeChangeModal({ app, kind, onFinished, onClose }: ComposeCh
             <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5 }}>
               Redeploys in place on {app.targetNode}: the same app, its images pulled first, its volumes kept. The compose is not
               validated before it is sent.
+            </p>
+            <label
+              htmlFor={portId}
+              style={{ display: 'block', color: DIM, fontSize: 9, fontFamily: MONO, letterSpacing: '0.12em', margin: '14px 0 6px' }}
+            >
+              {WEB_PORT_LABEL}
+            </label>
+            <Input
+              id={portId}
+              value={portDraft}
+              onChange={(e) => setPortDraft(e.target.value)}
+              disabled={busy}
+              inputMode="numeric"
+              autoComplete="off"
+              placeholder="e.g. 8080"
+              aria-label="Web port"
+              style={{ width: 160 }}
+            />
+            <p style={{ color: DIM, fontSize: 9, fontFamily: MONO, margin: '6px 0 0', lineHeight: 1.5 }}>
+              {WEB_PORT_MEANING} {WEB_PORT_EMPTY_ON_EDIT}
             </p>
           </div>
         )}

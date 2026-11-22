@@ -52,8 +52,10 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/releases"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/scheduler"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/sdnotify"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/sealrotate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemarker"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storemigrate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
@@ -422,7 +424,23 @@ func main() {
 	// into the job ledger just before READY, and again after each store
 	// restart the api performs; their alert joins the aggregator below. The
 	// store's init record also feeds the marker (#765).
-	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput, storeMarker.ObserveInit)
+	//
+	// The store's roll-forward (geekdojo/geekdojo-brain#1132) observes two
+	// of them: its trigger keeps the last provision record, and its Hold is
+	// released by a migrate record once an abort left it on.
+	migrateFiles, err := storemigrate.NewStateDir(storemigrate.ProductionDir, nil)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store migration state", "err", err.Error())
+		os.Exit(1)
+	}
+	migrateHold, err := storemigrate.NewHold(migrateFiles, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: store migration hold", "err", err.Error())
+		os.Exit(1)
+	}
+	provisionSeen := &storemigrate.LastRecord{}
+	outcomes, err := outcomeReaderWiring(jobStore, logger, outcomeRunDir, procBootIDPath, execrun.CombinedOutput,
+		outcomeObservers{init: storeMarker.ObserveInit, provision: provisionSeen.Observe, migrate: migrateHold.Observe})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: os outcomes", "err", err.Error())
 		os.Exit(1)
@@ -557,12 +575,13 @@ func main() {
 	// sweeper of their own; nil, and skipped, when the identity CA did not
 	// load. See identityca_wiring.go.
 	// The identity service's client (geekdojo/geekdojo-brain#978):
-	// RASPUTIN_IDENTITY_BACKEND selects it, and a refused setting turns it
-	// off with a configfault. It is wired before the identity leaves, so its
+	// RASPUTIN_IDENTITY_BACKEND selects it, and a refused setting, or the
+	// mock on a release build, turns it off with a configfault. It is wired before the identity leaves, so its
 	// CloseIdleConnections is the api client leaf's reload. See
 	// identity_wiring.go.
-	identityW, err := wireIdentity(ctx, logger, identityBackendFromEnv(), identityAddrFromEnv(), identityMgmtAddrFromEnv(),
-		identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputEnv)
+	// The restored alert's holder (#1127): set once the alerts service exists.
+	adminRestored := &atomic.Pointer[restoredFunc]{}
+	identityW, err := wireIdentityFromEnv(ctx, logger, identityCA, dataDir, execrun.CombinedOutput, execrun.CombinedOutputInput, adminRestored)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity service", "err", err.Error())
 		os.Exit(1)
@@ -609,6 +628,21 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store update copy", "err", err.Error())
 		os.Exit(1)
 	}
+	// The same control, quiescing for the store's roll-forward
+	// (geekdojo/geekdojo-brain#1132). An api that died mid-migration left
+	// its files behind: Recover finishes them now, before the secrets
+	// service, the app relay or the job runner exists, so nothing reads a
+	// store that is not yet back on its old data.
+	storeMigrateControl, err := storeBackupWiring(storeBackend, storestate.QuiesceMigration, readiness.monitor, readiness.store, sealFiles,
+		execrun.CombinedOutput, outcomes.AfterStoreRestart, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration control", "err", err.Error())
+		os.Exit(1)
+	}
+	if err := storeMigrateRecover(ctx, storeW.mode, migrateFiles, storeMigrateControl, logger); err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration recovery", "err", err.Error())
+		os.Exit(1)
+	}
 	// The api's login session at the store (geekdojo/geekdojo-brain#759). It
 	// logs in on the first call that needs a token, not here. #761's
 	// repository is its first consumer.
@@ -617,8 +651,18 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store session", "err", err.Error())
 		os.Exit(1)
 	}
+	// The api's key session at the store (geekdojo/geekdojo-brain#1084): the
+	// rasputin-app-keys identity, over its own leaf and client, kept off the
+	// readiness observer. Only the secrets service's key ops use it.
+	storeKeySession, err := storeKeySessionWiring(storeW.keyLogin, storeW.keyTransit, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store key session", "err", err.Error())
+		os.Exit(1)
+	}
 	// The secrets service and its KV repository (geekdojo/geekdojo-brain#761).
-	secretsSvc, err := secretsWiring(storeSession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
+	// Under openbao both sessions sit behind the roll-forward's Hold (#1132).
+	heldSession, heldKeySession := storeMigrateHeld(storeW.mode, migrateHold, storeSession, storeKeySession)
+	secretsSvc, err := secretsWiring(heldSession, heldKeySession, appsStore, storeSwitchFor(storeBackend, storeSwitch), logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secrets service", "err", err.Error())
 		os.Exit(1)
@@ -1186,7 +1230,7 @@ func main() {
 	}
 	runner.Register(storeRecov.workflow)
 	// identity.recover_admin (#978), under keycloak only: a System job, so
-	// POST /api/jobs refuses it. Nothing submits it yet (F-978-04).
+	// POST /api/jobs refuses it. Only its trigger submits it (#1127).
 	identityW.register(runner)
 	// The identity service's state, its identity:<state> alert and
 	// identity.recover, the pair's restart after a full disk
@@ -1196,24 +1240,65 @@ func main() {
 		mode: identityW.mode, client: identityW.client, ledger: jobStore, settings: setupStore,
 		outcomes: outcomes, jobRunning: jobRunning(jobStore), run: execrun.CombinedOutput,
 		fsys: os.DirFS("/"), remove: os.Remove, free: storage.FreeBytes, dataDir: dataDir,
-		restores: restoreSessions, now: time.Now, log: logger,
+		restores: restoreSessions, features: identityFeatures(identityW.mode, identityW.session, logger), now: time.Now, log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity state", "err", err.Error())
 		os.Exit(1)
 	}
 	identityState.register(runner)
+	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
+	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
+		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat, now: time.Now, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
+		os.Exit(1)
+	}
+	identityConv.register(runner)
+	// identity.recover_admin's trigger (#1127): due only once the restored
+	// alert's holder is set below, and then on its fact.
+	adminEntry, adminTrigger, err := identityAdminTrigger(identityW.mode, identityState.monitor, identityW.session, jobStore,
+		adminRestored, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity admin trigger", "err", err.Error())
+		os.Exit(1)
+	}
 	// The store's copy before an OS update of its host, and the reference
 	// check that reports entries lost when the store's data is put back
 	// (geekdojo/geekdojo-brain#800).
 	rollback, err := storeRollbackWiring(storeRollbackDeps{
 		mode: storeW.mode, copyStore: storeUpdateCopy, lock: sealRot.updateLock(),
 		storeDataDir: storeDataDir, copyPath: filepath.Join(dataDir, "openbao-preupdate.tar"),
-		refs: appSecretRefs{store: appsStore}, secrets: secretsSvc, monitor: readiness.monitor,
+		refs: appSecretRefs{store: appsStore}, secrets: secretsSvc,
 		runner: runner, log: logger,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store rollback", "err", err.Error())
+		os.Exit(1)
+	}
+	// The store's roll-forward (geekdojo/geekdojo-brain#1132): its job, and
+	// the store's one first-ready coordinator, which submits the migration
+	// or the reference check above, and orders the check after the
+	// migration. Its repository reads and writes over the raw session: the
+	// Hold keeps everything else off the store while it runs.
+	migrateRecords, err := newOutcomeRecords(outcomeRunDir)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
+		os.Exit(1)
+	}
+	migrateRepo, err := secrets.NewRepository(storeSession)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
+		os.Exit(1)
+	}
+	storeMig, err := storeMigrateWiring(storeMigrateDeps{
+		mode: storeW.mode, hold: migrateHold, files: migrateFiles, provision: provisionSeen, inventory: appsStore,
+		repo: migrateRepo, control: storeMigrateControl, lock: sealRot.captureLock(), marker: storeMarker,
+		settings: setupStore, records: migrateRecords, run: execrun.CombinedOutput, bootID: fileBootID(procBootIDPath),
+		monitor: readiness.monitor, runner: runner, check: rollback.check, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: secret store migration", "err", err.Error())
 		os.Exit(1)
 	}
 	// The same hosts' update of themselves commits only once their own store
@@ -1332,9 +1417,6 @@ func main() {
 	// Ordered after ResumeSelfUpdates because it waits on the child that call
 	// drives — starting it first would just poll for longer.
 	updater.ResumeSystemUpdates(ctx, jobStore, runner, busSrv.Conn(), selfNodeID)
-	// The store reference check, once per process on the first ready
-	// reading: a store's data can only be put back before boot (#800).
-	rollback.arm(ctx)
 
 	invSvc := inventory.NewService(invStore, busSrv.Conn(), logger)
 	// On a firewall-role node's FIRST registration, seed the stock-equivalent
@@ -1654,7 +1736,7 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), identityState.entries()...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...)...)...))
 	sched.Start(ctx)
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
@@ -1874,8 +1956,12 @@ func main() {
 	if storeAlerts := sealRot.storeAlerts(readiness.alerts); storeAlerts != nil {
 		alertsSvc.SetStoreAlerts(storeAlerts)
 	}
-	// The identity service's state alert (#979), under keycloak only.
-	identityState.wireAlerts(alertsSvc)
+	// The identity service's state alert (#979) and the admin client's
+	// still-refused alert (#1127), under keycloak only. Setting the restored
+	// alert's holder is the fact identity.recover_admin's trigger waits on.
+	identityState.wireAlerts(alertsSvc, adminTrigger, identityConv.alerts)
+	raiseRestored := restoredFunc(alertsSvc.RaiseIdentityAdminRestored)
+	adminRestored.Store(&raiseRestored)
 	// The OS outcome records' crit alert (#833), which replaces the generic
 	// job-failed warn for their kinds.
 	wireOutcomeAlerts(alertsSvc, outcomes)
@@ -2128,8 +2214,14 @@ func main() {
 	// outcome records are read first, so the seal-key job is in the ledger
 	// before READY=1 (#833, #853), and the empty-store marker is armed on
 	// existing store data after them (#765, F-765-01).
+	//
+	// The store's first-ready coordinator is armed in the same place, after
+	// the read, so this boot's provision record is observed before it
+	// decides (#1132): it submits the roll-forward, or the reference check
+	// (#800) once per process on the first ready reading.
 	readyAfterOutcomes(ctx, outcomes, func(ctx context.Context) {
 		storeMarker.Arm(ctx, storeDataPresent(storeDataDir))
+		storeMig.arm(ctx)
 	}, sdnotify.Ready)
 	sdnotify.StartWatchdog(ctx, func(pctx context.Context) error {
 		_, err := authStore.CountUsers(pctx)
@@ -2297,8 +2389,9 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 //   - headscale exists only for the self-hosted Docker backend. The mock has no
 //     container, and an external Headscale brings its own certificate — neither
 //     is ours to renew.
-//   - the three store-CA leaves (the store's server leaf, the api's client
-//     leaf and the store provisioner's leaf, #805) exist only when
+//   - the four store-CA leaves (the store's server leaf, the api's client
+//     leaf, the store provisioner's leaf, #805, and the api's key leaf,
+//     #1084) exist only when
 //     RASPUTIN_SECRETSTORE_BACKEND is openbao. They are registered with the
 //     store CA's own sweeper, so the caller checks the union of both
 //     sweepers' names.
@@ -2311,7 +2404,7 @@ func requiredLeafConsumers(httpsEnabled, selfHostedMesh, storeSelected bool) []s
 		want = append(want, mesh.HeadscaleLeafName)
 	}
 	if storeSelected {
-		want = append(want, storeServerLeafName, storeClientLeafName, storeProvisionerLeafName)
+		want = append(want, storeServerLeafName, storeClientLeafName, storeProvisionerLeafName, storeAppKeysLeafName)
 	}
 	return want
 }

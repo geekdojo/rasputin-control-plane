@@ -37,7 +37,7 @@ func TestMonitor_QuiesceOSUpdateCopy(t *testing.T) {
 	if got := QuiesceOSUpdate.String(); got != "os-update" {
 		t.Errorf("String() = %q, want os-update", got)
 	}
-	if c := Clause(Quiesced); !strings.Contains(c, "or an OS update") {
+	if c := Clause(Quiesced); !strings.Contains(c, "an OS update") {
 		t.Errorf("Clause(Quiesced) = %q, want it to name an OS update", c)
 	}
 	recs := f.rec.Matching(slog.LevelInfo, "secret store quiesced for an OS update")
@@ -46,6 +46,39 @@ func TestMonitor_QuiesceOSUpdateCopy(t *testing.T) {
 	}
 	if got, _ := logkittest.Attr(recs[0], "reason"); got != "os-update" {
 		t.Errorf("reason field = %q, want os-update", got)
+	}
+}
+
+// TC-1132-20 (the refusal's words): a not-ready store held by a running
+// store migration raises the quiesced warn alert naming the upgrade, and
+// Quiesced's clause, which a Hold refusal carries, names it too.
+func TestMonitor_QuiesceMigration(t *testing.T) {
+	f := newFixture(t, secretstore.Health{}, healthErr(secretstore.ErrUnreachable))
+	f.running["mig"] = true
+	release := f.m.Quiesce("mig", QuiesceMigration)
+	defer release()
+	a := f.m.Alerts(context.Background(), f.clock.now())
+	if len(a) != 1 || a[0].ID != "secret-store:quiesced" || a[0].Severity != proto.AlertWarn {
+		t.Fatalf("alerts = %+v", a)
+	}
+	if a[0].Title != "The secret store is paused for an upgrade." {
+		t.Errorf("Title = %q", a[0].Title)
+	}
+	if strings.Contains(a[0].Detail, "backup") || strings.Contains(a[0].Detail, "OS update") {
+		t.Errorf("Detail = %q", a[0].Detail)
+	}
+	assertSentence(t, "Detail", a[0].Detail)
+	if got := QuiesceMigration.String(); got != "store-migrate" {
+		t.Errorf("String() = %q, want store-migrate", got)
+	}
+	if c := Clause(Quiesced); !strings.Contains(c, "a secret store upgrade") {
+		t.Errorf("Clause(Quiesced) = %q, want it to name the upgrade", c)
+	}
+	if e := (&NotReadyError{State: Quiesced}).Error(); !strings.Contains(e, "a secret store upgrade") {
+		t.Errorf("refusal %q does not name the upgrade", e)
+	}
+	if len(f.rec.Matching(slog.LevelInfo, "secret store quiesced for a secret store upgrade")) != 1 {
+		t.Fatal("no quiesce record naming the upgrade")
 	}
 }
 

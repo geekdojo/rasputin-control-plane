@@ -15,9 +15,10 @@ const WebPublishHost = "127.0.0.1"
 // passes too, because it publishes nothing; it is on its own for networking.
 // Ports other than the web port are not checked.
 //
-// Only the catalog publisher (corpus.BuildBundle) and tilelint call this. The
-// control plane's reader never does, so the embedded floor and cached bundles
-// signed before the rule existed keep loading.
+// The catalog publisher (corpus.BuildBundle) and tilelint call this on tiles.
+// The control plane calls it only on a custom app's compose
+// (geekdojo/geekdojo-brain#1091), never on a bundle it reads, so the embedded
+// floor and cached bundles signed before the rule existed keep loading.
 func ValidateWebPortBind(t Tile, f SafetyFacts) error {
 	web := t.WebPort()
 	if web == 0 {

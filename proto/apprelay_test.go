@@ -2,6 +2,7 @@ package proto
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"strings"
@@ -70,5 +71,28 @@ func TestAppRelay_SubjectsFloorAndRedaction(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), `"correlationId":"c"`) || !strings.Contains(buf.String(), `"name":"k"`) {
 		t.Errorf("the log values lost their fields: %s", buf.String())
+	}
+}
+
+// TC-1084-16 (the bound itself): the largest plaintext AppKeyPlaintextFits
+// accepts is exactly AppKeyMaxPlaintextBytes, decoded, at every padding; its
+// Transit ciphertext with a 10-digit version (the prefix, then base64 of the
+// 12-byte nonce, the plaintext and the 16-byte tag) fits the decrypt bound,
+// AppRelayMaxValueBytes; and one byte more does not fit.
+func TestAppKeyPlaintextFits(t *testing.T) {
+	for _, n := range []int{AppKeyMaxPlaintextBytes - 2, AppKeyMaxPlaintextBytes - 1, AppKeyMaxPlaintextBytes} {
+		if b64 := base64.StdEncoding.EncodeToString(make([]byte, n)); !AppKeyPlaintextFits(b64) {
+			t.Errorf("%d bytes do not fit", n)
+		}
+		if b64 := base64.StdEncoding.EncodeToString(make([]byte, n+3)); AppKeyPlaintextFits(b64) {
+			t.Errorf("%d bytes fit", n+3)
+		}
+	}
+	if over := base64.StdEncoding.EncodeToString(make([]byte, AppKeyMaxPlaintextBytes+1)); AppKeyPlaintextFits(over) {
+		t.Error("one byte over the bound fits")
+	}
+	ct := "vault:v" + strings.Repeat("9", 10) + ":" + base64.StdEncoding.EncodeToString(make([]byte, 12+AppKeyMaxPlaintextBytes+16))
+	if len(ct) != 43746 || len(ct) > AppRelayMaxValueBytes {
+		t.Errorf("the largest ciphertext is %d characters; want 43746, within %d", len(ct), AppRelayMaxValueBytes)
 	}
 }

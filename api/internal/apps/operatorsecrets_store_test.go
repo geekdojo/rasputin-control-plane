@@ -102,7 +102,7 @@ func TestOperatorSecretsClearedByACustomEdit(t *testing.T) {
 		OperatorSecrets: opV1Decls, LastStatus: proto.AppStatusStopped, CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.EditCompose(ctx, opStoreAppID, ComposeHash("services: {a: {}}\n"), "services: {b: {}}\n", now); err != nil {
+	if err := s.EditCompose(ctx, opStoreAppID, ComposeHash("services: {a: {}}\n"), "services: {b: {}}\n", 0, now); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := readBoth(t, s)

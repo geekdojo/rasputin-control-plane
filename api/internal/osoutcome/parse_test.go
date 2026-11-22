@@ -1,6 +1,9 @@
 package osoutcome
 
 import (
+	"errors"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -231,5 +234,41 @@ func TestParse_SizeAndEncoding(t *testing.T) {
 	}
 	if _, err := Parse(initSrc, []byte(pad(4096))); err == nil || strings.Contains(err.Error(), "4096") {
 		t.Errorf("4096 bytes: %v, want past the size cap (and refused for its reason length)", err)
+	}
+}
+
+// TC-1132-24 (the parser): a source declaring author accepts present,
+// absent and -, and refuses any other value, an empty one and a missing
+// line. ReadFile reads and parses a record now; an absent file is an error
+// wrapping fs.ErrNotExist, and a malformed one is an error.
+func TestParse_AuthorAndReadFile(t *testing.T) {
+	src := Source{Kind: "os.store_provision", Path: filepath.Join(t.TempDir(), "provision"),
+		Fields: []string{FieldBootID, FieldRunID, FieldReason, FieldAuthor}, KeyField: FieldRunID,
+		Outcomes: map[string]Verdict{"applied": OK}}
+	base := provRec("applied", testBoot, testRun, "Provisioned.")
+	for _, a := range []string{AuthorPresent, AuthorAbsent, AuthorUnknown} {
+		if rec, err := Parse(src, []byte(base+"author="+a+"\n")); err != nil || rec.Author != a {
+			t.Errorf("author=%s: (%+v, %v)", a, rec, err)
+		}
+	}
+	for _, body := range []string{base, base + "author=yes\n", base + "author=\n"} {
+		if _, err := Parse(src, []byte(body)); err == nil {
+			t.Errorf("accepted %q", body)
+		}
+	}
+	if _, err := ReadFile(src); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("absent: %v, want fs.ErrNotExist", err)
+	}
+	if err := os.WriteFile(src.Path, []byte(base+"author=absent\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rec, err := ReadFile(src); err != nil || rec.Author != AuthorAbsent || rec.RunID != testRun {
+		t.Fatalf("ReadFile = (%+v, %v)", rec, err)
+	}
+	if err := os.WriteFile(src.Path, []byte(base), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(src); err == nil {
+		t.Fatal("a record with no author line was read")
 	}
 }

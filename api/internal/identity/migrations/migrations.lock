@@ -1,0 +1,10 @@
+# migrations.lock — the hash lock for this package's shipped migrations
+# (geekdojo/geekdojo-brain#981). One line per mNNNN_<name>.go file:
+#
+#   <id> <file> sha256=<hex>
+#
+# TestLock (lock_test.go) fails when a shipped file is edited, a file has no
+# line, a line has no file, the lines' ids differ from All's, or an All
+# entry's Apply is defined outside its locked file. A shipped migration is
+# never edited: restore it and add a new migration. A new migration adds its
+# file, its All entry and its line here in the same change.

@@ -299,3 +299,26 @@ func TestContains_SliceCycleTerminates(t *testing.T) {
 		t.Fatal("Contains on a self-holding map with no Value = true")
 	}
 }
+
+// Equal compares the held bytes: the same bytes in two payloads are equal,
+// different bytes or lengths are not, and the zero and destroyed Values hold
+// nothing (geekdojo/geekdojo-brain#1132 moved it here from appsecret).
+func TestEqual(t *testing.T) {
+	a, b := secret.New([]byte("s3cret")), secret.New([]byte("s3cret"))
+	if !secret.Equal(a, b) {
+		t.Fatal("two Values holding the same bytes are not equal")
+	}
+	for name, other := range map[string]secret.Value{
+		"different bytes":  secret.New([]byte("s3creT")),
+		"different length": secret.New([]byte("s3cre")),
+		"zero":             {},
+	} {
+		if secret.Equal(a, other) {
+			t.Errorf("%s: equal, want not", name)
+		}
+	}
+	b.Destroy()
+	if secret.Equal(a, b) || !secret.Equal(b, secret.Value{}) {
+		t.Fatal("a destroyed Value compares as holding bytes")
+	}
+}

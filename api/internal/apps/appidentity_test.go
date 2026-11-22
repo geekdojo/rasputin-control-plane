@@ -257,7 +257,7 @@ func TestAppIdentity_EditNeverIssues(t *testing.T) {
 	issuer := &fakeIssuer{}
 	stash := NewComposeStash()
 	const jobID = "01JOBEDIT0000000000000000A"
-	if err := stash.Put(jobID, customV2); err != nil {
+	if err := stash.Put(jobID, HeldEdit{ComposeYAML: customV2}); err != nil {
 		t.Fatal(err)
 	}
 	w := wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps(), grant(issuer, "mine")))
@@ -292,7 +292,7 @@ func TestAppIdentity_CustomAppIsNeverGranted(t *testing.T) {
 	}
 	receiveWithin(t, deploys, "the deploy never reached the agent")
 
-	if err := store.EditCompose(ctx, testAppID, ComposeHash(customV1), customV2, time.Now().UTC()); err != nil {
+	if err := store.EditCompose(ctx, testAppID, ComposeHash(customV1), customV2, 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	r := runWorkflow(t, wf(t)(RevertWorkflow(store, inv, nc, nil, testSource(t), identity)), nc, revertSpec(testAppID, customV1), "job-test")

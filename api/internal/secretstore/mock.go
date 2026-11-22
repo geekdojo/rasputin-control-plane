@@ -20,6 +20,9 @@ type Mock struct {
 
 	mu      sync.Mutex
 	secrets map[KVPath]*mockSecret
+	// keys are the Transit keys, each with the id its ciphertexts carry.
+	keys    map[TransitKey]uint64
+	nextKey uint64
 }
 
 type mockSecret struct {
@@ -38,7 +41,7 @@ func NewMock(now func() time.Time) *Mock {
 	if now == nil {
 		panic("secretstore: NewMock: now is nil")
 	}
-	return &Mock{now: now, secrets: map[KVPath]*mockSecret{}}
+	return &Mock{now: now, secrets: map[KVPath]*mockSecret{}, keys: map[TransitKey]uint64{}}
 }
 
 // Health reports an initialised, unsealed store.

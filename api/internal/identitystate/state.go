@@ -39,6 +39,13 @@ const (
 	AppsPaused State = "apps-paused"
 	// HistoryBehind: the last sign-in history drain failed (Identity 4.3).
 	HistoryBehind State = "history-behind"
+	// FeaturesMismatch: the otherwise ready service runs with features that
+	// differ from the shipped build or lack a required one (Identity 3.5).
+	FeaturesMismatch State = "features-mismatch"
+	// FeaturesUnchecked: the otherwise ready service's features could not be
+	// checked: the shipped build options or the server's feature list could
+	// not be read (Identity 3.5).
+	FeaturesUnchecked State = "features-unchecked"
 )
 
 // Blocks reports whether the state refuses console identity work.
@@ -86,6 +93,10 @@ func (s State) sentence() string {
 		return "Sign-in to apps is paused until the secret store is ready."
 	case HistoryBehind:
 		return "Sign-in history is not being recorded."
+	case FeaturesMismatch:
+		return "Sign-in is closed: the sign-in service is not running with the features this release built it with. Update or reinstall this release."
+	case FeaturesUnchecked:
+		return "Sign-in is closed because the control plane cannot check which features its sign-in service is running with."
 	}
 	return "Sign-in is not ready."
 }

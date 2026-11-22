@@ -132,10 +132,72 @@ func routes(appID string, fwd Forwarder, ids func() string) http.Handler {
 		}
 		answer(w, op, fwd.Forward(appID, call, ids()))
 	})
+	keyRoutes(mux, appID, fwd, ids)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		writeError(w, http.StatusNotFound, proto.AppSecretNotFound, "The path is not one the relay answers; use /v1/secrets/{name}.", ids())
+		writeError(w, http.StatusNotFound, proto.AppSecretNotFound, "The path is not one the relay answers; use /v1/secrets/{name} or /v1/keys/{name}.", ids())
 	})
 	return mux
+}
+
+// keyRoutes are the relay's routes for the app's own Transit keys
+// (geekdojo/geekdojo-brain#1084):
+//
+//	POST   /v1/keys/{name}          create   201
+//	DELETE /v1/keys/{name}          destroy  204, present or absent
+//	POST   /v1/keys/{name}/encrypt  {"plaintext":b64} → 200 {"ciphertext":…}
+//	POST   /v1/keys/{name}/decrypt  {"ciphertext":…}  → 200 {"plaintext":b64}
+//
+// A plaintext that decodes to more than proto.AppKeyMaxPlaintextBytes, or a
+// ciphertext longer than proto.AppRelayMaxValueBytes, answers 413. The app
+// is appID, the socket's own, whatever the path, headers or body say.
+func keyRoutes(mux *http.ServeMux, appID string, fwd Forwarder, ids func() string) {
+	mux.HandleFunc("/v1/keys/{name}", func(w http.ResponseWriter, r *http.Request) {
+		var op string
+		switch r.Method {
+		case http.MethodPost:
+			op = proto.AppKeyCreate
+		case http.MethodDelete:
+			op = proto.AppKeyDestroy
+		default:
+			w.Header().Set("Allow", "POST, DELETE")
+			writeError(w, http.StatusMethodNotAllowed, proto.AppSecretMethodNotAllowed, "The method is not one the relay answers for a key; use POST or DELETE.", ids())
+			return
+		}
+		call := proto.AppSecretCall{AppID: appID, Op: op, Name: r.PathValue("name")}
+		answer(w, op, fwd.Forward(appID, call, ids()))
+	})
+	for _, c := range []struct {
+		verb, op, in string
+		fits         func(string) bool
+		tooLarge     string
+	}{
+		{"encrypt", proto.AppKeyEncrypt, "plaintext", proto.AppKeyPlaintextFits,
+			fmt.Sprintf("The plaintext is longer than %d bytes.", proto.AppKeyMaxPlaintextBytes)},
+		{"decrypt", proto.AppKeyDecrypt, "ciphertext", func(v string) bool { return len(v) <= proto.AppRelayMaxValueBytes },
+			fmt.Sprintf("The ciphertext is longer than %d bytes.", proto.AppRelayMaxValueBytes)},
+	} {
+		mux.HandleFunc("/v1/keys/{name}/"+c.verb, func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				w.Header().Set("Allow", "POST")
+				writeError(w, http.StatusMethodNotAllowed, proto.AppSecretMethodNotAllowed, "The method is not one the relay answers to "+c.verb+"; use POST.", ids())
+				return
+			}
+			var body map[string]string
+			err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&body)
+			var tooBig *http.MaxBytesError
+			v, ok := body[c.in]
+			switch {
+			case errors.As(err, &tooBig) || err == nil && ok && !c.fits(v):
+				writeError(w, http.StatusRequestEntityTooLarge, proto.AppSecretTooLarge, c.tooLarge, ids())
+				return
+			case err != nil || !ok:
+				writeError(w, http.StatusBadRequest, proto.AppSecretInvalid, `The body is not JSON of the form {"`+c.in+`":"..."}.`, ids())
+				return
+			}
+			call := proto.AppSecretCall{AppID: appID, Op: c.op, Name: r.PathValue("name"), Value: v}
+			answer(w, c.op, fwd.Forward(appID, call, ids()))
+		})
+	}
 }
 
 // answer writes the api's reply to op as its HTTP status and body.
@@ -148,6 +210,12 @@ func answer(w http.ResponseWriter, op string, rep proto.AppSecretReply) {
 			w.WriteHeader(http.StatusCreated)
 		case proto.AppSecretReplace:
 			w.WriteHeader(http.StatusOK)
+		case proto.AppKeyCreate:
+			w.WriteHeader(http.StatusCreated)
+		case proto.AppKeyEncrypt:
+			writeJSON(w, http.StatusOK, map[string]string{"ciphertext": rep.Value})
+		case proto.AppKeyDecrypt:
+			writeJSON(w, http.StatusOK, map[string]string{"plaintext": rep.Value})
 		default:
 			w.WriteHeader(http.StatusNoContent)
 		}

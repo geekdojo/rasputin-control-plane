@@ -86,9 +86,6 @@ func rollbackFor(t *testing.T, requested, mode string, store secretStore, runner
 	}
 	d := storeRollbackDeps{mode: mode, copyStore: copyStore, storeDataDir: t.TempDir(), copyPath: t.TempDir() + "/openbao-preupdate.tar",
 		refs: noRefs{}, secrets: noExists{}, runner: runner, log: log}
-	if r.monitor != nil {
-		d.monitor = r.monitor
-	}
 	if mode == storeModeOpenBao {
 		g, err := sealrotate.NewGate(clean, func(context.Context, string) (bool, error) { return true, nil }, log)
 		if err != nil {
@@ -104,14 +101,14 @@ func rollbackFor(t *testing.T, requested, mode string, store secretStore, runner
 }
 
 // TC-800-20: the composition root's rollback wiring. Under openbao the copy
-// is wired, the check is registered, and arming it (main runs arm after
-// runner.Recover) submits exactly one check on the first ready reading.
-// With nothing or the mock requested there is no copy and no check. A
+// is wired, the check is registered, and its submit submits exactly one
+// check. With nothing or the mock requested there is no copy and no check. A
 // refused selector wires the copy, which refuses an update of the store's
 // host because the store reads unreachable (fail closed). A failed submit is
-// one ERROR record, and start carries on. The pre-revision case text has the
-// check submitted "after runner.Recover"; the approved plan submits it on
-// the first ready reading after arm (F-800-03).
+// one ERROR record, and start carries on. When the check runs, on the first
+// ready reading, is the store's first-ready coordinator's (TC-1132-23,
+// storemigrate_wiring_test.go), which replaced the check's own callback
+// (F-1132-05).
 func TestStoreRollbackWiring(t *testing.T) {
 	t.Run("openbao", func(t *testing.T) {
 		log, _ := logkittest.New()
@@ -125,39 +122,11 @@ func TestStoreRollbackWiring(t *testing.T) {
 			t.Fatalf("retirer %v is not the copier %v", w.retirer, w.copier)
 		}
 		if reg, sub := run.counts(); reg != 1 || sub != 0 || run.registered[0] != appsecret.ReferenceCheckKind {
-			t.Fatalf("registered %v, submitted %d before arm", run.registered, sub)
+			t.Fatalf("registered %v, submitted %d before the check ran", run.registered, sub)
 		}
-		w.arm(context.Background())
-		<-run.done
+		w.check(context.Background())
 		if _, sub := run.counts(); sub != 1 || run.submitted[0] != appsecret.ReferenceCheckKind+" by "+storeRollbackCreatedBy {
 			t.Fatalf("submitted %v, want one check", run.submitted)
-		}
-	})
-	t.Run("openbao, store not ready at start", func(t *testing.T) {
-		log, _ := logkittest.New()
-		run := newFakeRollbackRunner()
-		store := &switchableHealth{secretStore: secretstore.NewMock(time.Now), down: true}
-		r, err := storeReadinessWiring(storeModeOpenBao, false, storeModeOpenBao, store, openJobStore(t), time.Now, notBlank, log)
-		if err != nil {
-			t.Fatal(err)
-		}
-		w, err := storeRollbackWiring(storeRollbackDeps{mode: storeModeOpenBao, refs: noRefs{}, secrets: noExists{}, monitor: r.monitor, runner: run, log: log})
-		if err != nil {
-			t.Fatal(err)
-		}
-		w.arm(context.Background())
-		if _, sub := run.counts(); sub != 0 {
-			t.Fatalf("a store not ready at start submitted %d check(s)", sub)
-		}
-		store.set(false)
-		for range 3 {
-			if _, err := r.monitor.State(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-		}
-		<-run.done
-		if _, sub := run.counts(); sub != 1 {
-			t.Fatalf("submitted %d check(s), want one on the first ready reading", sub)
 		}
 	})
 	for _, requested := range []string{"", storeModeMock} {
@@ -169,9 +138,9 @@ func TestStoreRollbackWiring(t *testing.T) {
 				mode, store = storeModeMock, secretstore.NewMock(time.Now)
 			}
 			w, _ := rollbackFor(t, requested, mode, store, run, log)
-			w.arm(context.Background())
-			if reg, sub := run.counts(); w.copier != nil || w.retirer != nil || reg != 0 || sub != 0 {
-				t.Fatalf("copier %v, retirer %v, registered %d, submitted %d; want none", w.copier, w.retirer, reg, sub)
+			if reg, sub := run.counts(); w.copier != nil || w.retirer != nil || w.check != nil || reg != 0 || sub != 0 {
+				t.Fatalf("copier %v, retirer %v, check set %v, registered %d, submitted %d; want none",
+					w.copier, w.retirer, w.check != nil, reg, sub)
 			}
 		})
 	}
@@ -196,12 +165,7 @@ func TestStoreRollbackWiring(t *testing.T) {
 		run := newFakeRollbackRunner()
 		run.submitErr = errors.New("jobs: database is locked")
 		w, _ := rollbackFor(t, storeModeOpenBao, storeModeOpenBao, secretstore.NewMock(time.Now), run, log)
-		w.arm(context.Background())
-		<-run.done
-		deadline := time.Now().Add(5 * time.Second)
-		for len(rec.Matching(slog.LevelError, "secret store reference check not submitted")) == 0 && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
+		w.check(context.Background())
 		if n := len(rec.Matching(slog.LevelError, "secret store reference check not submitted")); n != 1 {
 			t.Fatalf("%d ERROR record(s), want 1", n)
 		}
@@ -212,9 +176,9 @@ func TestStoreRollbackWiring(t *testing.T) {
 			t.Error("a nil logger was accepted")
 		}
 		if _, err := storeRollbackWiring(storeRollbackDeps{mode: storeModeOpenBao, log: log}); err == nil {
-			t.Error("a nil monitor and runner were accepted under openbao")
+			t.Error("a nil runner was accepted under openbao")
 		}
-		if _, err := storeRollbackWiring(storeRollbackDeps{mode: storeModeOpenBao, log: log, monitor: &fakeReady{}, runner: newFakeRollbackRunner()}); err == nil {
+		if _, err := storeRollbackWiring(storeRollbackDeps{mode: storeModeOpenBao, log: log, runner: newFakeRollbackRunner()}); err == nil {
 			t.Error("a nil reference lister was accepted")
 		}
 		if _, err := storeRollbackWiring(storeRollbackDeps{mode: storeModeOff, log: log, copyStore: &storeBackupControl{}}); err == nil {
@@ -222,12 +186,6 @@ func TestStoreRollbackWiring(t *testing.T) {
 		}
 	})
 }
-
-// fakeReady is a readyReader that is never read.
-type fakeReady struct{}
-
-func (*fakeReady) OnFirstReady(context.Context, func(context.Context)) {}
-func (*fakeReady) State(context.Context) (storestate.State, error)     { return storestate.Ready, nil }
 
 // switchableHealth answers sys/health unreachable while down.
 type switchableHealth struct {

@@ -30,6 +30,10 @@ type spy struct {
 	store   error
 	index   error
 	value   string
+	// noKey makes HasTransitKey answer that the app has no such key.
+	noKey bool
+	// forgetKey, when set, is ForgetTransitKey's answer instead of index.
+	forgetKey error
 }
 
 func (s *spy) note(c string) {
@@ -65,6 +69,44 @@ func (s *spy) Replace(_ context.Context, _ secrets.Actor, r secrets.Ref, _ secre
 }
 func (s *spy) Delete(_ context.Context, _ secrets.Actor, r secrets.Ref) error {
 	s.note("delete " + r.String())
+	return s.store
+}
+
+func (s *spy) RecordTransitKey(_ context.Context, _, name string) error {
+	s.note("record key " + name)
+	return s.index
+}
+func (s *spy) ForgetTransitKey(_ context.Context, _, name string) error {
+	s.note("forget key " + name)
+	if s.forgetKey != nil {
+		return s.forgetKey
+	}
+	return s.index
+}
+func (s *spy) HasTransitKey(_ context.Context, _, name string) (bool, error) {
+	s.note("has key " + name)
+	return !s.noKey, s.index
+}
+func (s *spy) CreateKey(_ context.Context, _ secrets.Actor, r secrets.Ref) error {
+	s.note("create " + r.String())
+	return s.store
+}
+func (s *spy) Encrypt(_ context.Context, _ secrets.Actor, r secrets.Ref, _ secret.Value) (secret.Value, error) {
+	s.note("encrypt " + r.String())
+	if s.store != nil {
+		return secret.Value{}, s.store
+	}
+	return secret.New([]byte(s.value)), nil
+}
+func (s *spy) Decrypt(_ context.Context, _ secrets.Actor, r secrets.Ref, _ secret.Value) (secret.Value, error) {
+	s.note("decrypt " + r.String())
+	if s.store != nil {
+		return secret.Value{}, s.store
+	}
+	return secret.New([]byte(s.value)), nil
+}
+func (s *spy) DestroyKey(_ context.Context, _ secrets.Actor, r secrets.Ref) error {
+	s.note("destroy " + r.String())
 	return s.store
 }
 

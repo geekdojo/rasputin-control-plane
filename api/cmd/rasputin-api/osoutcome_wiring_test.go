@@ -74,7 +74,7 @@ func openLedgerAt(t *testing.T, path string) *jobs.Store {
 func (e *outcomeEnv) reader(t *testing.T, run runFunc) *osoutcome.Reader {
 	t.Helper()
 	log, _ := logkittest.New()
-	r, err := outcomeReaderWiring(openLedgerAt(t, e.dbPath), log, e.runDir, e.bootIDPath, run, noObserve)
+	r, err := outcomeReaderWiring(openLedgerAt(t, e.dbPath), log, e.runDir, e.bootIDPath, run, noObservers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,11 +171,12 @@ func sealBody(outcome, boot string) string {
 // The declarations are at the contract's paths under /run.
 func TestOutcomeSources_Paths(t *testing.T) {
 	var paths []string
-	for _, s := range outcomeSources(outcomeRunDir, noObserve) {
+	for _, s := range outcomeSources(outcomeRunDir, noObservers) {
 		paths = append(paths, s.Path)
 	}
 	want := []string{"/run/rasputin-seal-key/outcome", "/run/rasputin-store-init/outcome", "/run/rasputin-store-provision/outcome",
-		"/run/rasputin-store-rollback/outcome", "/run/rasputin-identity-db-init/outcome", "/run/rasputin-identity-rollback/outcome"}
+		"/run/rasputin-store-rollback/outcome", "/run/rasputin-store-migrate/outcome", "/run/rasputin-identity-db-init/outcome",
+		"/run/rasputin-identity-rollback/outcome"}
 	if !slices.Equal(paths, want) {
 		t.Errorf("paths = %v, want %v", paths, want)
 	}
@@ -186,7 +187,7 @@ func TestOutcomeSources_Paths(t *testing.T) {
 // again after a store restart; and osoutcome.New accepts the declarations.
 func TestOutcomeSources_StoreRollback(t *testing.T) {
 	var got *osoutcome.Source
-	srcs := outcomeSources(outcomeRunDir, noObserve)
+	srcs := outcomeSources(outcomeRunDir, noObservers)
 	for i := range srcs {
 		if srcs[i].Kind == "os.store_rollback" {
 			got = &srcs[i]
@@ -224,7 +225,7 @@ func TestOutcomeSources_StoreRollback(t *testing.T) {
 	// outcomeReaderWiring hands these declarations to osoutcome.New.
 	log, _ := logkittest.New()
 	if _, err := outcomeReaderWiring(openLedgerAt(t, filepath.Join(t.TempDir(), "jobs.db")), log, outcomeRunDir,
-		procBootIDPath, (&outcomeRun{}).run, noObserve); err != nil {
+		procBootIDPath, (&outcomeRun{}).run, noObservers); err != nil {
 		t.Errorf("osoutcome.New refused the declarations: %v", err)
 	}
 }
@@ -405,7 +406,7 @@ func TestFunctional_StoreInitAfterRestartHook(t *testing.T) {
 // hook, which starts its unit first, and at start when it is already there.
 func TestFunctional_StoreProvisionAfterRestartHook(t *testing.T) {
 	provBody := func(outcome, run string) string {
-		return "outcome=" + outcome + "\nboot_id=" + fxBoot + "\nrun_id=" + run + "\nreason=Provision said " + outcome + ".\n"
+		return "outcome=" + outcome + "\nboot_id=" + fxBoot + "\nrun_id=" + run + "\nreason=Provision said " + outcome + ".\nauthor=present\n"
 	}
 	for _, tc := range []struct {
 		outcome string
@@ -490,14 +491,14 @@ func TestFunctional_JobCommittedBeforeReady(t *testing.T) {
 func TestOutcomeReaderWiring(t *testing.T) {
 	e := newOutcomeEnv(t)
 	log, _ := logkittest.New()
-	if _, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, nil, noObserve); err == nil {
+	if _, err := outcomeReaderWiring(e.ledger, log, e.runDir, e.bootIDPath, nil, noObservers); err == nil {
 		t.Error("a nil run func was accepted")
 	}
-	if _, err := outcomeReaderWiring(nil, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run, noObserve); err == nil {
+	if _, err := outcomeReaderWiring(nil, log, e.runDir, e.bootIDPath, (&outcomeRun{}).run, noObservers); err == nil {
 		t.Error("a nil ledger was accepted")
 	}
 	wlog, rec := logkittest.New()
-	r, err := outcomeReaderWiring(e.ledger, wlog, e.runDir, e.bootIDPath, (&outcomeRun{err: errors.New("exit status 5")}).run, noObserve)
+	r, err := outcomeReaderWiring(e.ledger, wlog, e.runDir, e.bootIDPath, (&outcomeRun{err: errors.New("exit status 5")}).run, noObservers)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -542,5 +543,8 @@ func TestFileBootID(t *testing.T) {
 	}
 }
 
-// noObserve is a store init observer that does nothing.
+// noObserve is a record observer that does nothing.
 func noObserve(context.Context, osoutcome.Record) {}
+
+// noObservers observe nothing.
+var noObservers = outcomeObservers{init: noObserve, provision: noObserve, migrate: noObserve}

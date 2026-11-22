@@ -21,6 +21,7 @@ package storemarker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/osoutcome"
@@ -121,13 +122,7 @@ func (m *Marker) ObserveInit(ctx context.Context, rec osoutcome.Record) {
 // cleared. A failed write is one ERROR; it fails toward a false blank alert,
 // never toward silence.
 func (m *Marker) Rebase(ctx context.Context) {
-	boot, err := m.d.BootID()
-	if err == nil {
-		err = m.d.Settings.Set(ctx, KeySetUpBootID, boot)
-	}
-	if err == nil {
-		err = m.d.Settings.Set(ctx, KeyBlankBootID, "")
-	}
+	boot, err := m.rebase(ctx)
 	if err != nil {
 		m.d.Log.ErrorContext(ctx, "secret store marker not re-based after the restore",
 			"component", "secretstore", "event", "secretstore.marker_write_failed", "boot_id", boot, "err", err.Error())
@@ -135,6 +130,48 @@ func (m *Marker) Rebase(ctx context.Context) {
 	}
 	m.d.Log.InfoContext(ctx, "secret store marker re-based on the restored store",
 		"component", "secretstore", "event", "secretstore.marker_rebased", "boot_id", boot)
+}
+
+// RebaseChecked is Rebase for a caller that must not go on when it fails:
+// the store's roll-forward re-initialises the store in this boot on purpose
+// (geekdojo/geekdojo-brain#1132), so the marker is moved to this boot first,
+// or the swap does not happen. It returns the set-up boot the marker named
+// before, for RestoreSetUp, and logs nothing: the caller does.
+func (m *Marker) RebaseChecked(ctx context.Context) (prev string, err error) {
+	prev, err = m.d.Settings.Get(ctx, KeySetUpBootID)
+	if err != nil {
+		return "", fmt.Errorf("storemarker: read %s: %w", KeySetUpBootID, err)
+	}
+	if _, err := m.rebase(ctx); err != nil {
+		return "", err
+	}
+	return prev, nil
+}
+
+// RestoreSetUp writes prev back as the set-up boot: a roll-forward that
+// stopped before the store was re-initialised puts back what RebaseChecked
+// moved.
+func (m *Marker) RestoreSetUp(ctx context.Context, prev string) error {
+	if err := m.d.Settings.Set(ctx, KeySetUpBootID, prev); err != nil {
+		return fmt.Errorf("storemarker: write %s: %w", KeySetUpBootID, err)
+	}
+	return nil
+}
+
+// rebase records this boot as the set-up one and clears any blank start. It
+// returns the boot it wrote, or tried to.
+func (m *Marker) rebase(ctx context.Context) (string, error) {
+	boot, err := m.d.BootID()
+	if err != nil {
+		return "", fmt.Errorf("storemarker: read the boot id: %w", err)
+	}
+	if err := m.d.Settings.Set(ctx, KeySetUpBootID, boot); err != nil {
+		return boot, fmt.Errorf("storemarker: write %s: %w", KeySetUpBootID, err)
+	}
+	if err := m.d.Settings.Set(ctx, KeyBlankBootID, ""); err != nil {
+		return boot, fmt.Errorf("storemarker: write %s: %w", KeyBlankBootID, err)
+	}
+	return boot, nil
 }
 
 // Arm runs after the start-time outcome read. With no marker and the store's

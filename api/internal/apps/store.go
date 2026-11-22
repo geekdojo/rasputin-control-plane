@@ -255,10 +255,12 @@ var ErrEditCatalogApp = errors.New(`this app was installed from the catalog, so 
 // previous_compose_yaml with the rest of its record, exactly as UpgradeCompose
 // does.
 //
-// Only the compose and its hash change. A custom app's port, scheme and budget
+// The compose and its hash change, and the web port when webPort is not 0:
+// the port the owner declared beside the compose (geekdojo/geekdojo-brain#1089).
+// webPort 0 leaves published_port as it is. A custom app's scheme and budget
 // were never copied from a tile, so there is nothing to re-copy; they stay as
-// they are, and the previous record gets the same values so a re-apply leaves
-// them unchanged too. compose_catalog_version is 0 — the compose came from no
+// they are. The previous record keeps the port as it was beside the compose
+// being replaced, so a re-apply restores that port. compose_catalog_version is 0 — the compose came from no
 // catalog — whatever it said before. ID, Name, TargetNode, ExposeLAN and
 // BackupAck are not written: the ULID is the Compose project and the volume
 // namespace.
@@ -270,8 +272,11 @@ var ErrEditCatalogApp = errors.New(`this app was installed from the catalog, so 
 // caller to have checked. An unknown id is sql.ErrNoRows, a catalog app is
 // ErrEditCatalogApp, a stale hash is ErrComposeChanged.
 //
-// The compose is not validated, as it is not at custom create (ADR-0006 D12).
-func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML string, now time.Time) error {
+// The compose is not validated here. The api checks only that it publishes
+// the web port in effect on loopback (CheckWebPortPublish,
+// geekdojo/geekdojo-brain#1091), as at custom create; nothing else in it is
+// judged (ADR-0006 D12).
+func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML string, webPort int, now time.Time) error {
 	res, err := s.db.ExecContext(ctx, `
         UPDATE apps SET previous_compose_yaml = compose_yaml,
                         previous_compose_catalog_version = compose_catalog_version,
@@ -280,12 +285,40 @@ func (s *Store) EditCompose(ctx context.Context, id, fromHash, composeYAML strin
                         previous_privilege_tier = privilege_tier,
                         previous_operator_secrets = operator_secrets,
                         compose_yaml = ?, compose_sha256 = ?, compose_catalog_version = 0, privilege_tier = '',
+                        published_port = CASE WHEN ? > 0 THEN ? ELSE published_port END,
                         operator_secrets = '', updated_at = ?
         WHERE id = ? AND compose_sha256 = ? AND source_tile = ''`,
-		composeYAML, ComposeHash(composeYAML), ms(now), id, fromHash)
+		composeYAML, ComposeHash(composeYAML), webPort, webPort, ms(now), id, fromHash)
 	if err != nil {
 		return err
 	}
+	return s.customWriteOutcome(ctx, res, id)
+}
+
+// SetCustomWebPort sets a custom app's web port without changing its compose:
+// the port-only edit (geekdojo/geekdojo-brain#1089), an owner declaring a
+// different port beside the compose the app already runs. Only published_port
+// and updated_at change. The previous record is left alone, since the compose
+// it was retained beside has not been replaced.
+//
+// Conditional twice, as EditCompose is: fromHash is the compose_sha256 the
+// caller read, and the row must have no source_tile. An unknown id is
+// sql.ErrNoRows, a catalog app is ErrEditCatalogApp, a stale hash is
+// ErrComposeChanged.
+func (s *Store) SetCustomWebPort(ctx context.Context, id, fromHash string, port int, now time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+        UPDATE apps SET published_port = ?, updated_at = ?
+        WHERE id = ? AND compose_sha256 = ? AND source_tile = ''`,
+		port, ms(now), id, fromHash)
+	if err != nil {
+		return err
+	}
+	return s.customWriteOutcome(ctx, res, id)
+}
+
+// customWriteOutcome is the answer to a write conditional on a custom app's
+// compose hash: nil when it landed, else why it did not.
+func (s *Store) customWriteOutcome(ctx context.Context, res sql.Result, id string) error {
 	if n, _ := res.RowsAffected(); n > 0 {
 		return nil
 	}

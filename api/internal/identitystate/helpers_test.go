@@ -138,6 +138,10 @@ type world struct {
 	blank, appsPaused, historyBehind          bool
 	blankErr, appsPausedErr, historyBehindErr error
 
+	featuresMismatch bool
+	featuresErr      error
+	featuresCalls    []string // the invocation each call named
+
 	unitsCalls, healthCalls, readRecordsCalls, setCalls, removes int
 }
 
@@ -236,8 +240,14 @@ func (x *fixture) deps(log *slog.Logger, ledger Ledger) Deps {
 		Blank:         fact(&w.blank, &w.blankErr),
 		AppsPaused:    fact(&w.appsPaused, &w.appsPausedErr),
 		HistoryBehind: fact(&w.historyBehind, &w.historyBehindErr),
-		Now:           func() time.Time { return fixedNow },
-		Log:           log,
+		Features: func(_ context.Context, inv string) (bool, error) {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			w.featuresCalls = append(w.featuresCalls, inv)
+			return w.featuresMismatch, w.featuresErr
+		},
+		Now: func() time.Time { return fixedNow },
+		Log: log,
 	}
 }
 

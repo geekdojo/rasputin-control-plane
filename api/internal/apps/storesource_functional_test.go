@@ -164,7 +164,7 @@ func TestStoreSource_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: appNodes{s: appStore}, Switch: sw, Log: log})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Transit: secretstoretest.NoTransit{}, Apps: appNodes{s: appStore}, Switch: sw, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}

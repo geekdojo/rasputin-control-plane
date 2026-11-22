@@ -150,7 +150,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Apps: appNodes{s: appStore}, Switch: sw, Log: log})
+	svc, err := secrets.NewService(secrets.Deps{Repo: repo, Transit: secretstoretest.NoTransit{}, Apps: appNodes{s: appStore}, Switch: sw, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -352,7 +352,7 @@ func TestDelete_AgainstTheRealStore(t *testing.T) {
 		record(t, idE, "x", "y")
 		release := func(t *testing.T, jobID, from, to string) {
 			t.Helper()
-			if err := appStore.EditCompose(ctx, idE, apps.ComposeHash(from), to, time.Now().UTC()); err != nil {
+			if err := appStore.EditCompose(ctx, idE, apps.ComposeHash(from), to, 0, time.Now().UTC()); err != nil {
 				t.Fatal(err)
 			}
 			out, err := apps.ReleaseUnusedSecrets(appStore, deps)(&jobs.StepCtx{Ctx: ctx, JobID: jobID, CreatedBy: "alice",

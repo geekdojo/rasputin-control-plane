@@ -14,10 +14,12 @@ import (
 )
 
 // AppSecretDeleter is what the app.delete saga needs of the secrets service:
-// deleting one entry, every version and its metadata, on an actor's behalf.
+// deleting one entry, every version and its metadata, and destroying one of
+// the app's Transit keys (geekdojo/geekdojo-brain#1084), on an actor's behalf.
 // *secrets.Service satisfies it.
 type AppSecretDeleter interface {
 	Delete(ctx context.Context, a secrets.Actor, r secrets.Ref) error
+	DestroyKey(ctx context.Context, a secrets.Actor, r secrets.Ref) error
 }
 
 // SecretStoreState is what the app.delete saga needs to know about the secret
@@ -96,11 +98,13 @@ func checkStoreForDeletes(ctx context.Context, st SecretStoreState, recordedRefs
 
 // storeEntry is one store entry a delete path destroys: app appID's pushed
 // secret name, or, with runtime set, the entry name it wrote itself through
-// its relay socket, apps/<appID>/_runtime/<name> (geekdojo/geekdojo-brain#1081).
+// its relay socket, apps/<appID>/_runtime/<name> (geekdojo/geekdojo-brain#1081),
+// or, with key set, its Transit key name (#1084).
 type storeEntry struct {
 	AppID   string
 	Name    string
 	runtime bool
+	key     bool
 }
 
 // destroyAppSecrets deletes every entry refs names, every version and its
@@ -128,8 +132,11 @@ func refNames(refs []storeEntry) []string {
 
 // label is the ref's name as a person reads it in a failure sentence.
 func (r storeEntry) label() string {
-	if r.runtime {
+	switch {
+	case r.runtime:
 		return runtimeLabel(r.Name)
+	case r.key:
+		return "key " + r.Name
 	}
 	return r.Name
 }
@@ -143,6 +150,16 @@ func runtimeRefs(appID string, names []string) []storeEntry {
 	out := make([]storeEntry, len(names))
 	for i, n := range names {
 		out[i] = storeEntry{AppID: appID, Name: n, runtime: true}
+	}
+	return out
+}
+
+// keyRefs is app appID's Transit key names as storeEntries
+// (geekdojo/geekdojo-brain#1084).
+func keyRefs(appID string, names []string) []storeEntry {
+	out := make([]storeEntry, len(names))
+	for i, n := range names {
+		out[i] = storeEntry{AppID: appID, Name: n, key: true}
 	}
 	return out
 }
@@ -184,8 +201,9 @@ const errRefsUnreadable sentenceError = "The app's recorded secrets could not be
 // rather than after the app and its data are gone. The row is not touched.
 // A compose the scanner refuses names no secret (F-783-24).
 //
-// The entries the app wrote itself at runtime count as recorded references
-// (geekdojo/geekdojo-brain#1081): each one is in the store.
+// The entries the app wrote itself at runtime (geekdojo/geekdojo-brain#1081)
+// and its Transit keys (#1084) count as recorded references: each one is in
+// the store.
 func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreState, app *App) error {
 	refs, err := store.SecretRefNames(ctx, app.ID)
 	if err != nil {
@@ -195,10 +213,14 @@ func deleteSecretsPreflight(ctx context.Context, store *Store, st SecretStoreSta
 	if err != nil {
 		return fmt.Errorf("%s: %w", errRefsUnreadable, err)
 	}
-	if len(secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)) == 0 && len(runtime) == 0 {
+	keys, err := store.TransitKeyNames(ctx, app.ID)
+	if err != nil {
+		return fmt.Errorf("%s: %w", errRefsUnreadable, err)
+	}
+	if len(secretNames(refs, app.ComposeYAML, app.PreviousComposeYAML)) == 0 && len(runtime) == 0 && len(keys) == 0 {
 		return nil
 	}
-	recorded := len(refs) + len(runtime)
+	recorded := len(refs) + len(runtime) + len(keys)
 	check, state, err := checkStoreForDeletes(ctx, st, recorded)
 	switch check {
 	case storeUnconfigured:
@@ -225,6 +247,9 @@ type removeResult struct {
 	// (geekdojo/geekdojo-brain#1081). Omitted when there are none, so the
 	// result of every app that never wrote one is what it was before.
 	RuntimeNames []string `json:"runtimeNames,omitempty"`
+	// TransitKeys are the app's Transit keys (geekdojo/geekdojo-brain#1084),
+	// omitted when there are none for the same reason.
+	TransitKeys []string `json:"transitKeys,omitempty"`
 }
 
 // deleteDestroySecrets is the app.delete saga's last step. On every delete,
@@ -248,6 +273,7 @@ func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 		}
 		names := removed.SecretNames
 		refs := append(appRefs(spec.AppID, names), runtimeRefs(spec.AppID, removed.RuntimeNames)...)
+		refs = append(refs, keyRefs(spec.AppID, removed.TransitKeys)...)
 		n := len(refs)
 		if n == 0 {
 			sc.Log("info", "the app had no secrets in the secret store")
@@ -282,8 +308,16 @@ func deleteDestroySecrets(d DeleteSecretsDeps) jobs.DoFn {
 }
 
 // destroyAppSecret deletes the entry r names: a pushed secret, or one the app
-// wrote itself at runtime.
+// wrote itself at runtime; or destroys r's Transit key, where an absent key is
+// done (secrets.Service.DestroyKey).
 func destroyAppSecret(ctx context.Context, d AppSecretDeleter, actor secrets.Actor, r storeEntry) error {
+	if r.key {
+		ref, err := secrets.AppKey(r.AppID, r.Name)
+		if err != nil {
+			return err
+		}
+		return d.DestroyKey(ctx, actor, ref)
+	}
 	parse := secrets.AppSecret
 	if r.runtime {
 		parse = secrets.AppRuntimeSecret

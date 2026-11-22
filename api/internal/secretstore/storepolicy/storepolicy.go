@@ -3,10 +3,13 @@
 //
 // Each policy is a file in this directory, <name>.hcl, embedded here and
 // packed by scripts/pack-store-policy.sh into the api release tarball as
-// openbao-policy/<name>.hcl. rasputin-os installs those files on the image,
-// and the store's self-init loads them through a `file` source, so the text
-// the store enforces is the text these tests check. rasputin-os's drift check
-// compares the tarball's copy with this directory at the release tag.
+// openbao-policy/<name>.hcl. rasputin-os installs those files on the image.
+// The store's self-init loads the first-boot policies, rasputin-author among
+// them, through a `file` source; the store provisioner writes rasputin-app-keys
+// from its file, logged in as rasputin-author (geekdojo/geekdojo-brain#1084).
+// Either way the text the store enforces is the text these tests check.
+// rasputin-os's drift check compares the tarball's copy with this directory at
+// the release tag.
 //
 // No shipped binary imports this package: only tests do.
 package storepolicy
@@ -37,6 +40,19 @@ const (
 	// Namespace is the prefix of every mount and role the provisioner may add.
 	// No fixed mount, role or policy name starts with it.
 	Namespace = "rasputin-rel-"
+	// AuthorPolicy is the policy a later release adds store engines,
+	// policies and roles through (geekdojo/geekdojo-brain#1084, ADR-0010 S9),
+	// bound to its own cert role: only Transit mounts, policy text and roles
+	// under AuthorNamespace.
+	AuthorPolicy = "rasputin-author"
+	// AuthorNamespace is the prefix of every mount, policy and role the
+	// author may add. No fixed mount, role or policy name starts with it.
+	AuthorNamespace = "rasputin-app-"
+	// AppKeysPolicy is the api's key identity's policy, bound to the cert
+	// role of the same name, which admits only the api's key leaf.
+	AppKeysPolicy = "rasputin-app-keys"
+	// AppKeysMount is the Transit mount the app keys live in.
+	AppKeysMount = "rasputin-app-keys"
 )
 
 const ext = ".hcl"

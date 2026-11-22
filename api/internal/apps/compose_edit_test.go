@@ -84,17 +84,17 @@ func assertNoCompose(t *testing.T, run workflowRun) {
 
 func TestComposeStash(t *testing.T) {
 	s := NewComposeStash()
-	if err := s.Put("", "x"); err == nil {
+	if err := s.Put("", HeldEdit{ComposeYAML: "x"}); err == nil {
 		t.Error("an empty job id must be refused")
 	}
-	if err := s.Put("j", "one"); err != nil {
+	if err := s.Put("j", HeldEdit{ComposeYAML: "one", WebPort: 8080}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Put("j", "two"); err == nil {
+	if err := s.Put("j", HeldEdit{ComposeYAML: "two"}); err == nil {
 		t.Error("a second compose for the same job must be refused")
 	}
-	if got, ok := s.Get("j"); !ok || got != "one" {
-		t.Errorf("Get = %q %v, want the first compose kept", got, ok)
+	if got, ok := s.Get("j"); !ok || got != (HeldEdit{ComposeYAML: "one", WebPort: 8080}) {
+		t.Errorf("Get = %+v %v, want the first edit kept, port and all", got, ok)
 	}
 	s.Discard("j")
 	s.Discard("j") // idempotent, as an OnTerminal hook must be
@@ -133,7 +133,7 @@ func TestEditSaga_DeploysTheSubmittedComposeToTheSameULIDWithoutRecordingIt(t *t
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	stash := NewComposeStash()
 	const jobID = "01JOBEDIT0000000000000000A"
-	if err := stash.Put(jobID, customV2); err != nil {
+	if err := stash.Put(jobID, HeldEdit{ComposeYAML: customV2}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -194,7 +194,7 @@ func TestEditSaga_AFailedPullChangesNothing(t *testing.T) {
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
 	fakePullAgent(t, nc, proto.AppPullAck{OK: false, Detail: "docker compose pull: manifest unknown"}, nil)
 	stash := NewComposeStash()
-	_ = stash.Put("j", customV2)
+	_ = stash.Put("j", HeldEdit{ComposeYAML: customV2})
 
 	run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps(), AppIdentity{})), nc, `{"appId":"`+testAppID+`"}`, "j")
 	if run.failedAt != "pull" || !strings.Contains(run.err.Error(), "manifest unknown") {
@@ -246,7 +246,7 @@ func TestEditSaga_Refusals(t *testing.T) {
 		nc := startNATS(t)
 		store, inv := seedUpgradeApp(t, testAppID)
 		stash := NewComposeStash()
-		_ = stash.Put("j", customV2)
+		_ = stash.Put("j", HeldEdit{ComposeYAML: customV2})
 		run := runWorkflow(t, wf(t)(EditWorkflow(store, inv, nc, nil, stash, testSource(t), testSecretDeps(), AppIdentity{})), nc, `{"appId":"`+testAppID+`"}`, "j")
 		if run.failedAt != "load" || !errors.Is(run.err, ErrEditCatalogApp) {
 			t.Fatalf("got step=%q err=%v", run.failedAt, run.err)
@@ -270,19 +270,19 @@ func TestStore_EditCompose(t *testing.T) {
 	}
 	now := time.Now().UTC()
 
-	if err := store.EditCompose(ctx, "a", ComposeHash("stale"), customV2, now); !errors.Is(err, ErrComposeChanged) {
+	if err := store.EditCompose(ctx, "a", ComposeHash("stale"), customV2, 0, now); !errors.Is(err, ErrComposeChanged) {
 		t.Errorf("stale hash: want ErrComposeChanged, got %v", err)
 	}
-	if err := store.EditCompose(ctx, "cat", ComposeHash(composeV1), customV2, now); !errors.Is(err, ErrEditCatalogApp) {
+	if err := store.EditCompose(ctx, "cat", ComposeHash(composeV1), customV2, 0, now); !errors.Is(err, ErrEditCatalogApp) {
 		t.Errorf("catalog app: want ErrEditCatalogApp, got %v", err)
 	}
-	if err := store.EditCompose(ctx, "ghost", ComposeHash(customV1), customV2, now); !errors.Is(err, sql.ErrNoRows) {
+	if err := store.EditCompose(ctx, "ghost", ComposeHash(customV1), customV2, 0, now); !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("unknown app: want sql.ErrNoRows, got %v", err)
 	}
 	if got, _ := store.Get(ctx, "cat"); got.ComposeYAML != composeV1 || got.PreviousComposeYAML != "" {
 		t.Error("a refused edit wrote a catalog app's row")
 	}
-	if err := store.EditCompose(ctx, "a", ComposeHash(customV1), customV2, now); err != nil {
+	if err := store.EditCompose(ctx, "a", ComposeHash(customV1), customV2, 0, now); err != nil {
 		t.Fatalf("EditCompose: %v", err)
 	}
 	got, _ := store.Get(ctx, "a")
@@ -402,7 +402,7 @@ func TestRevertSaga_ACustomAppReappliesItsPreviousCompose(t *testing.T) {
 	nc := startNATS(t)
 	fakePullAgent(t, nc, proto.AppPullAck{OK: true}, nil)
 	deploys := fakeDeployAgent(t, nc, proto.AppDeployAck{OK: true, Status: proto.AppStatusRunning})
-	if err := store.EditCompose(ctx, testAppID, ComposeHash(customV1), customV2, time.Now().UTC()); err != nil {
+	if err := store.EditCompose(ctx, testAppID, ComposeHash(customV1), customV2, 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	if step, err := runRevert(t, store, inv, nc, nil, testAppID, customV1); err != nil {

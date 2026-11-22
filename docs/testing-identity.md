@@ -17,6 +17,9 @@ it, and the package's `TestMain` tears it down with proof. `api/internal/identit
 the Go headless sign-in client, which signs in through Keycloak's own pages
 ([geekdojo-brain#966](https://github.com/geekdojo/geekdojo-brain/issues/966)).
 
+To choose the identity service the api itself runs against locally (off, the mock, or
+`keycloak`), see [Local identity service](../AGENTS.md#local-identity-service) in `AGENTS.md`.
+
 It is an **enforced gate**. The required `backend (vet + test + build)` CI job installs
 everything with `scripts/install-identity.sh` and sets `RASPUTIN_IDENTITY_HOME` and
 `RASPUTIN_IDENTITY_FUNCTIONAL=required` on its `test (api with coverage)` step, so on every PR
@@ -132,7 +135,8 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   TLS (Identity 2.4 and 2.6, proved in rasputin-os CI).
 - That the front behaves like the door. The front is an `httptest` TLS server whose reverse
   proxy presents the client leaf to Keycloak; it stands in for the door (Identity 4.3) and
-  forwards everything. It exists because `https-client-auth=required` holds for every caller,
+  forwards everything except what the door's admin-account guard refuses (`adminguard`,
+  geekdojo/geekdojo-brain#1127). It exists because `https-client-auth=required` holds for every caller,
   a browser included.
 - Any sign-in verb other than password with PKCE. The TOTP, passkey, reset and app-door verbs
   land with the items whose CI cases need them; the vector file already carries their sections.
@@ -167,6 +171,21 @@ runner's real systemd.
 | `TestIdentityState_DatabaseDown` (TC-979-01, row T80 K-HEALTH) | the runner user, in `test (api with coverage)` | With Keycloak ready, `docker stop` on its database makes `/health/ready` answer 503 naming `Keycloak database connections async health check` DOWN. The state reads `database-down` with its sentence, and `Ready` refuses with `identity_not_ready`. After `docker start` the state is `Ready` with no `identity:` alert. Its own Env keeps the database's data across the stop and serves it on a fixed port. |
 | `TestIdentitySystemd_OutOfMemory` (TC-979-02, row T79 K-OOMEXIT) | root, in `test (identity under real systemd, root)` | Keycloak with a 16 MiB heap exits with status 3 on each start, under `Restart=always`, until systemd's start limit (`StartLimitBurst=3`, `StartLimitIntervalSec=infinity`) fails the unit after its third run. The runner's systemd leaves it `failed` with `Result=exit-code`, not `start-limit-hit`. Each invocation's record says `exit_code=exited`, `exit_status=3`, and `last` names the unit's last `InvocationID`. One reading gives `out-of-memory` and exactly one `identity.service_exit` job per record, and leaves only `last` and its record. A second reading adds no job. |
 | `TestIdentitySystemd_FullPartition` (TC-979-04) | root, in the same step | With PostgreSQL's data on a 128 MiB tmpfs that is then filled, the database unit crash-loops until systemd's start limit (`StartLimitBurst=5`, `StartLimitIntervalSec=infinity`) leaves it `failed`, and Keycloak stops with it. The state reads `database-down`, and `identity.recover` arms but is not due. Once the fill file is removed it is due exactly once, its job restarts the pair through `sysunit.RestartUnits`, and the state reaches `Ready`. |
+
+[geekdojo-brain#1127](https://github.com/geekdojo/geekdojo-brain/issues/1127) (Identity 2.8) adds
+`TestRecoverAdminTrigger_AgainstPinnedKeycloak`
+(`api/internal/identitytest/recoveradmin_trigger_functional_test.go`), the trigger that submits
+`identity.recover_admin`. It runs as the runner user in `test (api with coverage)`, under the same
+`RASPUTIN_IDENTITY_FUNCTIONAL=required` switch, against the imported baseline. Each subtest builds
+its own job ledger, a real `jobs.Runner` over in-process NATS and the api's session, as one api
+process would.
+
+| Subtest | Proves |
+|---|---|
+| TC-1127-15 (row T83) | `failureFactor+1` (read from the baseline) client-credentials logins as `rasputin-admin` sent directly to Keycloak with the `rasputin-door` leaf (the inside path), each refused by Keycloak. Then, through the front, which applies the door's admin-account guard (`adminguard`), `failureFactor+1` of each of: client-credentials requests naming `rasputin-admin` in the form and in a `Basic` header with a secret; password grants for `service-account-rasputin-admin`; and login-form sign-ins as that user through `signin.PasswordCodeFlow`. The front refuses every one with 400 and its sentence and forwards none. Afterwards the service account's brute-force status reads `numFailures` 0 and not disabled, while a control user's one wrong password through the same front reads `numFailures` 1 (waited on as a fact, because Keycloak records failures asynchronously). The trigger is not due, the api leaf's login and the session's realm read answer 200, and the ledger holds no job. |
+| TC-1127-16 (row T81) | With `rasputin-admin` deleted, the real scheduler's first tick submits exactly one job, which succeeds; the restored hook is called once with its id; the session reads the realm and creates and deletes a user; the trigger is no longer due; the temporary secret is in no record. |
+| TC-1127-17 (row T82) | With the service account's realm-management roles removed, the session's realm read answers 403 and the trigger is due; the job succeeds and the read answers 200. |
+| TC-1127-18 | With `rasputin-admin` deleted and the baseline unreadable, the job fails with the baseline sentence; after two more scheduler ticks (30 s apart, waited on as ticks) the ledger still holds that one job, and the alerts list carries `job-failed:<id>` and `identity:admin-client-refused`. |
 
 **The units.** The two root tests write the pair as runtime unit files under
 `/run/systemd/system`, related as `keycloak-db.service` and `keycloak.service` are (`Requires=`
@@ -342,3 +361,48 @@ Then run the self-test as above.
 | TC-979-01 | `TestIdentityState_DatabaseDown` (CI) |
 | TC-979-02 | `TestIdentitySystemd_OutOfMemory` (CI, root step) |
 | TC-979-04 | `TestIdentitySystemd_FullPartition` (CI, root step) |
+| TC-1127-15 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-15 (CI) |
+| TC-1127-16 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-16 (CI) |
+| TC-1127-17 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-17 (CI) |
+| TC-1127-18 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-18 (CI) |
+
+## Converge, migrations and the features check
+
+`TestConverge_AgainstPinnedKeycloak` (`api/internal/identitytest/converge_functional_test.go`,
+geekdojo/geekdojo-brain#981) imports the repo's realm baseline into an Env of its own and runs
+`identity.converge`, the features check and the migrations runner against it, over the api's own
+identity client and Admin API session as `rasputin-admin`. It runs in the backend job with the
+other functional tests, under `RASPUTIN_IDENTITY_FUNCTIONAL=required`, and needs nothing more
+than they do.
+
+What it proves at the pin:
+
+- From the freshly imported baseline, one converge run reaches every field converge owns, and a
+  second run repairs nothing, writes nothing and adds no admin event.
+- The drift testing.md's CI TS-17 names (`frontendUrl`, both WebAuthn RP IDs, `admin-cli` with
+  its password grant on, an SMTP host) is put back, and each WebAuthn policy keeps its user
+  verification, resident-key and entity-name settings. `admin-cli`'s password grant is then
+  refused for the client. The drift warning rises on that run and clears on the next.
+- Every other owned field is put back, a `fallback-*` key provider is deleted, and
+  `rasputin-mesh`'s client secret is untouched.
+- The stored-event settings are held: the audit event types, no admin-event details, and a
+  30-day expiry for user and admin events.
+- The shipped `identity/keycloak-build.conf` matches the pin's `GET /admin/serverinfo`, read
+  through the identity client within its body cap, so a real identity state reads ready. With
+  a build conf that disables a feature the pin runs, it reads `features-mismatch`.
+- `migrations.All` followed by two test-only migrations commutes with converge. For each prefix
+  k, a realm migrated k steps, converged, migrated the rest and converged again exports equal,
+  with ids, key material and the realm's name masked, to one migrated fully and then converged.
+
+What it does not prove: the doors' answer to a features mismatch (Identity 4.3 and 4.4), an
+upgrade across Keycloak versions (there is one pin), and redirect URIs from a real door table
+(Identity 4.1).
+
+| Test case | Where |
+|---|---|
+| TC-981-01 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-01 (CI) |
+| TC-981-02 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-02 (CI) |
+| TC-981-03 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-03 (CI) |
+| TC-981-04 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-04 (CI) |
+| TC-981-10 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-10 (CI) |
+| TC-981-17 | `TestConverge_AgainstPinnedKeycloak`, subtest TC-981-17 (CI) |

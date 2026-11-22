@@ -28,6 +28,16 @@ var (
 // exitCodes are systemd's $EXIT_CODE words.
 var exitCodes = map[string]bool{"exited": true, "killed": true, "dumped": true}
 
+// The author field's values (FieldAuthor).
+const (
+	AuthorPresent = "present"
+	AuthorAbsent  = "absent"
+	AuthorUnknown = "-"
+)
+
+// authorValues are FieldAuthor's three values.
+var authorValues = map[string]bool{AuthorPresent: true, AuthorAbsent: true, AuthorUnknown: true}
+
 // Record is one parsed outcome record. A field the source does not declare
 // is empty.
 type Record struct {
@@ -39,6 +49,7 @@ type Record struct {
 	InvocationID string
 	ExitCode     string
 	ExitStatus   string
+	Author       string
 }
 
 // Parse reads b as src's record. It is strict: the bytes are valid UTF-8 of
@@ -91,6 +102,7 @@ func Parse(src Source, b []byte) (Record, error) {
 		InvocationID: values[FieldInvocationID],
 		ExitCode:     values[FieldExitCode],
 		ExitStatus:   values[FieldExitStatus],
+		Author:       values[FieldAuthor],
 	}
 	if _, ok := src.Outcomes[rec.Outcome]; !ok {
 		return Record{}, fmt.Errorf("the outcome %q is not one %s records", rec.Outcome, src.Kind)
@@ -109,6 +121,9 @@ func Parse(src Source, b []byte) (Record, error) {
 	}
 	if src.has(FieldExitStatus) && rec.ExitStatus != "" && !exitStatusRE.MatchString(rec.ExitStatus) {
 		return Record{}, errors.New("exit_status is neither a number nor a signal name")
+	}
+	if src.has(FieldAuthor) && !authorValues[rec.Author] {
+		return Record{}, errors.New("author is not present, absent or -")
 	}
 	if src.has(FieldKeyID) && rec.KeyID != "-" {
 		if _, err := sealrotate.ParseKeyID(rec.KeyID); err != nil {

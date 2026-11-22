@@ -60,6 +60,19 @@ CREATE TABLE IF NOT EXISTS app_runtime_secrets (
     name   TEXT NOT NULL,
     PRIMARY KEY (app_id, name)
 );
+
+-- app_transit_keys: the name of every Transit key an app has created through
+-- its relay socket, app-<id>-<name> in the store (geekdojo/geekdojo-brain#1084).
+-- The deletion index of the keys, as app_runtime_secrets is of the entries,
+-- and the fact an encrypt or decrypt checks before it calls the store. A row
+-- is recorded before its key is created and forgotten after its key is
+-- destroyed, or when the store refuses the create that added it. Deleting the
+-- app removes its rows.
+CREATE TABLE IF NOT EXISTS app_transit_keys (
+    app_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
+    name   TEXT NOT NULL,
+    PRIMARY KEY (app_id, name)
+);
 `
 
 // migrations are forward-only DDL applied after schema on every open. They must

@@ -102,7 +102,7 @@ func TestPreUpdateCopy_AgainstTheRealStore(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	svc, err := secrets.NewService(secrets.Deps{Repo: rs.repo, Apps: appsAt{appStore}, Switch: realSwitch(t, logger), Log: logger})
+	svc, err := secrets.NewService(secrets.Deps{Repo: rs.repo, Transit: secretstoretest.NoTransit{}, Apps: appsAt{appStore}, Switch: realSwitch(t, logger), Log: logger})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -152,7 +152,7 @@ func TestRuntimeIndex_CascadesAndIsReadAtomically(t *testing.T) {
 		t.Errorf("after Forget, names = %v, want [k1 k2]", got)
 	}
 
-	names, runtime, err := store.DeleteWithSecretNames(ctx, delAppID)
+	names, runtime, _, err := store.DeleteWithSecretNames(ctx, delAppID)
 	if err != nil || !slices.Equal(names, []string{"p"}) || !slices.Equal(runtime, []string{"rt"}) {
 		t.Fatalf("DeleteWithSecretNames = %v, %v, %v; want [p] [rt]", names, runtime, err)
 	}
@@ -356,7 +356,7 @@ func TestOpenStore_UpgradesAPreviousReleaseDatabase(t *testing.T) {
 	if err := store.RecordRuntimeSecret(ctx, delAppID, "k"); err != nil {
 		t.Fatalf("the upgraded database has no runtime table: %v", err)
 	}
-	names, runtime, err := store.DeleteWithSecretNames(ctx, delAppID)
+	names, runtime, _, err := store.DeleteWithSecretNames(ctx, delAppID)
 	if err != nil || !slices.Equal(names, []string{"p"}) || !slices.Equal(runtime, []string{"k"}) {
 		t.Fatalf("delete = %v %v %v", names, runtime, err)
 	}

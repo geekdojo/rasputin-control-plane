@@ -7,12 +7,18 @@
 // Keycloak's own recovery command, kc.sh bootstrap-admin service, runs only
 // while the service is stopped and makes a temporary master-realm client
 // authenticated by a client secret (register row E39). The job makes that
-// secret, hands it to the command only through its environment, uses the
+// secret and hands it to Deps.Bootstrap, which the composition root wires to
+// the OS's recovery launcher: the secret reaches the command on the
+// launcher's standard input and from there only the command's own
+// environment (geekdojo/geekdojo-brain#1131). The job uses the
 // temporary client to put rasputin-admin back exactly as the baseline
 // declares it, deletes every temporary client, and reports restored only
 // once rasputin-admin itself has logged in by client-x509 and read the realm.
 //
-// It is a System workflow: the runner refuses it from POST /api/jobs.
+// It is a System workflow: the runner refuses it from POST /api/jobs. The
+// Trigger (trigger.go, geekdojo/geekdojo-brain#1127, Identity 2.8) is what
+// submits it, on the fact that the identity service is ready and refuses the
+// api's own admin login.
 package recoveradmin
 
 import (
@@ -30,6 +36,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -42,7 +49,7 @@ const (
 	// realm and adminClient are the baseline's realm and its administrator
 	// client.
 	realm       = "rasputin"
-	adminClient = "rasputin-admin"
+	adminClient = adminguard.AdminClientID
 	// realmManagement is the client whose roles the administrator holds.
 	realmManagement = "realm-management"
 	// masterRealm is where bootstrap-admin makes its temporary client.
@@ -50,8 +57,6 @@ const (
 	// TempClientPrefix starts every temporary client's id; the job's id
 	// follows it.
 	TempClientPrefix = "rasputin-recover-"
-	// SecretEnv is the variable the temporary secret reaches kc.sh in.
-	SecretEnv = "RASPUTIN_RECOVER_CLIENT_SECRET"
 	// secretBytes is how many random bytes the temporary secret carries.
 	secretBytes = 32
 )
@@ -76,16 +81,19 @@ type Deps struct {
 	Units    units
 	// Unit names the unit in records.
 	Unit string
-	// Bootstrap runs kc.sh with args and exactly env as its environment
-	// additions; the composition root adds the config file and the unit's
-	// JVM variables.
-	Bootstrap func(ctx context.Context, args, env []string) error
+	// Bootstrap runs Keycloak's bootstrap-admin service command for the
+	// temporary client id with clientSecret as its secret. It must not keep
+	// or destroy clientSecret: the step logs in with it afterwards.
+	Bootstrap func(ctx context.Context, clientID string, clientSecret secret.Value) error
 	// ReadBaseline returns the shipped realm baseline, the administrator
 	// client's only source.
 	ReadBaseline func() ([]byte, error)
 	// Rand makes the temporary secret.
 	Rand io.Reader
-	Log  *slog.Logger
+	// Restored raises the persisted "admin client restored" alert for a job
+	// that succeeded. Its error is logged; the job's outcome stands.
+	Restored func(ctx context.Context, jobID string) error
+	Log      *slog.Logger
 	// StepTimeout bounds the one step; it marks work gone far outside
 	// normal and decides nothing else.
 	StepTimeout time.Duration
@@ -97,7 +105,7 @@ type Recoverer struct{ d Deps }
 // New checks d and returns a Recoverer. It does no I/O.
 func New(d Deps) (*Recoverer, error) {
 	switch {
-	case d.Identity == nil || d.Units == nil || d.Bootstrap == nil || d.ReadBaseline == nil || d.Rand == nil || d.Log == nil:
+	case d.Identity == nil || d.Units == nil || d.Bootstrap == nil || d.ReadBaseline == nil || d.Rand == nil || d.Restored == nil || d.Log == nil:
 		return nil, errors.New("recoveradmin: a collaborator is nil")
 	case d.Unit == "":
 		return nil, errors.New("recoveradmin: Deps.Unit is empty")
@@ -108,11 +116,25 @@ func New(d Deps) (*Recoverer, error) {
 }
 
 // Workflow is the job's one step. It is Irreversible, so it is never retried
-// and never replayed, and System, so no operator can start it.
+// and never replayed, and System, so no operator can start it. A job that
+// succeeds raises the restored alert once, from OnTerminal.
 func (r *Recoverer) Workflow() jobs.Workflow {
 	return jobs.Workflow{Kind: Kind, System: true, Steps: []jobs.WorkflowStep{
 		{Name: "restore", Do: r.restore, Timeout: r.d.StepTimeout, Retries: 0, Irreversible: true},
-	}}
+	}, OnTerminal: r.terminal}
+}
+
+// terminal raises the restored alert for a job that succeeded. A failed job
+// is recorded by the ledger and its job-failed alert, so it raises nothing
+// here.
+func (r *Recoverer) terminal(ctx context.Context, jobID string, success bool, _ string) {
+	if !success {
+		return
+	}
+	if err := r.d.Restored(ctx, jobID); err != nil {
+		r.d.Log.ErrorContext(ctx, "The admin client restored alert was not raised.",
+			"component", "identity", "job_id", jobID, "err", err.Error())
+	}
 }
 
 // stepError is a failure sentence a person reads: the runner stores a failed
@@ -144,13 +166,6 @@ type baselineAdmin struct {
 	scopeRoles  []string // realm-management roles in its scope
 }
 
-// bootstrapArgs is kc.sh's recovery command for the temporary client id. It
-// names the secret's variable, never the secret.
-func bootstrapArgs(clientID string) []string {
-	return []string{"bootstrap-admin", "service", "--optimized", "--no-prompt",
-		"--client-id", clientID, "--client-secret:env", SecretEnv}
-}
-
 func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	ctx := sc.Ctx
 	temp := TempClientPrefix + sc.JobID
@@ -170,22 +185,26 @@ func (r *Recoverer) restore(sc *jobs.StepCtx) (json.RawMessage, error) {
 	}
 	defer sec.Destroy()
 
+	// Every start below runs on a context the step's cancellation does not
+	// reach (F-978-09): a step that timed out or was cancelled must never
+	// leave the sign-in service stopped. systemctl start is bounded by the
+	// unit's own TimeoutStartSec= (F-979-11). Starting an active unit does
+	// nothing, so a stop that failed is followed by a start too (F-1127-05).
+	startCtx := context.WithoutCancel(ctx)
 	if err := r.d.Units.Stop(ctx); err != nil {
-		return fail(errStop, "The identity service could not be stopped.", err)
+		return fail(errStop, "The identity service could not be stopped.", errors.Join(err, r.d.Units.Start(startCtx)))
 	}
 	jobs.LogStep(r.d.Log, sc, slog.LevelInfo, "The identity service is stopped for the admin client's recovery.",
 		append(attrs, "event", "identity.recover_admin_stopped")...)
 
-	env := []string{SecretEnv + "=" + string(sec.Reveal())}
-	bootErr := r.d.Bootstrap(ctx, bootstrapArgs(temp), env)
-	clear(env) // drops the slice's reference; the string itself cannot be zeroed
+	bootErr := r.d.Bootstrap(ctx, temp, sec)
 	if bootErr == nil {
 		jobs.LogStep(r.d.Log, sc, slog.LevelInfo, "The identity service's recovery command made the temporary client.",
 			append(attrs, "event", "identity.recover_admin_bootstrapped")...)
 	}
 	// The unit is started whether or not the command worked: a stopped
 	// identity service is worse than the missing client.
-	startErr := r.d.Units.Start(ctx)
+	startErr := r.d.Units.Start(startCtx)
 	if bootErr != nil {
 		return fail(errCommand, "The identity service's recovery command failed.", errors.Join(bootErr, startErr))
 	}
@@ -270,7 +289,7 @@ func (r *Recoverer) readBaseline() (baselineAdmin, error) {
 }
 
 // tempSecret is 32 bytes from Rand as unpadded base64url: 43 printable ASCII
-// characters, which an environment entry and the JVM both carry unchanged
+// characters, which a line on stdin, an environment entry and the JVM all carry unchanged
 // (F-978-01). The raw bytes and the encoding buffer are zeroed.
 func (r *Recoverer) tempSecret() (secret.Value, error) {
 	raw := make([]byte, secretBytes)

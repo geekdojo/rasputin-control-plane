@@ -73,6 +73,11 @@ func (f *fakeAppSecretDeleter) Delete(ctx context.Context, _ secrets.Actor, r se
 	return nil
 }
 
+// DestroyKey records the key as Delete records an entry.
+func (f *fakeAppSecretDeleter) DestroyKey(ctx context.Context, a secrets.Actor, r secrets.Ref) error {
+	return f.Delete(ctx, a, r)
+}
+
 func (f *fakeAppSecretDeleter) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -336,12 +341,13 @@ func TestAppsCompose_TC783_55_RecordsTheOperator(t *testing.T) {
 	seedUpgradeApp(t, f, "cat", "vw", "vaultwarden", "services: {old: {}}\n", 3)
 	seedUpgradeApp(t, f, "custom", "mine", "", customOld, 0)
 	seedUpgradeApp(t, f, "back", "back", "", customOld, 0)
-	if err := f.appsStore.EditCompose(f.ctx, "back", apps.ComposeHash(customOld), "services:\n  web:\n    image: me/web:3\n", time.Now().UTC()); err != nil {
+	if err := f.appsStore.EditCompose(f.ctx, "back", apps.ComposeHash(customOld), "services:\n  web:\n    image: me/web:3\n", 0, time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct{ kind, id, body string }{
 		{"app.upgrade", "cat", catalogBody},
-		{"app.edit", "custom", composeYAMLBody(t, "services:\n  web:\n    image: me/web:2\n")},
+		// seedUpgradeApp's port, published on loopback for the web-port rule.
+		{"app.edit", "custom", composeYAMLBody(t, "services:\n  web:\n    image: me/web:2\n    ports: [\"127.0.0.1:1234:80\"]\n")},
 		{"app.revert", "back", shaBody(customOld)},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {

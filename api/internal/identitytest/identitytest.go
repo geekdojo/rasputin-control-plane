@@ -15,8 +15,9 @@
 //
 // The front is an httptest TLS server whose reverse proxy presents the client
 // leaf to Keycloak. It stands in for the door (Identity 4.3) and is not the
-// door: it forwards everything. It exists because https-client-auth=required
-// holds for every caller, a browser included.
+// door: it forwards everything except what the door's admin-account guard
+// refuses (adminguard, geekdojo/geekdojo-brain#1127). It exists because
+// https-client-auth=required holds for every caller, a browser included.
 //
 // Tests import it; nothing in a shipped binary does.
 package identitytest
@@ -43,9 +44,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -197,6 +200,8 @@ type Env struct {
 	ports  *reportedPorts
 	front  *httptest.Server
 	issuer string
+	// refusals counts the requests the front's admin-account guard refused.
+	refusals atomic.Int64
 
 	// ctx is cancelled by Close; the browser's allocator lives under it.
 	ctx    context.Context
@@ -220,6 +225,10 @@ func (e *Env) Issuer() string { return e.issuer }
 
 // FrontURL is the front's https://127.0.0.1:<port>.
 func (e *Env) FrontURL() string { return e.front.URL }
+
+// FrontRefusals is how many requests the front's admin-account guard has
+// refused, each answered 400 and forwarded nowhere.
+func (e *Env) FrontRefusals() int64 { return e.refusals.Load() }
 
 // ManagementURL is Keycloak's management interface, which serves
 // /health/ready and requires a client certificate.
@@ -638,13 +647,15 @@ func (e *Env) newFront() (*httptest.Server, error) {
 }
 
 // serveFront points the front at Keycloak's https port and starts it. Its
-// proxy presents the client leaf and keeps the browser's Host.
+// proxy presents the client leaf and keeps the browser's Host. The door's
+// admin-account guard runs first: a request it refuses is answered 400 with
+// the guard's sentence, counted, and never forwarded.
 func (e *Env) serveFront(httpsPort int) error {
 	target, err := url.Parse("https://127.0.0.1:" + strconv.Itoa(httpsPort))
 	if err != nil {
 		return fmt.Errorf("identitytest: front target: %w", err)
 	}
-	e.front.Config.Handler = &httputil.ReverseProxy{
+	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 			r.Out.Host = r.In.Host
@@ -652,6 +663,18 @@ func (e *Env) serveFront(httpsPort int) error {
 		Transport: &http.Transport{TLSClientConfig: e.ClientTLS()},
 		ErrorLog:  slog.NewLogLogger(e.log.Handler(), slog.LevelWarn),
 	}
+	e.front.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		in, err := adminguard.FromRequest(r)
+		if err == nil {
+			err = adminguard.Check(in)
+		}
+		if err != nil {
+			e.refusals.Add(1)
+			http.Error(w, adminguard.Sentence(err), http.StatusBadRequest)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
 	e.front.StartTLS()
 	return nil
 }

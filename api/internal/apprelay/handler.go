@@ -2,10 +2,12 @@ package apprelay
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secrets"
@@ -71,6 +73,9 @@ const (
 	msgConflict    = "The secret changed while it was being replaced; read it and try again."
 	msgForbidden   = "The call was refused: an app may reach only its own runtime secrets, from the node it runs on."
 	msgUnavailable = "The secret store could not complete the call; try again later."
+	// The key operations' own sentences (geekdojo/geekdojo-brain#1084).
+	msgNoKey         = "The key does not exist; create it first."
+	msgBadCiphertext = "The ciphertext does not decrypt under this key."
 )
 
 // okMessage is the sentence a successful op's reply carries.
@@ -79,6 +84,10 @@ var okMessage = map[string]string{
 	proto.AppSecretCreate:  "The secret was created.",
 	proto.AppSecretReplace: "The secret was replaced.",
 	proto.AppSecretDelete:  "The secret was deleted.",
+	proto.AppKeyCreate:     "The key was created.",
+	proto.AppKeyEncrypt:    "The value was encrypted.",
+	proto.AppKeyDecrypt:    "The value was decrypted.",
+	proto.AppKeyDestroy:    "The key was destroyed.",
 }
 
 // Handle answers one call that arrived on subject, asking for a reply on
@@ -112,7 +121,8 @@ func (h *Handler) Handle(ctx context.Context, pub Publisher, subject, reply stri
 		return
 	}
 	r := proto.AppSecretReply{Code: proto.AppSecretOK, Message: okMessage[call.Op], CorrelationID: cid}
-	if call.Op == proto.AppSecretRead {
+	switch call.Op {
+	case proto.AppSecretRead, proto.AppKeyEncrypt, proto.AppKeyDecrypt:
 		r.Value = string(value.Reveal())
 	}
 	h.reply(ctx, pub, reply, r)
@@ -140,8 +150,10 @@ func parseCall(node string, data []byte) (Call, string) {
 	c.AppID, c.Op, c.Name = w.AppID, w.Op, w.Name
 	switch w.Op {
 	case proto.AppSecretRead, proto.AppSecretCreate, proto.AppSecretReplace, proto.AppSecretDelete:
+	case proto.AppKeyCreate, proto.AppKeyEncrypt, proto.AppKeyDecrypt, proto.AppKeyDestroy:
+		return parseKeyCall(c, w)
 	default:
-		return c, "the operation is not read, create, replace or delete"
+		return c, "the operation is not read, create, replace or delete, or a key's create, encrypt, decrypt or destroy"
 	}
 	ref, err := secrets.AppRuntimeSecret(w.AppID, w.Name)
 	if err != nil {
@@ -157,11 +169,66 @@ func parseCall(node string, data []byte) (Call, string) {
 	return c, ""
 }
 
+// ciphertextRE is Transit's ciphertext form: vault:v<version>:<standard
+// base64> (F-1084-04). The version is 1 to 10 digits.
+var ciphertextRE = regexp.MustCompile(`^vault:v[0-9]{1,10}:[A-Za-z0-9+/]+={0,2}$`)
+
+// parseKeyCall is parseCall for a key op (geekdojo/geekdojo-brain#1084): the
+// app key's reference, an encrypt's plaintext as standard base64 within
+// proto.AppKeyPlaintextFits, a decrypt's ciphertext in Transit's form within
+// proto.AppRelayMaxValueBytes, and no value on create or destroy.
+func parseKeyCall(c Call, w proto.AppSecretCall) (Call, string) {
+	ref, err := secrets.AppKey(w.AppID, w.Name)
+	if err != nil {
+		return c, "the app id or the key name is not valid"
+	}
+	switch w.Op {
+	case proto.AppKeyEncrypt:
+		if !proto.AppKeyPlaintextFits(w.Value) {
+			return c, fmt.Sprintf("the plaintext is longer than %d bytes", proto.AppKeyMaxPlaintextBytes)
+		}
+		raw, err := base64.StdEncoding.Strict().DecodeString(w.Value)
+		clear(raw)
+		if err != nil {
+			return c, "the plaintext is not standard base64"
+		}
+	case proto.AppKeyDecrypt:
+		if len(w.Value) > proto.AppRelayMaxValueBytes {
+			return c, fmt.Sprintf("the ciphertext is longer than %d bytes", proto.AppRelayMaxValueBytes)
+		}
+		if !ciphertextRE.MatchString(w.Value) {
+			return c, "the ciphertext is not of the form vault:v<version>:<base64>"
+		}
+	}
+	c.Ref = ref
+	if w.Op == proto.AppKeyEncrypt || w.Op == proto.AppKeyDecrypt {
+		c.Value = secret.New([]byte(w.Value))
+	}
+	return c, ""
+}
+
+// isKeyOp reports whether op is one of an app key's operations.
+func isKeyOp(op string) bool {
+	switch op {
+	case proto.AppKeyCreate, proto.AppKeyEncrypt, proto.AppKeyDecrypt, proto.AppKeyDestroy:
+		return true
+	}
+	return false
+}
+
 // errorReply maps the service's error to its code and sentence, and logs it
 // under the correlation id: a refusal at WARN, a store failure at ERROR.
 func (h *Handler) errorReply(ctx context.Context, c Call, cid string, err error) proto.AppSecretReply {
 	r := proto.AppSecretReply{CorrelationID: cid}
 	switch {
+	case errors.Is(err, ErrNoKey), isKeyOp(c.Op) && errors.Is(err, secretstore.ErrNotFound):
+		// A key op's not-found is the app naming a key it never created (or
+		// one gone from the store): a refusal, at WARN (F-1084-02).
+		r.Code, r.Message = proto.AppSecretNotFound, msgNoKey
+		h.refused(ctx, c, cid, err.Error())
+	case errors.Is(err, secretstore.ErrInvalidCiphertext):
+		r.Code, r.Message = proto.AppSecretInvalid, msgBadCiphertext
+		h.refused(ctx, c, cid, err.Error())
 	case errors.Is(err, secretstore.ErrNotFound):
 		r.Code, r.Message = proto.AppSecretNotFound, msgNotFound
 	case errors.Is(err, secrets.ErrExists):

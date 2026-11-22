@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -122,7 +123,15 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/apps
-// Body: { "name": "minecraft", "composeYaml": "...", "targetNode": "node-dev" }
+// Body: { "name": "minecraft", "composeYaml": "...", "targetNode": "node-dev", "webPort": 8080 }
+//
+// "webPort" is optional: the custom app's web port, a whole number from 1 to
+// 65535, stored where a tile's web port is (geekdojo/geekdojo-brain#1089).
+// Absent or null is no port. A port that is not a JSON integer is refused as
+// the body is decoded, before any other field is judged; one out of range is
+// refused after the name, compose, node and role checks. With a port, the
+// compose must then publish it on 127.0.0.1 only (refuseWebPortPublish,
+// geekdojo/geekdojo-brain#1091); with none, the compose is not read.
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name        string `json:"name"`
@@ -131,8 +140,13 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		// ExposeLAN opts the app into LAN reachability (ADR-0004 §9). Absent →
 		// false: tailnet-only by default; LAN is always an explicit opt-in.
 		ExposeLAN bool `json:"exposeLan"`
+		WebPort   *int `json:"webPort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if isWebPortTypeError(err) {
+			s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortInvalid, msgWebPortInvalid, slog.String("cause", "type"))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid json body")
 		return
 	}
@@ -169,6 +183,14 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, appTargetRoleMsg)
 		return
 	}
+	webPort, ok := parseWebPort(req.WebPort)
+	if !ok {
+		s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortInvalid, msgWebPortInvalid, slog.String("cause", "range"))
+		return
+	}
+	if s.refuseWebPortPublish(w, r, req.ComposeYAML, webPort) {
+		return
+	}
 
 	if existing, _ := s.apps.GetByName(r.Context(), req.Name); existing != nil {
 		writeError(w, http.StatusConflict, "an app with that name already exists")
@@ -199,9 +221,12 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		ComposeYAML: req.ComposeYAML,
 		TargetNode:  req.TargetNode,
 		ExposeLAN:   req.ExposeLAN,
-		LastStatus:  proto.AppStatusStopped,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		// A custom app serves plain HTTP on its web port: there is no
+		// declaring web TLS for one, so WebTLS stays false.
+		PublishedPort: webPort,
+		LastStatus:    proto.AppStatusStopped,
+		CreatedAt:     now,
+		UpdatedAt:     now,
 	}
 	if err := s.apps.Create(r.Context(), app); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -469,6 +494,10 @@ type composeRequest struct {
 	// accept. Only beside "source"; a tier string exactly as tileschema spells
 	// it. Ignored when the upgrade raises nothing.
 	AcceptPrivilegeTier *string `json:"acceptPrivilegeTier"`
+	// WebPort is a custom app's web port (geekdojo/geekdojo-brain#1089), only
+	// beside "composeYaml": a whole number from 1 to 65535. Absent or null
+	// leaves the stored port as it is. Not a fourth variant either.
+	WebPort *int `json:"webPort"`
 }
 
 // PUT /api/apps/{id}/compose
@@ -500,6 +529,12 @@ type composeRequest struct {
 // (a tile the catalog in effect does not offer, a catalog older than the app's
 // compose), and for a sha256 that is neither the installed compose nor the
 // retained previous one.
+//
+// "webPort" goes only beside "composeYaml": a custom app's web port
+// (geekdojo/geekdojo-brain#1089). Sent without "composeYaml" it is a coded 400,
+// web_port_without_compose, before the exactly-one-of check; a port that is
+// not a whole number from 1 to 65535 is a coded 400, web_port_invalid. The
+// installed compose with a different port is a port-only app.edit.
 //
 // A composeYaml is not validated, as it is not at custom create (ADR-0006
 // D12). It is also never put in the job's spec: specs are rendered on the
@@ -548,11 +583,24 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
+		if isWebPortTypeError(err) {
+			s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortInvalid, msgWebPortInvalid,
+				slog.String("app_id", app.ID), slog.String("cause", "type"))
+			return
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return
 	}
 	if dec.More() {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: more than one JSON value")
+		return
+	}
+	// Before the exactly-one-of check, so a port sent alone or beside the
+	// wrong variant is told what it needs rather than how many variants to
+	// name (F-1089-02).
+	if req.WebPort != nil && req.ComposeYAML == nil {
+		s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortWithoutCompose, msgWebPortWithoutCompose,
+			slog.String("app_id", app.ID), slog.String("cause", "compose_absent"))
 		return
 	}
 	set := 0
@@ -575,12 +623,18 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	webPort, ok := parseWebPort(req.WebPort)
+	if !ok {
+		s.writeCodedError(w, r, http.StatusBadRequest, codeWebPortInvalid, msgWebPortInvalid,
+			slog.String("app_id", app.ID), slog.String("cause", "range"))
+		return
+	}
 
 	switch {
 	case req.Source != nil:
 		s.putComposeFromCatalog(w, r, app, *req.Source, req.AcceptPrivilegeTier, req.DeleteVolumes)
 	case req.ComposeYAML != nil:
-		s.putComposeYAML(w, r, app, *req.ComposeYAML, req.DeleteVolumes)
+		s.putComposeYAML(w, r, app, *req.ComposeYAML, webPort, req.DeleteVolumes)
 	default:
 		s.putComposeByHash(w, r, app, *req.SHA256, req.DeleteVolumes)
 	}
@@ -703,8 +757,14 @@ func userName(r *http.Request) string {
 	return ""
 }
 
-// putComposeYAML is {"composeYaml":"…"}: replace a custom app's compose.
-func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string, deleteVolumes []string) {
+// putComposeYAML is {"composeYaml":"…"}: replace a custom app's compose, and
+// its web port when webPort is not 0 (geekdojo/geekdojo-brain#1089). The
+// installed compose with no port, or with the stored one, is the 200 no-op;
+// with a different port it is a port-only edit, run as app.edit like any other.
+// Anything else must publish the port in effect, declared or stored, on
+// 127.0.0.1 only (geekdojo/geekdojo-brain#1091); an app with neither is not
+// checked.
+func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *apps.App, compose string, webPort int, deleteVolumes []string) {
 	if strings.TrimSpace(compose) == "" {
 		writeError(w, http.StatusBadRequest, "composeYaml must not be empty")
 		return
@@ -713,8 +773,18 @@ func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *app
 		writeError(w, http.StatusConflict, apps.ErrEditCatalogApp.Error())
 		return
 	}
-	if apps.ComposeHash(compose) == app.ComposeSHA256 {
+	if apps.ComposeHash(compose) == app.ComposeSHA256 && (webPort == 0 || webPort == app.PublishedPort) {
 		s.writeAppView(w, r, app)
+		return
+	}
+	// The port the app will be served on once this lands: the declared one,
+	// or the stored one, which EditCompose keeps when none is declared
+	// (geekdojo/geekdojo-brain#1091).
+	effective := webPort
+	if effective == 0 {
+		effective = app.PublishedPort
+	}
+	if s.refuseWebPortPublish(w, r, compose, effective, slog.String("app_id", app.ID)) {
 		return
 	}
 	if s.composeStash == nil {
@@ -729,7 +799,7 @@ func (s *Server) putComposeYAML(w http.ResponseWriter, r *http.Request, app *app
 		return
 	}
 	s.submitComposeJob(w, r, "app.edit", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, func(jobID string) error {
-		return s.composeStash.Put(jobID, compose)
+		return s.composeStash.Put(jobID, apps.HeldEdit{ComposeYAML: compose, WebPort: webPort})
 	})
 }
 

@@ -22,13 +22,13 @@ func TestParseUnits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Units{KC: Unit{"activating", "start-post", id(1)}, DB: Unit{"active", "running", id(2)}}
+	want := Units{KC: Unit{ActiveState: "activating", SubState: "start-post", InvocationID: id(1)}, DB: Unit{ActiveState: "active", SubState: "running", InvocationID: id(2)}}
 	if u != want {
 		t.Fatalf("units = %+v, want %+v", u, want)
 	}
 	// An unknown unit: systemd prints inactive/dead and an empty InvocationID.
 	unknown := "ActiveState=inactive\nSubState=dead\nInvocationID=\n\nActiveState=active\nSubState=running\nInvocationID=" + id(2) + "\n"
-	if u, err := ParseUnits([]byte(unknown)); err != nil || u.KC != (Unit{"inactive", "dead", ""}) {
+	if u, err := ParseUnits([]byte(unknown)); err != nil || u.KC != (Unit{ActiveState: "inactive", SubState: "dead"}) {
 		t.Fatalf("unknown unit: %+v, %v", u, err)
 	}
 	for name, out := range map[string]string{

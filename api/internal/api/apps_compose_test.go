@@ -33,9 +33,12 @@ type revertRow struct {
 // secretMarker stands for a secret a custom compose inlines.
 const secretMarker = "hunter2-DO-NOT-LEAK-7f3a"
 
-const customOld = "services:\n  web:\n    image: me/web:1\n    volumes: [data:/data]\nvolumes:\n  data: {}\n"
+// customOld and customNew publish, on loopback, every web port the tests
+// seed or declare beside them, so the web-port rule
+// (geekdojo/geekdojo-brain#1091) passes them.
+const customOld = "services:\n  web:\n    image: me/web:1\n    ports: [\"127.0.0.1:1234:80\", \"127.0.0.1:8080:80\"]\n    volumes: [data:/data]\nvolumes:\n  data: {}\n"
 
-var customNew = "services:\n  web:\n    image: me/web:2\n    environment:\n      DB_PASSWORD: " + secretMarker + "\n    volumes: [data:/data]\nvolumes:\n  data: {}\n"
+var customNew = "services:\n  web:\n    image: me/web:2\n    ports: [\"127.0.0.1:1234:80\", \"127.0.0.1:8080:80\", \"127.0.0.1:9090:80\"]\n    environment:\n      DB_PASSWORD: " + secretMarker + "\n    volumes: [data:/data]\nvolumes:\n  data: {}\n"
 
 func composeYAMLBody(t *testing.T, compose string) string {
 	t.Helper()

@@ -193,3 +193,50 @@ func deviceRef(t *testing.T, kind, name string) secrets.Ref {
 }
 
 func val(s string) secret.Value { return secret.New([]byte(s)) }
+
+// fakeTransit is a secrets.TransitStore that records each call, in the
+// repository's shared call log when log is set, and answers err.
+type fakeTransit struct {
+	mu    sync.Mutex
+	log   *fakeRepo
+	calls []string
+	err   error
+}
+
+func (f *fakeTransit) note(op string, k secretstore.TransitKey) error {
+	f.mu.Lock()
+	f.calls = append(f.calls, op+" "+k.String())
+	f.mu.Unlock()
+	if f.log != nil {
+		f.log.note("transit " + op)
+	}
+	return f.err
+}
+
+func (f *fakeTransit) TransitCreateKey(_ context.Context, k secretstore.TransitKey) error {
+	return f.note("create", k)
+}
+
+func (f *fakeTransit) TransitEncrypt(_ context.Context, k secretstore.TransitKey, _ secret.Value) (secret.Value, error) {
+	if err := f.note("encrypt", k); err != nil {
+		return secret.Value{}, err
+	}
+	return secret.New([]byte("vault:v1:ct")), nil
+}
+
+func (f *fakeTransit) TransitDecrypt(_ context.Context, k secretstore.TransitKey, _ secret.Value) (secret.Value, error) {
+	if err := f.note("decrypt", k); err != nil {
+		return secret.Value{}, err
+	}
+	return secret.New([]byte(sentinel)), nil
+}
+
+func (f *fakeTransit) TransitDestroyKey(_ context.Context, k secretstore.TransitKey) error {
+	return f.note("destroy", k)
+}
+
+func (f *fakeTransit) seen() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.calls...)
+}
