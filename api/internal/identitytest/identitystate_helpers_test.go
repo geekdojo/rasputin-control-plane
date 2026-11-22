@@ -21,6 +21,8 @@ type stateDeps struct {
 	exits  string // the exits directory
 	health identitystate.Health
 	ledger identitystate.Ledger
+	// features is the features check; nil stands in a matching one.
+	features func(ctx context.Context, kcInvocation string) (bool, error)
 }
 
 // memSettings is the settings store in memory.
@@ -77,6 +79,10 @@ func (n noHealth) Health(context.Context) (idclient.HealthReport, error) {
 func newStateMonitor(t *testing.T, cfg Config, d stateDeps) *identitystate.Monitor {
 	t.Helper()
 	never := func(context.Context) (bool, error) { return false, nil }
+	features := d.features
+	if features == nil {
+		features = func(context.Context, string) (bool, error) { return false, nil }
+	}
 	m, err := identitystate.New(identitystate.Deps{
 		Units:       d.units,
 		Exits:       identitystate.ExitRecords(os.DirFS("/"), d.exits),
@@ -89,8 +95,9 @@ func newStateMonitor(t *testing.T, cfg Config, d stateDeps) *identitystate.Monit
 		Settings:    &memSettings{m: map[string]string{identitystate.VersionReadyKey: "26.8.2"}},
 		JobRunning:  func(context.Context, string) (bool, error) { return false, nil },
 		Blank:       never, AppsPaused: never, HistoryBehind: never,
-		Now: time.Now,
-		Log: cfg.Logger,
+		Features: features,
+		Now:      time.Now,
+		Log:      cfg.Logger,
 	})
 	if err != nil {
 		t.Fatal(err)

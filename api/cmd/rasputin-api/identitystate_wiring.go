@@ -72,6 +72,8 @@ type identityStateDeps struct {
 	free     func(dir string) (uint64, error)
 	dataDir  string
 	restores interface{ Active() (string, bool) }
+	// features is the features check (identityFeatures, #981).
+	features func(ctx context.Context, kcInvocation string) (bool, error)
 	now      func() time.Time
 	log      *slog.Logger
 }
@@ -109,20 +111,27 @@ func (w identityState) start(ctx context.Context) {
 	}
 }
 
-// wireAlerts hands the monitor's alert, and the admin trigger's still-refused
-// alert when there is a trigger (#1127), to the alerts aggregator as one
-// source.
+// wireAlerts hands the monitor's alert, the admin trigger's still-refused
+// alert when there is a trigger (#1127), and each extra source (converge's
+// drift alert, #981) to the alerts aggregator as one source.
 func (w identityState) wireAlerts(svc interface {
 	SetIdentityAlerts(func(context.Context, time.Time) []proto.Alert)
-}, trig *recoveradmin.Trigger) {
+}, trig *recoveradmin.Trigger, extra ...func(context.Context, time.Time) []proto.Alert) {
 	switch {
 	case w.monitor == nil:
-	case trig == nil:
+	case trig == nil && len(extra) == 0:
 		svc.SetIdentityAlerts(w.monitor.Alerts)
 	default:
 		mon := w.monitor
 		svc.SetIdentityAlerts(func(ctx context.Context, now time.Time) []proto.Alert {
-			return append(mon.Alerts(ctx, now), trig.Alerts(ctx, now)...)
+			out := mon.Alerts(ctx, now)
+			if trig != nil {
+				out = append(out, trig.Alerts(ctx, now)...)
+			}
+			for _, f := range extra {
+				out = append(out, f(ctx, now)...)
+			}
+			return out
 		})
 	}
 }
@@ -135,7 +144,7 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 		return identityState{}, nil
 	}
 	if d.client == nil || d.ledger == nil || d.settings == nil || d.outcomes == nil || d.jobRunning == nil ||
-		d.run == nil || d.fsys == nil || d.remove == nil || d.free == nil || d.restores == nil || d.now == nil || d.log == nil {
+		d.run == nil || d.fsys == nil || d.remove == nil || d.free == nil || d.restores == nil || d.features == nil || d.now == nil || d.log == nil {
 		return identityState{}, errors.New("identity state: a collaborator is nil under keycloak")
 	}
 	units := identitystate.SystemctlUnits(identitystate.RunFunc(d.run), identityUnit, identityDBUnit)
@@ -163,6 +172,7 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 		AppsPaused: identityFactAbsent,
 		// Identity 4.3 (#985) produces history-behind.
 		HistoryBehind: identityFactAbsent,
+		Features:      d.features,
 		Now:           d.now,
 		Log:           log,
 	})

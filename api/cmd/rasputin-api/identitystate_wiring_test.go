@@ -117,6 +117,7 @@ func identityDeps(t *testing.T, mode string, c *identityCounts) identityStateDep
 		free:     func(string) (uint64, error) { return 1 << 40, nil },
 		dataDir:  t.TempDir(),
 		restores: noRestores{},
+		features: func(context.Context, string) (bool, error) { return false, nil },
 		now:      time.Now,
 		log:      log,
 	}

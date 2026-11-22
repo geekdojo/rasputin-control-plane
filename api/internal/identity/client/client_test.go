@@ -389,6 +389,32 @@ func TestClient_AdminPathGuard(t *testing.T) {
 	}
 }
 
+// TC-981-11: Admin also sends exactly /admin/serverinfo, and refuses every
+// path near it before any request.
+func TestClient_AdminServerInfoAndNothingNearIt(t *testing.T) {
+	p := newPKI(t)
+	var seen []string
+	srv := newServer(t, p, func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"features":[]}`))
+	}, nil)
+	c, _ := newClient(t, p, srv.URL)
+	tok := secret.New([]byte("t"))
+	var out map[string]any
+	if _, err := c.Admin(t.Context(), tok, http.MethodGet, "/admin/serverinfo", nil, &out); err != nil {
+		t.Fatalf("Admin(/admin/serverinfo) = %v, want it sent", err)
+	}
+	for _, path := range []string{"/admin/serverinfo/", "/admin/serverinfo/x", "/admin/serverinfo?a=b", "/admin/server", "/Admin/serverinfo"} {
+		if _, err := c.Admin(t.Context(), tok, http.MethodGet, path, nil, nil); !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("Admin(%q): err = %v, want ErrInvalidValue", path, err)
+		}
+	}
+	if len(seen) != 1 || seen[0] != "/admin/serverinfo" {
+		t.Errorf("the server saw %v, want exactly [/admin/serverinfo]", seen)
+	}
+}
+
 // TC-978-14: the token travels only in Authorization: Bearer, the client
 // secret only in the form body, whose buffer is zero after the call, and no
 // sentinel reaches an error rendering or a log record for any failure kind.

@@ -428,7 +428,8 @@ func TestState_FailClosed(t *testing.T) {
 // TC-979-17: Ready's refusal carries identity_not_ready and the state's
 // sentence; every title, detail and error is a vendor-neutral sentence.
 func TestState_NotReadySentences(t *testing.T) {
-	all := []State{Starting, Upgrading, Paused, DatabaseDown, Held, OutOfMemory, Failed, Unreachable, Blank, AppsPaused, HistoryBehind}
+	all := []State{Starting, Upgrading, Paused, DatabaseDown, Held, OutOfMemory, Failed, Unreachable, Blank, AppsPaused, HistoryBehind,
+		FeaturesMismatch, FeaturesUnchecked}
 	vendors := []string{"Keycloak", "PostgreSQL", "Postgres", "Java", "JVM"}
 	sentence := func(t *testing.T, what, s string) {
 		t.Helper()
@@ -677,7 +678,8 @@ func TestNew_Refuses(t *testing.T) {
 		"Settings": func(d *Deps) { d.Settings = nil }, "JobRunning": func(d *Deps) { d.JobRunning = nil },
 		"Blank": func(d *Deps) { d.Blank = nil }, "AppsPaused": func(d *Deps) { d.AppsPaused = nil },
 		"HistoryBehind": func(d *Deps) { d.HistoryBehind = nil }, "Now": func(d *Deps) { d.Now = nil },
-		"Log": func(d *Deps) { d.Log = nil },
+		"Features": func(d *Deps) { d.Features = nil },
+		"Log":      func(d *Deps) { d.Log = nil },
 	} {
 		d := x.deps(log, x.ledger)
 		mut(&d)
@@ -709,5 +711,82 @@ func TestState_UnitsUnreadable(t *testing.T) {
 	}
 	if x.w.readRecordsCalls != 0 {
 		t.Fatal("outcome records read without the database's run")
+	}
+}
+
+// TC-981-08: features-mismatch and features-unchecked arise only on an
+// otherwise ready service, before apps-paused; both block and are critical,
+// with Appendix F's sentences and identity:<state> alert IDs. The
+// service-only readiness reads both as ready and refuses every other
+// blocking state.
+func TestState_Features(t *testing.T) {
+	const (
+		mismatchSentence  = "Sign-in is closed: the sign-in service is not running with the features this release built it with. Update or reinstall this release."
+		uncheckedSentence = "Sign-in is closed because the control plane cannot check which features its sign-in service is running with."
+	)
+	for _, c := range []struct {
+		name     string
+		set      func(w *world)
+		want     State
+		sentence string
+	}{
+		{"mismatch", func(w *world) { w.featuresMismatch = true }, FeaturesMismatch, mismatchSentence},
+		{"unchecked", func(w *world) { w.featuresErr = errors.New("serverinfo unreadable") }, FeaturesUnchecked, uncheckedSentence},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			x := newFixture(t)
+			x.w.set(c.set)
+			// Before apps-paused.
+			x.w.set(func(w *world) { w.appsPaused = true })
+			if got := x.state(t); got != c.want {
+				t.Fatalf("state = %s, want %s", got, c.want)
+			}
+			if !c.want.Blocks() || !c.want.critical() || c.want.sentence() != c.sentence {
+				t.Errorf("%s: Blocks %t, critical %t, sentence %q", c.want, c.want.Blocks(), c.want.critical(), c.want.sentence())
+			}
+			err := x.m.Ready(t.Context())
+			var nr *NotReadyError
+			if !errors.As(err, &nr) || nr.State != c.want {
+				t.Errorf("Ready = %v, want NotReadyError{%s}", err, c.want)
+			}
+			a := x.m.Alerts(t.Context(), fixedNow)
+			if len(a) != 1 || a[0].ID != "identity:"+string(c.want) || a[0].Severity != proto.AlertCrit || a[0].Title != c.sentence {
+				t.Errorf("alerts = %+v", a)
+			}
+			if err := x.m.ServiceOnly().Ready(t.Context()); err != nil {
+				t.Errorf("ServiceOnly().Ready = %v, want nil", err)
+			}
+			if got := x.w.featuresCalls; len(got) == 0 || got[0] != kcActive.InvocationID {
+				t.Errorf("Features called with %v, want Keycloak's invocation %s", got, kcActive.InvocationID)
+			}
+			// Only when otherwise ready: a starting service reads starting
+			// and asks nothing.
+			x.w.set(func(w *world) { w.units.KC = kcStartPost; w.featuresCalls = nil })
+			if got := x.state(t); got != Starting {
+				t.Errorf("starting service: state = %s, want starting", got)
+			}
+			if len(x.w.featuresCalls) != 0 {
+				t.Errorf("Features asked while starting: %v", x.w.featuresCalls)
+			}
+			err = x.m.ServiceOnly().Ready(t.Context())
+			if !errors.As(err, &nr) || nr.State != Starting {
+				t.Errorf("ServiceOnly().Ready while starting = %v, want NotReadyError{starting}", err)
+			}
+		})
+	}
+	// A match is ready, through both readinesses.
+	x := newFixture(t)
+	if got := x.state(t); got != Ready {
+		t.Fatalf("matching features: state = %s, want ready", got)
+	}
+	if err := x.m.ServiceOnly().Ready(t.Context()); err != nil {
+		t.Errorf("ServiceOnly().Ready = %v", err)
+	}
+	// Every other blocking state still refuses through the service-only
+	// readiness.
+	x.w.set(func(w *world) { w.units.KC = kcFailed })
+	var nr *NotReadyError
+	if err := x.m.ServiceOnly().Ready(t.Context()); !errors.As(err, &nr) || nr.State != Failed {
+		t.Errorf("ServiceOnly().Ready on a failed unit = %v, want NotReadyError{failed}", err)
 	}
 }

@@ -36,8 +36,13 @@ import (
 // ErrProtocol; the service's answers here are a few kilobytes.
 const maxBody = 1 << 20
 
-// adminPrefix is the one path prefix Admin sends to.
-const adminPrefix = "/admin/realms/"
+// adminPrefix is the one path prefix Admin sends to, and serverInfoPath the
+// one path outside it: the server's feature list, which converge's features
+// check reads (geekdojo/geekdojo-brain#981).
+const (
+	adminPrefix    = "/admin/realms/"
+	serverInfoPath = "/admin/serverinfo"
+)
 
 // Config is everything a Client needs. New refuses an incomplete one.
 type Config struct {
@@ -149,8 +154,8 @@ func (c *Client) ClientCredentials(ctx context.Context, realm, clientID string, 
 }
 
 // Admin sends one Admin API request with token as its bearer. path must
-// start with /admin/realms/; anything else is ErrInvalidValue and nothing is
-// sent. in, when not nil, is sent as JSON; out, when not nil, takes a 2xx
+// start with /admin/realms/ or be exactly /admin/serverinfo; anything else is
+// ErrInvalidValue and nothing is sent. in, when not nil, is sent as JSON; out, when not nil, takes a 2xx
 // answer's JSON body. A 2xx is success; 401 is ErrTokenRefused, 403
 // ErrForbidden, 404 ErrNotFound, 409 ErrConflict, 5xx ErrUnreachable, and
 // anything else ErrProtocol.
@@ -275,8 +280,8 @@ func (c *Client) token(ctx context.Context, path string, form []byte) (secret.Va
 
 func (c *Client) admin(ctx context.Context, token secret.Value, method, path string, in, out any) (Response, *Error) {
 	const op = "admin"
-	if !strings.HasPrefix(path, adminPrefix) {
-		return Response{}, &Error{Op: op, Path: path, Kind: ErrInvalidValue, Err: errors.New("the path is not under " + adminPrefix)}
+	if path != serverInfoPath && !strings.HasPrefix(path, adminPrefix) {
+		return Response{}, &Error{Op: op, Path: path, Kind: ErrInvalidValue, Err: errors.New("the path is not under " + adminPrefix + " nor " + serverInfoPath)}
 	}
 	var reqBody []byte
 	contentType := ""

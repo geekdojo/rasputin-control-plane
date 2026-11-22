@@ -102,6 +102,11 @@ type Deps struct {
 	// Blank, AppsPaused and HistoryBehind are the facts Identity 5.7, 7.3 and
 	// 4.3 produce.
 	Blank, AppsPaused, HistoryBehind Fact
+	// Features compares the running service's features with the shipped
+	// build for Keycloak's run kcInvocation (converge.FeatureCheck.Mismatch,
+	// geekdojo/geekdojo-brain#981). true is a mismatch; an error is a check
+	// that could not finish.
+	Features func(ctx context.Context, kcInvocation string) (bool, error)
 	// Now stamps when a state was first observed, and nothing else.
 	Now func() time.Time
 	Log *slog.Logger
@@ -137,8 +142,8 @@ type Monitor struct {
 	dbInvocation string
 	holds        map[*hold]struct{}
 	// The once-per-outage WARN flags.
-	unitsUnread, exitsUnread, markerUnread, versionUnwritten, rollbackUnread, startHoldUnread bool
-	factUnread                                                                                map[string]bool
+	unitsUnread, exitsUnread, markerUnread, versionUnwritten, rollbackUnread, startHoldUnread, featuresUnread bool
+	factUnread                                                                                                map[string]bool
 }
 
 // hold is one Quiesce call that has not been released.
@@ -177,6 +182,8 @@ func New(d Deps) (*Monitor, error) {
 		missing = "AppsPaused"
 	case d.HistoryBehind == nil:
 		missing = "HistoryBehind"
+	case d.Features == nil:
+		missing = "Features"
 	case d.Now == nil:
 		missing = "Now"
 	case d.Log == nil:
@@ -206,6 +213,33 @@ func (m *Monitor) Ready(ctx context.Context) error {
 	r, err := m.read(ctx)
 	if err != nil {
 		return err
+	}
+	if r.state.Blocks() {
+		return &NotReadyError{State: r.state}
+	}
+	return nil
+}
+
+// ServiceReadiness is the Monitor's readiness of the service alone: the two
+// features states read as ready, so a features check that cannot finish
+// (the api's own admin login refused, for one) never blocks what repairs it.
+// Every other blocking state still refuses.
+type ServiceReadiness struct{ m *Monitor }
+
+// ServiceOnly is the service-only readiness identity.recover_admin's trigger
+// reads (geekdojo/geekdojo-brain#981).
+func (m *Monitor) ServiceOnly() ServiceReadiness { return ServiceReadiness{m: m} }
+
+// Ready is Monitor.Ready with FeaturesMismatch and FeaturesUnchecked read as
+// ready.
+func (s ServiceReadiness) Ready(ctx context.Context) error {
+	r, err := s.m.read(ctx)
+	if err != nil {
+		return err
+	}
+	switch r.state {
+	case FeaturesMismatch, FeaturesUnchecked:
+		return nil
 	}
 	if r.state.Blocks() {
 		return &NotReadyError{State: r.state}
@@ -357,12 +391,33 @@ func (m *Monitor) decide(ctx context.Context, f facts, ready bool) (State, strin
 		return Upgrading, ""
 	case !ready:
 		return Starting, ""
+	}
+	// The features check, only on an otherwise ready service (#981).
+	if st := m.featureState(ctx, kc.InvocationID); st != "" {
+		return st, ""
+	}
+	switch {
 	case m.fact(ctx, "apps-paused", m.d.AppsPaused):
 		return AppsPaused, ""
 	case m.fact(ctx, "history-behind", m.d.HistoryBehind):
 		return HistoryBehind, ""
 	}
 	return Ready, ""
+}
+
+// featureState is FeaturesMismatch or FeaturesUnchecked from the features
+// check, or "" when it matches. A check that could not finish is one WARN per
+// outage.
+func (m *Monitor) featureState(ctx context.Context, kcInvocation string) State {
+	mismatch, err := m.d.Features(ctx, kcInvocation)
+	m.outage(ctx, &m.featuresUnread, err, "identity features check could not finish")
+	switch {
+	case err != nil:
+		return FeaturesUnchecked
+	case mismatch:
+		return FeaturesMismatch
+	}
+	return ""
 }
 
 // dbDown is the database not running: stopped, failed, or waiting to be
