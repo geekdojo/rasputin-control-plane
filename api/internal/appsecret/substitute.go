@@ -16,9 +16,10 @@ import (
 // (geekdojo/geekdojo-brain#776).
 //
 // PURE, and takes the compose as a STRING. The substitution is a textual scan
-// against a token and no YAML parser enters the control plane
-// (ADR-0006:219, :404). gopkg.in/yaml.v3 is in api/go.mod and is imported by
-// test files only; this path keeps it that way.
+// against a token, never a YAML parse (ADR-0006:219, :404), so the bytes a
+// node gets are the bytes stored. The control plane's one compose YAML read
+// is apps.composePortFacts, the web-port check (geekdojo/geekdojo-brain#1091);
+// this path does not use it.
 //
 // A compose with no token is returned unchanged — the same bytes, not a
 // re-rendered copy — with a nil map, because the install path's contract is

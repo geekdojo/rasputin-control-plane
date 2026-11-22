@@ -223,14 +223,27 @@ func assertWebPortRefusal(t *testing.T, f *apiFixture, w interface {
 		t.Errorf("record route=%q code=%q, want %q and %q", keys["route"], keys["code"], route, code)
 	}
 	switch keys["cause"] {
-	case "type", "range", "compose_absent":
+	case "type", "range", "compose_absent", "bind", "yaml":
 	default:
 		t.Errorf("record cause = %q, want a fixed cause", keys["cause"])
 	}
 }
 
+// createBody is a create request for name with port as "webPort" ("" for
+// none). A whole-number port is published on loopback, so the web-port rule
+// (geekdojo/geekdojo-brain#1091) passes it.
 func createBody(name, port string) string {
-	b := `{"name":"` + name + `","composeYaml":"services: {web: {image: me/web:1}}\n","targetNode":"n1","exposeLan":true`
+	compose := "services: {web: {image: me/web:1}}\n"
+	if port != "" && strings.Trim(port, "0123456789") == "" {
+		compose = `services: {web: {image: me/web:1, ports: ["127.0.0.1:` + port + `:80"]}}` + "\n"
+	}
+	return createRequest(name, compose, port)
+}
+
+// createRequest is a create request for name with compose and port as
+// "webPort" ("" for none).
+func createRequest(name, compose, port string) string {
+	b := `{"name":"` + name + `","composeYaml":` + jsonString(compose) + `,"targetNode":"n1","exposeLan":true`
 	if port != "" {
 		b += `,"webPort":` + port
 	}
