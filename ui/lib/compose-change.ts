@@ -88,7 +88,9 @@ export type ComposeChangeKind = 'upgrade' | 'edit' | 'revert';
 
 export type ComposeChangeBody =
   | { source: 'catalog'; acceptPrivilegeTier?: PrivilegeTier; deleteVolumes?: string[] }
-  | { composeYaml: string; deleteVolumes?: string[] }
+  // webPort: the port on the node the compose publishes for the app's web
+  // page (#1089, #1090). Absent: the app's stored port is kept.
+  | { composeYaml: string; webPort?: number | string; deleteVolumes?: string[] }
   | { sha256: string; deleteVolumes?: string[] };
 
 // ----- which actions an app offers ------------------------------------------
@@ -148,8 +150,12 @@ export function upgradeBody(acceptPrivilegeTier?: PrivilegeTier): ComposeChangeB
   return acceptPrivilegeTier ? { source: 'catalog', acceptPrivilegeTier } : { source: 'catalog' };
 }
 
-export function editBody(composeYaml: string): ComposeChangeBody {
-  return { composeYaml };
+/**
+ * The edit body. `webPort` is sent only when defined: an absent key keeps the
+ * app's stored port, and no request removes one.
+ */
+export function editBody(composeYaml: string, webPort?: number | string): ComposeChangeBody {
+  return webPort === undefined ? { composeYaml } : { composeYaml, webPort };
 }
 
 /** The re-apply body. Throws when the app has no previous compose to name. */
@@ -162,19 +168,20 @@ export function revertBody(app: Pick<App, 'revertAvailable' | 'previousComposeSh
 
 /**
  * The body for a change of `kind`, for the app as the page last read it.
- * `acceptPrivilegeTier` applies to an upgrade only.
+ * `acceptPrivilegeTier` applies to an upgrade only, `webPort` to an edit only.
  */
 export function bodyFor(
   kind: ComposeChangeKind,
   app: Pick<App, 'revertAvailable' | 'previousComposeSha256'>,
   composeYaml?: string,
   acceptPrivilegeTier?: PrivilegeTier,
+  webPort?: number | string,
 ): ComposeChangeBody {
   switch (kind) {
     case 'upgrade':
       return upgradeBody(acceptPrivilegeTier);
     case 'edit':
-      return editBody(composeYaml ?? '');
+      return editBody(composeYaml ?? '', webPort);
     case 'revert':
       return revertBody(app);
   }
@@ -195,7 +202,12 @@ export function withDeleteVolumes(body: ComposeChangeBody, names: readonly strin
       ? { source: body.source, acceptPrivilegeTier: body.acceptPrivilegeTier, deleteVolumes }
       : { source: body.source, deleteVolumes };
   }
-  if ('composeYaml' in body) return { composeYaml: body.composeYaml, deleteVolumes };
+  // The port the owner typed rides along too, or the redeploy would skip it.
+  if ('composeYaml' in body) {
+    return body.webPort === undefined
+      ? { composeYaml: body.composeYaml, deleteVolumes }
+      : { composeYaml: body.composeYaml, webPort: body.webPort, deleteVolumes };
+  }
   return { sha256: body.sha256, deleteVolumes };
 }
 
@@ -232,6 +244,19 @@ function errorText(body: unknown): string {
     return (body as { error: string }).error;
   }
   return '';
+}
+
+/**
+ * The api's own sentence when the refusal is a coded one: a body with a
+ * non-empty string `code` and a non-empty string `error`, the shape the api's
+ * writeCodedError answers with. Such a sentence is written for the owner, so
+ * it is shown alone, at any status and for any code, including codes this
+ * build does not know (ERR-MESSAGE). null for an uncoded refusal.
+ */
+function codedSentence(body: unknown): string | null {
+  if (!body || typeof body !== 'object') return null;
+  const o = body as { code?: unknown; error?: unknown };
+  return typeof o.code === 'string' && o.code !== '' && typeof o.error === 'string' && o.error !== '' ? o.error : null;
 }
 
 function isDroppedVolume(v: unknown): v is DroppedVolume {
@@ -310,6 +335,8 @@ export function parseComposeResponse(status: number, body: unknown): ComposeOutc
     const kept = notDropped.length ? ` (still declared or not on the node: ${notDropped.join(', ')})` : '';
     return { kind: 'error', status, message: composeErrorMessage(status, message) + kept };
   }
+  const coded = codedSentence(body);
+  if (coded !== null) return { kind: 'error', status, message: coded };
   return { kind: 'error', status, message: composeErrorMessage(status, message) };
 }
 

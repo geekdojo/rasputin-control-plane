@@ -381,3 +381,66 @@ describe('upgradeReviewUrl', () => {
     assert.equal(UPGRADE_WARNING, 'Be sure you have reviewed changes on GitHub before upgrading!');
   });
 });
+
+// geekdojo/geekdojo-brain#1090: the web port on an edit, and coded refusals
+// shown in the api's own words.
+describe('the web port on an edit', () => {
+  const app = { revertAvailable: true, previousComposeSha256: HASH };
+  const c = 'services: {}';
+
+  // TC-1090-05
+  test('editBody and bodyFor carry the port on edit only', () => {
+    const plain = editBody(c);
+    assert.deepEqual(plain, { composeYaml: c });
+    assert.equal('webPort' in plain, false);
+    assert.deepEqual(editBody(c, 8080), { composeYaml: c, webPort: 8080 });
+    assert.deepEqual(bodyFor('edit', app, c, undefined, 9090), { composeYaml: c, webPort: 9090 });
+    const up = bodyFor('upgrade', app, c, undefined, 9090);
+    assert.deepEqual(up, { source: 'catalog' });
+    assert.equal('webPort' in up, false);
+    const rev = bodyFor('revert', app, c, undefined, 9090);
+    assert.deepEqual(rev, { sha256: HASH });
+    assert.equal('webPort' in rev, false);
+  });
+
+  // TC-1090-06
+  test('withDeleteVolumes keeps the port on resubmit', () => {
+    assert.deepEqual(withDeleteVolumes({ composeYaml: c, webPort: 9090 }, ['v1']), { composeYaml: c, webPort: 9090, deleteVolumes: ['v1'] });
+    const plain = withDeleteVolumes({ composeYaml: c }, ['v1']);
+    assert.deepEqual(plain, { composeYaml: c, deleteVolumes: ['v1'] });
+    assert.equal('webPort' in plain, false);
+  });
+});
+
+describe('coded refusals', () => {
+  const SENTENCE = 'The web port must be a whole number from 1 to 65535.';
+
+  // TC-1090-07
+  test('a coded web-port refusal is the api sentence alone', () => {
+    const o = parseComposeResponse(400, { error: SENTENCE, code: 'web_port_invalid', correlationId: 'x' });
+    assert.deepEqual(o, { kind: 'error', status: 400, message: SENTENCE });
+    if (o.kind === 'error') assert.ok(!o.message.includes('malformed'));
+  });
+
+  // TC-1090-08
+  test('the verbatim display is generic across codes and statuses', () => {
+    const bodies: Array<[number, { error: string; code: string }]> = [
+      [400, { error: 'A web port needs a compose to go with it.', code: 'web_port_without_compose' }],
+      [409, { error: 'A future refusal.', code: 'some_future_code' }],
+    ];
+    for (const [status, body] of bodies) {
+      const o = parseComposeResponse(status, body);
+      assert.equal(o.kind, 'error');
+      if (o.kind === 'error') assert.equal(o.message, body.error);
+    }
+  });
+
+  // TC-1090-09 (the uncoded 400, dropped-volume and privilege-raise tests
+  // above stay as they were)
+  test('an empty or non-string code keeps today\'s wording', () => {
+    const want = 'The change was not accepted — the request was malformed: composeYaml must not be empty';
+    for (const code of ['', 7]) {
+      assert.deepEqual(parseComposeResponse(400, { error: 'composeYaml must not be empty', code }), { kind: 'error', status: 400, message: want });
+    }
+  });
+});
