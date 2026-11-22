@@ -131,20 +131,26 @@ func TestEnrollDispatch_MintErrorSendsNothing(t *testing.T) {
 }
 
 // TC-825-31: enrollCommand carries the key's bytes and the spec's fields.
+// TC-984-04: it writes both tailnet settings exactly as given, for both values.
 func TestEnrollCommand_CarriesTheKey(t *testing.T) {
-	key := secret.New([]byte("tskey-auth-example"))
-	defer key.Destroy()
-	b, err := enrollCommand("https://hs.example", key, EnrollSpec{NodeID: "n1", AdvertiseRoutes: []string{"10.0.0.0/24"}}, []byte("CA"))
-	if err != nil {
-		t.Fatalf("enrollCommand: %v", err)
-	}
-	var cmd proto.MeshEnrollCmd
-	if err := json.Unmarshal(b, &cmd); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if cmd.AuthKey != "tskey-auth-example" || cmd.LoginServer != "https://hs.example" || cmd.Hostname != "n1" ||
-		!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || !cmd.AcceptDNS || !cmd.AcceptRoutes || string(cmd.LegacyTrustBundlePEM) != "CA" {
-		t.Errorf("enroll command = %+v", cmd)
+	for _, prefs := range []EnrolPrefs{{AcceptRoutes: true, AcceptDNS: true}, {AcceptRoutes: false, AcceptDNS: false}, {AcceptRoutes: true, AcceptDNS: false}, {AcceptRoutes: false, AcceptDNS: true}} {
+		key := secret.New([]byte("tskey-auth-example"))
+		b, err := enrollCommand("https://hs.example", key, EnrollSpec{NodeID: "n1", AdvertiseRoutes: []string{"10.0.0.0/24"}}, prefs, []byte("CA"))
+		key.Destroy()
+		if err != nil {
+			t.Fatalf("enrollCommand: %v", err)
+		}
+		var cmd proto.MeshEnrollCmd
+		if err := json.Unmarshal(b, &cmd); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if cmd.AuthKey != "tskey-auth-example" || cmd.LoginServer != "https://hs.example" || cmd.Hostname != "n1" ||
+			!slices.Equal(cmd.AdvertiseRoutes, []string{"10.0.0.0/24"}) || string(cmd.LegacyTrustBundlePEM) != "CA" {
+			t.Errorf("enroll command = %+v", cmd)
+		}
+		if cmd.AcceptDNS != prefs.AcceptDNS || cmd.AcceptRoutes != prefs.AcceptRoutes {
+			t.Errorf("prefs %+v: AcceptDNS=%v AcceptRoutes=%v", prefs, cmd.AcceptDNS, cmd.AcceptRoutes)
+		}
 	}
 }
 

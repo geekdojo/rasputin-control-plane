@@ -915,15 +915,19 @@ func (f *convergeFixture) submittedEnrolls(t *testing.T) []string {
 	return out
 }
 
+// TC-984-01: the control plane is an auto-enrolled role. On a fresh cluster
+// (or one upgraded from a release that never enrolled it) converge enrols an
+// online, unbound control plane with the other roles, and stops once it binds.
 func TestReconcileConverge_EnrollsUnenrolledManagedNodes(t *testing.T) {
 	f := newConvergeFixture(t)
 	now := time.Now().UTC()
-	f.addNode(t, "c01", proto.RoleCompute, now)                 // unenrolled → enroll
-	f.addNode(t, "stor1", proto.RoleStorage, now)               // unenrolled → enroll
-	f.addNode(t, "fw", proto.RoleFirewall, now)                 // unenrolled → enroll
-	f.addNode(t, "cp", proto.RoleControlPlane, now)             // CP self-enrolls at setup → skip
-	f.addNode(t, "c02", proto.RoleCompute, now)                 // already enrolled → skip
-	f.addNode(t, "c03", proto.RoleCompute, now.Add(-time.Hour)) // offline → skip
+	f.addNode(t, "c01", proto.RoleCompute, now)                      // unenrolled → enroll
+	f.addNode(t, "stor1", proto.RoleStorage, now)                    // unenrolled → enroll
+	f.addNode(t, "fw", proto.RoleFirewall, now)                      // unenrolled → enroll
+	f.addNode(t, "cp", proto.RoleControlPlane, now)                  // unenrolled → enroll
+	f.addNode(t, "c02", proto.RoleCompute, now)                      // already enrolled → skip
+	f.addNode(t, "c03", proto.RoleCompute, now.Add(-time.Hour))      // offline → skip
+	f.addNode(t, "cp2", proto.RoleControlPlane, now.Add(-time.Hour)) // offline → skip
 	if err := f.store.UpsertDevice(f.ctx, &Device{
 		HSID: "hs-c02", User: "u", Hostname: "c02", Kind: "rasputin",
 		RasputinNodeID: "c02", FirstSeen: now, LastSeen: now,
@@ -936,9 +940,34 @@ func TestReconcileConverge_EnrollsUnenrolledManagedNodes(t *testing.T) {
 		t.Fatalf("converge: %v", err)
 	}
 	got := f.submittedEnrolls(t)
-	want := []string{"c01", "fw", "stor1"}
+	want := []string{"c01", "cp", "fw", "stor1"}
 	if !slices.Equal(got, want) {
 		t.Errorf("submitted = %v, want %v", got, want)
+	}
+
+	// cp binds; a second pass submits nothing more for it.
+	if err := f.store.UpsertDevice(f.ctx, &Device{
+		HSID: "hs-cp", User: "u", Hostname: "cp", Kind: "rasputin",
+		RasputinNodeID: "cp", FirstSeen: now, LastSeen: now,
+	}); err != nil {
+		t.Fatalf("UpsertDevice: %v", err)
+	}
+	// The first pass's jobs finished (the fixture's workflow is a no-op), so
+	// none is in flight; only the bind keeps cp out of the second pass.
+	if _, err := step(stepCtx(f.ctx, f.nc, struct{}{})); err != nil {
+		t.Fatalf("converge (second pass): %v", err)
+	}
+	cpCount := 0
+	for _, id := range f.submittedEnrolls(t) {
+		if id == "cp" {
+			cpCount++
+		}
+		if id == "cp2" || id == "c03" {
+			t.Errorf("offline node %s was submitted", id)
+		}
+	}
+	if cpCount != 1 {
+		t.Errorf("cp submitted %d times across both passes, want 1 (none after it bound)", cpCount)
 	}
 }
 

@@ -166,11 +166,13 @@ func applyRecord(svc *Service, nc *nats.Conn) jobs.DoFn {
 // ----- mesh.reconcile -----------------------------------------------------
 
 // AutoEnrollRoles are the node roles the control plane enrolls into the mesh
-// automatically — once at first registration (the onNodeAdded hook in main)
-// and convergently on every reconcile tick (converge_enrollment below). The
-// controlplane self-enrolls during setup (POST /api/setup/mesh); user devices
-// are never auto-enrolled.
-var AutoEnrollRoles = []proto.NodeRole{proto.RoleFirewall, proto.RoleCompute, proto.RoleStorage}
+// automatically — once at first registration (the onNodeAdded hook in main,
+// when the mesh is ready) and convergently on every reconcile tick
+// (converge_enrollment below). The control plane is one of them: it joins its
+// own private network with no person acting, with accept-routes and
+// accept-DNS off (enrolPrefsForRole; geekdojo/geekdojo-brain#984). User
+// devices are never auto-enrolled.
+var AutoEnrollRoles = []proto.NodeRole{proto.RoleFirewall, proto.RoleCompute, proto.RoleStorage, proto.RoleControlPlane}
 
 // Retry pacing for converge_enrollment after a FAILED enroll.
 //
@@ -640,17 +642,18 @@ func enrollValidate(inv *inventory.Store) jobs.DoFn {
 }
 
 // enrollCommand builds the MeshEnrollCmd bus payload: the one place the
-// node's pre-auth key leaves its secret.Value. legacyBundle is the trust
-// bundle for an agent that predates trust.install, and nil for every other
-// agent, which received the bundle on trust.install before this.
-func enrollCommand(loginServer string, key secret.Value, spec EnrollSpec, legacyBundle []byte) ([]byte, error) {
+// node's pre-auth key leaves its secret.Value. prefs are the node's role's
+// tailnet settings (enrolPrefsForRole). legacyBundle is the trust bundle for
+// an agent that predates trust.install, and nil for every other agent, which
+// received the bundle on trust.install before this.
+func enrollCommand(loginServer string, key secret.Value, spec EnrollSpec, prefs EnrolPrefs, legacyBundle []byte) ([]byte, error) {
 	return json.Marshal(proto.MeshEnrollCmd{
 		LoginServer:          loginServer,
 		AuthKey:              string(key.Reveal()),
 		Hostname:             spec.NodeID,
 		AdvertiseRoutes:      spec.AdvertiseRoutes,
-		AcceptDNS:            true,
-		AcceptRoutes:         true,
+		AcceptDNS:            prefs.AcceptDNS,
+		AcceptRoutes:         prefs.AcceptRoutes,
 		LegacyTrustBundlePEM: legacyBundle,
 	})
 }
@@ -683,6 +686,19 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		if err != nil {
 			return nil, err
 		}
+		// The role is read once, before trust is delivered or a key minted:
+		// the login server and the tailnet settings both derive from it, and
+		// a role that cannot be read or has no settings fails the step
+		// (ERR-CLOSED) rather than enrolling with a guess.
+		role, err := enrolTargetRole(inv, s.NodeID)
+		if err != nil {
+			return nil, err
+		}
+		prefs, ok := enrolPrefsForRole(role)
+		if !ok {
+			return nil, fmt.Errorf("node %s: no enrolment settings for role %q", s.NodeID, role)
+		}
+		sc.Log("info", fmt.Sprintf("%s (%s) enrols with accept-routes=%t accept-dns=%t", s.NodeID, role, prefs.AcceptRoutes, prefs.AcceptDNS))
 		// The control plane reaches Headscale on ITSELF. Enrolling it against
 		// the cluster's public name makes its own tailscaled resolve
 		// <cluster>.local to get there, and mDNS answers that with every
@@ -705,7 +721,7 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		// worth forcing on existing clusters for a transient, self-healing,
 		// LAN-invisible delay — they pick this up when next re-provisioned.
 		loginServer := svc.cfg.LoginServer
-		if isControlPlaneNode(sc.Ctx, inv, s.NodeID) {
+		if role == proto.RoleControlPlane {
 			loginServer = loopbackLoginServer(svc.cfg.LoginServer)
 			if loginServer != svc.cfg.LoginServer {
 				sc.Log("info", fmt.Sprintf("%s is the control plane — enrolling against %s so its own tailscaled needs no name resolution", s.NodeID, loginServer))
@@ -730,7 +746,7 @@ func enrollDispatch(svc *Service, inv *inventory.Store) jobs.DoFn {
 		// sent but not consumed does not stay valid for its safety-net TTL.
 		defer expireEnrolKey(sc, svc, s.NodeID, key.ID)
 
-		cmd, err := enrollCommand(loginServer, key.Value, s.EnrollSpec, legacyBundle)
+		cmd, err := enrollCommand(loginServer, key.Value, s.EnrollSpec, prefs, legacyBundle)
 		if err != nil {
 			return nil, err
 		}
@@ -870,21 +886,6 @@ func nodeAgentVersion(ctx context.Context, inv *inventory.Store, nodeID string) 
 		return ""
 	}
 	return strings.TrimPrefix(strings.TrimSpace(n.AgentVersion), "v")
-}
-
-// isControlPlaneNode reports whether nodeID is this cluster's control plane.
-// A lookup failure answers false: the cluster's normal login server is always
-// correct, just occasionally slow for the control plane, so an unknown role
-// degrades to the existing behaviour rather than to something novel.
-func isControlPlaneNode(ctx context.Context, inv *inventory.Store, nodeID string) bool {
-	if inv == nil || nodeID == "" {
-		return false
-	}
-	n, err := inv.Get(ctx, nodeID)
-	if err != nil || n == nil {
-		return false
-	}
-	return n.Role == proto.RoleControlPlane
 }
 
 // loopbackLoginServer rewrites a login server URL to point at loopback,

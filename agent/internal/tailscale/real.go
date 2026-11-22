@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -88,24 +89,7 @@ func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error
 			b.waitForDaemon(ctx)
 		}
 	}
-	args := []string{
-		"up",
-		"--login-server=" + in.LoginServer,
-		"--auth-key=" + in.AuthKey,
-		"--reset", // start from a clean state — matches the saga's intent
-	}
-	if in.Hostname != "" {
-		args = append(args, "--hostname="+in.Hostname)
-	}
-	if len(in.AdvertiseRoutes) > 0 {
-		args = append(args, "--advertise-routes="+strings.Join(in.AdvertiseRoutes, ","))
-	}
-	if in.AcceptDNS {
-		args = append(args, "--accept-dns=true")
-	}
-	if in.AcceptRoutes {
-		args = append(args, "--accept-routes=true")
-	}
+	args := upArgs(in)
 	// `tailscale up --auth-key` blocks until tailscaled reports Running —
 	// i.e. until Headscale has answered the login — and says nothing while
 	// it waits. When ctx expires first, CommandContext kills it (SIGKILL: the
@@ -130,6 +114,32 @@ func (b *RealBackend) Enroll(ctx context.Context, in EnrollInput) (Status, error
 		return Status{}, fmt.Errorf("tailscale up: %w (stderr=%s)", err, redactAuthKey(stderr.String(), in.AuthKey))
 	}
 	return b.Status(ctx)
+}
+
+// upArgs is the `tailscale up` argument list for an enroll. Both settings are
+// always written out: `tailscale up` defaults --accept-dns to true, and
+// --reset restores every flag not given, so an omitted false would turn the
+// setting on (geekdojo/geekdojo-brain#984).
+//
+// The pre-auth key rides on the command line (legacy under LOG-SECRETS):
+// `tailscale up` takes it only as an argument or as a file: reference.
+func upArgs(in EnrollInput) []string {
+	args := []string{
+		"up",
+		"--login-server=" + in.LoginServer,
+		"--auth-key=" + in.AuthKey,
+		"--reset", // start from a clean state — matches the saga's intent
+	}
+	if in.Hostname != "" {
+		args = append(args, "--hostname="+in.Hostname)
+	}
+	if len(in.AdvertiseRoutes) > 0 {
+		args = append(args, "--advertise-routes="+strings.Join(in.AdvertiseRoutes, ","))
+	}
+	return append(args,
+		"--accept-dns="+strconv.FormatBool(in.AcceptDNS),
+		"--accept-routes="+strconv.FormatBool(in.AcceptRoutes),
+	)
 }
 
 // upWaitDelay is how long Run may sit on `tailscale up`'s stderr pipe after
