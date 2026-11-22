@@ -29,7 +29,10 @@ const (
 	keyProviderType = "org.keycloak.keys.KeyProvider"
 	attrFrontendURL = "frontendUrl"
 	attrAdminEvents = "adminEventsExpiration"
-	webAuthnPrefix  = "webAuthnPolicy"
+	// attrConsoleURL is the console's origin, which the login theme reads
+	// through realm.getAttribute (geekdojo/geekdojo-brain#988).
+	attrConsoleURL = "rasputin.console-url"
+	webAuthnPrefix = "webAuthnPolicy"
 	// The two-factor policy's RP ID and entity name, then the passwordless
 	// (second) policy's.
 	rpIDKey            = "webAuthnPolicyRpId"
@@ -213,7 +216,9 @@ func diff(d Desired, o observed) writes {
 	_ = json.Unmarshal(o.realm["attributes"], &attrs)
 	_, hasFrontend := attrs[attrFrontendURL]
 	adminExpiry := str(attrs, attrAdminEvents)
-	if hasFrontend || adminExpiry != d.AdminEventsExpirySeconds {
+	_, hasConsole := attrs[attrConsoleURL]
+	consoleDrift := hasConsole != (d.ConsoleURL != "") || str(attrs, attrConsoleURL) != d.ConsoleURL
+	if hasFrontend || adminExpiry != d.AdminEventsExpirySeconds || consoleDrift {
 		out := map[string]json.RawMessage{}
 		maps.Copy(out, attrs)
 		if hasFrontend {
@@ -224,6 +229,15 @@ func diff(d Desired, o observed) writes {
 			w.fields = append(w.fields, "realm.attributes."+attrAdminEvents)
 			v, _ := json.Marshal(d.AdminEventsExpirySeconds)
 			out[attrAdminEvents] = v
+		}
+		if consoleDrift {
+			w.fields = append(w.fields, "realm.attributes."+attrConsoleURL)
+			if d.ConsoleURL == "" {
+				delete(out, attrConsoleURL)
+			} else {
+				v, _ := json.Marshal(d.ConsoleURL)
+				out[attrConsoleURL] = v
+			}
 		}
 		realm["attributes"] = out
 	}

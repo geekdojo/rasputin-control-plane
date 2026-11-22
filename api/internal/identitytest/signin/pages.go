@@ -33,6 +33,9 @@ type Page struct {
 	ID    string
 	Forms []Form
 	Alert string
+	// Theme is the body's data-rasputin-theme marker: "rasputin" on a page
+	// the Rasputin login theme rendered, "" otherwise.
+	Theme string
 }
 
 // Form is one <form>: its id, action and method, and its named inputs with
@@ -89,6 +92,7 @@ func ParsePage(body []byte) (Page, error) {
 				if !bodyFound {
 					bodyFound = true
 					page.ID = attr(n, "data-page-id")
+					page.Theme = attr(n, "data-rasputin-theme")
 				}
 			case "form":
 				page.Forms = append(page.Forms, Form{

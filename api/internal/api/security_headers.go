@@ -19,8 +19,10 @@ const (
 	//     WebAssembly. It permits WebAssembly compilation only, not eval().
 	//   - style-src 'unsafe-inline': the prerendered HTML carries style="..."
 	//     attributes (React inline styles).
-	//   - fonts.googleapis.com / fonts.gstatic.com: globals.css imports
-	//     JetBrains Mono from Google Fonts.
+	//   - font-src data:: the UI bundles JetBrains Mono (ui/styles/fonts,
+	//     loaded same-origin), and a data: font is what some browsers use for
+	//     a fallback glyph. No font or style comes from another host
+	//     (geekdojo/geekdojo-brain#988).
 	//   - img-src data: blob:: inline SVG/data-URL images and client-built
 	//     downloads.
 	//   - connect-src 'self': fetch and the /ws/* WebSockets are same-origin
@@ -33,8 +35,8 @@ const (
 	// sameOriginFraming.
 	contentSecurityPolicy = "default-src 'self'; " +
 		"script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
-		"font-src 'self' https://fonts.gstatic.com data:; " +
+		"style-src 'self' 'unsafe-inline'; " +
+		"font-src 'self' data:; " +
 		"img-src 'self' data: blob:; " +
 		"connect-src 'self'; " +
 		"object-src 'none'; " +

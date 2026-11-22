@@ -1,0 +1,330 @@
+/* The Rasputin sign-in frame (geekdojo/geekdojo-brain#988, ui.md §4.2, §4.5).
+ *
+ * Loaded after tokens.css (the shared tokens, focus ring and font) and
+ * components.css (generated from the console kit). Every colour here is a
+ * var(--rasp-*) token from tokens.css, and the pages never set data-theme, so
+ * they render the default token set whichever console theme is picked
+ * (F-988-12; test/styles.test.ts refuses a hard-coded colour). */
+
+html.rasp-signin {
+  background: var(--rasp-bg);
+  color: var(--rasp-fg);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+}
+
+body.rasp-body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--rasp-bg);
+  color: var(--rasp-fg);
+}
+
+.rasp-shell {
+  box-sizing: border-box;
+  max-width: 460px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.rasp-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid rgba(var(--rasp-fg-rgb), 0.18);
+  letter-spacing: 0.12em;
+  font-size: 12px;
+}
+
+.rasp-brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--rasp-accent);
+  font-weight: 600;
+}
+
+.rasp-brand-name {
+  color: var(--rasp-dim);
+  text-transform: uppercase;
+}
+
+.rasp-card {
+  display: block;
+  margin-top: 16px;
+  padding: 20px;
+  background: var(--rasp-panel);
+  border: 1px solid rgba(var(--rasp-fg-rgb), 0.18);
+  border-radius: var(--rasp-radius);
+}
+
+.rasp-card h1 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--rasp-fg);
+}
+
+.rasp-group,
+.rasp-form > .rasp-group {
+  margin: 0 0 14px;
+  border: 0;
+  padding: 0;
+}
+
+.rasp-label {
+  display: block;
+  text-transform: uppercase;
+  font-size: 12px;
+}
+
+.rasp-field,
+.rasp-signin input:not([type='hidden']):not([type='checkbox']):not([type='radio']),
+.rasp-signin select,
+.rasp-signin textarea {
+  box-sizing: border-box;
+  width: 100%;
+}
+
+/* At least 16 px for inputs and buttons: the kit's are 10-11 px, and iOS zooms
+   the page when a smaller input takes focus (ui.md §4.2, UNVERIFIED there). */
+.rasp-signin input,
+.rasp-signin select,
+.rasp-signin textarea,
+.rasp-signin button,
+.rasp-field,
+.rasp-btn {
+  font-size: 16px;
+}
+
+.rasp-signin input[type='checkbox'],
+.rasp-signin input[type='radio'] {
+  width: auto;
+  accent-color: var(--rasp-accent);
+}
+
+.rasp-input-group {
+  display: flex;
+  gap: 4px;
+}
+
+.rasp-input-group .rasp-field {
+  flex: 1;
+}
+
+.rasp-eye {
+  padding: 6px 10px;
+}
+
+.rasp-btn {
+  justify-content: center;
+  text-transform: uppercase;
+  border-radius: var(--rasp-radius);
+}
+
+.rasp-btn-block {
+  display: flex;
+  width: 100%;
+}
+
+.rasp-btn-large {
+  padding: 10px 16px;
+}
+
+.rasp-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.rasp-codes-actions {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+
+.rasp-mt {
+  margin-top: 8px;
+}
+
+.rasp-link {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: var(--rasp-accent);
+  text-decoration: underline;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.rasp-signin a {
+  color: var(--rasp-accent);
+}
+
+.rasp-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.rasp-hint {
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.rasp-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 8px;
+  color: var(--rasp-dim);
+}
+
+.rasp-divider::before,
+.rasp-divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid rgba(var(--rasp-fg-rgb), 0.18);
+}
+
+.rasp-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid rgba(var(--rasp-accent-rgb), 0.4);
+  background: rgba(var(--rasp-accent-rgb), 0.06);
+  color: var(--rasp-fg);
+}
+
+.rasp-alert-error {
+  border-color: rgba(var(--rasp-danger-rgb), 0.45);
+  background: rgba(var(--rasp-danger-rgb), 0.07);
+}
+
+.rasp-alert-error .rasp-icon {
+  color: var(--rasp-danger);
+}
+
+.rasp-field-error {
+  display: block;
+  margin-top: 4px;
+  color: var(--rasp-danger);
+  font-size: 12px;
+}
+
+.rasp-field[aria-invalid='true'] {
+  border-color: var(--rasp-danger);
+}
+
+.rasp-codes {
+  margin: 12px 0;
+  padding: 12px 12px 12px 36px;
+  background: var(--rasp-field-bg);
+  border: 1px solid rgba(var(--rasp-fg-rgb), 0.18);
+  letter-spacing: 0.08em;
+}
+
+.rasp-choices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rasp-choice-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(var(--rasp-fg-rgb), 0.1);
+}
+
+.rasp-choice-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.rasp-choice-heading {
+  color: var(--rasp-fg);
+}
+
+.rasp-hidden,
+.rasp-signin [hidden] {
+  display: none;
+}
+
+#kc-username {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kc-tooltip-text {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+/* Glyphs for the icon hooks: an SVG mask painted in the text's colour, since
+   parent=base brings no icon font. */
+.rasp-icon {
+  display: inline-block;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  background-color: currentColor;
+  mask-position: center;
+  mask-repeat: no-repeat;
+  mask-size: contain;
+}
+
+.rasp-icon-brand {
+  mask-image: url('../img/brand.svg');
+}
+.rasp-icon-error {
+  mask-image: url('../img/error.svg');
+}
+.rasp-icon-warning {
+  mask-image: url('../img/warning.svg');
+}
+.rasp-icon-success {
+  mask-image: url('../img/success.svg');
+}
+.rasp-icon-info {
+  mask-image: url('../img/info.svg');
+}
+.rasp-icon-restart {
+  mask-image: url('../img/restart.svg');
+}
+.rasp-icon-key {
+  mask-image: url('../img/key.svg');
+}
+.rasp-icon-show {
+  mask-image: url('../img/show.svg');
+}
+.rasp-icon-hide {
+  mask-image: url('../img/hide.svg');
+}
+.rasp-icon-next {
+  mask-image: url('../img/next.svg');
+}
+
+/* PRINT on the recovery-codes page prints the codes and nothing else. */
+@media print {
+  .rasp-signin body * {
+    visibility: hidden;
+  }
+  #kc-recovery-codes-list,
+  #kc-recovery-codes-list * {
+    visibility: visible;
+  }
+}

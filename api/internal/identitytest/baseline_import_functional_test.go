@@ -251,28 +251,14 @@ func jwtClaims(t *testing.T, jwt string) map[string]any {
 	return c
 }
 
-// TC-980-25: the real baseline, imported by the pinned Keycloak, gives
-// rasputin-admin a working Admin API (read and write) over client-x509, and
-// each authorization-code client a token through a headless sign-in; the
-// console's access token carries auth_time and rasputin_roles.
-func TestIdentity_BaselineImportedWorks(t *testing.T) {
-	p := NewPackage(ConfigFromEnv)
-	env := p.Env(t)
-	if env == nil {
-		return
-	}
-	t.Cleanup(func() {
-		// t.Context() has ended by now; Close stops Keycloak cleanly and
-		// proves its containers, processes and root are gone.
-		if err := env.Close(context.Background()); err != nil {
-			t.Errorf("identitytest: teardown proof failed: %v", err)
-		}
-	})
-	importBaseline(t, env)
-
+// baselineAdmin is realm rasputin's Admin API as rasputin-admin, authenticated
+// by client-x509 with a leaf whose subject is the api's, and that leaf's TLS
+// config. The baseline must be imported.
+func baselineAdmin(t *testing.T, env *Env) (adminAPI, *tls.Config) {
+	t.Helper()
 	leafTLS := apiLeafTLS(t, env)
 	tr := &http.Transport{TLSClientConfig: leafTLS}
-	defer tr.CloseIdleConnections()
+	t.Cleanup(tr.CloseIdleConnections)
 	client := &http.Client{
 		Transport:     tr,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -306,7 +292,36 @@ func TestIdentity_BaselineImportedWorks(t *testing.T) {
 		t.Fatalf("rasputin-admin by client-x509: status %d, error %q, token present %v; want 200 with a token",
 			resp.StatusCode, tok.Error, tok.AccessToken != "")
 	}
-	api := adminAPI{t: t, client: client, base: env.KeycloakURL() + "/admin/realms/" + baselineRealm, token: tok.AccessToken}
+	return adminAPI{t: t, client: client, base: env.KeycloakURL() + "/admin/realms/" + baselineRealm, token: tok.AccessToken}, leafTLS
+}
+
+// TC-980-25: the real baseline, imported by the pinned Keycloak, gives
+// rasputin-admin a working Admin API (read and write) over client-x509, and
+// each authorization-code client a token through a headless sign-in; the
+// console's access token carries auth_time and rasputin_roles.
+//
+// TC-988-27: the baseline selects the Rasputin login theme (loginTheme), so
+// every page of each sign-in carries data-rasputin-theme, and the harness
+// still finds the page fields capability row T98 names.
+func TestIdentity_BaselineImportedWorks(t *testing.T) {
+	p := NewPackage(ConfigFromEnv)
+	if !p.RequireTheme(t) {
+		return
+	}
+	env := p.Env(t)
+	if env == nil {
+		return
+	}
+	t.Cleanup(func() {
+		// t.Context() has ended by now; Close stops Keycloak cleanly and
+		// proves its containers, processes and root are gone.
+		if err := env.Close(context.Background()); err != nil {
+			t.Errorf("identitytest: teardown proof failed: %v", err)
+		}
+	})
+	importBaseline(t, env)
+
+	api, leafTLS := baselineAdmin(t, env)
 
 	t.Run("rasputin-admin reads the realm", func(t *testing.T) {
 		api := api
@@ -394,6 +409,14 @@ func TestIdentity_BaselineImportedWorks(t *testing.T) {
 			res, err := c.PasswordCodeFlow(t.Context(), user, password)
 			if err != nil {
 				t.Fatalf("PasswordCodeFlow for %s: %v (pages %v)", clientID, err, res.PageIDs)
+			}
+			for i, id := range res.PageIDs {
+				if res.Themes[i] != "rasputin" {
+					t.Errorf("page %s carries data-rasputin-theme %q, want rasputin (TC-988-27)", id, res.Themes[i])
+				}
+			}
+			if len(res.PageIDs) == 0 {
+				t.Error("the sign-in passed no page (TC-988-27)")
 			}
 			if want := env.FrontURL() + "/realms/" + baselineRealm; res.Claims.Iss != want {
 				t.Errorf("iss = %q, want %q", res.Claims.Iss, want)

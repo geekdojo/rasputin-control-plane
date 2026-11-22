@@ -20,7 +20,8 @@
 #          and openbao-policy/*.hcl to /usr/share/rasputin/openbao-policy, where
 #          the secrets store's self-init reads its fixed policies:
 #          geekdojo/geekdojo-brain#804; identity/ holds realm-baseline.json,
-#          keycloak-build.conf, pins.json and theme/, installed under
+#          keycloak-build.conf, pins.json and theme/ (the built sign-in theme),
+#          installed under
 #          /usr/share/rasputin/identity: geekdojo/geekdojo-brain#980)
 #
 # Requires: go, node/npm (for the UI build), jq (pins.json).
@@ -84,7 +85,22 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 # refuses an unknown build option, a baseline that does not match its lock, and
 # a missing input or pin, so no api tarball is built without them
 # (geekdojo/geekdojo-brain#980; platform.md §2.5).
-"$ROOT/scripts/pack-identity.sh" "$ROOT/identity" "$ROOT/api/internal/identitytest/pin.go" "$DIST/identity"
+#
+# The sign-in theme (geekdojo/geekdojo-brain#988) fills the theme slot: built
+# by ui/identity-theme's node script (Node built-ins only), then copied in by
+# pack-identity.sh. The pack fails closed unless the built theme's
+# login/theme.properties and the door proxy's resource-allowlist.json made it
+# into identity/.
+echo ">> building the sign-in theme"
+node "$ROOT/ui/identity-theme/build.mjs" "$DIST/identity-theme"
+"$ROOT/scripts/pack-identity.sh" "$ROOT/identity" "$ROOT/api/internal/identitytest/pin.go" "$DIST/identity" "$DIST/identity-theme"
+for f in login/theme.properties resource-allowlist.json; do
+	if [ ! -f "$DIST/identity/theme/$f" ]; then
+		echo "the packed identity theme has no $f, so no api tarball is built without the sign-in pages" >&2
+		exit 1
+	fi
+done
+rm -rf "$DIST/identity-theme"
 
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
 # -tags release compiles in artifactsig.ReleaseBuild() = true: a release binary

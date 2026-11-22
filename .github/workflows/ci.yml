@@ -366,6 +366,16 @@ jobs:
       # Coverage profile only for api — it remains the module whose coverage we
       # trend, and that choice is deliberate rather than a list that drifts.
       # Every other module is still TESTED below; it just isn't profiled.
+      # The sign-in theme the identity walk renders
+      # (geekdojo/geekdojo-brain#988): built here by ui/identity-theme's node
+      # script, Node built-ins only, so no npm install.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: build the sign-in theme
+        run: node ui/identity-theme/build.mjs "$RUNNER_TEMP/identity-theme"
+
       - name: test (api with coverage)
         env:
           # Turns the appsecret Compose test's skips into failures: a runner
@@ -384,6 +394,9 @@ jobs:
           # job (geekdojo-brain#966, docs/testing-identity.md).
           RASPUTIN_IDENTITY_HOME: ${{ runner.temp }}/identity
           RASPUTIN_IDENTITY_FUNCTIONAL: required
+          # The built sign-in theme, linked as the harness's themes/rasputin;
+          # unset, the theme walk fails under required (TC-988-28).
+          RASPUTIN_IDENTITY_THEME: ${{ runner.temp }}/identity-theme
         run: |
           go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
@@ -740,3 +753,42 @@ jobs:
 
       - name: assert static export
         run: test -f out/index.html && test -f out/login.html
+
+      # The console bundles JetBrains Mono (ui/styles/fonts) instead of loading
+      # it from Google Fonts, whose two CSP allowances are gone
+      # (geekdojo/geekdojo-brain#988, TC-988-17): the export names neither
+      # Google host, carries the three woff2 files, and every @font-face URL in
+      # its CSS resolves to a file in out/.
+      - name: the console bundles its font
+        run: |
+          set -eu
+          if grep -rlE 'fonts\.(googleapis|gstatic)\.com' out; then
+            echo "::error::the static export references Google Fonts (listed above)"
+            exit 1
+          fi
+          echo "zero references to fonts.googleapis.com or fonts.gstatic.com in out/"
+          for w in Regular Medium SemiBold; do
+            ls out/_next/static/media/JetBrainsMono-"$w".*.woff2
+          done
+          n=0
+          for css in $(find out -name '*.css'); do
+            dir="$(dirname "$css")"
+            for u in $(grep -oE '@font-face\{[^}]*\}' "$css" | grep -oE 'url\([^)]*\)' | sed -E "s/^url\([\"']?//; s/[\"']?\)$//"); do
+              if [ ! -f "$dir/$u" ]; then
+                echo "::error::$css names the font $u, which is not in out/"
+                exit 1
+              fi
+              n=$((n + 1))
+            done
+          done
+          if [ "$n" -eq 0 ]; then
+            echo "::error::no @font-face URL in the static export"
+            exit 1
+          fi
+          echo "$n @font-face URLs resolve to files in out/"
+
+      # The sign-in theme (geekdojo/geekdojo-brain#988): built by the same
+      # node script the release runs, so a theme that does not build fails
+      # here; its unit tests ran in `npm test` above.
+      - name: build the sign-in theme
+        run: node identity-theme/build.mjs "$RUNNER_TEMP/identity-theme"

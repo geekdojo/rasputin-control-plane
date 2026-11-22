@@ -9,7 +9,7 @@ export default function WireGuardPage() {
     <>
       <SectionLabel>WIREGUARD</SectionLabel>
       <Hint>
-        WireGuard peer management for direct (non-tailnet) clients lands after the Headscale mesh
+        WireGuard peer management for direct (non-tailnet) clients lands after the mesh
         story settles — see open question F-5 in the firewall wiki. For mesh tailnet devices use{' '}
         <Link href="/mesh" style={{ color: ACCENT, textDecoration: 'none' }}>
           MESH

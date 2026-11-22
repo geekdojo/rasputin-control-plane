@@ -25,6 +25,11 @@ const SwitchEnv = "RASPUTIN_IDENTITY_FUNCTIONAL"
 // keycloak/, jre/ and chrome-linux64/chrome.
 const HomeEnv = "RASPUTIN_IDENTITY_HOME"
 
+// ThemeEnv is the built login theme, `npm run identity-theme:build -- <dir>`
+// in ui/ (geekdojo/geekdojo-brain#988). Unset, Keycloak runs without it and
+// a test that renders the theme skips, or fails under SwitchEnv=required.
+const ThemeEnv = "RASPUTIN_IDENTITY_THEME"
+
 // TB is the slice of testing.TB the Package uses, declared by its consumer so
 // a unit test can pass a recorder. *testing.T satisfies it.
 type TB interface {
@@ -202,9 +207,10 @@ func (p *Package) Run(m M) int {
 
 // ConfigFromEnv is the identity tests' composition root: the only place the
 // environment is read. It reads HomeEnv (layout keycloak/, jre/,
-// chrome-linux64/chrome) and builds the logger (text to stderr, at the level
-// -test.v would want: INFO), the clock, crypto/rand, execrun's runner and the
-// /proc scan. An unset HomeEnv is a missing dependency.
+// chrome-linux64/chrome) and ThemeEnv, and builds the logger (text to
+// stderr, at the level -test.v would want: INFO), the clock, crypto/rand,
+// execrun's runner and the /proc scan. An unset HomeEnv is a missing
+// dependency.
 func ConfigFromEnv() (Config, error) {
 	home := os.Getenv(HomeEnv)
 	if home == "" {
@@ -225,5 +231,24 @@ func ConfigFromEnv() (Config, error) {
 		Rand:         rand.Reader,
 		Run:          CmdRunner(execrun.CombinedOutput),
 		Procs:        ScanProc,
+		ThemeDir:     os.Getenv(ThemeEnv),
 	}, nil
+}
+
+// RequireTheme reports a Package Config with no ThemeDir as a missing
+// dependency, naming ThemeEnv: it skips tb, or fails it when SwitchEnv is
+// required. It returns whether the theme is configured. A configured but
+// broken theme is refused by New, which always fails.
+func (p *Package) RequireTheme(tb TB) bool {
+	tb.Helper()
+	cfg, err := p.loadConfig()
+	if err != nil {
+		functest.SkipOrFail(tb, SwitchEnv, "%v", err)
+		return false
+	}
+	if cfg.ThemeDir == "" {
+		functest.SkipOrFail(tb, SwitchEnv, "%s is not set, so there is no built login theme to render (npm run identity-theme:build in ui/)", ThemeEnv)
+		return false
+	}
+	return true
 }

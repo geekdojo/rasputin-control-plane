@@ -8,7 +8,9 @@
     "start": "next start",
     "lint": "eslint .",
     "type-check": "tsc --noEmit",
-    "test": "rm -rf .test-out && tsc -p tsconfig.test.json && node --test \".test-out/**/*.test.js\""
+    "test": "rm -rf .test-out && tsc -p tsconfig.test.json && node --test \".test-out/**/*.test.js\"",
+    "identity-theme:styles": "rm -rf .test-out && tsc -p tsconfig.test.json && node .test-out/identity-theme/styles.js",
+    "identity-theme:build": "node identity-theme/build.mjs"
   },
   "dependencies": {
     "@simplewebauthn/browser": "^14.0.0",

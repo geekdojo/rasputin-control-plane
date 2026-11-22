@@ -2,6 +2,7 @@
   "realm": "rasputin",
   "enabled": true,
   "sslRequired": "all",
+  "loginTheme": "rasputin",
   "editUsernameAllowed": false,
   "internationalizationEnabled": false,
   "defaultRole": {

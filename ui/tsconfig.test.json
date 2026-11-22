@@ -37,5 +37,5 @@
     "incremental": false,
     "types": ["node"]
   },
-  "include": ["lib/**/*.ts", "components/storage/*.ts", "components/**/*.test.tsx", "test/**/*.ts", "test/**/*.tsx"]
+  "include": ["lib/**/*.ts", "components/storage/*.ts", "components/**/*.test.tsx", "test/**/*.ts", "test/**/*.tsx", "identity-theme/**/*.ts"]
 }

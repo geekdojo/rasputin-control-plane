@@ -1,0 +1,127 @@
+{
+  "comment": "The FreeMarker data-model roots, and the fields of each, that the Rasputin login templates read (geekdojo/geekdojo-brain#988). The templates test (TC-988-01) fails on a root or field read that is not listed; capability row T99 pins these to the Keycloak release in identitytest/pin.go, so a bump fails until they are re-checked. properties is theme.properties, whose kc*Class keys the coverage test holds.",
+  "keycloak": "26.8.2",
+  "roots": {
+    "actionUri": [],
+    "attestationConveyancePreference": [],
+    "auth": [
+      "attemptedUsername",
+      "selectedCredential",
+      "showResetCredentials",
+      "showTryAnotherWayLink",
+      "showUsername"
+    ],
+    "authenticatorAttachment": [],
+    "authenticators": [
+      "authenticators"
+    ],
+    "challenge": [],
+    "client": [
+      "baseUrl",
+      "clientId",
+      "name"
+    ],
+    "createTimeout": [],
+    "credentialLabel": [],
+    "enableWebAuthnConditionalUI": [],
+    "excludeCredentialIds": [],
+    "execution": [],
+    "isAppInitiatedAction": [],
+    "isSetRetry": [],
+    "isUserIdentified": [],
+    "lang": [],
+    "login": [
+      "rememberMe",
+      "username"
+    ],
+    "logout": [
+      "clients",
+      "logoutRedirectUri"
+    ],
+    "logoutConfirm": [
+      "code",
+      "skipLink"
+    ],
+    "mediation": [],
+    "message": [
+      "summary",
+      "type"
+    ],
+    "messageHeader": [],
+    "messagesPerField": [
+      "exists",
+      "existsError",
+      "get",
+      "getFirstError"
+    ],
+    "mode": [],
+    "msg": [],
+    "otpLogin": [
+      "selectedCredentialId",
+      "userOtpCredentials"
+    ],
+    "pageId": [],
+    "pageRedirectUri": [],
+    "passwordRequired": [],
+    "properties": [
+      "*"
+    ],
+    "realm": [
+      "displayName",
+      "getAttribute",
+      "loginWithEmailAllowed",
+      "password",
+      "registrationAllowed",
+      "registrationEmailAsUsername",
+      "rememberMe"
+    ],
+    "recoveryAuthnCodesConfigBean": [
+      "generatedAt",
+      "generatedRecoveryAuthnCodesAsString",
+      "generatedRecoveryAuthnCodesList"
+    ],
+    "recoveryAuthnCodesInputBean": [
+      "codeNumber"
+    ],
+    "registrationDisabled": [],
+    "requireResidentKey": [],
+    "requiredActions": [],
+    "residentKey": [],
+    "rpEntityName": [],
+    "rpId": [],
+    "samlPost": [
+      "SAMLRequest",
+      "SAMLResponse",
+      "relayState",
+      "url"
+    ],
+    "scripts": [],
+    "shouldDisplayAuthenticators": [],
+    "signatureAlgorithms": [],
+    "skipLink": [],
+    "totp": [
+      "manualUrl",
+      "otpCredentials",
+      "policy",
+      "qrUrl",
+      "totpSecret",
+      "totpSecretEncoded",
+      "totpSecretQrCode"
+    ],
+    "traceId": [],
+    "url": [
+      "loginAction",
+      "loginRestartFlowUrl",
+      "loginUrl",
+      "logoutConfirmAction",
+      "registrationAction",
+      "registrationUrl",
+      "resourcesPath"
+    ],
+    "userVerification": [],
+    "userVerificationRequirement": [],
+    "userid": [],
+    "username": [],
+    "usernameHidden": []
+  }
+}

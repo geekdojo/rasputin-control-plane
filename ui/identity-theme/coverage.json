@@ -1,0 +1,441 @@
+{
+  "comment": "The pin-time coverage record for the Rasputin login theme (geekdojo/geekdojo-brain#988, ui.md §4.3). test/coverage.test.ts holds it against upstream/<keycloak>/: every base English key is in our bundle or listed here with the reason it never renders; every base template is overridden or reviewed; each override and fork names the sha256 (upstreamSha256) of the upstream file it was copied from, so a Keycloak bump that changes one fails until it is re-reviewed (F-988-05). Every kc*Class hook is checked against theme.properties, not listed here.",
+  "keycloak": "26.8.2",
+  "neverRenderedKeys": [
+    {
+      "reason": "The impersonation feature is disabled (identity/keycloak-build.conf features-disabled).",
+      "keys": [
+        "doImpersonate",
+        "impersonateTitle",
+        "impersonateTitleHtml"
+      ]
+    },
+    {
+      "reason": "The organization feature is disabled (features-disabled).",
+      "keys": [
+        "doSwitchOrganization",
+        "organizationScopeConsentText",
+        "organization.confirm-membership.title",
+        "organization.confirm-membership",
+        "organization.member.register.title",
+        "organization.select",
+        "notMemberOfOrganization",
+        "notMemberOfAnyOrganization",
+        "orgMemberAlready",
+        "orgDisabledMessage",
+        "staleInviteOrgLink"
+      ]
+    },
+    {
+      "reason": "Deleting one's own account is a required action left disabled (delete-account-confirm.ftl is never rendered).",
+      "keys": [
+        "errorDeletingAccount",
+        "deletingAccountForbidden",
+        "finalDeletionConfirmation",
+        "irreversibleAction",
+        "deleteAccountConfirm",
+        "deletingImplies",
+        "errasingData",
+        "loggingOutImmediately",
+        "accountUnusable",
+        "userDeletedSuccessfully"
+      ]
+    },
+    {
+      "reason": "The kerberos feature is disabled.",
+      "keys": [
+        "kerberosNotConfigured",
+        "kerberosNotConfiguredTitle",
+        "bypassKerberosDetail",
+        "kerberosNotSetUp",
+        "gssDelegationCredential"
+      ]
+    },
+    {
+      "reason": "No client is consent-required, so the consent page (login-oauth-grant) and its scope and role names are never rendered.",
+      "keys": [
+        "oauthGrantTitle",
+        "oauthGrantTitleHtml",
+        "oauthGrantInformation",
+        "oauthGrantReview",
+        "oauthGrantTos",
+        "oauthGrantPolicy",
+        "consentDenied",
+        "did",
+        "profileScopeConsentText",
+        "emailScopeConsentText",
+        "addressScopeConsentText",
+        "phoneScopeConsentText",
+        "offlineAccessScopeConsentText",
+        "samlRoleListScopeConsentText",
+        "rolesScopeConsentText",
+        "userDelegationScopeConsentText",
+        "clientDelegationScopeConsentText",
+        "oauthGrantRequest",
+        "inResource",
+        "personalInfo",
+        "role_admin",
+        "role_create-client",
+        "role_view-users",
+        "role_view-applications",
+        "role_view-clients",
+        "role_view-events",
+        "role_view-identity-providers",
+        "role_manage-users",
+        "role_manage-applications",
+        "role_manage-identity-providers",
+        "role_manage-clients",
+        "role_manage-events",
+        "role_view-profile",
+        "role_manage-account",
+        "role_manage-account-links",
+        "role_read-token",
+        "role_offline-access",
+        "client_account",
+        "client_account-console",
+        "client_security-admin-console",
+        "client_admin-cli",
+        "client_broker",
+        "naturalPersonScopeConsentText"
+      ]
+    },
+    {
+      "reason": "The device-flow feature is disabled.",
+      "keys": [
+        "oauth2DeviceVerificationTitle",
+        "verifyOAuth2DeviceUserCode",
+        "oauth2DeviceInvalidUserCodeMessage",
+        "oauth2DeviceExpiredUserCodeMessage",
+        "oauth2DeviceVerificationCompleteHeader",
+        "oauth2DeviceVerificationCompleteMessage",
+        "oauth2DeviceVerificationFailedHeader",
+        "oauth2DeviceVerificationFailedMessage",
+        "oauth2DeviceConsentDeniedMessage",
+        "oauth2DeviceAuthorizationGrantDisabledMessage"
+      ]
+    },
+    {
+      "reason": "D11: Rasputin sends no email, so no email verification, update-email (also a disabled feature) or email link page is rendered.",
+      "keys": [
+        "emailVerifyTitle",
+        "updateEmailTitle",
+        "emailUpdateConfirmationSentTitle",
+        "emailUpdateConfirmationSent",
+        "emailUpdatedTitle",
+        "emailUpdated",
+        "emailVerified",
+        "emailVerifyInstruction1",
+        "emailVerifyInstruction2",
+        "emailVerifyInstruction3",
+        "emailVerifyInstruction4",
+        "emailVerifyResend",
+        "emailVerifySend",
+        "emailVerifySendCooldown",
+        "emailLinkIdpTitle",
+        "emailLinkIdp1",
+        "emailLinkIdp2",
+        "emailLinkIdp3",
+        "emailLinkIdp4",
+        "emailLinkIdp5",
+        "updateEmailMessage",
+        "verifyEmailMessage",
+        "emailSentMessage",
+        "emailSendErrorMessage",
+        "emailVerifiedMessageHeader",
+        "emailVerifiedMessage",
+        "emailVerifiedAlreadyMessageHeader",
+        "emailVerifiedAlreadyMessage",
+        "staleEmailVerificationLink",
+        "emailVerificationCancelled",
+        "confirmEmailAddressVerificationHeader",
+        "confirmEmailAddressVerification",
+        "emailVerificationPending"
+      ]
+    },
+    {
+      "reason": "There is no out-of-band redirect, so the code and cli_splash pages are never rendered.",
+      "keys": [
+        "codeSuccessTitle",
+        "codeSuccess",
+        "codeErrorTitle",
+        "copyCodeInstruction",
+        "code-clipboard-label",
+        "code-copy-label",
+        "code-copy-success",
+        "code-copy-failure"
+      ]
+    },
+    {
+      "reason": "The terms-and-conditions required action is left disabled.",
+      "keys": [
+        "termsTitle",
+        "termsText",
+        "termsPlainText",
+        "termsAcceptanceRequired",
+        "acceptTerms"
+      ]
+    },
+    {
+      "reason": "The realm has no identity provider: no brokering, linking or provider-login page.",
+      "keys": [
+        "loginIdpReviewProfileTitle",
+        "linkIdpActionTitle",
+        "linkIdpActionMessage",
+        "identityProviderLogoutFailure",
+        "federatedIdentityExistsMessage",
+        "federatedIdentityUnavailableMessage",
+        "federatedIdentityUnmatchedEssentialClaimMessage",
+        "confirmLinkIdpTitle",
+        "confirmOverrideIdpTitle",
+        "federatedIdentityConfirmLinkMessage",
+        "federatedIdentityConfirmOverrideMessage",
+        "federatedIdentityConfirmReauthenticateMessage",
+        "nestedFirstBrokerFlowMessage",
+        "confirmLinkIdpReviewProfile",
+        "confirmLinkIdpContinue",
+        "confirmOverrideIdpContinue",
+        "linkIdpMessage",
+        "delegationCompleteHeader",
+        "delegationCompleteMessage",
+        "delegationFailedHeader",
+        "delegationFailedMessage",
+        "identityProviderAuthenticationFailedMessage",
+        "identityProviderUnexpectedErrorMessage",
+        "identityProviderMissingStateMessage",
+        "identityProviderMissingCodeOrErrorMessage",
+        "identityProviderInvalidResponseMessage",
+        "identityProviderInvalidSignatureMessage",
+        "identityProviderNotFoundMessage",
+        "identityProviderLinkSuccess",
+        "identityProviderLinkSuccessHeader",
+        "identityProviderLinkConfirmedAlreadyMessage",
+        "identityProviderLinkConfirmedAlreadyMessageHeader",
+        "identityProviderAlreadyLinkedMessage",
+        "identityProviderAlreadyLinkedToCurrentUserMessage",
+        "confirmAccountLinking",
+        "confirmAccountLinkingBody",
+        "brokerLinkingSessionExpired",
+        "identity-provider-redirector",
+        "identity-provider-login-label",
+        "identity-provider-login-label-divider",
+        "signInWithProvider",
+        "idp-email-verification-display-name",
+        "idp-email-verification-help-text",
+        "idp-username-password-form-display-name",
+        "idp-username-password-form-help-text",
+        "access-denied-when-idp-auth"
+      ]
+    },
+    {
+      "reason": "No reCAPTCHA is configured, and it would load a third-party script.",
+      "keys": [
+        "recaptchaFailed",
+        "recaptchaNotConfigured"
+      ]
+    },
+    {
+      "reason": "The realm's user profile declares only the sign-in name, email, first and last name; these attribute names are never shown.",
+      "keys": [
+        "address",
+        "street",
+        "locality",
+        "region",
+        "postal_code",
+        "country",
+        "website",
+        "phoneNumber",
+        "phoneNumberVerified",
+        "gender",
+        "birthday",
+        "zoneinfo"
+      ]
+    },
+    {
+      "reason": "There is no X.509 client-certificate authenticator in any browser flow.",
+      "keys": [
+        "doX509Login",
+        "clientCertificate",
+        "noCertificate",
+        "auth-x509-client-username-form-display-name",
+        "auth-x509-client-username-form-help-text"
+      ]
+    },
+    {
+      "reason": "Text-console (CLI) sign-in is never used: no client is configured for it.",
+      "keys": [
+        "console-username",
+        "console-password",
+        "console-otp",
+        "console-new-password",
+        "console-confirm-password",
+        "console-update-password",
+        "console-verify-email",
+        "console-email-code",
+        "console-accept-terms",
+        "console-accept"
+      ]
+    },
+    {
+      "reason": "OpenShift scope names: no such client scope exists.",
+      "keys": [
+        "openshift.scope.user_info",
+        "openshift.scope.user_check-access",
+        "openshift.scope.user_full",
+        "openshift.scope.list-projects"
+      ]
+    },
+    {
+      "reason": "The verifiable-credential features (oid4vc-vci disabled; no oid4vp flow) are off.",
+      "keys": [
+        "credentialOfferTitle",
+        "credentialOfferStep1",
+        "credentialOfferStep2",
+        "credentialOfferUri",
+        "oid4vpLoginTitle",
+        "oid4vpOpenWalletApp",
+        "oid4vpScanQrCodeTitle",
+        "oid4vpScanQrCode",
+        "oid4vpQrCodeAlt",
+        "oid4vpQrExpired"
+      ]
+    },
+    {
+      "reason": "Resetting an authenticator app (login-reset-otp) belongs to the reset flow, Identity 4.10 (geekdojo/geekdojo-brain#992), which overrides it.",
+      "keys": [
+        "otp-reset-description"
+      ]
+    }
+  ],
+  "overriddenTemplates": [
+    {
+      "upstreamSha256": "64dc4f431793bef3cf9cd9198c7a07d5977821f8e687b36936e17f166550d859",
+      "template": "delete-credential.ftl"
+    },
+    {
+      "upstreamSha256": "1a358dc521c16ac678d72de5dfa1a4fa356f2fb0e532cadfffcc6e6caa283bc3",
+      "template": "error.ftl"
+    },
+    {
+      "upstreamSha256": "e481b22f4146fc08d7321204add921e85b0ac4aa73e7a2d3a2fc0ae7c2e0badb",
+      "template": "frontchannel-logout.ftl"
+    },
+    {
+      "upstreamSha256": "77019d077436cdcacf88c67ac809381b6cb0257d1223f2882ad1eef75f4ef457",
+      "template": "info.ftl"
+    },
+    {
+      "upstreamSha256": "8f736353fb77880d9ce959c23b1800705c0ed3f0f2b41230af64cd20d195544e",
+      "template": "login-config-totp.ftl"
+    },
+    {
+      "upstreamSha256": "9572f46dbd68e07d17d12cf8bb734286984beddbd2c12d8842347ba103917665",
+      "template": "login-otp.ftl"
+    },
+    {
+      "upstreamSha256": "df4e9795782f512c97f67fdaa08cd382f1c300639bbc87a27cab302e08f3078c",
+      "template": "login-page-expired.ftl"
+    },
+    {
+      "upstreamSha256": "9798d87badc67d79dcf3efe946ed9ad07be48478e52db07ae5d38d62a1a8b0e3",
+      "template": "login-passkeys-conditional-authenticate.ftl"
+    },
+    {
+      "upstreamSha256": "865d417cca52f2aca4c0f55e033cee5cd77f4f840a6ecf5a339985d80d255b08",
+      "template": "login-password.ftl"
+    },
+    {
+      "upstreamSha256": "a9c195a2b625b6e0a332cd04089b38d2131c1a6bdfbf49273ba0bf066528127d",
+      "template": "login-recovery-authn-code-config.ftl"
+    },
+    {
+      "upstreamSha256": "7765d7917ff9ae7226df07dc6fa570c34e9e9b3f99b0e544b3a5a096b52fc211",
+      "template": "login-recovery-authn-code-input.ftl"
+    },
+    {
+      "upstreamSha256": "4b5acfb50e1ec58c334f9555a2c9152fcf5a1b3c108c1b8e45b0641049c45028",
+      "template": "login-reset-password.ftl"
+    },
+    {
+      "upstreamSha256": "d6055ff9f988e2b0ffced2f110d7ca4e71cbbd050932d15aa3f74a118022c8da",
+      "template": "login-update-password.ftl"
+    },
+    {
+      "upstreamSha256": "46e2c2993d4e146d387039ff7f8f52c8c1c468ef0315e21b248be367d929fab0",
+      "template": "login-update-profile.ftl"
+    },
+    {
+      "upstreamSha256": "2c36a24520025d78bb0e203ed72d9d6ad04c06fe80985d4c3a7db5d13afebb43",
+      "template": "login-username.ftl"
+    },
+    {
+      "upstreamSha256": "8b179d40968e07776b9c9c4b46103f8e3489eaaa249d18be202ddcd3da565e34",
+      "template": "login.ftl"
+    },
+    {
+      "upstreamSha256": "9a5f5070691bd7d122afd621693402778c0ec7bf8a79304aa20600c18c4e6f06",
+      "template": "logout-confirm.ftl"
+    },
+    {
+      "upstreamSha256": "64acd32cc34fa1e4537912f0c54e1730bb8b7b29d04640804c8bf7a6029a2f01",
+      "template": "passkeys.ftl"
+    },
+    {
+      "upstreamSha256": "5128f79743b0205989e1d979464e54ab3b1542ca758c36c101ed71bb6f33362f",
+      "template": "register.ftl"
+    },
+    {
+      "upstreamSha256": "e6d2f5d58a25d339d9d7fb6ac8ca853ceb64300793acc974a505987893eb2b13",
+      "template": "saml-post-form.ftl"
+    },
+    {
+      "upstreamSha256": "ee72898d9d6a20e5c3aebd75540e8b9153e8d0163cf4ed4e468821fb3975100a",
+      "template": "template.ftl"
+    },
+    {
+      "upstreamSha256": "0b00a7b9f425cdfcfc7f9f08d3061dcf8b0cc6a46e9b95a25b884e7f9735f5d6",
+      "template": "webauthn-authenticate.ftl"
+    },
+    {
+      "upstreamSha256": "c0831c25e9c05ea419a19d77769c3ebce3e65ae784ffcd05fa50b57de473a2ad",
+      "template": "webauthn-error.ftl"
+    },
+    {
+      "upstreamSha256": "cb06db57d5544dd21bacc34c8f61c6c27af23004e5e613e9b9e00ce0baf079f3",
+      "template": "webauthn-register.ftl"
+    }
+  ],
+  "reviewedTemplates": {
+    "cli_splash.ftl": "Never rendered: no out-of-band redirect (cli_splash).",
+    "code.ftl": "Never rendered: no out-of-band redirect (the code page).",
+    "delete-account-confirm.ftl": "Never rendered: the delete-account required action is disabled.",
+    "footer.ftl": "An empty macro our frame calls; it renders nothing.",
+    "idp-review-user-profile.ftl": "Never rendered: the realm has no identity provider.",
+    "link-idp-action.ftl": "Never rendered: the realm has no identity provider.",
+    "login-idp-link-confirm-override.ftl": "Never rendered: the realm has no identity provider.",
+    "login-idp-link-confirm.ftl": "Never rendered: the realm has no identity provider.",
+    "login-idp-link-email.ftl": "Never rendered: the realm has no identity provider, and D11 (no email).",
+    "login-oauth-grant.ftl": "Never rendered: no client is consent-required.",
+    "login-oauth2-device-verify-user-code.ftl": "Never rendered: the device-flow feature is disabled.",
+    "login-reset-otp.ftl": "Rendered only by the reset flow, Identity 4.10 (geekdojo/geekdojo-brain#992), which reviews it; inside our frame, with mapped classes and no inline script.",
+    "login-verify-email.ftl": "Never rendered: D11, Rasputin sends no email.",
+    "login-x509-info.ftl": "Never rendered: no X.509 client-certificate authenticator.",
+    "password-commons.ftl": "A macro our templates import: one checkbox, labelled by logoutOtherSessions, which we override; mapped classes, no inline script.",
+    "register-commons.ftl": "A macro register.ftl imports; it renders only when the terms required action is on, which it is not.",
+    "select-authenticator.ftl": "The second-step chooser, rendered once Identity 4.5's flows (geekdojo/geekdojo-brain#987) exist; inside our frame, with mapped classes, our copy for each way to sign in and no inline script.",
+    "select-organization.ftl": "Never rendered: the organization feature is disabled.",
+    "terms.ftl": "Never rendered: the terms required action is disabled.",
+    "theme-resources.ftl": "Favicon and style macros base's frame used; our frame does not import it.",
+    "update-email.ftl": "Never rendered: the update-email feature is disabled, and D11 (no email).",
+    "user-profile-commons.ftl": "The profile fields macro register.ftl and login-update-profile.ftl import: mapped classes, field names from our bundle, and only script files by src. Its helper texts come from the realm's user profile, which an administrator writes."
+  },
+  "forkedScripts": [
+    {
+      "upstreamSha256": "0889bb492f6a0848f3c38e21ddb9dbf26e6f161d9cabe958767284c2fc5dfd88",
+      "script": "webauthnAuthenticate.js"
+    },
+    {
+      "upstreamSha256": "f3b2c7a541e0ff78d4fa502c6d4fb6672c059c898993ecf7034b91624250b661",
+      "script": "webauthnRegister.js"
+    }
+  ]
+}

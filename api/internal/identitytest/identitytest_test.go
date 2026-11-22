@@ -704,3 +704,134 @@ func TestAwaitPostgres(t *testing.T) {
 		}
 	})
 }
+
+// builtTheme lays out a theme tree holding login/theme.properties.
+func builtTheme(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "login"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "login", "theme.properties"), []byte("parent=base\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// TC-988-16: with a ThemeDir, the Env's Keycloak home has a themes/ of its
+// own: each entry of the dist's themes/ is linked in it and themes/rasputin
+// links to ThemeDir. Without one, themes/ is the dist's, linked whole.
+func TestThemeDir_LinkedIntoTheKeycloakHome(t *testing.T) {
+	cfg, _ := installed(t, "exit 0\n")
+	distThemes := filepath.Join(cfg.KeycloakHome, "themes")
+	if err := os.MkdirAll(filepath.Join(distThemes, "other"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(distThemes, "README.md"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ThemeDir = builtTheme(t)
+	h, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Env{h: h, root: t.TempDir()}
+	home, err := e.makeKeycloakHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	themes := filepath.Join(home, "themes")
+	info, err := os.Lstat(themes)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("themes/ = %v, %v; want a real directory", info, err)
+	}
+	for name, want := range map[string]string{
+		"other":     filepath.Join(distThemes, "other"),
+		"README.md": filepath.Join(distThemes, "README.md"),
+		"rasputin":  cfg.ThemeDir,
+	} {
+		got, err := os.Readlink(filepath.Join(themes, name))
+		if err != nil || got != want {
+			t.Errorf("readlink themes/%s = %q, %v; want %q", name, got, err, want)
+		}
+	}
+
+	cfg.ThemeDir = ""
+	h, err = New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e = &Env{h: h, root: t.TempDir()}
+	home, err = e.makeKeycloakHome()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.Readlink(filepath.Join(home, "themes")); err != nil || got != distThemes {
+		t.Errorf("without a ThemeDir, readlink themes = %q, %v; want the dist's %q", got, err, distThemes)
+	}
+}
+
+// TC-988-16: a ThemeDir that is missing, a file, or lacks
+// login/theme.properties is refused by New, naming it, before anything runs.
+func TestThemeDir_RefusesABrokenTheme(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "theme")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, dir := range map[string]string{
+		"missing":                   filepath.Join(t.TempDir(), "nothing-here"),
+		"a file":                    file,
+		"no login/theme.properties": t.TempDir(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, r := installed(t, "exit 0\n")
+			cfg.ThemeDir = dir
+			h, err := New(cfg)
+			if h != nil || err == nil || !strings.Contains(err.Error(), dir) {
+				t.Fatalf("New = %v, %v; want an error naming %s", h, err, dir)
+			}
+			if r.count() != 0 {
+				t.Errorf("New called the runner")
+			}
+		})
+	}
+}
+
+// TC-988-28: a walk with RASPUTIN_IDENTITY_THEME unset fails under
+// required, naming the variable, and skips otherwise; a theme that lacks
+// login/theme.properties fails whether or not required is set.
+func TestThemeDir_DependencyHandling(t *testing.T) {
+	cfg, _ := installed(t, "exit 0\n")
+	t.Run("unset, required", func(t *testing.T) {
+		t.Setenv(SwitchEnv, functest.Required)
+		p := NewPackage(func() (Config, error) { return cfg, nil })
+		tb := &recTB{ctx: t.Context()}
+		if p.RequireTheme(tb) || len(tb.fatals) != 1 || !strings.Contains(tb.fatals[0], ThemeEnv) {
+			t.Errorf("fatals %q skips %q; want one failure naming %s", tb.fatals, tb.skips, ThemeEnv)
+		}
+	})
+	t.Run("unset, not required", func(t *testing.T) {
+		t.Setenv(SwitchEnv, "")
+		p := NewPackage(func() (Config, error) { return cfg, nil })
+		tb := &recTB{ctx: t.Context()}
+		if p.RequireTheme(tb) || len(tb.skips) != 1 || len(tb.fatals) != 0 || !strings.Contains(tb.skips[0], ThemeEnv) {
+			t.Errorf("fatals %q skips %q; want one skip naming %s", tb.fatals, tb.skips, ThemeEnv)
+		}
+	})
+	for _, sw := range []string{functest.Required, ""} {
+		t.Run("broken, switch="+sw, func(t *testing.T) {
+			t.Setenv(SwitchEnv, sw)
+			broken := cfg
+			broken.ThemeDir = t.TempDir()
+			p := NewPackage(func() (Config, error) { return broken, nil })
+			tb := &recTB{ctx: t.Context()}
+			if !p.RequireTheme(tb) {
+				t.Fatal("RequireTheme refused a configured theme; New is what checks it")
+			}
+			p.Env(tb)
+			if len(tb.fatals) != 1 || len(tb.skips) != 0 || !strings.Contains(tb.fatals[0], "login/theme.properties") {
+				t.Errorf("fatals %q skips %q; want one failure naming login/theme.properties", tb.fatals, tb.skips)
+			}
+		})
+	}
+}

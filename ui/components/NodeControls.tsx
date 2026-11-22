@@ -823,9 +823,9 @@ function RemoveNodeModal({
                 label="MESH ENROLLMENT"
                 value={
                   (impact!.meshDeviceHsIds?.length ?? 0) > 1
-                    ? `${impact!.meshDeviceHsIds!.length} devices removed from Headscale`
+                    ? `${impact!.meshDeviceHsIds!.length} devices removed from the mesh`
                     : impact!.meshDeviceHsId
-                      ? 'removed from Headscale'
+                      ? 'removed from the mesh'
                       : 'not enrolled'
                 }
               />
