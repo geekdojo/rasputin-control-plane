@@ -1592,12 +1592,7 @@ func main() {
 				}
 				return out
 			})
-		nsSources := []nameserver.Source{nameserver.NewSelfSource(zone, clusterHostname(), lanWatch.PrimaryIP), clusterSrc}
-		if doorsOn {
-			// The app door's record: the LAN IP, read per query, while the
-			// door is not withheld (geekdojo/geekdojo-brain#983).
-			nsSources = append(nsSources, nameserver.NewDoorSource(doorTable.App.Host, lanWatch.PrimaryIP, appDoor.withheld))
-		}
+		nsSources := append(controlPlaneSources(zone, clusterHostname(), doorTable, doorsOn, lanWatch.PrimaryIP, appDoor.withheld), clusterSrc)
 		nsResp = nameserver.NewResponder(zone, nsSources...)
 		nsListeners := nameserver.NewListeners(ctx, 53, nsResp)
 		defer func() { _ = nsListeners.Close() }()

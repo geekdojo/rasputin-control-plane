@@ -222,8 +222,12 @@ func rows() []row {
 				done := make(chan struct{})
 				go func() {
 					defer close(done)
-					hostsync.Run(ctx, "rasputin.local", dir, time.Hour, "",
-						func() string { return "10.0.0.9" })
+					hostsync.Run(ctx, hostsync.Config{
+						Names:    []string{"rasputin.local"},
+						Dir:      dir,
+						Interval: time.Hour,
+						ServerIP: func() string { return "10.0.0.9" },
+					})
 				}()
 				waitForFile(t, filepath.Join(dir, "rasputin.local"), "10.0.0.9 rasputin.local\n")
 				cancel()

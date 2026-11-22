@@ -495,6 +495,23 @@ func TestClusterNameDefaultsToTodaysLiteral(t *testing.T) {
 	}
 }
 
+// TC-997-06: the firewall publishes <cid>.local first (it names the hosts
+// file an upgraded firewall already holds), then the home door's name.
+func TestHostsyncNames(t *testing.T) {
+	t.Setenv("RASPUTIN_CLUSTER_ID", "bench")
+	got := hostsyncNames()
+	if want := []string{"bench.local", "sso-bench.local"}; !slices.Equal(got, want) {
+		t.Errorf("hostsyncNames() = %q, want %q", got, want)
+	}
+	if got[0] != clusterName() {
+		t.Errorf("hostsyncNames()[0] = %q, want clusterName() %q", got[0], clusterName())
+	}
+	t.Setenv("RASPUTIN_CLUSTER_ID", "")
+	if got, want := hostsyncNames(), []string{"rasputin.local", "sso-rasputin.local"}; !slices.Equal(got, want) {
+		t.Errorf("hostsyncNames() with no id = %q, want %q", got, want)
+	}
+}
+
 // FaultFailHealth drives the mark-bad branch of the update saga — the one that
 // unconfirms inventory instead of recording a version, because a node on the
 // new slot that is about to revert has no version worth writing. The reply has

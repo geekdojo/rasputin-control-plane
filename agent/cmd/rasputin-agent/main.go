@@ -642,9 +642,14 @@ func main() {
 		// RASPUTIN_CP_HOSTS_RELOAD_CMD re-reads the resolver after a change —
 		// dnsmasq doesn't auto-watch addn-hosts files. The firewall sets it to
 		// "/etc/init.d/dnsmasq reload".
-		go hostsync.Run(ctx, clusterName(), hostsDir, 30*time.Second,
-			os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"),
-			func() string { return hostOf(client.ConnectedAddr()) })
+		go hostsync.Run(ctx, hostsync.Config{
+			Names:     hostsyncNames(),
+			Dir:       hostsDir,
+			Interval:  30 * time.Second,
+			ReloadCmd: os.Getenv("RASPUTIN_CP_HOSTS_RELOAD_CMD"),
+			ServerIP:  func() string { return hostOf(client.ConnectedAddr()) },
+			Logger:    logger,
+		})
 	}
 
 	// Keep our own mDNS name published, and say so loudly when another cluster
@@ -1298,6 +1303,15 @@ func handleHealth(ctx context.Context, nodeID string, role proto.NodeRole, m *na
 // sites used to hardcode.
 func clusterName() string {
 	return clusterID() + ".local"
+}
+
+// hostsyncNames is every name the firewall publishes at the control plane's
+// address: the console's <cid>.local and the home sign-in door's
+// sso-<cid>.local (Identity 4.15), both built by their one constructor.
+// clusterName() stays first because hostsync names its file after element 0,
+// the file an upgraded firewall already holds.
+func hostsyncNames() []string {
+	return []string{clusterName(), proto.SignInHomeFQDN(clusterID())}
 }
 
 // hostOf strips the port from a host:port, returning "" for anything it cannot
