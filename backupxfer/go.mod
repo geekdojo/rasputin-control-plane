@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/geekdojo/rasputin-control-plane/logkit v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
-	golang.org/x/crypto v0.59.0
+	golang.org/x/crypto v0.58.0
 )
 
 require golang.org/x/sys v0.50.0
