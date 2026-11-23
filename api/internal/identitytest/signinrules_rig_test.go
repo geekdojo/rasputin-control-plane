@@ -527,9 +527,12 @@ func (k *keyTab) rpNames() []string {
 	return slices.Clone(k.rp)
 }
 
-// keyTab opens a tab at origin with a virtual authenticator whose
-// simulated presence is held back until a step gives it: a platform one,
-// or with securityKey a USB one, which a security-key request asks for.
+// keyTab opens a tab at origin with a virtual authenticator: a platform
+// one, or with securityKey a USB one, which a security-key request asks
+// for. Every page the tab opens keeps its conditional passkey request from
+// the authenticator (conditionalWaitsJS), as a person who has not chosen
+// from the autofill list, so the authenticator answers only a request a
+// step makes: the button a step presses, never the page by itself.
 func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin string, securityKey ...bool) *keyTab {
 	t.Helper()
 	k := &keyTab{tab: newTab(t, browserCtx, origin)}
@@ -541,8 +544,10 @@ func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin strin
 	}), "expose the RP spy")
 	ctx, cancel := context.WithTimeout(k.ctx, stepTimeout)
 	defer cancel()
-	if _, err := chromedp.Call(ctx, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: rpSpyJS}); err != nil {
-		t.Fatal(err)
+	for _, js := range []string{rpSpyJS, conditionalWaitsJS} {
+		if _, err := chromedp.Call(ctx, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: js}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := chromedp.Call(ctx, webauthn.Enable, webauthn.EnableParams{EnableUI: new(false)}); err != nil {
 		t.Fatal(err)
@@ -552,7 +557,6 @@ func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin strin
 		transport = webauthn.AuthenticatorTransportUsb
 	}
 	k.auth = addAuthenticator(t, k.tab, transport)
-	setPresence(t, k.tab, k.auth, false)
 	return k
 }
 
@@ -573,7 +577,6 @@ func (r *rulesRig) registerKey(t *testing.T, k *keyTab, a account, auth string, 
 		action, button = flows.ActionSecurityKey, "rasputin-passkey-security-key"
 	}
 	r.requireActions(t, a, action)
-	setPresence(t, k.tab, k.auth, false)
 	if id := k.navigate(auth); id != "login-login" {
 		t.Fatalf("the sign-in opened %q", id)
 	}
@@ -581,13 +584,11 @@ func (r *rulesRig) registerKey(t *testing.T, k *keyTab, a account, auth string, 
 	if got := r.tabSignIn(k, a); got != "login-webauthn-register" {
 		t.Fatalf("the registration action led to %q (%q), want login-webauthn-register", got, alertOf(k.tab))
 	}
-	setPresence(t, k.tab, k.auth, true)
 	k.step(chromedp.SetValue(chromedp.ID("rasputin-passkey-name"), "Rules key"), "type the NAME")
 	r.settle(t)
 	if got := k.submit(chromedp.Click(chromedp.ID(button)), "register"); got != "rasputin-stub" {
 		t.Fatalf("registering led to %q, want the client's callback", got)
 	}
-	setPresence(t, k.tab, k.auth, false)
 	r.settle(t)
 }
 
@@ -614,7 +615,6 @@ func (r *rulesRig) passkeyAlone(t *testing.T, k *keyTab, auth string) string {
 	if posts != 1 {
 		t.Errorf("a passkey sign-in posted %d times to the sign-in step, want only the passkey's", posts)
 	}
-	setPresence(t, k.tab, k.auth, false)
 	return codeOf(t, evalT[string](k.tab, `location.href`))
 }
 
@@ -623,7 +623,6 @@ func (r *rulesRig) passkeyAlone(t *testing.T, k *keyTab, auth string) string {
 // authenticator and returns the callback's page.
 func (r *rulesRig) passwordThenKey(t *testing.T, k *keyTab, a account, auth string, answer bool) string {
 	t.Helper()
-	setPresence(t, k.tab, k.auth, false)
 	if id := k.navigate(auth); id != "login-login" {
 		t.Fatalf("the sign-in opened %q", id)
 	}
