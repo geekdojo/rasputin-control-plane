@@ -35,11 +35,15 @@ func GroupOpener(clock Clock) func(ifindex int) (Conn, error) {
 }
 
 func openGroup(ifindex int, clock Clock) (Conn, error) {
+	idx, err := ifindex32(ifindex)
+	if err != nil {
+		return nil, err
+	}
 	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, unix.IPPROTO_UDP)
 	if err != nil {
 		return nil, fmt.Errorf("signinname: socket: %w", err)
 	}
-	mreq := &unix.IPMreqn{Multiaddr: mdnsGroupIP, Ifindex: int32(ifindex)}
+	mreq := &unix.IPMreqn{Multiaddr: mdnsGroupIP, Ifindex: idx}
 	steps := []struct {
 		name string
 		fn   func() error
