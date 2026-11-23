@@ -81,7 +81,9 @@ type identityStateDeps struct {
 // identityState is what identityStateWiring built. Every field is nil
 // outside keycloak: no other mode has an identity service.
 type identityState struct {
-	monitor  *identitystate.Monitor
+	monitor *identitystate.Monitor
+	// events is the sign-in history drain's holder, bound by startEvents.
+	events   *identityEvents
 	workflow *jobs.Workflow
 	entry    *scheduler.Entry
 	arm      func(context.Context)
@@ -149,6 +151,7 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 	}
 	units := identitystate.SystemctlUnits(identitystate.RunFunc(d.run), identityUnit, identityDBUnit)
 	log := d.log
+	ev := &identityEvents{}
 	mon, err := identitystate.New(identitystate.Deps{
 		Units:      units,
 		Exits:      identitystate.ExitRecords(d.fsys, identityExitsDir),
@@ -170,8 +173,11 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 		Blank: identityFactAbsent,
 		// Identity 7.3 (#1027) produces apps-paused.
 		AppsPaused: identityFactAbsent,
-		// Identity 4.3 (#985) produces history-behind.
-		HistoryBehind: identityFactAbsent,
+		// The sign-in history drain produces history-behind; the service
+		// becoming ready marks it dirty and has the doors read the resource
+		// version again (#985, events_wiring.go).
+		HistoryBehind: ev.behind,
+		BecameReady:   ev.becameReady,
 		Features:      d.features,
 		Now:           d.now,
 		Log:           log,
@@ -199,6 +205,7 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 	wf.System = true
 	return identityState{
 		monitor:  mon,
+		events:   ev,
 		workflow: &wf,
 		entry:    &scheduler.Entry{Kind: identityRecoverKind, Interval: storeAuditCheckEvery, Due: rec.Due},
 		arm:      rec.Arm,

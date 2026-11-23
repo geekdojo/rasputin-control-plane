@@ -1765,6 +1765,7 @@ func main() {
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane

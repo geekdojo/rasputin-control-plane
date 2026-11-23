@@ -190,7 +190,10 @@ func TestRunner_Submit_StepSucceedsOnRetry(t *testing.T) {
 	nc := startNATS(t)
 	store := newStore(t)
 	r := NewRunner(store, nc)
-	r.SetBackoff(func(int) time.Duration { return 0 })
+	// The override's own calls are the fact that it was applied; the run's
+	// wall time is not one (a loaded runner stretches it).
+	var backoffs int32
+	r.SetBackoff(func(int) time.Duration { atomic.AddInt32(&backoffs, 1); return 0 })
 
 	var attempts int32
 	r.Register(Workflow{
@@ -211,14 +214,13 @@ func TestRunner_Submit_StepSucceedsOnRetry(t *testing.T) {
 		},
 	})
 
-	start := time.Now()
 	j, err := r.Submit(context.Background(), "test.flaky", nil, "test")
 	if err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 	waitForStatus(t, store, j.ID, StatusSucceeded, 5*time.Second)
-	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
-		t.Errorf("test took %v — backoff override not applied", elapsed)
+	if n := atomic.LoadInt32(&backoffs); n != 1 {
+		t.Errorf("the backoff override was called %d times for one retry, want 1: not applied", n)
 	}
 	if atomic.LoadInt32(&attempts) != 2 {
 		t.Errorf("attempts: want 2, got %d", atomic.LoadInt32(&attempts))

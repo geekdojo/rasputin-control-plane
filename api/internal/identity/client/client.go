@@ -106,15 +106,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("idclient: management %w", err)
 	}
-	tlsCfg := cfg.TLS.Clone()
-	tlsCfg.MinVersion = max(tlsCfg.MinVersion, tls.VersionTLS13)
-	transport := &http.Transport{
-		// Proxy nil: no HTTP(S)_PROXY is consulted. The service is on loopback.
-		Proxy:               nil,
-		DialContext:         (&net.Dialer{}).DialContext,
-		TLSClientConfig:     tlsCfg,
-		MaxIdleConnsPerHost: 4,
-	}
+	transport := NewTransport(cfg.TLS)
 	return &Client{
 		base:      addr.String(),
 		mgmt:      mgmt.String(),
@@ -126,6 +118,23 @@ func New(cfg Config) (*Client, error) {
 		timeout: cfg.CallTimeout,
 		log:     cfg.Logger,
 	}, nil
+}
+
+// NewTransport is the one constructor of a connection pool to the identity
+// service (signin-origin.md §5.5): the api's own calls and the door's relayed
+// browser traffic each get one, over their own client leaf, so a connection
+// opened with one leaf never carries the other's requests. It consults no
+// HTTP(S)_PROXY (the service is on loopback) and raises cfg, a copy of which
+// it uses, to TLS 1.3 at least.
+func NewTransport(cfg *tls.Config) *http.Transport {
+	tlsCfg := cfg.Clone()
+	tlsCfg.MinVersion = max(tlsCfg.MinVersion, tls.VersionTLS13)
+	return &http.Transport{
+		Proxy:               nil,
+		DialContext:         (&net.Dialer{}).DialContext,
+		TLSClientConfig:     tlsCfg,
+		MaxIdleConnsPerHost: 4,
+	}
 }
 
 // CloseIdleConnections drops every idle connection, so the next call makes a

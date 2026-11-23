@@ -145,6 +145,11 @@ type Config struct {
 	// IP address as its relying party, and localhost is the one name a
 	// browser resolves to loopback by itself.
 	FrontHost string
+	// DoorMode runs Keycloak as it runs behind the sign-in doors: no
+	// hostname, the forwarded headers trusted from loopback
+	// (renderKeycloakConf). The front still serves, but its addresses follow
+	// whatever it forwards; door tests reach Keycloak through ServeDoors.
+	DoorMode bool
 
 	// pgRestartable, set only by this package's tests, runs PostgreSQL so a
 	// test can docker stop and docker start it under a running Keycloak
@@ -239,6 +244,12 @@ type Env struct {
 	frontURL string
 	// refusals counts the requests the front's admin-account guard refused.
 	refusals atomic.Int64
+
+	// doorSites are the servers ServeDoors started, and browserRules and
+	// browserSPKI the Chrome flags they need; set before Browser starts.
+	doorSites    []*httptest.Server
+	browserRules string
+	browserSPKI  []string
 
 	// ctx is cancelled by Close; the browser's allocator lives under it.
 	ctx    context.Context
@@ -407,12 +418,16 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 		return err
 	}
 	confPath := filepath.Join(e.root, "keycloak.conf")
+	hostname := frontURL
+	if cfg.DoorMode {
+		hostname = ""
+	}
 	conf := renderKeycloakConf(kcPaths{
 		CertFile:  filepath.Join(e.root, "server", "leaf.pem"),
 		KeyFile:   filepath.Join(e.root, "server", "leaf.key"),
 		TrustFile: filepath.Join(e.root, "ca", caCertFile),
 		VaultDir:  filepath.Join(e.root, "vault"),
-	}, kcPorts{DB: dbPort}, frontURL, e.dbPassword)
+	}, kcPorts{DB: dbPort}, hostname, e.dbPassword)
 	defer clear(conf)
 	if err := atrest.WriteSecretFile(confPath, conf); err != nil {
 		return fmt.Errorf("identitytest: keycloak.conf: %w", err)
@@ -786,6 +801,9 @@ func (e *Env) teardown(ctx context.Context) error {
 	if e.hs != nil {
 		containers = append(containers, e.hs.id)
 		errs = append(errs, e.removeContainer(ctx, e.hs.id, "mesh coordinator"))
+	}
+	for _, s := range e.doorSites {
+		s.Close()
 	}
 	if e.front != nil {
 		if e.front.Config.Handler != nil {

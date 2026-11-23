@@ -12,8 +12,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
@@ -100,7 +102,13 @@ type identityWiring struct {
 	// session is the api's Admin API session as rasputin-admin, over client;
 	// under off and mock every call refuses with client's kind.
 	session *idclient.Session
-	// recoverer and reload are set only under keycloak.
+	// recoverer, reload and dirty are set only under keycloak. dirty is the
+	// sign-in history drain's signal, which the session's writes mark
+	// (events_wiring.go).
+	dirty *events.Signal
+	// version reads the resource version the doors serve theme files
+	// under; set only under keycloak.
+	version   door.VersionSource
 	recoverer *recoveradmin.Recoverer
 	reload    func(context.Context, tlsca.LeafPaths) error
 }
@@ -134,7 +142,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 	run runFunc, runIn runInFunc, restored *atomic.Pointer[restoredFunc]) (identityWiring, error) {
 	disabled := func(mode string, kind error) (identityWiring, error) {
 		c := idclient.Disabled{Kind: kind}
-		s, err := identitySession(c, logger)
+		s, err := identitySession(c, c, logger)
 		if err != nil {
 			return identityWiring{}, err
 		}
@@ -184,7 +192,8 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 	if err != nil {
 		return configFault("RASPUTIN_IDENTITY_ADDR", addr, err.Error())
 	}
-	session, err := identitySession(client, logger)
+	dirty := newIdentityDirty()
+	session, err := identitySession(client, dirtyAdmin{inner: client, dirty: dirty}, logger)
 	if err != nil {
 		return identityWiring{}, err
 	}
@@ -203,7 +212,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 		return identityWiring{}, fmt.Errorf("identity service: %w", err)
 	}
 	return identityWiring{
-		mode: identityModeKeycloak, client: client, session: session, recoverer: rec,
+		mode: identityModeKeycloak, client: client, session: session, recoverer: rec, dirty: dirty, version: client,
 		reload: func(context.Context, tlsca.LeafPaths) error {
 			client.CloseIdleConnections()
 			return nil
@@ -211,10 +220,11 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 	}, nil
 }
 
-// identitySession is the api's Admin API session as rasputin-admin over c.
-func identitySession(c identityClient, logger *slog.Logger) (*idclient.Session, error) {
+// identitySession is the api's Admin API session as rasputin-admin: it logs
+// in through c and sends its calls through admin.
+func identitySession(c identityClient, admin idclient.AdminCaller, logger *slog.Logger) (*idclient.Session, error) {
 	s, err := idclient.NewSession(idclient.SessionConfig{
-		Login: c, Admin: c, Realm: identityRealm, ClientID: identityAdminClient, Log: logger,
+		Login: c, Admin: admin, Realm: identityRealm, ClientID: identityAdminClient, Log: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("identity service: %w", err)

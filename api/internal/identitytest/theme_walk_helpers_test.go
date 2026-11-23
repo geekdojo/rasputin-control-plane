@@ -300,6 +300,10 @@ type tab struct {
 	downloads []string
 	acsPosts  []string
 	held      map[string]string // URL substring -> body that answers it
+	// beforeSubmit, when set, runs before each submit: through a sign-in
+	// door, the drain takes the previous post's event first, as the door's
+	// one-post-in-flight bound needs (geekdojo/geekdojo-brain#985).
+	beforeSubmit func(t *testing.T)
 }
 
 // stubAnswers are what the tab answers for the addresses outside Keycloak.
@@ -514,10 +518,21 @@ func (tb *tab) navigate(u string) string {
 // returns its page id.
 func (tb *tab) submit(a chromedp.Action[chromedp.Void], what string) string {
 	tb.t.Helper()
+	if tb.beforeSubmit != nil {
+		tb.beforeSubmit(tb.t)
+	}
+	m := tb.mark()
 	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
 	defer cancel()
 	if _, err := chromedp.Run(ctx, chromedp.WaitEvent(page.LoadEventFired, nil, a)); err != nil {
-		tb.t.Fatalf("%s: %v", what, err)
+		// What the step did, so a stalled one says where it stalled.
+		reqs, errs := tb.since(m)
+		var sent []string
+		for _, r := range reqs {
+			sent = append(sent, fmt.Sprintf("%s %s %d %s", r.method, redactURL(r.url), r.status, r.failed))
+		}
+		shown := evalT[string](tb, `(document.body ? (document.body.dataset.pageId || '') : '') + ' ' + location.pathname + ' focus=' + (document.activeElement ? document.activeElement.id || document.activeElement.tagName : '')`)
+		tb.t.Fatalf("%s: %v; the page shows %q; the requests since: %q; the console since: %q", what, err, shown, sent, errs)
 	}
 	return tb.pageID()
 }

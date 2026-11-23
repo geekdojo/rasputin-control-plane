@@ -115,7 +115,7 @@ func Check(in Input) error {
 			}
 		}
 	}
-	user, ok, err := basicUser(in.Authorization)
+	user, ok, err := BasicUser(in.Authorization)
 	if err != nil {
 		return err
 	}
@@ -135,10 +135,12 @@ func Sentence(err error) string {
 	return unreadableSentence
 }
 
-// basicUser is the user of a Basic Authorization, base64-decoded strictly
+// BasicUser is the user of a Basic Authorization, base64-decoded strictly
 // and then URL-decoded, as Keycloak's BasicAuthHelper reads it (RFC 6749
-// §2.3.1). ok is false for no header or another scheme.
-func basicUser(header string) (user string, ok bool, err error) {
+// §2.3.1). ok is false for no header or another scheme; a credential that
+// does not decode is ErrUnreadable. The door reads the client a token call
+// names through it (geekdojo/geekdojo-brain#985).
+func BasicUser(header string) (user string, ok bool, err error) {
 	scheme, cred, found := strings.Cut(strings.TrimSpace(header), " ")
 	if !found || !strings.EqualFold(scheme, "Basic") {
 		return "", false, nil
