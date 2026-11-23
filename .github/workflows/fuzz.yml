@@ -118,6 +118,7 @@ jobs:
             api/internal/releases:FuzzPublicNodeImage
             api/internal/releases:FuzzValidReleaseVersion
             api/internal/releases:FuzzArchCompatible
+            api/internal/signinname:FuzzParse
           "
           for t in $targets; do
             [ -n "$t" ] || continue

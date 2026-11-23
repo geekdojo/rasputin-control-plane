@@ -265,18 +265,6 @@ func normalizeDNSLabel(kind, v string) (string, error) {
 	return v, nil
 }
 
-// ssoPrefix starts every cluster's sign-in name, sso-<cluster id>.local
-// (Identity D25, signin-origin.md §6.1). A cluster id may not start with it,
-// or that cluster's own name would be another cluster's sign-in name.
-//
-// It belongs in proto beside the sign-in name itself; geekdojo-brain#983 adds
-// that constant there, and this one goes when it lands.
-const ssoPrefix = "sso-"
-
-// clusterIDMaxLen leaves room for ssoPrefix: sso-<cluster id> must still fit
-// in one 63-character DNS label.
-const clusterIDMaxLen = 63 - len(ssoPrefix)
-
 // clusterIDReason is which cluster-id rule a clusterIDError broke.
 type clusterIDReason int
 
@@ -295,35 +283,38 @@ type clusterIDError struct {
 
 func (e *clusterIDError) Error() string {
 	if e.reason == clusterIDTooLong {
-		return fmt.Sprintf("cluster id %q is %d characters; a cluster id allows at most %d", e.id, len(e.id), clusterIDMaxLen)
+		return fmt.Sprintf("cluster id %q is %d characters; a cluster id allows at most %d", e.id, len(e.id), proto.ClusterIDMaxLen)
 	}
-	return fmt.Sprintf("cluster id %q starts with the reserved prefix %q", e.id, ssoPrefix)
+	return fmt.Sprintf("cluster id %q starts with the reserved prefix %q", e.id, proto.SignInHomePrefix)
 }
 
 // Sentence is the person-facing sentence for the refusal: the rule, why,
 // and what to do.
 func (e *clusterIDError) Sentence() string {
 	if e.reason == clusterIDTooLong {
-		return fmt.Sprintf("The cluster id %q is %d characters, and a cluster id allows at most %d so that its sign-in name, sso-<cluster id>.local, fits in one DNS label. Choose a shorter --cluster-id.", e.id, len(e.id), clusterIDMaxLen)
+		return fmt.Sprintf("The cluster id %q is %d characters, and a cluster id allows at most %d so that its sign-in name, sso-<cluster id>.local, fits in one DNS label. Choose a shorter --cluster-id.", e.id, len(e.id), proto.ClusterIDMaxLen)
 	}
-	return fmt.Sprintf("The cluster id %q starts with %q, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name. Choose a --cluster-id that does not start with %q.", e.id, ssoPrefix, ssoPrefix)
+	return fmt.Sprintf("The cluster id %q starts with %q, which is reserved for sign-in names: every cluster signs in at sso-<cluster id>.local, so this one would publish another cluster's sign-in name. Choose a --cluster-id that does not start with %q.", e.id, proto.SignInHomePrefix, proto.SignInHomePrefix)
 }
 
 // normalizeClusterID is normalizeDNSLabel for the cluster id, plus the two
-// rules only a cluster id has: at most clusterIDMaxLen characters, and no
-// ssoPrefix. The length check runs first so a 60-63 character id gets the
-// cluster-id sentence, not the generic 63 one. Node ids keep
+// rules only a cluster id has, which proto.CheckClusterID holds (the one copy,
+// geekdojo/geekdojo-brain#995): at most proto.ClusterIDMaxLen characters, and
+// no proto.SignInHomePrefix. The length result is acted on first so a 60-63
+// character id gets the cluster-id sentence, not the generic 63 one; the
+// prefix result only after the id is known to be a label. Node ids keep
 // normalizeDNSLabel alone.
 func normalizeClusterID(v string) (string, error) {
 	v = strings.ToLower(strings.TrimSpace(v))
-	if len(v) > clusterIDMaxLen {
+	rule := proto.CheckClusterID(v)
+	if errors.Is(rule, proto.ErrClusterIDTooLong) {
 		return "", &clusterIDError{reason: clusterIDTooLong, id: v}
 	}
 	v, err := normalizeDNSLabel("cluster id", v)
 	if err != nil {
 		return "", err
 	}
-	if strings.HasPrefix(v, ssoPrefix) {
+	if errors.Is(rule, proto.ErrClusterIDReservedPrefix) {
 		return "", &clusterIDError{reason: clusterIDReservedPrefix, id: v}
 	}
 	return v, nil

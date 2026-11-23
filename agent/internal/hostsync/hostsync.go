@@ -38,7 +38,7 @@ package hostsync
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -56,38 +56,70 @@ import (
 // agent wires both from the live bus client.
 type ServerIP func() string
 
-// Run publishes "<ip> <name>" into dir/<name> (atomic rename) whenever the
-// control plane's address changes, and leaves the published entry alone the
-// rest of the time. A dnsmasq configured with `hostsdir=<dir>` picks up the
-// change automatically. Blocks until ctx is cancelled. dir is created if
-// missing.
+// Config is everything Run needs, each piece supplied by the composition root.
+type Config struct {
+	// Names are the names published at the control plane's address, one
+	// "<ip> <name>" line each. Names[0] also names the file (dir/Names[0]):
+	// the file an upgraded firewall already holds, so the previous release's
+	// one-line file is rewritten in place rather than left beside a new one
+	// (dnsmasq reads every file in the directory).
+	Names []string
+	// Dir is the dnsmasq hosts directory; created if missing.
+	Dir string
+	// Interval is a safety net behind the address source, not a clock the
+	// entry lives on; non-positive means 30s.
+	Interval time.Duration
+	// ReloadCmd, if non-empty, is run via "sh -c" after each write.
+	ReloadCmd string
+	// ServerIP is the live address source; required.
+	ServerIP ServerIP
+	// Logger receives every record Run writes; nil discards them.
+	Logger *slog.Logger
+}
+
+// Run publishes one "<ip> <name>" line per name into dir/Names[0] (one atomic
+// rename, so every name always carries the same address) whenever the control
+// plane's address changes, and leaves the published entry alone the rest of
+// the time. Blocks until ctx is cancelled.
 //
-// serverIP is re-read on every look, never captured: a rollout reboots the
+// ServerIP is re-read on every look, never captured: a rollout reboots the
 // control plane LAST, right after every other node has just seen its old
 // address, so a captured string is a stale one.
 //
 // NOT KNOWING the address is not the same as having LOST the control plane —
-// the same rule clusterdns learned the hard way. serverIP reads empty at start
+// the same rule clusterdns learned the hard way. ServerIP reads empty at start
 // (before the first dial) and whenever the bus is down. In both cases the
 // published entry is KEPT: withdrawing it would take this box's own tailscaled
 // off the mesh for as long as the bus was down, and put nothing better in its
 // place. The entry only ever changes to another address the bus itself
 // reported.
 //
-// interval is a safety net behind that, not a clock the entry lives on:
+// Interval is a safety net behind that, not a clock the entry lives on:
 // nothing is published or withdrawn because a tick happened, only because the
-// address the bus reports differs from the one on disk.
+// address the bus reports differs from the one last written.
 //
-// reloadCmd, if non-empty, is run via "sh -c" after each change to the hosts
-// file. dnsmasq does NOT auto-watch addn-hosts files (only --hostsdir, which
-// OpenWrt's uci doesn't expose), so the resolver must be told to re-read — on
-// the firewall this is "/etc/init.d/dnsmasq reload". It runs only on an actual
-// address change, so the reload is rare (first connect + CP-IP changes).
-func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCmd string, serverIP ServerIP) {
-	if serverIP == nil {
-		log.Printf("hostsync: no control-plane address source; %s will not be published to %s", name, dir)
+// ReloadCmd exists because dnsmasq does NOT auto-watch addn-hosts files (only
+// --hostsdir, which OpenWrt's uci doesn't expose), so the resolver must be
+// told to re-read — on the firewall this is "/etc/init.d/dnsmasq reload". It
+// runs only after an actual write, so the reload is rare (first connect +
+// CP-IP changes).
+func Run(ctx context.Context, cfg Config) {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	// A missing address source or name list is a wiring bug, not a reason to
+	// fall back to resolving the name — that fallback is the mDNS republish
+	// this package no longer does.
+	if cfg.ServerIP == nil || len(cfg.Names) == 0 {
+		reason := "no control-plane address source"
+		if len(cfg.Names) == 0 {
+			reason = "no names to publish"
+		}
+		logger.Error("hostsync not started", "dir", cfg.Dir, "names", cfg.Names, "reason", reason)
 		return
 	}
+	interval := cfg.Interval
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
@@ -95,13 +127,13 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCm
 	// inherited: dnsmasq reads this directory and the files in it AFTER
 	// dropping to its own unprivileged user, so an owner-only mode would stop
 	// the control plane's name resolving on the firewall's LAN. What is in
-	// them is one "<ip> <name>" line — the control plane's LAN address, which
+	// them is "<ip> <name>" lines — the control plane's LAN address, which
 	// every client on that LAN already learns by resolving the name.
-	if err := atrest.EnsurePublicDir(dir); err != nil {
-		log.Printf("hostsync: cannot create %s: %v (%s won't resolve via dnsmasq)", dir, err, name)
+	if err := atrest.EnsurePublicDir(cfg.Dir); err != nil {
+		logger.Error("hostsync cannot create the hosts directory", "dir", cfg.Dir, "names", cfg.Names, "err", err)
 		return
 	}
-	file := filepath.Join(dir, name)
+	file := filepath.Join(cfg.Dir, cfg.Names[0])
 	last := ""
 	timer := time.NewTimer(0) // first tick fires immediately
 	defer timer.Stop()
@@ -110,15 +142,15 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCm
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if ip := serverIP(); ip != "" && ip != last {
-				if werr := writeHost(file, ip, name); werr != nil {
-					log.Printf("hostsync: write %s: %v", file, werr)
+			if ip := cfg.ServerIP(); ip != "" && ip != last {
+				if werr := writeHost(file, ip, cfg.Names); werr != nil {
+					logger.Error("hostsync write failed", "file", file, "err", werr)
 				} else {
-					log.Printf("hostsync: %s -> %s (from the bus connection; published to %s)", name, ip, dir)
+					logger.Info("hostsync published", "names", cfg.Names, "ip", ip, "dir", cfg.Dir, "source", "bus")
 					last = ip
-					if reloadCmd != "" {
-						if out, rerr := exec.CommandContext(ctx, "sh", "-c", reloadCmd).CombinedOutput(); rerr != nil {
-							log.Printf("hostsync: reload %q failed: %v (%s)", reloadCmd, rerr, strings.TrimSpace(string(out)))
+					if cfg.ReloadCmd != "" {
+						if out, rerr := exec.CommandContext(ctx, "sh", "-c", cfg.ReloadCmd).CombinedOutput(); rerr != nil {
+							logger.Error("hostsync reload failed", "cmd", cfg.ReloadCmd, "err", rerr, "output", strings.TrimSpace(string(out)))
 						}
 					}
 				}
@@ -128,6 +160,11 @@ func Run(ctx context.Context, name, dir string, interval time.Duration, reloadCm
 	}
 }
 
-func writeHost(file, ip, name string) error {
-	return atrest.WritePublicFile(file, []byte(ip+" "+name+"\n"))
+// writeHost replaces file with one "<ip> <name>" line per name, in one rename.
+func writeHost(file, ip string, names []string) error {
+	var b strings.Builder
+	for _, n := range names {
+		b.WriteString(ip + " " + n + "\n")
+	}
+	return atrest.WritePublicFile(file, []byte(b.String()))
 }

@@ -86,6 +86,35 @@ func (s *VMSink) Write(ctx context.Context, evt *proto.MetricsEvt) error {
 		return nil
 	}
 	healthy, _ := s.sup.Healthy(ctx)
+	return s.post(ctx, healthy, encodePromText(evt))
+}
+
+// Label is one Prometheus label beside nodeId.
+type Label struct {
+	Name, Value string
+}
+
+// Series is one labelled sample: rasputin_<Name>{nodeId,<Labels>} Value.
+// MetricsEvt has no labels, so a metric that needs them is written as Series.
+type Series struct {
+	Name   string
+	Labels []Label
+	Value  float64
+}
+
+// WriteSeries writes series for nodeID at ts, through the same POST, health
+// gate and status record as Write.
+func (s *VMSink) WriteSeries(ctx context.Context, nodeID string, ts time.Time, series []Series) error {
+	if nodeID == "" || len(series) == 0 {
+		return nil
+	}
+	healthy, err := s.sup.Healthy(ctx)
+	return s.post(ctx, healthy && err == nil, encodeSeries(nodeID, ts, series))
+}
+
+// post sends one Prometheus text body to VM's import endpoint, or refuses
+// when VM is not healthy.
+func (s *VMSink) post(ctx context.Context, healthy bool, body []byte) error {
 	if !healthy {
 		// Don't try when VM isn't up — we don't even have a base URL
 		// yet, and the supervisor's startup path will retry shortly.
@@ -100,7 +129,6 @@ func (s *VMSink) Write(ctx context.Context, evt *proto.MetricsEvt) error {
 		return err
 	}
 
-	body := encodePromText(evt)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		base+"/api/v1/import/prometheus", bytes.NewReader(body))
 	if err != nil {
@@ -182,6 +210,31 @@ func encodePromText(evt *proto.MetricsEvt) []byte {
 		buf.WriteString(strconv.FormatFloat(evt.Metrics[name], 'f', -1, 64))
 		buf.WriteByte(' ')
 		buf.WriteString(strconv.FormatInt(tsMs, 10))
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
+}
+
+// encodeSeries renders series as Prometheus text, one line each, in the order
+// given: rasputin_<name>{nodeId="...",<label>="..."} <value> <ts_ms>.
+func encodeSeries(nodeID string, ts time.Time, series []Series) []byte {
+	tsMs := strconv.FormatInt(ts.UnixMilli(), 10)
+	var buf bytes.Buffer
+	for _, se := range series {
+		buf.WriteString("rasputin_")
+		buf.WriteString(sanitizeName(se.Name))
+		buf.WriteString(`{nodeId=`)
+		buf.WriteString(strconv.Quote(nodeID))
+		for _, l := range se.Labels {
+			buf.WriteByte(',')
+			buf.WriteString(sanitizeName(l.Name))
+			buf.WriteByte('=')
+			buf.WriteString(strconv.Quote(l.Value))
+		}
+		buf.WriteString(`} `)
+		buf.WriteString(strconv.FormatFloat(se.Value, 'f', -1, 64))
+		buf.WriteByte(' ')
+		buf.WriteString(tsMs)
 		buf.WriteByte('\n')
 	}
 	return buf.Bytes()

@@ -2,11 +2,14 @@ package nameserver
 
 import "net"
 
-// DoorSource answers one sign-in door's host, signin.<cid>.internal, with the
-// control plane's primary LAN IP (geekdojo/geekdojo-brain#983). The address is
-// read on every query, like SelfSource's, and so is withheld: while an app
-// holds a reserved name, or the apps list cannot be read, the door has no
-// record and the in-zone name answers NXDOMAIN.
+// DoorSource answers one sign-in door's host with the control plane's primary
+// LAN IP. It serves both doors: the app door's signin.<cid>.internal
+// (geekdojo/geekdojo-brain#983), and the home door's sso-<cid>.local, an
+// off-zone extra unicast name like <cid>.local (Identity 4.15). The address
+// is read on every query, like SelfSource's, and so is withheld: while the
+// predicate says so (for the app door, while an app holds a reserved name or
+// the apps list cannot be read) the door has no record, and an in-zone name
+// answers NXDOMAIN. Any other type for a served host is NODATA, never REFUSED.
 type DoorSource struct {
 	host     string
 	ipFn     func() net.IP
