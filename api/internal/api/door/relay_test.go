@@ -97,13 +97,13 @@ func TestDoor_ResponseHeaders(t *testing.T) {
 		for _, k := range []Kind{Home, App} {
 			target := realmPrefix + ".well-known/openid-configuration"
 			if name == "css" {
-				target = themeLoginPath + "css/signin.css"
+				target = testLoginPath + "css/signin.css"
 			}
 			w := f.do(k, req{target: target})
 			h := w.Header()
 			want := policiesFor(k, f.door(k).cfg.Door.Host)
-			if v := h.Values("Content-Security-Policy"); len(v) != 1 || v[0] != want.relayed || strings.Contains(v[0], "form-action") {
-				t.Errorf("%s %s: CSP %q, want exactly %q", k, name, v, want.relayed)
+			if v := h.Values("Content-Security-Policy"); len(v) != 1 || v[0] != want.relayed(testVersion, true) || strings.Contains(v[0], "form-action") {
+				t.Errorf("%s %s: CSP %q, want exactly %q", k, name, v, want.relayed(testVersion, true))
 			}
 			for _, gone := range []string{"Strict-Transport-Security", "Alt-Svc", "Content-Security-Policy-Report-Only"} {
 				if h.Get(gone) != "" {
@@ -119,10 +119,10 @@ func TestDoor_ResponseHeaders(t *testing.T) {
 		}
 	}
 	// The exact policies (C32), and the door's own pages.
-	if got := policiesFor(Home, "sso-ci.local").relayed; got != "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" {
+	if got := policiesFor(Home, "sso-ci.local").relayed(testVersion, true); got != "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" {
 		t.Errorf("home policy %q", got)
 	}
-	if got := policiesFor(App, "signin.ci.internal").relayed; got != "script-src https://signin.ci.internal/resources/xmkpe/login/rasputin/ https://signin.ci.internal/resources/xmkpe/common/keycloak/; object-src 'none'; base-uri 'none'; frame-ancestors 'self'" {
+	if got := policiesFor(App, "signin.ci.internal").relayed(testVersion, true); got != "script-src https://signin.ci.internal/resources/ab12c/login/rasputin/ https://signin.ci.internal/resources/ab12c/common/keycloak/; object-src 'none'; base-uri 'none'; frame-ancestors 'self'" {
 		t.Errorf("app policy %q", got)
 	}
 	for _, k := range []Kind{Home, App} {
@@ -286,7 +286,7 @@ func TestDoor_NotReady(t *testing.T) {
 			}
 		}
 		if f.ready.err != nil {
-			for _, p := range []string{themeLoginPath + "css/signin.css", realmPrefix + ".well-known/openid-configuration", oidc("certs"), oidc("userinfo")} {
+			for _, p := range []string{testLoginPath + "css/signin.css", realmPrefix + ".well-known/openid-configuration", oidc("certs"), oidc("userinfo")} {
 				f.wantPass(Home, req{target: p}, string(st)+": "+p+" is not gated on readiness")
 			}
 		}

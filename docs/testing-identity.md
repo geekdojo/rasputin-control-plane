@@ -134,10 +134,10 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
 - arm64, the appliance, the OS packages and units, or the identity service's database link over
   TLS (Identity 2.4 and 2.6, proved in rasputin-os CI).
 - That the front behaves like the door. The front is an `httptest` TLS server whose reverse
-  proxy presents the client leaf to Keycloak; it stands in for the door (Identity 4.3) and
-  forwards everything except what the door's admin-account guard refuses (`adminguard`,
-  geekdojo/geekdojo-brain#1127). It exists because `https-client-auth=required` holds for every caller,
-  a browser included.
+  proxy presents the client leaf to Keycloak; it forwards everything except what the door's
+  admin-account guard refuses (`adminguard`, geekdojo/geekdojo-brain#1127). It exists because
+  `https-client-auth=required` holds for every caller, a browser included. The real doors are
+  proved by their own test; see [The sign-in doors](#the-sign-in-doors).
 - Any sign-in verb other than password with PKCE. The TOTP, passkey, reset and app-door verbs
   land with the items whose CI cases need them; the vector file already carries their sections.
 - The ID token's signature. The client decodes the payload of a token it received over TLS from
@@ -469,9 +469,66 @@ What it proves at the pin:
 What it does not prove:
 
 - the pages that later items' flows render, which the page table names (Identity 4.5 and 4.10);
-- the door's script policy and its allowlist enforcement (Identity 4.3);
+- the door's script policy and its allowlist enforcement, which
+  [The sign-in doors](#the-sign-in-doors) proves by running this walk through each door;
 - the look of the pages;
 - iOS's zoom on small inputs.
 
 The walk runs on `https://localhost:<port>` (`Config.FrontHost`), because WebAuthn refuses an IP
 address as its relying party.
+
+## The sign-in doors
+
+`TestDoor_AgainstPinnedKeycloak` (api/internal/identitytest/door_functional_test.go,
+geekdojo/geekdojo-brain#985, TC-985-36 to TC-985-45) runs both sign-in doors, built by
+`door.Build` exactly as the api builds them, in front of the pinned Keycloak. Keycloak runs in door
+mode: no `hostname`, the forwarded headers trusted from loopback only, as rasputin-os's
+`keycloak.conf`. The doors relay over the `rasputin-door` leaf's own pool. The sign-in history drain
+and the throttle run on a `rasputin-admin` session. The pinned Chrome and Go clients reach
+`sso-ci.local`, `signin.ci.internal`, `ci.local` and `app.ci.internal` by name on port 443. The api
+does not mount the doors yet (Identity 4.4), so the test serves them itself.
+
+To run it locally, use the theme command in [The sign-in theme walk](#the-sign-in-theme-walk) with
+this test's name:
+
+```sh
+RASPUTIN_IDENTITY_THEME=/tmp/rasputin-identity-theme RASPUTIN_IDENTITY_HOME="$HOME/.cache/rasputin-identity" \
+  RASPUTIN_IDENTITY_FUNCTIONAL=required go test -v -run 'TestDoor_AgainstPinnedKeycloak' ./api/internal/identitytest/
+```
+
+What it proves at the pin:
+
+- No forged `Host`, `X-Forwarded-*` or `Forwarded` header changes either door's issuer, which
+  equals the door table's byte for byte (TC-985-36).
+- A client at the wrong door, a missing or repeated `client_id`, and registration at the app door
+  or from a tailnet address are each refused with a sentence (TC-985-37).
+- The script policy and framing (TC-985-38):
+  - a home-door page carries `script-src 'self'` and `frame-ancestors 'none'`;
+  - a `ci.local` page that frames it is refused by the browser for its `frame-ancestors`;
+  - no `ci.local` cookie reaches the door;
+  - the app door names only its two theme paths;
+  - the other theme bundles answer 404.
+- The resource version and the theme walk (TC-985-39, capability rows T111 and T114):
+  - the doors learn `/resources/<v>/` from the running server, as they do in production, and every
+    page the server renders loads theme files under that `<v>` only;
+  - no `/resources/` answer is a redirect;
+  - #988's whole theme walk renders through each door under that door's script policy, held to
+    the walk's checks, a console error among them.
+
+  Each door walks the pages its own clients reach. Between them the doors render every page the
+  walk renders at the front, except delete-credential, which a door refuses outright.
+- Account creation at the home door resumes no session (TC-985-40), and tossed cookies sign nobody
+  in (TC-985-41).
+- The throttle:
+  - a waiting address does not lock the account out (TC-985-42);
+  - fifty parallel wrong passwords leave at most four failures (TC-985-43).
+- The drain gets every stored event once, more than 100 of them, many in one millisecond
+  (TC-985-44).
+- TC-1127-15's floods are refused through both doors (TC-985-45).
+
+What it does not prove:
+
+- mounting, SNI dispatch, 421 and the doors' metrics, which are Identity 4.4's;
+- a Keycloak upgrade that changes `<v>` on a running cluster: the re-learning on that fact is
+  unit-tested in api/internal/api/door (TC-985-48);
+- the bench (IDT-03, TC-985-46).

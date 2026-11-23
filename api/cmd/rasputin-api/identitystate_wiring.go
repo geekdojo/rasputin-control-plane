@@ -173,10 +173,11 @@ func identityStateWiring(d identityStateDeps) (identityState, error) {
 		Blank: identityFactAbsent,
 		// Identity 7.3 (#1027) produces apps-paused.
 		AppsPaused: identityFactAbsent,
-		// The sign-in history drain produces history-behind, and the
-		// service becoming ready marks it dirty (#985, events_wiring.go).
+		// The sign-in history drain produces history-behind; the service
+		// becoming ready marks it dirty and has the doors read the resource
+		// version again (#985, events_wiring.go).
 		HistoryBehind: ev.behind,
-		BecameReady:   ev.markDirty,
+		BecameReady:   ev.becameReady,
 		Features:      d.features,
 		Now:           d.now,
 		Log:           log,

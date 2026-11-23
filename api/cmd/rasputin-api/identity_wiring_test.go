@@ -488,9 +488,14 @@ func (a *scriptedAdmin) Admin(_ context.Context, _ secret.Value, method, path st
 	return a.resp, a.err
 }
 
-type countingSignal struct{ n atomic.Int64 }
+type countingSignal struct{ n, begun, ended atomic.Int64 }
 
 func (c *countingSignal) MarkDirty() { c.n.Add(1) }
+
+func (c *countingSignal) Begin() func() {
+	c.begun.Add(1)
+	return func() { c.ended.Add(1) }
+}
 
 // TC-985-32: the session's decorator marks the drain dirty only after a
 // successful call that is not a GET, and returns the inner answer and error
@@ -510,6 +515,14 @@ func TestDirtyAdmin_MarksOnlySuccessfulWrites(t *testing.T) {
 		resp, err := dirtyAdmin{inner: inner, dirty: sig}.Admin(t.Context(), secret.Value{}, c.method, "/admin/realms/rasputin/users", nil, nil)
 		if sig.n.Load() != c.marks {
 			t.Errorf("%s err=%v: %d marks, want %d", c.method, c.err, sig.n.Load(), c.marks)
+		}
+		// A write is open on the drain's signal while it runs, failed or not.
+		open := int64(0)
+		if c.method != http.MethodGet {
+			open = 1
+		}
+		if b, e := sig.begun.Load(), sig.ended.Load(); b != open || e != open {
+			t.Errorf("%s err=%v: %d begun and %d ended on the signal, want %d and %d", c.method, c.err, b, e, open, open)
 		}
 		if resp != inner.resp || err != c.err {
 			t.Errorf("%s: the answer %+v, %v was changed from %+v, %v", c.method, resp, err, inner.resp, c.err)
@@ -533,8 +546,8 @@ func TestWireIdentity_DirtySignalUnderKeycloakOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if (w.dirty != nil) != want {
-			t.Errorf("backend %q: dirty signal built = %v, want %v", backend, w.dirty != nil, want)
+		if (w.dirty != nil) != want || (w.version != nil) != want {
+			t.Errorf("backend %q: dirty signal built = %v, version source = %v, want %v", backend, w.dirty != nil, w.version != nil, want)
 		}
 		// startEvents on the state each mode wires does nothing outside
 		// keycloak.
@@ -597,7 +610,8 @@ func TestStartEvents_KeycloakMarksOnceAndBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	sig := newIdentityDirty()
-	w := identityWiring{mode: identityModeKeycloak, session: session, dirty: sig}
+	versions := &versionReads{reads: make(chan string, 4)}
+	w := identityWiring{mode: identityModeKeycloak, session: session, dirty: sig, version: versions}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	st.startEvents(ctx, w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, slog.New(slog.DiscardHandler))
@@ -613,15 +627,36 @@ func TestStartEvents_KeycloakMarksOnceAndBinds(t *testing.T) {
 	if n := d.Pass(); n != 1 {
 		t.Fatalf("%d passes after start, want exactly 1", n)
 	}
-	st.events.markDirty() // BecameReady's hook
+	// The start reads the doors' resource version once.
+	if got := <-versions.reads; got != "login/rasputin/css/tokens.css" {
+		t.Fatalf("the start read the version with %q", got)
+	}
+	if st.events.version.Load() == nil {
+		t.Fatal("start bound no resource version")
+	}
+	st.events.becameReady() // BecameReady's hook
 	<-admin.gets
 	<-admin.gets
 	if n := d.Pass(); n != 2 {
 		t.Fatalf("%d passes after BecameReady's mark, want 2", n)
 	}
+	<-versions.reads // and the version is read again on the fact
+	select {
+	case <-versions.reads:
+		t.Fatal("a third version read with no third fact")
+	default:
+	}
 	if b, _ := st.events.behind(t.Context()); b {
 		t.Error("history-behind raised after good passes")
 	}
+}
+
+// versionReads answers a resource version and reports each read.
+type versionReads struct{ reads chan string }
+
+func (v *versionReads) ResourceVersion(_ context.Context, file string) (string, error) {
+	v.reads <- file
+	return "ab12c", nil
 }
 
 // tokenLogin always logs in.

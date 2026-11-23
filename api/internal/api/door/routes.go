@@ -71,8 +71,8 @@ var routes = []Route{
 	{actions("registration"), getPost, homeOnly, policy.RouteRegistration, "the account creation form's own step, only for the console"},
 	{realmPrefix + "protocol/saml", getPost, appOnly, policy.RouteSAML, "a SAML device's sign-in, at the app door only"},
 	{realmPrefix + "protocol/saml/descriptor", get, appOnly, policy.RouteSAMLDescriptor, "the realm's SAML metadata a device is set up from, at the app door only"},
-	{"/resources/{v}/login/rasputin/{file...}", get, both, policy.RouteTheme, "Rasputin's login theme files the theme build lists, at the pinned resource version only"},
-	{"/resources/{v}/common/keycloak/{file...}", get, both, policy.RouteTheme, "the shared theme files the login theme build lists, at the pinned resource version only"},
+	{"/resources/{v}/login/rasputin/{file...}", get, both, policy.RouteTheme, "Rasputin's login theme files the theme build lists, at the resource version learned from the running service only"},
+	{"/resources/{v}/common/keycloak/{file...}", get, both, policy.RouteTheme, "the shared theme files the login theme build lists, at the resource version learned from the running service only"},
 	{signinPrefix + "{file...}", get, both, policy.RouteSignin, "the door's own page styles and images, served from memory and never forwarded"},
 }
 

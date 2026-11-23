@@ -44,9 +44,21 @@ type Throttle interface {
 	Answered(k policy.Key)
 }
 
-// Dirty is the sign-in history drain's dirty signal.
+// Dirty is the sign-in history drain's signal (*events.Drainer): Begin
+// records a relayed request that can store events until its end is called,
+// and MarkDirty asks for a pass.
 type Dirty interface {
+	Begin() (end func())
 	MarkDirty()
+}
+
+// Version is the identity service's resource version as last learned
+// (*ResourceVersion): the theme files are served, and the app door's script
+// policy names them, only under the version Current reports. Stale reports
+// the fact that the service redirected a theme file, so the version changed.
+type Version interface {
+	Current() (v string, known bool)
+	Stale()
 }
 
 // Config is one door handler's collaborators. New refuses a missing one.
@@ -68,6 +80,9 @@ type Config struct {
 	// tree, whose css/ and img/ the door serves at /_signin/.
 	Theme  Allowlist
 	Assets fs.FS
+	// Version is the learned resource version the theme files are served
+	// under.
+	Version Version
 	// InstallName reads setup.install_name for the not-ready sentence.
 	InstallName func(ctx context.Context) (string, error)
 	Dirty       Dirty
@@ -112,6 +127,8 @@ func New(cfg Config) (*Handler, error) {
 		missing = "Theme"
 	case cfg.Assets == nil:
 		missing = "Assets"
+	case cfg.Version == nil:
+		missing = "Version"
 	case cfg.InstallName == nil:
 		missing = "InstallName"
 	case cfg.Dirty == nil:
@@ -163,6 +180,7 @@ type Shared struct {
 	Upstream      *url.URL
 	Theme         Allowlist
 	Assets        fs.FS
+	Version       Version
 	InstallName   func(ctx context.Context) (string, error)
 	Dirty         Dirty
 	IDs           func() string
@@ -173,7 +191,7 @@ type Shared struct {
 func Build(table doors.Table, s Shared) (home, app *Handler, err error) {
 	cfg := func(d doors.Door, k Kind) Config {
 		return Config{Door: d, Kind: k, ConsoleOrigin: s.ConsoleOrigin, Policy: s.Policy, Throttle: s.Throttle,
-			Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets,
+			Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets, Version: s.Version,
 			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Log: s.Log}
 	}
 	if home, err = New(cfg(table.Home, Home)); err != nil {
@@ -202,7 +220,6 @@ type reqState struct {
 	refused    string
 	errorClass string
 	level      slog.Level
-	status     int
 }
 
 type stateKey struct{}
@@ -214,7 +231,9 @@ func stateOf(r *http.Request) *reqState {
 	return &reqState{}
 }
 
-// statusWriter records the status written.
+// statusWriter records the status a handler set. A handler that writes a
+// body without setting one, or writes nothing, has answered 200 (net/http
+// sends it), so the record reads 200 then.
 type statusWriter struct {
 	http.ResponseWriter
 	status int
@@ -227,11 +246,12 @@ func (s *statusWriter) WriteHeader(code int) {
 	s.ResponseWriter.WriteHeader(code)
 }
 
-func (s *statusWriter) Write(b []byte) (int, error) {
+// written is the status the client was sent.
+func (s *statusWriter) written() int {
 	if s.status == 0 {
-		s.status = http.StatusOK
+		return http.StatusOK
 	}
-	return s.ResponseWriter.Write(b)
+	return s.status
 }
 
 func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
@@ -257,7 +277,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) logRequest(ctx context.Context, st *reqState, sw *statusWriter) {
 	attrs := []slog.Attr{
 		slog.String("door", h.cfg.Kind.String()), slog.String("pattern", st.pattern),
-		slog.Int("status", sw.status), slog.String("correlation_id", st.id),
+		slog.Int("status", sw.written()), slog.String("correlation_id", st.id),
 	}
 	level, msg := st.level, "sign-in door request relayed"
 	if st.refused != "" {
@@ -303,7 +323,10 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 			return
 		case policy.RouteTheme:
 			common := strings.Contains(rt.Pattern, "/common/keycloak/")
-			if r.PathValue("v") != ResourceVersion || !h.cfg.Theme.allows(common, r.PathValue("file")) {
+			// Only the exact version learned from the running service; with
+			// none known, every theme path is the 404 door page.
+			v, known := h.cfg.Version.Current()
+			if !known || r.PathValue("v") != v || !h.cfg.Theme.allows(common, r.PathValue("file")) {
 				h.notFound(w, r, st)
 				return
 			}

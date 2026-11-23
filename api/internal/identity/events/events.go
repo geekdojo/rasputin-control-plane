@@ -9,10 +9,14 @@
 // made while a pass runs coalesce into one more pass. There is no ticker; the
 // only bounds are the identity client's per-call ones.
 //
-// A pass reads every page before it delivers anything, then delivers oldest
-// first, then stores the new mark. So a failure on any page delivers nothing
-// and leaves the mark where it was, and the next pass delivers each missed
-// event once. A failed pass sets the history-behind fact, with one WARN per
+// A pass reads the stream oldest first from its mark's floor, by time and
+// never by offset (the service's order has no tie-breaker), and reads every
+// page before it delivers anything, then delivers each event it has not
+// delivered before, oldest first, then stores the new mark. The floor never
+// passes the start of a request still open (Signal), so an event committed
+// after a later-stamped one is still read. A failure on any page delivers
+// nothing and leaves the mark where it was, and the next pass delivers each
+// missed event once. A failed pass sets the history-behind fact, with one WARN per
 // outage; a good pass clears it.
 //
 // Nothing here logs an event's body, a user id or an address.
@@ -21,6 +25,7 @@ package events
 import (
 	"context"
 	"net/netip"
+	"sync"
 	"time"
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
@@ -82,14 +87,33 @@ const (
 	AdminMarkKey = "identity.events.admin_mark"
 )
 
-// Signal is the dirty signal: a capacity-one channel, so any number of marks
-// while a pass runs make exactly one more pass. It is built before the
-// identity client is wired, so the Admin API decorator can mark it, and it is
-// safe for concurrent use.
-type Signal struct{ ch chan struct{} }
+// Signal is the drain's fact source. Its dirty half is a capacity-one
+// channel, so any number of marks while a pass runs make exactly one more
+// pass. Its open half counts the requests that can store an event and have
+// not been answered yet, with the time each began: a request's events are
+// committed before its answer completes (Keycloak 26.8.2's CloseSessionFilter
+// commits the request's transaction before the response is closed, and an
+// error event is stored in a transaction of its own before that), but each
+// is stamped with its time before it commits, so two requests can commit out
+// of time order. A pass therefore never moves its mark past the start of the
+// oldest request still open (horizon). It is built before the identity
+// client is wired, so the Admin API decorator can use it, and it is safe for
+// concurrent use.
+type Signal struct {
+	ch  chan struct{}
+	now func() time.Time
 
-// NewSignal returns an unmarked signal.
-func NewSignal() *Signal { return &Signal{ch: make(chan struct{}, 1)} }
+	mu   sync.Mutex
+	open map[uint64]int64
+	next uint64
+}
+
+// NewSignal returns an unmarked signal with no request open. now is the
+// clock request starts are read from: the host clock the identity service
+// stamps its events with.
+func NewSignal(now func() time.Time) *Signal {
+	return &Signal{ch: make(chan struct{}, 1), now: now, open: map[uint64]int64{}}
+}
 
 // MarkDirty records that new events may be stored. It never blocks.
 func (s *Signal) MarkDirty() {
@@ -97,4 +121,34 @@ func (s *Signal) MarkDirty() {
 	case s.ch <- struct{}{}:
 	default:
 	}
+}
+
+// Begin records that a request that can store an event is about to be sent.
+// The caller calls end once the request's answer has completed (or failed),
+// before it marks the signal dirty; end may be called more than once.
+func (s *Signal) Begin() (end func()) {
+	s.mu.Lock()
+	s.next++
+	id := s.next
+	s.open[id] = s.now().UnixMilli()
+	s.mu.Unlock()
+	return func() {
+		s.mu.Lock()
+		delete(s.open, id)
+		s.mu.Unlock()
+	}
+}
+
+// horizon is the time, in milliseconds, before which every event is already
+// visible: the start of the oldest open request, or now when none is open.
+// An event is stamped no earlier than its request began, and every request
+// that began earlier has been answered, so its events are committed.
+func (s *Signal) horizon() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := s.now().UnixMilli()
+	for _, start := range s.open {
+		h = min(h, start)
+	}
+	return h
 }

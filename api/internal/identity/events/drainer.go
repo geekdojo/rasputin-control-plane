@@ -68,6 +68,10 @@ func New(d Deps) (*Drainer, error) {
 // MarkDirty marks the drain's signal.
 func (dr *Drainer) MarkDirty() { dr.d.Signal.MarkDirty() }
 
+// Begin records a request that can store an event on the drain's signal
+// (Signal.Begin).
+func (dr *Drainer) Begin() (end func()) { return dr.d.Signal.Begin() }
+
 // Pass is the number of passes started so far.
 func (dr *Drainer) Pass() uint64 { return dr.passes.Load() }
 
@@ -204,8 +208,12 @@ func synthetic(fields ...string) string {
 
 // ---- the mark --------------------------------------------------------------
 
-// mark is a stream's high-water mark: the newest event time delivered, in
-// milliseconds, and the keys of every delivered event at that time.
+// mark is a stream's mark: a floor time in milliseconds, before which every
+// stored event has been delivered, and the keys of every delivered event at
+// or after it. The floor is the newest event time delivered, held back to the
+// start of the oldest request still open when the pass began (the signal's
+// horizon), so an event committed after a later-stamped one was read is still
+// at or after the floor on the next pass.
 type mark struct {
 	Time int64    `json:"time"`
 	IDs  []string `json:"ids"`
@@ -235,67 +243,62 @@ func (dr *Drainer) readMark(ctx context.Context, op, key string) (mark, bool, er
 
 // ---- one stream ------------------------------------------------------------
 
-// drain pages one stream newest first back to its mark, then delivers the
-// new events oldest first, then stores the new mark. It delivers nothing when
-// a read fails.
+// drain reads one stream from its mark's floor, oldest first, then delivers
+// the events it has not delivered before, then stores the new mark. It
+// delivers nothing when a read fails.
+//
+// The service orders events by time alone, with no tie-breaker
+// (JpaEventQuery and JpaAdminEventQuery at 26.8.2), so two offset pages can
+// order the events of one millisecond differently and drop one between them.
+// So every read starts at a time (dateFrom, inclusive) with first unset:
+// from one query sorted by time, every event stamped before that page's last
+// time is in the page, and the next read starts at that last time. A page
+// that is all one millisecond is read again, twice as large, until it holds
+// that millisecond whole.
 func drain[T stored](ctx context.Context, dr *Drainer, op, path, markKey string, deliver func(T)) error {
 	m, have, err := dr.readMark(ctx, op, markKey)
 	if err != nil {
 		dr.outage(ctx, op, "sign-in history not drained", err)
 		return err
 	}
-	atMark := map[string]bool{}
+	// The horizon is read before the first page: every event stamped before
+	// it is already visible to every read below.
+	horizon := dr.d.Signal.horizon()
+	floor := int64(0)
+	if have {
+		floor = m.Time
+	}
+	read, err := readFrom[T](ctx, dr, op, path, floor)
+	if err != nil {
+		dr.outage(ctx, op, "sign-in history not drained", err)
+		return err
+	}
+	known := map[string]bool{}
 	for _, id := range m.IDs {
-		atMark[id] = true
+		known[id] = true
 	}
-	seen := map[string]bool{}
+	newest := floor
 	var fresh []T
-	for first := 0; ; first += pageSize {
-		var page []T
-		q := url.Values{"first": {strconv.Itoa(first)}, "max": {strconv.Itoa(pageSize)}}
-		if _, err := dr.d.Admin.Admin(ctx, http.MethodGet, path+"?"+q.Encode(), nil, &page); err != nil {
-			err = fmt.Errorf("events: read %s from %d: %w", op, first, err)
-			dr.outage(ctx, op, "sign-in history not drained", err)
-			return err
-		}
-		older := false
-		for _, e := range page {
-			k := e.key()
-			switch {
-			case have && e.ms() < m.Time:
-				older = true
-			case have && e.ms() == m.Time && atMark[k], seen[k]:
-			default:
-				seen[k] = true
-				fresh = append(fresh, e)
-			}
-		}
-		if older || len(page) < pageSize {
-			break
+	for _, e := range read {
+		newest = max(newest, e.ms())
+		if !known[e.key()] {
+			fresh = append(fresh, e)
 		}
 	}
-	// The pages came newest first; deliver oldest first, ties in the order
-	// the service stored them.
-	slices.Reverse(fresh)
+	// Oldest first; ties in the order the service returned them.
 	slices.SortStableFunc(fresh, func(a, b T) int { return cmp.Compare(a.ms(), b.ms()) })
 	for _, e := range fresh {
 		deliver(e)
 	}
-	if len(fresh) == 0 {
-		dr.outage(ctx, op, "", nil)
-		return nil
-	}
-	next := mark{Time: m.Time}
-	if have {
-		next.IDs = append(next.IDs, m.IDs...)
-	}
-	for _, e := range fresh {
-		switch {
-		case e.ms() > next.Time:
-			next = mark{Time: e.ms(), IDs: []string{e.key()}}
-		case e.ms() == next.Time:
+	next := mark{Time: max(floor, min(newest, horizon))}
+	for _, e := range read {
+		if e.ms() >= next.Time {
 			next.IDs = append(next.IDs, e.key())
 		}
+	}
+	if len(fresh) == 0 && next.Time == floor {
+		dr.outage(ctx, op, "", nil)
+		return nil
 	}
 	raw, err := json.Marshal(next)
 	if err == nil {
@@ -308,4 +311,41 @@ func drain[T stored](ctx context.Context, dr *Drainer, op, path, markKey string,
 	}
 	dr.outage(ctx, op, "", nil)
 	return nil
+}
+
+// readFrom reads every stored event stamped at or after from, each once,
+// oldest first.
+func readFrom[T stored](ctx context.Context, dr *Drainer, op, path string, from int64) ([]T, error) {
+	var out []T
+	seen := map[string]bool{}
+	for size := pageSize; ; {
+		var page []T
+		q := url.Values{"dateFrom": {strconv.FormatInt(from, 10)}, "direction": {"asc"}, "max": {strconv.Itoa(size)}}
+		if _, err := dr.d.Admin.Admin(ctx, http.MethodGet, path+"?"+q.Encode(), nil, &page); err != nil {
+			return nil, fmt.Errorf("events: read %s from %d: %w", op, from, err)
+		}
+		full := len(page) >= size
+		last := int64(0)
+		for _, e := range page {
+			last = max(last, e.ms())
+		}
+		if full && slices.IndexFunc(page, func(e T) bool { return e.ms() != last }) < 0 {
+			// The whole page is one millisecond: read it again, larger.
+			size *= 2
+			continue
+		}
+		for _, e := range page {
+			if full && e.ms() == last {
+				continue // read whole by the next query, which starts there
+			}
+			if k := e.key(); !seen[k] {
+				seen[k] = true
+				out = append(out, e)
+			}
+		}
+		if !full {
+			return out, nil
+		}
+		from, size = last, pageSize
+	}
 }

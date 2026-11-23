@@ -8,65 +8,96 @@ import (
 	"log/slog"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 )
 
-// fakeAdmin serves stored events newest first, paged by first and max, as
-// Keycloak's events endpoints do.
+// fakeAdmin serves stored events as Keycloak 26.8.2's events endpoints do:
+// filtered by dateFrom (inclusive), ordered by time alone in the direction
+// asked (newest first by default), then cut by first and max. With
+// shuffleTies, each read orders the events of one millisecond differently,
+// as PostgreSQL may for an ORDER BY with no tie-breaker.
 type fakeAdmin struct {
 	mu    sync.Mutex
 	user  []userRep
 	admin []adminRep
-	// failAt fails a user-events read whose first equals it, once per
-	// failures count.
-	failAt   int
-	failures int
-	calls    []string
+	// failIf fails a user-events read whose query it matches, while
+	// failures is above zero.
+	failIf      func(q url.Values) bool
+	failures    int
+	shuffleTies bool
+	reads       int
+	calls       []string
 }
 
 func (f *fakeAdmin) Admin(_ context.Context, method, path string, _, out any) (idclient.Response, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, method+" "+path)
+	f.reads++
 	p, raw, _ := strings.Cut(path, "?")
 	q, _ := url.ParseQuery(raw)
-	first, _ := strconv.Atoi(q.Get("first"))
-	max, _ := strconv.Atoi(q.Get("max"))
-	if strings.HasSuffix(p, "/events") && f.failures > 0 && first == f.failAt {
+	if strings.HasSuffix(p, "/events") && f.failures > 0 && f.failIf != nil && f.failIf(q) {
 		f.failures--
 		return idclient.Response{}, &idclient.Error{Op: "admin", Path: path, Kind: idclient.ErrUnreachable}
 	}
 	var b []byte
 	switch {
 	case strings.HasSuffix(p, "/admin-events"):
-		b, _ = json.Marshal(pageOf(newestFirst(f.admin), first, max))
+		b, _ = json.Marshal(query(f.admin, q, f.shuffleTies && f.reads%2 == 1))
 	case strings.HasSuffix(p, "/events"):
-		b, _ = json.Marshal(pageOf(newestFirst(f.user), first, max))
+		b, _ = json.Marshal(query(f.user, q, f.shuffleTies && f.reads%2 == 1))
 	default:
 		return idclient.Response{}, errors.New("unexpected path " + path)
 	}
 	return idclient.Response{Status: 200}, json.Unmarshal(b, out)
 }
 
-func newestFirst[T stored](in []T) []T {
-	out := append([]T(nil), in...)
-	sort.SliceStable(out, func(i, j int) bool { return out[i].ms() > out[j].ms() })
-	return out
-}
-
-func pageOf[T any](all []T, first, max int) []T {
-	if first >= len(all) {
+// query is one events query over all: dateFrom, direction, first and max,
+// with each millisecond's events reversed when flip is set.
+func query[T stored](all []T, q url.Values, flip bool) []T {
+	var out []T
+	from, _ := strconv.ParseInt(q.Get("dateFrom"), 10, 64)
+	for _, e := range all {
+		if q.Get("dateFrom") == "" || e.ms() >= from {
+			out = append(out, e)
+		}
+	}
+	asc := q.Get("direction") == "asc"
+	sort.SliceStable(out, func(i, j int) bool {
+		if asc {
+			return out[i].ms() < out[j].ms()
+		}
+		return out[i].ms() > out[j].ms()
+	})
+	if flip {
+		for i := 0; i < len(out); {
+			j := i
+			for j < len(out) && out[j].ms() == out[i].ms() {
+				j++
+			}
+			slices.Reverse(out[i:j])
+			i = j
+		}
+	}
+	first, _ := strconv.Atoi(q.Get("first"))
+	max := 100
+	if m := q.Get("max"); m != "" {
+		max, _ = strconv.Atoi(m)
+	}
+	if first >= len(out) {
 		return []T{}
 	}
-	end := min(first+max, len(all))
-	return all[first:end]
+	return out[first:min(first+max, len(out))]
 }
 
 func (f *fakeAdmin) add(events ...userRep) {
@@ -138,14 +169,22 @@ type rig struct {
 	marks *fakeMarks
 	sink  *sinkRec
 	rec   *logkittest.Recorder
+	clock *testClock
 	d     *Drainer
 }
+
+// testClock is the signal's clock, in milliseconds, set by the test.
+type testClock struct{ ms atomic.Int64 }
+
+func (c *testClock) now() time.Time { return time.UnixMilli(c.ms.Load()) }
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	log, rec := logkittest.New()
-	r := &rig{admin: &fakeAdmin{}, marks: &fakeMarks{m: map[string]string{}}, sink: &sinkRec{}, rec: rec}
-	d, err := New(Deps{Admin: r.admin, Marks: r.marks, Signal: NewSignal(), Realm: "rasputin",
+	r := &rig{admin: &fakeAdmin{}, marks: &fakeMarks{m: map[string]string{}}, sink: &sinkRec{}, rec: rec, clock: &testClock{}}
+	// Every test event is stamped before the clock, unless a test sets it.
+	r.clock.ms.Store(1 << 40)
+	d, err := New(Deps{Admin: r.admin, Marks: r.marks, Signal: NewSignal(r.clock.now), Realm: "rasputin",
 		UserSinks: []UserSink{r.sink}, AdminSinks: []AdminSink{r.sink}, PassSinks: []PassSink{r.sink}, Log: log})
 	if err != nil {
 		t.Fatal(err)
@@ -250,7 +289,9 @@ func TestDrainer_FailedPageDeliversNothing(t *testing.T) {
 	for i := range 150 {
 		r.admin.add(ev(fmt.Sprintf("n%03d", i), int64(2000+i)))
 	}
-	r.admin.failAt, r.admin.failures = pageSize, 2
+	// The second read of each pass, the one after the first page, fails.
+	r.admin.failIf = func(q url.Values) bool { return q.Get("dateFrom") != "1000" }
+	r.admin.failures = 2
 	r.d.pass(context.Background())
 	r.d.pass(context.Background())
 	if got := r.sink.ids(); len(got) != 1 {
@@ -324,7 +365,8 @@ func TestDrainer_MarkReadOrWriteFails(t *testing.T) {
 func TestDrainer_LogsNoEventDetail(t *testing.T) {
 	r := newRig(t)
 	r.admin.add(ev("a", 1000))
-	r.admin.failAt, r.admin.failures = 0, 1
+	r.admin.failIf = func(url.Values) bool { return true }
+	r.admin.failures = 1
 	r.d.pass(context.Background())
 	r.marks.m[UserMarkKey] = "{bad"
 	r.d.pass(context.Background())
@@ -431,7 +473,7 @@ func TestDrainer_EventWithoutID(t *testing.T) {
 
 func TestNew_Refuses(t *testing.T) {
 	log, _ := logkittest.New()
-	ok := Deps{Admin: &fakeAdmin{}, Marks: &fakeMarks{}, Signal: NewSignal(), Realm: "rasputin", Log: log}
+	ok := Deps{Admin: &fakeAdmin{}, Marks: &fakeMarks{}, Signal: NewSignal(time.Now), Realm: "rasputin", Log: log}
 	for name, mut := range map[string]func(*Deps){
 		"Admin": func(d *Deps) { d.Admin = nil }, "Marks": func(d *Deps) { d.Marks = nil },
 		"Signal": func(d *Deps) { d.Signal = nil }, "Realm": func(d *Deps) { d.Realm = "" }, "Log": func(d *Deps) { d.Log = nil },
@@ -444,5 +486,121 @@ func TestNew_Refuses(t *testing.T) {
 	}
 	if _, err := New(ok); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// offsetRead is the read the drain no longer makes: newest first, paged by
+// first and max.
+func offsetRead(t *testing.T, a *fakeAdmin) map[string]int {
+	t.Helper()
+	got := map[string]int{}
+	for first := 0; ; first += pageSize {
+		var page []userRep
+		q := url.Values{"first": {strconv.Itoa(first)}, "max": {strconv.Itoa(pageSize)}}
+		if _, err := a.Admin(context.Background(), "GET", "/admin/realms/rasputin/events?"+q.Encode(), nil, &page); err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range page {
+			got[e.ID]++
+		}
+		if len(page) < pageSize {
+			return got
+		}
+	}
+}
+
+// TC-985-44's loss, reproduced (F-985-25): the service orders events by time
+// with no tie-breaker, so each read may order one millisecond's events
+// differently. Offset pages then drop an event between them; the drain's
+// reads by time deliver each event once.
+func TestDrainer_TiesOrderedDifferentlyPerRead(t *testing.T) {
+	r := newRig(t)
+	r.admin.shuffleTies = true
+	var all []userRep
+	for i := range 60 {
+		all = append(all, ev(fmt.Sprintf("a%03d", i), int64(1000+i)))
+	}
+	// 80 events in one millisecond, across the first page boundary of a
+	// newest-first read (positions 60 to 139), and 60 newer.
+	for i := range 80 {
+		all = append(all, ev(fmt.Sprintf("t%03d", i), 2000))
+	}
+	for i := range 60 {
+		all = append(all, ev(fmt.Sprintf("z%03d", i), int64(3000+i)))
+	}
+	r.admin.add(all...)
+	if got := offsetRead(t, r.admin); len(got) == len(all) {
+		t.Fatalf("the fake's offset pages returned all %d events; it does not model the order without a tie-breaker", len(all))
+	}
+	r.d.pass(context.Background())
+	seen := map[string]int{}
+	for _, id := range r.sink.ids() {
+		seen[id]++
+	}
+	for _, e := range all {
+		if seen[e.ID] != 1 {
+			t.Errorf("event %s delivered %d times, want once", e.ID, seen[e.ID])
+		}
+	}
+	r.admin.add(ev("late", 4000))
+	r.d.pass(context.Background())
+	if got := r.sink.ids(); len(got) != len(all)+1 || got[len(got)-1] != "late" {
+		t.Fatalf("the second pass delivered %d in total ending %q, want %d ending late", len(got), got[len(got)-1], len(all)+1)
+	}
+}
+
+// F-985-25's other path: an event stamped before one the drain has already
+// read, but committed after it, is still delivered once, because the mark
+// never passes the start of a request still open.
+func TestDrainer_LateCommitBehindTheMark(t *testing.T) {
+	r := newRig(t)
+	r.clock.ms.Store(5000)
+	end := r.d.Begin() // request A begins at 5000
+	r.clock.ms.Store(5002)
+	r.admin.add(ev("b", 5002)) // request B's event, committed first
+	r.d.pass(context.Background())
+	var m mark
+	if err := json.Unmarshal([]byte(r.marks.m[UserMarkKey]), &m); err != nil || m.Time != 5000 {
+		t.Fatalf("mark %q (%v), want its floor held at A's start, 5000", r.marks.m[UserMarkKey], err)
+	}
+	r.admin.add(ev("a", 5001)) // A's event, stamped before b, committed now
+	end()
+	r.clock.ms.Store(6000)
+	r.d.pass(context.Background())
+	if got := r.sink.ids(); !reflect.DeepEqual(got, []string{"b", "a"}) {
+		t.Fatalf("delivered %v, want b then a, each once", got)
+	}
+	if err := json.Unmarshal([]byte(r.marks.m[UserMarkKey]), &m); err != nil || m.Time != 5002 || !reflect.DeepEqual(m.IDs, []string{"b"}) {
+		t.Fatalf("mark %q (%v), want floor 5002 with ids [b] once nothing is open", r.marks.m[UserMarkKey], err)
+	}
+	r.d.pass(context.Background())
+	if got := r.sink.ids(); len(got) != 2 {
+		t.Fatalf("a third pass delivered again: %v", got)
+	}
+}
+
+// The signal's horizon is the oldest open request's start, or now.
+func TestSignal_Horizon(t *testing.T) {
+	c := &testClock{}
+	c.ms.Store(100)
+	s := NewSignal(c.now)
+	if h := s.horizon(); h != 100 {
+		t.Fatalf("horizon with nothing open %d, want now 100", h)
+	}
+	endA := s.Begin()
+	c.ms.Store(200)
+	endB := s.Begin()
+	c.ms.Store(300)
+	if h := s.horizon(); h != 100 {
+		t.Fatalf("horizon %d, want the oldest open start 100", h)
+	}
+	endA()
+	endA()
+	if h := s.horizon(); h != 200 {
+		t.Fatalf("horizon %d after A ended, want 200", h)
+	}
+	endB()
+	if h := s.horizon(); h != 300 {
+		t.Fatalf("horizon %d with nothing open, want now 300", h)
 	}
 }

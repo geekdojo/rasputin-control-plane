@@ -21,7 +21,10 @@ package identitytest
 // under RASPUTIN_IDENTITY_FUNCTIONAL=required, as CI's backend job sets it.
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -60,6 +63,45 @@ type walk struct {
 	seen  map[string]bool
 	admin func(t *testing.T) adminAPI
 	attrs map[string]string // the three link attributes as set
+	via   walkVia
+}
+
+// walkVia is the way the walk reaches the identity service: the front's
+// defaults, or one sign-in door's (TC-985-39, geekdojo/geekdojo-brain#985),
+// whose policy changes what the walk may ask.
+type walkVia struct {
+	// authExtra is set on every authorization request: the home door's
+	// prompt=login.
+	authExtra url.Values
+	// signInClient is the client the walk signs in to, and resetClient the
+	// one its reset page is for: a door serves only its own. clients are the
+	// sign-in pages whose links are checked, and missingClients those checked
+	// with each link attribute missing.
+	signInClient, resetClient string
+	clients, missingClients   []string
+	// prefix starts every user name, so two walks share one realm.
+	prefix string
+	// frontChannel is the app's front-channel sign-out address.
+	frontChannel string
+	// door: delete_credential is refused (the door's policy), and the SAML
+	// sign-in starts at the app (the door serves no IdP-initiated path).
+	door bool
+	// beforeSubmit is each tab's hook.
+	beforeSubmit func(t *testing.T)
+}
+
+// frontVia is the front's way: every client, no extra parameter.
+func frontVia(front string) walkVia {
+	return walkVia{signInClient: baselineConsole, resetClient: baselineConsole, clients: signInClients,
+		missingClients: []string{baselineConsole, appClient}, frontChannel: front + "/realms/" + baselineRealm}
+}
+
+// newTab is a tab on the walk's front, with the way's submit hook.
+func (w *walk) newTab(t *testing.T, browserCtx context.Context) *tab {
+	t.Helper()
+	tb := newTab(t, browserCtx, w.front)
+	tb.beforeSubmit = w.via.beforeSubmit
+	return tb
 }
 
 func TestIdentity_ThemeWalk(t *testing.T) {
@@ -100,6 +142,7 @@ func TestIdentity_ThemeWalk(t *testing.T) {
 			"rasputin.reset-home-url": front + "/reset-home",
 			"rasputin.reset-app-url":  front + "/reset-app",
 		},
+		via: frontVia(front),
 	}
 	w.setUp(t)
 
@@ -167,22 +210,24 @@ func (w *walk) setUp(t *testing.T) {
 	put["webAuthnPolicyPasswordlessRpEntityName"] = installName
 	put["webAuthnPolicyPasswordlessPasskeysEnabled"] = true
 	api.must(http.StatusNoContent, http.MethodPut, "", put)
+	// The callback is added to each client's redirect URIs, never put in
+	// their place, so a walk through each door shares one realm.
 	callback := w.front + callbackPath
-	for _, c := range []string{baselineConsole, baselineMesh, "rasputin-account"} {
+	for _, c := range []string{baselineConsole, baselineMesh, "rasputin-account", "rasputin-reset-home", "rasputin-reset-app"} {
 		id, rep := api.clientRep(c)
-		rep["redirectUris"] = []string{callback}
+		rep["redirectUris"] = withURI(rep["redirectUris"], callback)
 		api.must(http.StatusNoContent, http.MethodPut, "/clients/"+id, rep)
 	}
-	api.must(http.StatusCreated, http.MethodPost, "/clients", map[string]any{
+	w.ensureClient(t, api, map[string]any{
 		"clientId": appClient, "name": "Immich", "enabled": true, "publicClient": true, "protocol": "openid-connect",
 		"standardFlowEnabled": true, "redirectUris": []string{callback},
-		"frontchannelLogout": true, "attributes": map[string]string{"frontchannel.logout.url": w.front + "/realms/" + baselineRealm},
+		"frontchannelLogout": true, "attributes": map[string]string{"frontchannel.logout.url": w.via.frontChannel},
 	})
-	api.must(http.StatusCreated, http.MethodPost, "/clients", map[string]any{
+	w.ensureClient(t, api, map[string]any{
 		"clientId": otherApp, "enabled": true, "publicClient": true, "protocol": "openid-connect",
 		"standardFlowEnabled": true, "redirectUris": []string{callback},
 	})
-	api.must(http.StatusCreated, http.MethodPost, "/clients", map[string]any{
+	w.ensureClient(t, api, map[string]any{
 		"clientId": samlClient, "name": "Test SAML app", "enabled": true, "protocol": "saml", "frontchannelLogout": true,
 		"redirectUris": []string{w.front + acsPath},
 		"attributes": map[string]string{
@@ -193,6 +238,61 @@ func (w *walk) setUp(t *testing.T) {
 			"saml_name_id_format":              "username",
 		},
 	})
+}
+
+// withURI is a redirect URI list with u added once.
+func withURI(list any, u string) []string {
+	var out []string
+	if l, ok := list.([]any); ok {
+		for _, x := range l {
+			if s, ok := x.(string); ok && s != u {
+				out = append(out, s)
+			}
+		}
+	}
+	return append(out, u)
+}
+
+// ensureClient creates rep's client, or, when an earlier walk created it,
+// adds rep's redirect URIs to its own and sets rep's attributes on it.
+func (w *walk) ensureClient(t *testing.T, api adminAPI, rep map[string]any) {
+	t.Helper()
+	clientID, _ := rep["clientId"].(string)
+	_, out := api.must(http.StatusOK, http.MethodGet, "/clients?clientId="+url.QueryEscape(clientID), nil)
+	var found []map[string]any
+	if err := json.Unmarshal(out, &found); err != nil {
+		t.Fatal(err)
+	}
+	if len(found) == 0 {
+		api.must(http.StatusCreated, http.MethodPost, "/clients", rep)
+		return
+	}
+	cur := found[0]
+	uris := cur["redirectUris"]
+	for _, u := range rep["redirectUris"].([]string) {
+		uris = anyList(withURI(uris, u))
+	}
+	cur["redirectUris"] = uris
+	attrs, _ := cur["attributes"].(map[string]any)
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	if a, ok := rep["attributes"].(map[string]string); ok {
+		for k, v := range a {
+			attrs[k] = v
+		}
+	}
+	cur["attributes"] = attrs
+	id, _ := cur["id"].(string)
+	api.must(http.StatusNoContent, http.MethodPut, "/clients/"+id, cur)
+}
+
+func anyList(l []string) []any {
+	out := make([]any, len(l))
+	for i, s := range l {
+		out[i] = s
+	}
+	return out
 }
 
 // user creates a user with a full profile unless bare, a password, and the
@@ -230,6 +330,11 @@ func (w *walk) authURL(client string, extra url.Values) string {
 	}
 	for k, v := range extra {
 		q[k] = v
+	}
+	for k, v := range w.via.authExtra {
+		if _, set := extra[k]; !set {
+			q[k] = v
+		}
 	}
 	return w.issuer() + "/protocol/openid-connect/auth?" + q.Encode()
 }
@@ -310,9 +415,9 @@ func (w *walk) checkLinks(t *testing.T, tb *tab, client string, attrs map[string
 var signInClients = []string{baselineConsole, baselineMesh, "rasputin-account", appClient, otherApp}
 
 func (w *walk) linksPerClient(t *testing.T, browserCtx context.Context) {
-	for _, c := range signInClients {
+	for _, c := range w.via.clients {
 		t.Run(c, func(t *testing.T) {
-			tb := newTab(t, browserCtx, w.front)
+			tb := w.newTab(t, browserCtx)
 			w.visit(tb, w.authURL(c, nil), "login-login")
 			w.checkLinks(t, tb, c, w.attrs)
 		})
@@ -347,9 +452,9 @@ func (w *walk) missingAttributes(t *testing.T, browserCtx context.Context) {
 			}
 		}
 		w.setAttributes(t, attrs)
-		for _, c := range []string{baselineConsole, appClient} {
+		for _, c := range w.via.missingClients {
 			t.Run(missing+" "+c, func(t *testing.T) {
-				tb := newTab(t, browserCtx, w.front)
+				tb := w.newTab(t, browserCtx)
 				w.visit(tb, w.authURL(c, nil), "login-login")
 				w.checkLinks(t, tb, c, attrs)
 			})
@@ -360,39 +465,43 @@ func (w *walk) missingAttributes(t *testing.T, browserCtx context.Context) {
 // ---- register, reset, error ---------------------------------------------------
 
 func (w *walk) otherDoorPages(t *testing.T, browserCtx context.Context) {
-	tb := newTab(t, browserCtx, w.front)
-	w.visit(tb, w.authURL(baselineConsole, nil), "login-login")
-	m := tb.mark()
-	if got := tb.submit(chromedp.Click(chromedp.ID("rasputin-register")), "press Create an account"); got != "login-register" {
-		t.Fatalf("Create an account led to %q, want login-register", got)
-	}
-	w.checkPage(tb, m, "login-register")
-	for _, want := range []string{"Rasputin never sends you email.", "Your sign-in name can't be changed later."} {
-		if text := evalT[string](tb, `document.body.innerText`); !strings.Contains(text, want) {
-			t.Errorf("login-register does not say %q", want)
+	// Account creation is the console's only (ui.md §4.3).
+	if w.via.signInClient == baselineConsole {
+		tb := w.newTab(t, browserCtx)
+		w.visit(tb, w.authURL(baselineConsole, nil), "login-login")
+		m := tb.mark()
+		if got := tb.submit(chromedp.Click(chromedp.ID("rasputin-register")), "press Create an account"); got != "login-register" {
+			t.Fatalf("Create an account led to %q, want login-register", got)
+		}
+		w.checkPage(tb, m, "login-register")
+		for _, want := range []string{"Rasputin never sends you email.", "Your sign-in name can't be changed later."} {
+			if text := evalT[string](tb, `document.body.innerText`); !strings.Contains(text, want) {
+				t.Errorf("login-register does not say %q", want)
+			}
 		}
 	}
 
-	tb = newTab(t, browserCtx, w.front)
-	w.visit(tb, w.issuer()+"/login-actions/reset-credentials?client_id="+baselineConsole, "login-login-reset-password")
+	tb := w.newTab(t, browserCtx)
+	w.visit(tb, w.issuer()+"/login-actions/reset-credentials?client_id="+w.via.resetClient, "login-login-reset-password")
 
-	tb = newTab(t, browserCtx, w.front)
+	tb = w.newTab(t, browserCtx)
 	q := url.Values{"redirect_uri": {"https://elsewhere.invalid/cb"}}
-	w.visit(tb, w.authURL(baselineConsole, q), "login-error")
+	w.visit(tb, w.authURL(w.via.signInClient, q), "login-error")
 }
 
 // ---- required actions, the second step, sign-out (TC-988-22) ---------------
 
 func (w *walk) requiredActions(t *testing.T, browserCtx context.Context) {
-	const name = "walk-hoodoo"
+	name := w.via.prefix + "walk-hoodoo"
+	client := w.via.signInClient
 	loc, password := w.user(t, name, false, "UPDATE_PASSWORD", "CONFIGURE_TOTP", "CONFIGURE_RECOVERY_AUTHN_CODES")
 	newPassword, err := randomSecret(w.env.h.cfg.Rand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer newPassword.Destroy()
-	tb := newTab(t, browserCtx, w.front)
-	w.visit(tb, w.authURL(baselineConsole, nil), "login-login")
+	tb := w.newTab(t, browserCtx)
+	w.visit(tb, w.authURL(client, nil), "login-login")
 	staleAction := evalT[string](tb, `document.getElementById('kc-form-login').action`)
 
 	signIn(tb, name, password)
@@ -442,8 +551,8 @@ func (w *walk) requiredActions(t *testing.T, browserCtx context.Context) {
 	}
 
 	// The second step: sign in again; the authenticator app's code.
-	tb = newTab(t, browserCtx, w.front)
-	w.visit(tb, w.authURL(baselineConsole, nil), "login-login")
+	tb = w.newTab(t, browserCtx)
+	w.visit(tb, w.authURL(client, nil), "login-login")
 	m = tb.mark()
 	if got := signIn(tb, name, newPassword); got != "login-login-otp" {
 		t.Fatalf("signing in with an authenticator app led to %s, want login-login-otp", got)
@@ -474,13 +583,21 @@ func (w *walk) requiredActions(t *testing.T, browserCtx context.Context) {
 	if otpID == "" {
 		t.Fatal("the user holds no authenticator-app credential")
 	}
-	w.visit(tb, w.authURL(baselineConsole, url.Values{"kc_action": {"delete_credential:" + otpID}}), "login-delete-credential")
-	if got := tb.submit(chromedp.Click(chromedp.ID("kc-decline")), "decline the delete"); got != "rasputin-stub" {
-		t.Fatalf("declining the delete led to %s", got)
+	deleteURL := w.authURL(client, url.Values{"kc_action": {"delete_credential:" + otpID}})
+	if w.via.door {
+		// A door refuses delete_credential outright (signin-origin.md §5.2).
+		if got := tb.navigate(deleteURL); got != "rasputin-door-refusal" {
+			t.Fatalf("delete_credential through the door led to %s, want the door's refusal", got)
+		}
+	} else {
+		w.visit(tb, deleteURL, "login-delete-credential")
+		if got := tb.submit(chromedp.Click(chromedp.ID("kc-decline")), "decline the delete"); got != "rasputin-stub" {
+			t.Fatalf("declining the delete led to %s", got)
+		}
 	}
 
 	// Sign-out asks first, then says it is done.
-	w.visit(tb, w.issuer()+"/protocol/openid-connect/logout?client_id="+baselineConsole, "login-logout-confirm")
+	w.visit(tb, w.issuer()+"/protocol/openid-connect/logout?client_id="+client, "login-logout-confirm")
 	m = tb.mark()
 	if got := tb.submit(chromedp.Click(chromedp.ID("kc-logout")), "sign out"); got != "login-info" {
 		t.Fatalf("signing out led to %s, want login-info", got)
@@ -549,9 +666,9 @@ func (w *walk) saveRecoveryCodes(t *testing.T, tb *tab) {
 // ---- update profile, front-channel sign-out ----------------------------------
 
 func (w *walk) profileAndFrontChannel(t *testing.T, browserCtx context.Context) {
-	const name = "walk-noname"
+	name := w.via.prefix + "walk-noname"
 	_, password := w.user(t, name, true)
-	tb := newTab(t, browserCtx, w.front)
+	tb := w.newTab(t, browserCtx)
 	w.visit(tb, w.authURL(appClient, nil), "login-login")
 	m := tb.mark()
 	if got := signIn(tb, name, password); got != "login-login-update-profile" {
@@ -596,7 +713,7 @@ type createCall struct {
 
 func (w *walk) passkeyTab(t *testing.T, browserCtx context.Context, calls *[]createCall) *tab {
 	t.Helper()
-	tb := newTab(t, browserCtx, w.front)
+	tb := w.newTab(t, browserCtx)
 	tb.step(chromedp.ExposeFunc("rasputinCreateSpy", func(_ context.Context, c createCall) (bool, error) {
 		tb.mu.Lock()
 		defer tb.mu.Unlock()
@@ -638,7 +755,7 @@ func setVerified(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, verified 
 }
 
 func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
-	const name = "walk-passkey"
+	name := w.via.prefix + "walk-passkey"
 	loc, password := w.user(t, name, false)
 	choices := []struct {
 		button, label string
@@ -662,7 +779,7 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 		var calls []createCall
 		tb := w.passkeyTab(t, browserCtx, &calls)
 		auth := addAuthenticator(t, tb, c.transport)
-		w.visit(tb, w.authURL(baselineConsole, nil), "login-login")
+		w.visit(tb, w.authURL(w.via.signInClient, nil), "login-login")
 		m := tb.mark()
 		if got := signIn(tb, name, password); got != "login-webauthn-register" {
 			t.Fatalf("a passkey required action led to %s, want login-webauthn-register", got)
@@ -721,7 +838,7 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 	// rasputin-passkeys.js and the forked webauthnAuthenticate.js.
 	tb := last
 	m := tb.mark()
-	id := tb.navigate(w.authURL(baselineConsole, url.Values{"prompt": {"login"}}))
+	id := tb.navigate(w.authURL(w.via.signInClient, url.Values{"prompt": {"login"}}))
 	if id == "login-login" {
 		w.checkPage(tb, m, "login-login")
 		m = tb.mark()
@@ -739,14 +856,13 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 // ---- SAML (TC-988-25) ---------------------------------------------------------
 
 func (w *walk) saml(t *testing.T, browserCtx context.Context) {
-	const name = "walk-saml"
+	name := w.via.prefix + "walk-saml"
 	_, password := w.user(t, name, false)
-	start := w.issuer() + "/protocol/saml/clients/" + samlSSOName
 
 	// The page itself, with its auto-post held so the checks can run on it.
-	tb := newTab(t, browserCtx, w.front)
+	tb := w.newTab(t, browserCtx)
 	tb.hold("/js/rasputin-autosubmit.js", "// held by the walk so the page stays for its checks\n")
-	w.visit(tb, start, "login-login")
+	w.visit(tb, w.samlStart(t), "login-login")
 	m := tb.mark()
 	if got := signIn(tb, name, password); got != "login-saml-post-form" {
 		t.Fatalf("a SAML sign-in led to %s, want login-saml-post-form", got)
@@ -776,8 +892,8 @@ func (w *walk) saml(t *testing.T, browserCtx context.Context) {
 	}
 
 	// The real page: the POST it makes with no click.
-	tb = newTab(t, browserCtx, w.front)
-	w.visit(tb, start, "login-login")
+	tb = w.newTab(t, browserCtx)
+	w.visit(tb, w.samlStart(t), "login-login")
 	signIn(tb, name, password)
 	// The post page loads and then posts itself: wait for the fact, the
 	// app's endpoint showing, not for a time.
@@ -788,6 +904,34 @@ func (w *walk) saml(t *testing.T, browserCtx context.Context) {
 	if len(posts) != 1 || !strings.Contains(posts[0], "SAMLResponse=") {
 		t.Errorf("TC-988-25: the browser posted %d times to the app's endpoint, want once with a SAMLResponse", len(posts))
 	}
+}
+
+// samlStart is the SAML sign-in's first address. At the front it is the
+// IdP-initiated one; through a door, which serves only protocol/saml, it is
+// an SP-initiated AuthnRequest in the redirect binding (unsigned and with no
+// Destination, which the test client's settings accept: SamlService at
+// 26.8.2 checks a Destination only when one is sent or a signature is
+// required).
+func (w *walk) samlStart(t *testing.T) string {
+	if !w.via.door {
+		return w.issuer() + "/protocol/saml/clients/" + samlSSOName
+	}
+	req := `<samlp:AuthnRequest xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"` +
+		` ID="_rasputin-walk" Version="2.0" IssueInstant="` + w.env.h.cfg.Now().UTC().Format("2006-01-02T15:04:05Z") + `"` +
+		` AssertionConsumerServiceURL="` + w.front + acsPath + `" ProtocolBinding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST">` +
+		`<saml:Issuer>` + samlClient + `</saml:Issuer></samlp:AuthnRequest>`
+	var b bytes.Buffer
+	fw, err := flate.NewWriter(&b, flate.BestCompression)
+	if err == nil {
+		_, err = fw.Write([]byte(req))
+	}
+	if err == nil {
+		err = fw.Close()
+	}
+	if err != nil {
+		t.Fatalf("deflate the AuthnRequest: %v", err)
+	}
+	return w.issuer() + "/protocol/saml?" + url.Values{"SAMLRequest": {base64.StdEncoding.EncodeToString(b.Bytes())}}.Encode()
 }
 
 // jsString is s as a JavaScript string literal.

@@ -35,6 +35,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -43,6 +44,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/cdproto/webauthn"
 	"github.com/chromedp/chromedp"
 
@@ -95,6 +97,7 @@ type doorRig struct {
 	app     *door.Handler
 	th      *policy.Throttle
 	drainer *events.Drainer
+	version *door.ResourceVersion
 	sink    *eventSink
 	passes  *passWatch
 	actions *doorActions
@@ -176,7 +179,8 @@ func (doorReady) Ready(context.Context) error { return nil }
 type doorApps struct{}
 
 func (doorApps) AppClient(_ context.Context, id string) (policy.AppClient, bool, error) {
-	return policy.AppClient{}, id == doorTestApp, nil
+	// The theme walk's two apps and its SAML device are app-door clients too.
+	return policy.AppClient{}, id == doorTestApp || id == appClient || id == otherApp || id == samlClient, nil
 }
 
 type doorActions struct{ issued atomic.Bool }
@@ -254,7 +258,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 	if r.th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: time.Now}); err != nil {
 		t.Fatal(err)
 	}
-	r.drainer, err = events.New(events.Deps{Admin: session, Marks: &doorMarks{m: map[string]string{}}, Signal: events.NewSignal(),
+	r.drainer, err = events.New(events.Deps{Admin: session, Marks: &doorMarks{m: map[string]string{}}, Signal: events.NewSignal(time.Now),
 		Realm: baselineRealm, UserSinks: []events.UserSink{r.th, r.sink}, PassSinks: []events.PassSink{r.th, r.passes}, Log: env.log})
 	if err != nil {
 		t.Fatal(err)
@@ -273,6 +277,15 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The resource version, learned from the running service as the doors
+	// learn it in production (Identity 4.4 wires BecameReady to Stale).
+	if r.version, err = door.NewResourceVersion(client, env.log); err != nil {
+		t.Fatal(err)
+	}
+	r.version.Learn(t.Context())
+	if _, known := r.version.Current(); !known {
+		t.Fatal("the doors could not learn the identity service's resource version")
+	}
 	relay, err := env.DoorTransport()
 	if err != nil {
 		t.Fatal(err)
@@ -280,7 +293,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 	t.Cleanup(relay.CloseIdleConnections)
 	r.home, r.app, err = door.Build(table, door.Shared{
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
-		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")),
+		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return doorInstall, nil }, Dirty: r.drainer,
 		IDs: func() string { return fmt.Sprintf("door-%d", r.ids.Add(1)) }, Log: env.log,
 	})
@@ -299,7 +312,9 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { r.drainer.Run(ctx); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
+	vdone := make(chan struct{})
+	go func() { r.version.Run(ctx); close(vdone) }()
+	t.Cleanup(func() { cancel(); <-done; <-vdone })
 	r.setUpRealm(t)
 	r.settle(t)
 	return r
@@ -640,14 +655,23 @@ func (r *doorRig) appAuth(client string, extra map[string]string) string {
 	return r.appURL("/realms/rasputin/protocol/openid-connect/auth?" + doorAuthQuery(client, cb, extra))
 }
 
-// homePolicy and appPolicy are the doors' exact relayed script policies.
+// homePolicy and appPolicy are the doors' exact relayed script policies;
+// the app door's names the resource version the doors learned.
 func homePolicy() string {
 	return "script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
 }
 
-func appPolicy(host string) string {
-	return "script-src https://" + host + "/resources/" + door.ResourceVersion + "/login/rasputin/ https://" + host +
-		"/resources/" + door.ResourceVersion + "/common/keycloak/; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
+func (r *doorRig) appPolicy() string {
+	v := r.learned()
+	host := r.sites.Table.App.Host
+	return "script-src https://" + host + "/resources/" + v + "/login/rasputin/ https://" + host +
+		"/resources/" + v + "/common/keycloak/; object-src 'none'; base-uri 'none'; frame-ancestors 'self'"
+}
+
+// learned is the resource version the doors learned.
+func (r *doorRig) learned() string {
+	v, _ := r.version.Current()
+	return v
 }
 
 // ---- the test ----------------------------------------------------------------
@@ -778,23 +802,27 @@ func (r *doorRig) so10(t *testing.T, browserCtx context.Context) {
 	if id := tb.navigate("https://" + ConsoleHost + "/"); id != "rasputin-console" {
 		t.Fatalf("the console page is %q", id)
 	}
-	// The page's load event waited for its frame. A frame the browser
-	// refused to show holds its error document, never the sign-in page.
-	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
-	tree, err := chromedp.Call(ctx, page.GetFrameTree, cdp.Empty{})
-	cancel()
-	if err != nil {
-		t.Fatal(err)
+	// The page's load event waited for its frame. ci.local and sso-ci.local
+	// are two sites, so under site isolation the frame can live in a process
+	// and a target of its own, which the page's frame tree does not list: the
+	// frames are the tree's children and the tab's iframe targets together.
+	if n := evalT[int](tb, `document.querySelectorAll('iframe#framed').length`); n != 1 {
+		t.Fatalf("the console page holds %d frame elements, want its one", n)
 	}
-	_, errs := tb.since(m)
-	if len(tree.FrameTree.ChildFrames) != 1 {
-		t.Fatalf("the console page holds %d frames, want 1", len(tree.FrameTree.ChildFrames))
+	frames, framed, errs := r.consoleFrames(t, tb, m)
+	if framed {
+		t.Errorf("the console framed the home door's page: its frames %q (console log %q)", frames, errs)
 	}
-	child := tree.FrameTree.ChildFrames[0].Frame
-	if !strings.HasPrefix(child.URL, "chrome-error:") && child.UnreachableURL == "" {
-		t.Errorf("the console framed the home door's page: the frame shows %s (console log %q)", redactURL(child.URL), errs)
+	// The block itself, positively: the browser refused the home door's page
+	// in the frame for its frame-ancestors, and says so in the embedding
+	// page's console.
+	refused := slices.ContainsFunc(errs, func(e string) bool {
+		return strings.Contains(e, "Refused to frame") && strings.Contains(e, r.sites.Table.Home.Host) && strings.Contains(e, "frame-ancestors")
+	})
+	if !refused {
+		t.Errorf("the browser did not refuse the console's frame of the home door for its frame-ancestors: frames %q, console log %q", frames, errs)
 	}
-	t.Logf("the console's frame: %s; console log %q", redactURL(child.URL), errs)
+	t.Logf("the console's frames %q; refused by frame-ancestors: %v", frames, refused)
 	tb.navigate(r.homeAuth(baselineConsole, nil))
 	r.cookiesMu.Lock()
 	for _, c := range r.cookiesIn["home"] {
@@ -810,17 +838,51 @@ func (r *doorRig) so10(t *testing.T, browserCtx context.Context) {
 		t.Errorf("the home door's sign-in page CSP %q, want %q", csp, homePolicy())
 	}
 	b := g.follow(r.appAuth("rasputin-account", nil))
-	if csp := b.header.Values("Content-Security-Policy"); len(csp) != 1 || csp[0] != appPolicy(r.sites.Table.App.Host) {
-		t.Errorf("the app door's sign-in page CSP %q, want %q", csp, appPolicy(r.sites.Table.App.Host))
+	if csp := b.header.Values("Content-Security-Policy"); len(csp) != 1 || csp[0] != r.appPolicy() {
+		t.Errorf("the app door's sign-in page CSP %q, want %q", csp, r.appPolicy())
 	}
 	for _, host := range []string{r.sites.Table.Home.Host, r.sites.Table.App.Host} {
-		for _, p := range []string{"/resources/" + door.ResourceVersion + "/admin/keycloak.v2/main.js",
-			"/resources/" + door.ResourceVersion + "/account/keycloak.v3/main.js", "/resources/rasputin/login/en"} {
+		for _, p := range []string{"/resources/" + r.learned() + "/admin/keycloak.v2/main.js",
+			"/resources/" + r.learned() + "/account/keycloak.v3/main.js", "/resources/rasputin/login/en"} {
 			if a := g.send(http.MethodGet, "https://"+host+p, nil, nil); a.status != http.StatusNotFound {
 				t.Errorf("%s%s answered %d, want 404", host, p, a.status)
 			}
 		}
 	}
+}
+
+// consoleFrames are the frames the console page holds, in its own process
+// (its frame tree) and out of it (the tab's iframe targets), whether one in
+// its tree committed the home door's own page, and the console log since m.
+// An out-of-process frame's target URL is the address it was sent to, which
+// a blocked frame keeps too, so the block is read from the console log.
+func (r *doorRig) consoleFrames(t *testing.T, tb *tab, m mark) ([]string, bool, []string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	tree, err := chromedp.Call(ctx, page.GetFrameTree, cdp.Empty{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var frames []string
+	framed := false
+	home := "https://" + r.sites.Table.Home.Host + "/"
+	for _, c := range tree.FrameTree.ChildFrames {
+		frames = append(frames, "frame "+redactURL(c.Frame.URL)+" unreachable "+redactURL(c.Frame.UnreachableURL))
+		framed = framed || (strings.HasPrefix(c.Frame.URL, home) && c.Frame.UnreachableURL == "")
+	}
+	targets, err := chromedp.Call(ctx, target.GetTargets, target.GetTargetsParams{Filter: target.Filter{{Type: "iframe"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bc := chromedp.FromContext(tb.ctx).BrowserContextID
+	for _, ti := range targets.TargetInfos {
+		if ti.Type == "iframe" && ti.BrowserContextID == bc {
+			frames = append(frames, "target "+redactURL(ti.URL))
+		}
+	}
+	_, errs := tb.since(m)
+	return frames, framed, errs
 }
 
 // violationSpy reports each securitypolicyviolation through an exposed
@@ -840,7 +902,7 @@ func (r *doorRig) so11(t *testing.T, browserCtx context.Context) {
 		host, client, reset, policy string
 	}{
 		{r.sites.Table.Home.Host, baselineConsole, "rasputin-reset-home", homePolicy()},
-		{r.sites.Table.App.Host, "rasputin-account", "rasputin-reset-app", appPolicy(r.sites.Table.App.Host)},
+		{r.sites.Table.App.Host, "rasputin-account", "rasputin-reset-app", r.appPolicy()},
 	} {
 		origin := "https://" + d.host
 		callbackHost := ConsoleHost
@@ -903,14 +965,91 @@ func (r *doorRig) so11(t *testing.T, browserCtx context.Context) {
 				t.Errorf("%s: %s answered a redirect %d", d.host, u.Path, rq.status)
 			}
 		}
-		if len(served) != 1 || !served[door.ResourceVersion] {
-			t.Errorf("%s: the pages loaded theme files under the versions %v, want only %s (K-CSP)", d.host, served, door.ResourceVersion)
+		// K-CSP: the version the doors learned is the one the live server
+		// writes into its pages.
+		if len(served) != 1 || !served[r.learned()] {
+			t.Errorf("%s: the pages loaded theme files under the versions %v, want only %s, the version the doors learned (K-CSP)", d.host, served, r.learned())
 		}
 		vmu.Lock()
 		if len(violations) != 0 {
 			t.Errorf("%s: %d policy violations in the walk: %q", d.host, len(violations), violations)
 		}
 		vmu.Unlock()
+	}
+	r.themeWalks(t, browserCtx)
+}
+
+// themeWalks runs #988's theme walk through each door (TC-985-39): every
+// page it renders, under that door's script policy, held to TC-988-18's
+// checks, which fail on a console error, a policy violation among them. A
+// door serves only its own clients, so each door walks the pages its
+// clients reach; together they render every page the walk does at the
+// front, but delete-credential, which a door refuses outright
+// (signin-origin.md §5.2).
+func (r *doorRig) themeWalks(t *testing.T, browserCtx context.Context) {
+	table, err := buildPageTable(coverageTemplates(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var allow resourceAllowlist
+	b, err := os.ReadFile(filepath.Join(r.env.h.cfg.ThemeDir, "resource-allowlist.json"))
+	if err != nil || json.Unmarshal(b, &allow) != nil {
+		t.Fatalf("the built theme's resource-allowlist.json: %v", err)
+	}
+	seen := map[string]bool{}
+	words := loadForbiddenWords(t)
+	console := "https://" + ConsoleHost
+	for _, d := range []struct {
+		name string
+		host string
+		via  walkVia
+		run  []string
+	}{
+		{"home door", r.sites.Table.Home.Host, walkVia{
+			authExtra: url.Values{"prompt": {"login"}}, signInClient: baselineConsole, resetClient: "rasputin-reset-home",
+			clients: []string{baselineConsole, baselineMesh}, missingClients: []string{baselineConsole}, prefix: "home-",
+		}, []string{"links", "missing", "other", "required", "passkeys"}},
+		{"app door", r.sites.Table.App.Host, walkVia{
+			signInClient: "rasputin-account", resetClient: "rasputin-reset-app",
+			clients: []string{"rasputin-account", appClient, otherApp}, missingClients: []string{appClient}, prefix: "app-",
+		}, []string{"links", "missing", "other", "required", "profile", "passkeys", "saml"}},
+	} {
+		front := "https://" + d.host
+		d.via.door = true
+		d.via.frontChannel = front + callbackPath
+		d.via.beforeSubmit = r.settle
+		w := &walk{
+			env: r.env, front: front, words: words, allow: allow, table: table, seen: seen,
+			admin: func(t *testing.T) adminAPI { a, _ := baselineAdmin(t, r.env); a.t = t; return a },
+			attrs: map[string]string{
+				"rasputin.console-url":    console,
+				"rasputin.reset-home-url": console + "/reset-home",
+				"rasputin.reset-app-url":  "https://" + r.sites.Table.App.Host + "/reset-app",
+			},
+			via: d.via,
+		}
+		w.setUp(t)
+		steps := map[string]func(*testing.T){
+			"links":    func(t *testing.T) { w.linksPerClient(t, browserCtx) },
+			"missing":  func(t *testing.T) { w.missingAttributes(t, browserCtx) },
+			"other":    func(t *testing.T) { w.otherDoorPages(t, browserCtx) },
+			"required": func(t *testing.T) { w.requiredActions(t, browserCtx) },
+			"profile":  func(t *testing.T) { w.profileAndFrontChannel(t, browserCtx) },
+			"passkeys": func(t *testing.T) { w.passkeys(t, browserCtx) },
+			"saml":     func(t *testing.T) { w.saml(t, browserCtx) },
+		}
+		for _, step := range d.run {
+			t.Run(d.name+" "+step, steps[step])
+		}
+	}
+	var missed []string
+	for _, id := range walkedPages {
+		if id != "login-delete-credential" && !seen[id] {
+			missed = append(missed, id)
+		}
+	}
+	if len(missed) > 0 && !t.Failed() {
+		t.Errorf("the walks through the doors never rendered %v", missed)
 	}
 }
 
@@ -1253,8 +1392,12 @@ func (r *doorRig) kEvents(t *testing.T) {
 	var wg sync.WaitGroup
 	for range 120 {
 		wg.Add(1)
+		// Each is open on the drain's signal while it runs, as every request
+		// the doors relay is: these bypass the doors.
+		end := r.drainer.Begin()
 		go func() {
 			defer wg.Done()
+			defer end()
 			form := url.Values{"grant_type": {"authorization_code"}, "code": {"not-a-code"}, "client_id": {doorTestApp},
 				"redirect_uri": {callbackOn(AppSiteHost)}}
 			req, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, r.env.KeycloakURL()+"/realms/rasputin/protocol/openid-connect/token",

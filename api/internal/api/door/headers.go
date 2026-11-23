@@ -19,32 +19,47 @@ var replacedHeaders = []string{
 // violation that needs it.
 var javaPageHashes = []string{}
 
-// policies are one door's two script policies: the relayed pages', and the
-// door's own pages'.
+// policies are one door's script policies: the relayed pages', built per
+// answer from the resource version known then, and the door's own pages'.
 type policies struct {
-	relayed, own, frame string
+	app        bool
+	host, tail string
+	own, frame string
 }
 
 // policiesFor builds door's policies for host (signin-origin.md §5.3, C32):
 // at the home door 'self', which there admits only the theme files the
 // allowlist serves; at the app door, which shares its origin with "Your
-// account", only the two theme paths. Neither has form-action.
+// account", only the two theme paths under the learned resource version.
+// Neither has form-action.
 func policiesFor(door Kind, host string) policies {
 	frameAncestors, frame := "'none'", "DENY"
-	scripts := []string{"'self'"}
 	if door == App {
 		frameAncestors, frame = "'self'", "SAMEORIGIN"
-		scripts = []string{"https://" + host + themeLoginPath, "https://" + host + themeCommonPath}
+	}
+	tail := "; object-src 'none'; base-uri 'none'; frame-ancestors " + frameAncestors
+	return policies{app: door == App, host: host, tail: tail, own: "script-src 'none'" + tail, frame: frame}
+}
+
+// relayed is the relayed pages' policy under resource version v, when known.
+// With none known the app door names no theme path, so its pages run no
+// script until the version is learned (the theme files answer 404 then too).
+func (p policies) relayed(v string, known bool) string {
+	var scripts []string
+	switch {
+	case !p.app:
+		scripts = []string{"'self'"}
+	case known:
+		login, common := themePaths(v)
+		scripts = []string{"https://" + p.host + login, "https://" + p.host + common}
 	}
 	for _, h := range javaPageHashes {
 		scripts = append(scripts, "'"+h+"'")
 	}
-	tail := "; object-src 'none'; base-uri 'none'; frame-ancestors " + frameAncestors
-	return policies{
-		relayed: "script-src " + strings.Join(scripts, " ") + tail,
-		own:     "script-src 'none'" + tail,
-		frame:   frame,
+	if len(scripts) == 0 {
+		scripts = []string{"'none'"}
 	}
+	return "script-src " + strings.Join(scripts, " ") + p.tail
 }
 
 // setHeaders replaces the security headers on h with exactly one of each,

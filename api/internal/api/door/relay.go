@@ -62,9 +62,21 @@ func (h *Handler) rewrite(pr *httputil.ProxyRequest) {
 	inboundCookies(h.cfg.Kind, out)
 }
 
+// errVersionMoved is a theme file the identity service redirected: it does
+// that only when the version asked is not its own (ThemeResource at 26.8.2),
+// so the version the door holds is stale.
+var errVersionMoved = errors.New("the identity service redirected a theme file: its resource version has changed")
+
 // modifyResponse applies the response headers and the outbound cookie rule.
+// A redirected theme file is never relayed: it is the fact that the
+// identity service's resource version changed, so the version is read again
+// and the request answers the 404 door page.
 func (h *Handler) modifyResponse(resp *http.Response) error {
-	h.pol.setHeaders(resp.Header, h.pol.relayed)
+	if resp.StatusCode >= 300 && resp.StatusCode <= 399 && strings.HasPrefix(stateOf(resp.Request).pattern, "/resources/") {
+		h.cfg.Version.Stale()
+		return errVersionMoved
+	}
+	h.pol.setHeaders(resp.Header, h.pol.relayed(h.cfg.Version.Current()))
 	outboundCookies(h.cfg.Kind, resp.Header)
 	return nil
 }
@@ -74,6 +86,10 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 // text, which names the URL.
 func (h *Handler) upstreamFailed(w http.ResponseWriter, r *http.Request, err error) {
 	st := stateOf(r)
+	if errors.Is(err, errVersionMoved) {
+		h.notFound(w, r, st)
+		return
+	}
 	st.errorClass = errorClass(err)
 	h.render(w, http.StatusBadGateway, h.notReadyPage(r, st))
 }
@@ -97,15 +113,23 @@ func errorClass(err error) string {
 	return "transport"
 }
 
-// relay forwards an admitted request. Once the identity service has answered
-// (or failed to), a held credential post's slot is reported answered, and a
-// route that stores events marks the drain dirty, in that order, so the
-// pass that releases the slot starts after the answer.
+// relay forwards an admitted request. A route that can store events is
+// recorded open on the drain's signal while it is relayed, so a drain pass
+// holds its mark behind the request's events until they are committed (the
+// identity service commits them before its answer completes). Once the
+// answer has completed (or failed), a held credential post's slot is
+// reported answered, the request is closed and the drain is marked dirty, in
+// that order, so the pass that releases the slot starts after the answer.
 func (h *Handler) relay(w http.ResponseWriter, r *http.Request, rt Route, d policy.Decision) {
+	end := func() {}
+	if rt.Kind.EventProducing() {
+		end = h.cfg.Dirty.Begin()
+	}
 	defer func() {
 		if d.Held {
 			h.cfg.Throttle.Answered(d.HeldKey)
 		}
+		end()
 		if rt.Kind.EventProducing() {
 			h.cfg.Dirty.MarkDirty()
 		}

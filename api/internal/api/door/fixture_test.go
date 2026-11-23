@@ -2,6 +2,7 @@ package door
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -128,9 +129,16 @@ type fakeWaiting struct {
 
 func (f *fakeWaiting) Full(context.Context) (bool, error) { return f.full, f.err }
 
-type countDirty struct{ n atomic.Int64 }
+// countDirty counts the drain's marks, and the requests begun and ended on
+// its signal.
+type countDirty struct{ n, begun, ended atomic.Int64 }
 
 func (c *countDirty) MarkDirty() { c.n.Add(1) }
+
+func (c *countDirty) Begin() func() {
+	c.begun.Add(1)
+	return func() { c.ended.Add(1) }
+}
 
 // testAssets are a built theme's login/resources css and img files.
 var testAssets = fstest.MapFS{
@@ -163,6 +171,9 @@ type fixture struct {
 	network   *fakeNetwork
 	waiting   *fakeWaiting
 	dirty     *countDirty
+	vsrc      *fakeVersionSource
+	version   *ResourceVersion
+	vrec      *logkittest.Recorder
 	rec       *logkittest.Recorder
 	name      string
 	nameErr   error
@@ -195,8 +206,46 @@ func newFixture(t *testing.T) *fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.vsrc = &fakeVersionSource{v: testVersion}
+	vlog, vrec := logkittest.New()
+	f.vrec = vrec
+	if f.version, err = NewResourceVersion(f.vsrc, vlog); err != nil {
+		t.Fatal(err)
+	}
+	f.version.Learn(context.Background())
 	f.home, f.app = f.build(t)
 	return f
+}
+
+// testVersion is the resource version the fixture's identity service
+// reports, and testLoginPath the login theme path under it.
+const testVersion = "ab12c"
+
+var testLoginPath, _ = themePaths(testVersion)
+
+// fakeVersionSource is the identity service's resource version as the probe
+// reads it.
+type fakeVersionSource struct {
+	mu    sync.Mutex
+	v     string
+	err   error
+	reads int
+}
+
+func (s *fakeVersionSource) ResourceVersion(_ context.Context, file string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	if file != versionProbeFile {
+		return "", errors.New("unexpected probe file " + file)
+	}
+	return s.v, s.err
+}
+
+func (s *fakeVersionSource) set(v string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.v, s.err = v, err
 }
 
 func (f *fixture) shared(t *testing.T) Shared {
@@ -213,7 +262,7 @@ func (f *fixture) shared(t *testing.T) Shared {
 	f.rec = rec
 	return Shared{
 		ConsoleOrigin: consoleOrigin, Policy: f.policySvc, Throttle: f.th, Transport: f.up.srv.Client().Transport,
-		Upstream: up, Theme: allow, Assets: testAssets,
+		Upstream: up, Theme: allow, Assets: testAssets, Version: f.version,
 		InstallName: func(context.Context) (string, error) { return f.name, f.nameErr },
 		Dirty:       f.dirty,
 		IDs:         func() string { return "corr-" + strconv.FormatInt(f.ids.Add(1), 10) },

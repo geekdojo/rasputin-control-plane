@@ -22,7 +22,7 @@ func validTarget(k Kind, rt Route) string {
 		if strings.Contains(path, "/common/") {
 			file = "vendor/rfc4648/rfc4648.js"
 		}
-		return strings.Replace(strings.Replace(path, "{v}", ResourceVersion, 1), "{file...}", file, 1)
+		return strings.Replace(strings.Replace(path, "{v}", testVersion, 1), "{file...}", file, 1)
 	case policy.RouteSignin:
 		return signinPrefix + "css/tokens.css"
 	}
@@ -95,13 +95,17 @@ func TestDoor_AllowlistPerDoor(t *testing.T) {
 func TestDoor_NotFoundSurface(t *testing.T) {
 	f := newFixture(t)
 	paths := []string{
-		"/resources/" + ResourceVersion + "/admin/x.js",
-		"/resources/" + ResourceVersion + "/account/x.js",
+		"/resources/" + testVersion + "/admin/x.js",
+		"/resources/" + testVersion + "/account/x.js",
 		"/resources/rasputin/login/en",
 		"/resources/zzzzz/login/rasputin/css/signin.css",
-		"/resources/" + ResourceVersion + "/login/rasputin/css/notlisted.css",
-		"/resources/" + ResourceVersion + "/login/keycloak.v2/css/login.css",
-		"/resources/" + ResourceVersion + "/common/keycloak/vendor/notlisted.js",
+		// The version segment matches exactly: no prefix, extension or case.
+		"/resources/" + testVersion[:4] + "/login/rasputin/css/signin.css",
+		"/resources/" + testVersion + "x/login/rasputin/css/signin.css",
+		"/resources/" + strings.ToUpper(testVersion) + "/login/rasputin/css/signin.css",
+		"/resources/" + testVersion + "/login/rasputin/css/notlisted.css",
+		"/resources/" + testVersion + "/login/keycloak.v2/css/login.css",
+		"/resources/" + testVersion + "/common/keycloak/vendor/notlisted.js",
 		"/realms/master/protocol/openid-connect/auth",
 		"/admin",
 		"/admin/master/console",

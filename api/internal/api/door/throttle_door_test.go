@@ -132,7 +132,7 @@ func TestDoor_BurstBound(t *testing.T) {
 // a theme file, discovery and the door's own files do not.
 func TestDoor_DirtyFacts(t *testing.T) {
 	f := newFixture(t)
-	for _, target := range []string{themeLoginPath + "css/signin.css", realmPrefix + ".well-known/openid-configuration", signinPrefix + "css/tokens.css", "/nothing"} {
+	for _, target := range []string{testLoginPath + "css/signin.css", realmPrefix + ".well-known/openid-configuration", signinPrefix + "css/tokens.css", "/nothing"} {
 		f.do(Home, req{target: target})
 	}
 	if n := f.dirty.n.Load(); n != 0 {
@@ -142,6 +142,10 @@ func TestDoor_DirtyFacts(t *testing.T) {
 	f.do(App, req{method: http.MethodPost, target: oidc("token"), form: url.Values{"client_id": {"rasputin-account"}, "grant_type": {"refresh_token"}}})
 	if n := f.dirty.n.Load(); n != 2 {
 		t.Fatalf("%d marks after two forwarded event-producing requests, want 2", n)
+	}
+	// Each was open on the drain's signal while it was relayed, and closed.
+	if b, e := f.dirty.begun.Load(), f.dirty.ended.Load(); b != 2 || e != 2 {
+		t.Fatalf("%d requests begun and %d ended on the drain's signal, want 2 and 2", b, e)
 	}
 	f.do(Home, req{target: oidc("auth") + "?" + authQuery(policy.ConsoleClient, map[string]string{"prompt": "none"})})
 	if n := f.dirty.n.Load(); n != 2 {

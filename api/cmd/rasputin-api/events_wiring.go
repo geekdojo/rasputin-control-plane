@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
@@ -26,34 +27,48 @@ import (
 // request that stores events (the doors, which Identity 4.4 mounts with this
 // signal and this throttle).
 
-// newIdentityDirty is the drain's dirty signal, built in wireIdentity before
-// the session, so the session's writes can mark it.
-func newIdentityDirty() *events.Signal { return events.NewSignal() }
+// newIdentityDirty is the drain's signal, built in wireIdentity before the
+// session, so the session's writes can use it. Its clock is the host's,
+// which the identity service on the same host stamps its events with.
+func newIdentityDirty() *events.Signal { return events.NewSignal(time.Now) }
 
 // dirtyAdmin is the session's Admin API caller with one addition: a call that
-// is not a GET and succeeded marks the drain dirty, since it can have stored
-// an admin event. The inner answer and error are returned unchanged.
+// is not a GET is recorded open on the drain's signal while it runs, since it
+// can store an admin event, and marks the drain dirty once it has succeeded.
+// The inner answer and error are returned unchanged.
 type dirtyAdmin struct {
 	inner idclient.AdminCaller
-	dirty interface{ MarkDirty() }
+	dirty interface {
+		Begin() (end func())
+		MarkDirty()
+	}
 }
 
 // Admin calls inner and marks dirty after a successful write.
 func (a dirtyAdmin) Admin(ctx context.Context, token secret.Value, method, path string, in, out any) (idclient.Response, error) {
+	if method == http.MethodGet {
+		return a.inner.Admin(ctx, token, method, path, in, out)
+	}
+	end := a.dirty.Begin()
 	resp, err := a.inner.Admin(ctx, token, method, path, in, out)
-	if err == nil && method != http.MethodGet {
+	end()
+	if err == nil {
 		a.dirty.MarkDirty()
 	}
 	return resp, err
 }
 
-// identityEvents is the drain, its signal and the throttle, bound at start.
+// identityEvents is the drain, its signal, the throttle and the doors'
+// resource version, bound at start.
 // The monitor reads its facts from the moment it is built, so each part is
 // read through an atomic pointer that is nil until start binds it.
 type identityEvents struct {
 	signal   atomic.Pointer[events.Signal]
 	drainer  atomic.Pointer[events.Drainer]
 	throttle atomic.Pointer[policy.Throttle]
+	// version is the identity service's resource version the doors serve
+	// theme files under (Identity 4.4 hands it to door.Build).
+	version atomic.Pointer[door.ResourceVersion]
 	// unbuilt is a drain whose construction failed at start: history-behind.
 	unbuilt atomic.Bool
 }
@@ -77,6 +92,16 @@ func (e *identityEvents) markDirty() {
 	}
 }
 
+// becameReady is identitystate's BecameReady: the identity service became
+// ready, so the drain is marked dirty and the resource version is read again
+// (it changes when an upgrade migrates the identity database).
+func (e *identityEvents) becameReady() {
+	e.markDirty()
+	if v := e.version.Load(); v != nil {
+		v.Stale()
+	}
+}
+
 // eventsMarks is the settings store slice the drain keeps its marks in.
 type eventsMarks interface {
 	Get(ctx context.Context, key string) (string, error)
@@ -84,12 +109,23 @@ type eventsMarks interface {
 }
 
 // startEvents builds the drain (and, with a door table, the throttle it
-// feeds), binds them to the monitor's facts, marks the drain dirty for this
-// start and runs it until ctx ends. It does nothing outside keycloak.
+// feeds) and the doors' resource version, binds them to the monitor's facts,
+// marks both for this start and runs them until ctx ends. It does nothing
+// outside keycloak.
 func (w identityState) startEvents(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, log *slog.Logger) {
 	ev := w.events
 	if ev == nil || idw.mode != identityModeKeycloak || idw.dirty == nil {
 		return
+	}
+	if idw.version != nil {
+		rv, err := door.NewResourceVersion(idw.version, log)
+		if err != nil {
+			log.ErrorContext(ctx, "sign-in door resource version not built", "component", "identity", "err", err.Error())
+		} else {
+			ev.version.Store(rv)
+			rv.Stale()
+			go rv.Run(ctx)
+		}
 	}
 	deps := events.Deps{Admin: idw.session, Marks: marks, Signal: idw.dirty, Realm: identityRealm, Log: log}
 	if tableErr == nil {

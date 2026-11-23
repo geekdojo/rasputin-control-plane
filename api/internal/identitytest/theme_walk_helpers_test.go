@@ -300,6 +300,10 @@ type tab struct {
 	downloads []string
 	acsPosts  []string
 	held      map[string]string // URL substring -> body that answers it
+	// beforeSubmit, when set, runs before each submit: through a sign-in
+	// door, the drain takes the previous post's event first, as the door's
+	// one-post-in-flight bound needs (geekdojo/geekdojo-brain#985).
+	beforeSubmit func(t *testing.T)
 }
 
 // stubAnswers are what the tab answers for the addresses outside Keycloak.
@@ -514,6 +518,9 @@ func (tb *tab) navigate(u string) string {
 // returns its page id.
 func (tb *tab) submit(a chromedp.Action[chromedp.Void], what string) string {
 	tb.t.Helper()
+	if tb.beforeSubmit != nil {
+		tb.beforeSubmit(tb.t)
+	}
 	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
 	defer cancel()
 	if _, err := chromedp.Run(ctx, chromedp.WaitEvent(page.LoadEventFired, nil, a)); err != nil {

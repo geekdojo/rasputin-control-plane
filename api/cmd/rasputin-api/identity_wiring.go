@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
@@ -104,7 +105,10 @@ type identityWiring struct {
 	// recoverer, reload and dirty are set only under keycloak. dirty is the
 	// sign-in history drain's signal, which the session's writes mark
 	// (events_wiring.go).
-	dirty     *events.Signal
+	dirty *events.Signal
+	// version reads the resource version the doors serve theme files
+	// under; set only under keycloak.
+	version   door.VersionSource
 	recoverer *recoveradmin.Recoverer
 	reload    func(context.Context, tlsca.LeafPaths) error
 }
@@ -208,7 +212,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 		return identityWiring{}, fmt.Errorf("identity service: %w", err)
 	}
 	return identityWiring{
-		mode: identityModeKeycloak, client: client, session: session, recoverer: rec, dirty: dirty,
+		mode: identityModeKeycloak, client: client, session: session, recoverer: rec, dirty: dirty, version: client,
 		reload: func(context.Context, tlsca.LeafPaths) error {
 			client.CloseIdleConnections()
 			return nil
