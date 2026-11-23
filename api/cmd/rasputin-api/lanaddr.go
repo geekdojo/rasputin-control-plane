@@ -149,6 +149,10 @@ func (l *apiLeaf) loadLocked(lanIP net.IP) error {
 	return nil
 }
 
+// has reports whether a leaf is loaded: the sign-in door's "leaf loaded"
+// door-up fact (geekdojo/geekdojo-brain#986).
+func (l *apiLeaf) has() bool { return l.cert.Load() != nil }
+
 var errNoAPILeaf = errors.New("rasputin-api: https leaf not loaded")
 
 // getCertificate is the tls.Config hook. Each handshake reads the current leaf.

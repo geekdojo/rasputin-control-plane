@@ -25,6 +25,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
@@ -918,7 +919,7 @@ func main() {
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          rpIDFromEnv(),
-		RPOrigins:     rpOriginsFromEnv(),
+		RPOrigins:     consoleRPOrigins(ctx, logger, doorTable, doorsOn), // never a sign-in door's origin (#986)
 		SecureCookies: secure,
 	}
 	// Say what this node believes its identity IS, on startup, verbatim.
@@ -1640,10 +1641,21 @@ func main() {
 	obsEnabled := func(ctx context.Context) (bool, error) {
 		return setupStore.GetBool(ctx, setup.KeyObsEnabled, false)
 	}
+	// The sign-in doors' metrics (#986): built here, before the fan-out reads
+	// them; the HTTPS block binds the doors, their leaves and the listener.
+	var doorReady policy.Readiness
+	if identityState.monitor != nil {
+		doorReady = identityState.monitor
+	}
+	var doorM *doorMetrics
+	if doorsOn {
+		doorM = &doorMetrics{ready: doorReady, name: signinName, withheld: appDoor.check, appOnline: meshSvc.AppDoorOnline, now: time.Now}
+	}
 	// The fan-out adds the secret store's health to the node metrics while
 	// obs is on (geekdojo/geekdojo-brain#939).
 	fanout := func(vm *obs.VMSink) metrics.Sink {
-		return signinNameFanout(obsFanout(vm, readiness, selfNodeID, storeDataDir, logger), vm, signinName, selfNodeID, logger)
+		return doorMetricsFanout(signinNameFanout(obsFanout(vm, readiness, selfNodeID, storeDataDir, logger), vm, signinName, selfNodeID, logger),
+			vm, doorM, selfNodeID, logger)
 	}
 	obsSup, setObsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, storeW.mode, obsEnabled, fanout)
 	defer func() {
@@ -2135,9 +2147,27 @@ func main() {
 		}); err != nil {
 			log.Fatalf("rasputin-api: leaf sweep: %v", err)
 		}
+		// The sign-in doors (#986): built here and served beside the console
+		// on this one listener, chosen by SNI (doors_mount.go).
+		homeDoor, appDoorH := mountDoors(ctx, doorMountDeps{
+			mode: identityW.mode, table: doorTable, doorsOn: doorsOn, readiness: doorReady,
+			throttle: identityState.events.doorThrottle(), version: identityState.events.doorVersion(),
+			identityCA: identityCAPEM(identityCA), dataDir: dataDir, upstream: identityW.upstream, themeDir: identityTheme,
+			consoleOrigin: "https://" + clusterHostname(),
+			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
+			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger,
+		})
+		if doorM != nil {
+			doorM.setDoors(homeDoor, appDoorH, identityState.events.doorThrottle())
+		}
+		httpsHandler, err := doorSites(handler, doorTable, doorsOn, homeDoor, appDoorH, logger)
+		if err != nil {
+			logger.Log(ctx, logkit.LevelFatal, "rasputin-api: https sites", "err", err.Error())
+			os.Exit(1)
+		}
 		httpsSrv = &http.Server{
 			Addr:              httpsAddr,
-			Handler:           handler,
+			Handler:           httpsHandler,
 			ReadHeaderTimeout: 10 * time.Second,
 			// http/1.1 only: with h2 offered, Chrome rides WebSockets on an
 			// RFC 8441 extended-CONNECT h2 stream (Go ≥1.25 advertises it),
@@ -2158,6 +2188,9 @@ func main() {
 			}
 			doorL = &dl
 			httpsSrv.TLSConfig.GetCertificate = sniCertificate(leaf, dl.byHost())
+			if doorM != nil {
+				doorM.setLeaves(doorL)
+			}
 		}
 		// HTTP demotes to the bootstrap surface right away so the node is
 		// reachable immediately; HTTPS comes up asynchronously once the clock
@@ -2198,7 +2231,15 @@ func main() {
 				}
 			})
 			log.Printf("rasputin-api: https listening on %s (leaf %s)", httpsAddr, filepath.Join(dataDir, "tls", "api", "leaf.pem"))
-			if err := httpsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			// Listen, then serve, so "bound" is a fact the door-up metric reads.
+			httpsLn, err := net.Listen("tcp", httpsAddr)
+			if err != nil {
+				log.Fatalf("rasputin-api: https: %v", err)
+			}
+			if doorM != nil {
+				doorM.bound.Store(true)
+			}
+			if err := httpsSrv.ServeTLS(httpsLn, "", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Fatalf("rasputin-api: https: %v", err)
 			}
 		}()

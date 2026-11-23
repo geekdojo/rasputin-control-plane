@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -111,6 +112,9 @@ type identityWiring struct {
 	version   door.VersionSource
 	recoverer *recoveradmin.Recoverer
 	reload    func(context.Context, tlsca.LeafPaths) error
+	// upstream is the identity service's https listener, the doors' relay
+	// target (RASPUTIN_IDENTITY_ADDR, parsed); set only under keycloak.
+	upstream *url.URL
 }
 
 // register registers identity.recover_admin, under keycloak only: no other
@@ -213,6 +217,7 @@ func wireIdentity(ctx context.Context, logger *slog.Logger, release bool, backen
 	}
 	return identityWiring{
 		mode: identityModeKeycloak, client: client, session: session, recoverer: rec, dirty: dirty, version: client,
+		upstream: u,
 		reload: func(context.Context, tlsca.LeafPaths) error {
 			client.CloseIdleConnections()
 			return nil

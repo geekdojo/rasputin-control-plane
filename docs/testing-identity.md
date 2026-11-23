@@ -485,8 +485,9 @@ geekdojo/geekdojo-brain#985, TC-985-36 to TC-985-45) runs both sign-in doors, bu
 mode: no `hostname`, the forwarded headers trusted from loopback only, as rasputin-os's
 `keycloak.conf`. The doors relay over the `rasputin-door` leaf's own pool. The sign-in history drain
 and the throttle run on a `rasputin-admin` session. The pinned Chrome and Go clients reach
-`sso-ci.local`, `signin.ci.internal`, `ci.local` and `app.ci.internal` by name on port 443. The api
-does not mount the doors yet (Identity 4.4), so the test serves them itself.
+`sso-ci.local`, `signin.ci.internal`, `ci.local` and `app.ci.internal` by name on port 443. The home
+door, the app door and a stand-in console share one TLS address behind the api's own `:443`
+dispatcher (`api.NewSites`), with a leaf per name chosen by SNI, as the api serves them.
 
 To run it locally, use the theme command in [The sign-in theme walk](#the-sign-in-theme-walk) with
 this test's name:
@@ -526,9 +527,20 @@ What it proves at the pin:
   (TC-985-44).
 - TC-1127-15's floods are refused through both doors (TC-985-45).
 
+Through the dispatcher (geekdojo/geekdojo-brain#986, TC-986-19 to TC-986-24, capability row T120),
+it proves that each door's discovery names that door's issuer and endpoints with no `:443` (SO-1);
+that a code flow with PKCE at each door yields that door's `iss` in the authorization response and
+the ID token (SO-2); that a home-door refresh token is `invalid_grant` with the app door's forwarded
+headers, refused by the app door and accepted by the home door (SO-3); that every SNI and Host pair
+naming two sites answers 421 and the console's names never reach Keycloak (SO-5); and that a passkey
+made at either door has that door's RP ID and yields no assertion at the other, where the password
+still signs in (SO-9). #985's cases run through the same dispatcher, so a forged `Host` now answers
+421 with nothing forwarded.
+
 What it does not prove:
 
-- mounting, SNI dispatch, 421 and the doors' metrics, which are Identity 4.4's;
+- the doors' metrics and the api's own wiring of the doors, which the unit tests in
+  api/cmd/rasputin-api cover;
 - a Keycloak upgrade that changes `<v>` on a running cluster: the re-learning on that fact is
   unit-tested in api/internal/api/door (TC-985-48);
 - the bench (IDT-03, TC-985-46).

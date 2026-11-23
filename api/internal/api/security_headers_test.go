@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 )
 
 // baselineHeaders are the values every response carries unless it is the
@@ -168,6 +170,44 @@ func TestNoListenerSendsHSTS(t *testing.T) {
 					assertNoHSTS(t, label, w.Header())
 				}
 			}
+		}
+	}
+	t.Run("home door and app door", noHSTSAtSigninDoors)
+}
+
+// TC-986-07: no answer at either sign-in door carries HSTS, though the
+// identity service sends it on every answer: a relayed page, a redirect, a
+// JSON answer, a theme file at the learned version, the door's own files and
+// 404 page, the 421 and the not-ready page, each through NewSites over a real
+// TLS server and each first at its expected status (F-986-03).
+func noHSTSAtSigninDoors(t *testing.T) {
+	r := newSitesRig(t, sitesOpts{})
+	unbuilt := newSitesRig(t, sitesOpts{nilDoors: true})
+	for _, d := range []struct {
+		name string
+		kind door.Kind
+		host string
+	}{{"home door", door.Home, r.table.Home.Host}, {"app door", door.App, r.table.App.Host}} {
+		for _, c := range []struct {
+			what, sni, host, target string
+			rig                     *sitesRig
+			status                  int
+		}{
+			{"HTML page", d.host, d.host, authQuery(d.kind, ""), r, http.StatusOK},
+			{"redirect", d.host, d.host, authQueryState(d.kind, "redirect"), r, http.StatusFound},
+			{"JSON", d.host, d.host, "/realms/rasputin/.well-known/openid-configuration", r, http.StatusOK},
+			{"theme file", d.host, d.host, sitesLoginTheme + "css/signin.css", r, http.StatusOK},
+			{"door file", d.host, d.host, "/_signin/css/signin.css", r, http.StatusOK},
+			{"door 404", d.host, d.host, "/nothing", r, http.StatusNotFound},
+			{"421", d.host, sitesConsole, "/", r, http.StatusMisdirectedRequest},
+			{"not ready", d.host, d.host, "/", unbuilt, http.StatusServiceUnavailable},
+		} {
+			label := d.name + " " + c.what
+			a := c.rig.do(c.sni, c.host, http.MethodGet, c.target, nil)
+			if a.status != c.status {
+				t.Errorf("%s: %d, want %d (%.120q)", label, a.status, c.status, a.body)
+			}
+			assertNoHSTS(t, label, a.header)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 )
@@ -88,6 +89,14 @@ const (
 	// themselves (proto.IsReservedLabel), so no app was created
 	// (geekdojo/geekdojo-brain#983).
 	codeAppNameReserved = "app_name_reserved"
+	// codeMisdirectedRequest: on :443, the TLS server name and the Host
+	// header name different sites (the console, the home sign-in door, the
+	// app sign-in door), so the request was refused with 421
+	// (geekdojo/geekdojo-brain#986).
+	codeMisdirectedRequest = "misdirected_request"
+	// codeSigninUnavailable: a sign-in door's site was reached but its door
+	// is not being served, so the not-ready page answered 503.
+	codeSigninUnavailable = "signin_unavailable"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as
@@ -105,20 +114,33 @@ type codedError struct {
 //
 // The route is the pattern the request matched ("GET /api/bus/tls"), never
 // the path the client sent, so nothing a caller types reaches the log.
+func (s *Server) writeCodedError(w http.ResponseWriter, r *http.Request, status int, code, msg string, cause ...slog.Attr) {
+	id := s.newCorrelationID()
+	logRefusal(r.Context(), s.log, id, r.Pattern, code, cause...)
+	writeCodedBody(w, status, code, msg, id)
+}
+
+// logRefusal is the one refusal record: a WARN under the correlation id,
+// carrying the route, the code and cause. writeCodedError and the :443 site
+// dispatcher (sites.go) both write it.
 //
 // CodeQL reports go/log-injection at the LogAttrs call below; the register
 // (.github/codeql-register.tsv) records it as a false positive. Every value a
-// caller passes in cause is written through s.log, which the composition root
-// builds with logkit.New: its slog.TextHandler quotes any value that needs it
-// and escapes control characters, so no attribute can forge a record. The
-// verdict holds while s.log is logkit.New's.
-func (s *Server) writeCodedError(w http.ResponseWriter, r *http.Request, status int, code, msg string, cause ...slog.Attr) {
-	id := s.newCorrelationID()
+// caller passes in cause is written through log, which the composition root
+// builds with logkit.New for both NewServer and NewSites: its slog.TextHandler
+// quotes any value that needs it and escapes control characters, so no
+// attribute can forge a record. The verdict holds while every logger passed
+// here is logkit.New's.
+func logRefusal(ctx context.Context, log *slog.Logger, id, route, code string, cause ...slog.Attr) {
 	attrs := append([]slog.Attr{
 		slog.String("correlation_id", id),
-		slog.String("route", r.Pattern),
+		slog.String("route", route),
 		slog.String("code", code),
 	}, cause...)
-	s.log.LogAttrs(r.Context(), slog.LevelWarn, "api: request refused", attrs...)
+	log.LogAttrs(ctx, slog.LevelWarn, "api: request refused", attrs...)
+}
+
+// writeCodedBody writes the coded error body with status.
+func writeCodedBody(w http.ResponseWriter, status int, code, msg, id string) {
 	writeJSON(w, status, codedError{Error: msg, Code: code, CorrelationID: id})
 }
