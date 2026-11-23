@@ -1056,12 +1056,15 @@ func (r *rulesRig) tc21(t *testing.T) {
 	}
 	a := r.account(t, "tc21-acr", map[string][]string{"rasputin_app_role": {"user"}})
 	k := r.keyTab(t, bctx, "https://"+r.sites.Table.App.Host)
-	r.registerKey(t, k, a, r.appClient(rulesAppClients), false)
-	if got := r.passwordThenKey(t, k, a, r.appClient(rulesAppClients), true); got != "rasputin-stub" {
+	// prompt=login: each sign-in is made afresh, never by the session the
+	// registration left in the tab.
+	auth := r.appURL("/realms/rasputin/protocol/openid-connect/auth?" + doorAuthQuery(rulesAppClients, AppSiteHost, nil))
+	r.registerKey(t, k, a, auth, false)
+	if got := r.passwordThenKey(t, k, a, auth, true); got != "rasputin-stub" {
 		t.Fatalf("password and passkey led to %q", got)
 	}
 	stepped := r.idTokenClaims(t, rulesAppClients, codeOf(t, evalT[string](k.tab, `location.href`)))
-	alone := r.idTokenClaims(t, rulesAppClients, r.passkeyAlone(t, k, r.appClient(rulesAppClients)))
+	alone := r.idTokenClaims(t, rulesAppClients, r.passkeyAlone(t, k, auth))
 	if stepped["acr"] != alone["acr"] {
 		t.Errorf("acr %v after a second step, %v after a passkey alone; K-ACR says they are equal", stepped["acr"], alone["acr"])
 	}
