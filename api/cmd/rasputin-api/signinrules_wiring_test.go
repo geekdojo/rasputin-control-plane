@@ -151,8 +151,11 @@ func TestClockSyncFact(t *testing.T) {
 	}
 	perm := errors.New("stat: permission denied")
 	fail := &clockSyncFact{read: func() (bool, bool, error) { return true, false, perm }, log: log}
-	if fail.Synced(ctx) || fail.Synced(ctx) {
+	if fail.Synced(ctx) {
 		t.Error("a stat failure read as synced")
+	}
+	if fail.Synced(ctx) {
+		t.Error("a second stat failure read as synced")
 	}
 	warn := "The clock-sync signal could not be read, so the authenticator app is not offered."
 	if n := len(rec.Matching(slog.LevelWarn, warn)); n != 1 {
