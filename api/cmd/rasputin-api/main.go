@@ -2234,7 +2234,8 @@ func main() {
 			// Listen, then serve, so "bound" is a fact the door-up metric reads.
 			httpsLn, err := net.Listen("tcp", httpsAddr)
 			if err != nil {
-				log.Fatalf("rasputin-api: https: %v", err)
+				logger.Log(ctx, logkit.LevelFatal, "rasputin-api: https listen", "addr", httpsAddr, "err", err.Error())
+				os.Exit(1)
 			}
 			if doorM != nil {
 				doorM.bound.Store(true)
