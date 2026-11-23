@@ -27,6 +27,13 @@ const controlLockedBody = `{"code":"signin_rules_differ","error":"Administrator 
 // sign-in rules, when no alert is raised (F-987-19).
 const controlApplyingBody = `{"code":"signin_rules_applying","error":"Administrator tools are locked while Rasputin applies its sign-in rules. They unlock when it finishes."}`
 
+// controlLockedLog and controlApplyingLog are the INFO auth.control_locked
+// record's message in the same two states as the bodies (F-987-27).
+const (
+	controlLockedLog   = "A control request was refused: the sign-in rules differ from Rasputin's."
+	controlApplyingLog = "A control request was refused: Rasputin is applying its sign-in rules."
+)
+
 // applyingLock is a gate error that locks control while Rasputin applies
 // its own sign-in rules (converge.ErrSignInRulesApplying).
 type applyingLock interface{ ControlApplying() bool }
@@ -97,13 +104,13 @@ func (s *Service) controlLocked(w http.ResponseWriter, r *http.Request) bool {
 	if err == nil {
 		return false
 	}
-	body := controlLockedBody
+	body, msg := controlLockedBody, controlLockedLog
 	var a applyingLock
 	if errors.As(err, &a) && a.ControlApplying() {
-		body = controlApplyingBody
+		body, msg = controlApplyingBody, controlApplyingLog
 	}
 	if log != nil {
-		log.LogAttrs(r.Context(), slog.LevelInfo, "A control request was refused: the sign-in rules differ from Rasputin's.",
+		log.LogAttrs(r.Context(), slog.LevelInfo, msg,
 			slog.String("event", "auth.control_locked"), slog.String("method", r.Method), slog.String("route", r.Pattern))
 	}
 	w.Header().Set("Content-Type", "application/json")

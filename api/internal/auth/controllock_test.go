@@ -97,7 +97,8 @@ func TestControlLock(t *testing.T) {
 	}
 	// F-987-19: a gate locking while Rasputin applies its rules answers its
 	// own code and sentence, never the differing one.
-	f.svc.SetControlGate(func(context.Context) error { return fmt.Errorf("start: %w", applyingErr{}) }, log)
+	applyingLog, applyingRec := logkittest.New()
+	f.svc.SetControlGate(func(context.Context) error { return fmt.Errorf("start: %w", applyingErr{}) }, applyingLog)
 	for _, c := range cases {
 		w := send(c.method, c.path, c.upgrade)
 		if !c.locked {
@@ -112,6 +113,17 @@ func TestControlLock(t *testing.T) {
 			strings.Contains(body, "see Alerts") {
 			t.Errorf("applying: %s %s = %d %s", c.method, c.path, w.Code, body)
 		}
+	}
+	// F-987-27: the record says Rasputin is applying its rules, never that
+	// they differ, and keeps the event, method and route.
+	if recs := applyingRec.Matching(slog.LevelInfo, "A control request was refused: Rasputin is applying its sign-in rules."); len(recs) != 5 {
+		t.Errorf("%d applying auth.control_locked records, want 5:\n%s", len(recs), applyingRec.Text())
+	}
+	if recs := applyingRec.Matching(slog.LevelInfo, "differ"); len(recs) != 0 {
+		t.Errorf("an applying refusal was logged as differing:\n%s", applyingRec.Text())
+	}
+	if txt := applyingRec.Text(); !strings.Contains(txt, "event=auth.control_locked") || !strings.Contains(txt, "route=GET /ws/bmc/{nodeId}/sol") || !strings.Contains(txt, "method=POST") {
+		t.Errorf("the applying records lack the event, method or route:\n%s", txt)
 	}
 	f.svc.SetControlGate(func(context.Context) error { return nil }, log)
 	for _, c := range cases {
