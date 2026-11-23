@@ -103,7 +103,9 @@ func TestFunctional_RegistrationsDuringStartupAreRecorded(t *testing.T) {
 		})
 	}
 	api, _ := startAPI(t, apiOpts{preseed: preseed, noWait: true})
-	url := fmt.Sprintf("nats://127.0.0.1:%d", api.natsPort)
+	// TC-988-35: the bus port is the one the api's log names, read before
+	// the admission wait below.
+	url := fmt.Sprintf("nats://127.0.0.1:%d", api.busPort(t))
 
 	// The admission fact: the responder answers callouts from here on.
 	api.waitLog(t, "the auth-callout responder", "busauth: auth-callout responder active")
@@ -138,7 +140,7 @@ func TestFunctional_RegistrationsDuringStartupAreRecorded(t *testing.T) {
 	}
 
 	// Every start-up subscriber exists once HTTP is up; then the sentinel.
-	api.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
+	api.waitHTTP(t)
 	if c, p := registerOnce(url, sentinelNode, secure); c != nil || p != nil {
 		t.Fatalf("the sentinel did not register: connect %v, publish %v", c, p)
 	}
