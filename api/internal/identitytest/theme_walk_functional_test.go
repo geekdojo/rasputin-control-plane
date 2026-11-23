@@ -26,6 +26,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -754,6 +755,55 @@ func setVerified(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, verified 
 	}
 }
 
+// setPresence turns the virtual authenticator's simulated user presence on
+// or off.
+func setPresence(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, on bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	if _, err := chromedp.Call(ctx, webauthn.SetAutomaticPresenceSimulation, webauthn.SetAutomaticPresenceSimulationParams{AuthenticatorID: auth, Enabled: on}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// openForPasskey opens the sign-in page at u in tb with auth's simulated
+// presence held back, and returns the page id. The page's script starts a
+// conditional request on load unless a session already identifies the
+// person (passkeysConditionalAuth.js), as at a sign-in door that strips the
+// single-sign-on cookie; the virtual authenticator answers that request at
+// once while presence is simulated, so the page would sign in by itself
+// before it is checked. Held back, the request waits as it waits for a
+// person's choice in the autofill list.
+func openForPasskey(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, u string) string {
+	t.Helper()
+	setPresence(t, tb, auth, false)
+	return tb.navigate(u)
+}
+
+// pressPasskey gives auth's presence back and presses SIGN IN WITH A
+// PASSKEY, then waits for the client's callback page, a fact: whichever of
+// the page's two requests, the conditional one or the button's, the
+// authenticator answers first, both are rasputin-passkeys.js's.
+func pressPasskey(t *testing.T, tb *tab, auth webauthn.AuthenticatorID) string {
+	t.Helper()
+	m := tb.mark()
+	setPresence(t, tb, auth, true)
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	if _, err := chromedp.Run(ctx, chromedp.Steps(
+		chromedp.Evaluate[chromedp.Void](`(() => { const b = document.getElementById('authenticateWebAuthnButton'); if (b) b.click(); })()`),
+		chromedp.WaitVisible(chromedp.CSS(`body[data-page-id="rasputin-stub"]`)),
+	)); err != nil {
+		reqs, errs := tb.since(m)
+		var sent []string
+		for _, r := range reqs {
+			sent = append(sent, fmt.Sprintf("%s %s %d %s", r.method, redactURL(r.url), r.status, r.failed))
+		}
+		t.Fatalf("the passkey sign-in did not reach the client's callback: %v; the requests since: %q; the console since: %q", err, sent, errs)
+	}
+	return tb.pageID()
+}
+
 func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 	name := w.via.prefix + "walk-passkey"
 	loc, password := w.user(t, name, false)
@@ -767,6 +817,7 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 		{"rasputin-passkey-this-device", "Walk laptop", protocol.PublicKeyCredentialHintClientDevice, webauthn.AuthenticatorTransportInternal},
 	}
 	var last *tab
+	var lastAuth webauthn.AuthenticatorID
 	for i, c := range choices {
 		api := w.admin(t)
 		_, out := api.must(http.StatusOK, http.MethodGet, loc, nil)
@@ -819,7 +870,7 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 		if dialogs != 0 {
 			t.Errorf("TC-988-20: %d browser dialogs opened, want none", dialogs)
 		}
-		last = tb
+		last, lastAuth = tb, auth
 	}
 	_, out := w.admin(t).must(http.StatusOK, http.MethodGet, loc+"/credentials", nil)
 	var creds []struct{ Type, UserLabel string }
@@ -838,11 +889,11 @@ func (w *walk) passkeys(t *testing.T, browserCtx context.Context) {
 	// rasputin-passkeys.js and the forked webauthnAuthenticate.js.
 	tb := last
 	m := tb.mark()
-	id := tb.navigate(w.authURL(w.via.signInClient, url.Values{"prompt": {"login"}}))
+	id := openForPasskey(t, tb, lastAuth, w.authURL(w.via.signInClient, url.Values{"prompt": {"login"}}))
 	if id == "login-login" {
 		w.checkPage(tb, m, "login-login")
 		m = tb.mark()
-		id = tb.submit(chromedp.Click(chromedp.ID("authenticateWebAuthnButton")), "press SIGN IN WITH A PASSKEY")
+		id = pressPasskey(t, tb, lastAuth)
 	}
 	if id != "rasputin-stub" {
 		t.Fatalf("TC-988-21: the passkey sign-in led to %s, want the client's callback", id)

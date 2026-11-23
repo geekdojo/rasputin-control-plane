@@ -1278,7 +1278,7 @@ func (r *doorRig) ts26(t *testing.T, browserCtx context.Context) {
 		t.Fatal(err)
 	}
 	cancel()
-	addAuthenticator(t, tb, webauthn.AuthenticatorTransportInternal)
+	auth := addAuthenticator(t, tb, webauthn.AuthenticatorTransportInternal)
 	r.settle(t)
 	tb.navigate(r.homeAuth(baselineConsole, nil))
 	if got := signIn(tb, name, pw); got != "login-webauthn-register" {
@@ -1320,9 +1320,9 @@ func (r *doorRig) ts26(t *testing.T, browserCtx context.Context) {
 	r.client(t, "127.0.0.2").signIn(r.homeAuth(baselineConsole, nil), name, pw).code(t)
 	// A passkey from the waiting address.
 	m := tb.mark()
-	got := tb.navigate(r.homeAuth(baselineConsole, nil))
+	got := openForPasskey(t, tb, auth, r.homeAuth(baselineConsole, nil))
 	if got == "login-login" {
-		got = tb.submit(chromedp.Click(chromedp.ID("authenticateWebAuthnButton")), "press SIGN IN WITH A PASSKEY")
+		got = pressPasskey(t, tb, auth)
 	}
 	if got != "rasputin-stub" {
 		_, errs := tb.since(m)
