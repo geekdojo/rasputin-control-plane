@@ -755,51 +755,99 @@ func setVerified(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, verified 
 	}
 }
 
-// setPresence turns the virtual authenticator's simulated user presence on
-// or off.
-func setPresence(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, on bool) {
+// conditionalWaitsJS stands in for a person who has not chosen from the
+// autofill list: a conditional request (mediation "conditional", the one
+// passkeysConditionalAuth.js starts on load) never reaches the virtual
+// authenticator. It marks the document with data-rasputin-conditional and
+// waits until its signal aborts it, as SIGN IN WITH A PASSKEY's own request
+// does (webauthnAuthenticate.js signal()). Every other request goes through.
+// So the button's request is the only one the authenticator answers. Left to
+// the authenticator, a conditional request is answered when it reaches it
+// with presence simulated, and the page submits it while the button's
+// submits too; one held back by presence is never answered, nor is a
+// button's request made while presence is held back.
+const conditionalWaitsJS = `(() => {
+  const c = navigator.credentials;
+  if (!c || !c.get || c.get.rasputinConditionalWaits) return;
+  const real = c.get.bind(c);
+  const get = (o) => {
+    if (!o || o.mediation !== 'conditional') return real(o);
+    document.documentElement.dataset.rasputinConditional = 'waiting';
+    return new Promise((_, reject) => {
+      const s = o.signal;
+      if (s) s.addEventListener('abort', () => reject(s.reason), { once: true });
+    });
+  };
+  get.rasputinConditionalWaits = true;
+  c.get = get;
+})();`
+
+// startsConditionalJS is passkeysConditionalAuth.js initAuthenticate's own
+// test for whether the page starts a conditional request, on the button's
+// data attributes: not when a session already identifies the person, nor for
+// another mediation, nor where the browser offers none.
+const startsConditionalJS = `(async () => {
+  const b = document.getElementById('authenticateWebAuthnButton');
+  if (!b || !window.PublicKeyCredential) return false;
+  const d = b.dataset;
+  if (d.isUserIdentified === 'true' || (d.mediation || 'conditional') !== 'conditional') return false;
+  if (d.authenticatorAttachment === 'platform' && !(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) return false;
+  return typeof PublicKeyCredential.isConditionalMediationAvailable === 'function' && await PublicKeyCredential.isConditionalMediationAvailable();
+})()`
+
+// openForPasskey opens the sign-in page at u in tb, with the page's
+// conditional request kept from the authenticator (conditionalWaitsJS), and
+// returns the page id. The page would otherwise sign in by itself before it
+// is checked, as at a sign-in door that strips the single-sign-on cookie.
+func openForPasskey(t *testing.T, tb *tab, _ webauthn.AuthenticatorID, u string) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
 	defer cancel()
-	if _, err := chromedp.Call(ctx, webauthn.SetAutomaticPresenceSimulation, webauthn.SetAutomaticPresenceSimulationParams{AuthenticatorID: auth, Enabled: on}); err != nil {
+	if _, err := chromedp.Call(ctx, page.AddScriptToEvaluateOnNewDocument, page.AddScriptToEvaluateOnNewDocumentParams{Source: conditionalWaitsJS}); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// openForPasskey opens the sign-in page at u in tb with auth's simulated
-// presence held back, and returns the page id. The page's script starts a
-// conditional request on load unless a session already identifies the
-// person (passkeysConditionalAuth.js), as at a sign-in door that strips the
-// single-sign-on cookie; the virtual authenticator answers that request at
-// once while presence is simulated, so the page would sign in by itself
-// before it is checked. Held back, the request waits as it waits for a
-// person's choice in the autofill list.
-func openForPasskey(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, u string) string {
-	t.Helper()
-	setPresence(t, tb, auth, false)
 	return tb.navigate(u)
 }
 
-// pressPasskey gives auth's presence back and presses SIGN IN WITH A
-// PASSKEY, then waits for the client's callback page, a fact: whichever of
-// the page's two requests, the conditional one or the button's, the
-// authenticator answers first, both are rasputin-passkeys.js's.
-func pressPasskey(t *testing.T, tb *tab, auth webauthn.AuthenticatorID) string {
+// pressPasskey presses SIGN IN WITH A PASSKEY on a page openForPasskey
+// opened, waits for the client's callback page, and fails unless the page
+// submitted exactly one passkey sign-in. The page's conditional request
+// starts after the page has loaded (initAuthenticate awaits the browser
+// first), and starting it aborts the button's request if the button was
+// pressed first, which the page then submits as a failure; so, when the
+// page starts one, the press waits for that fact.
+func pressPasskey(t *testing.T, tb *tab, _ webauthn.AuthenticatorID) string {
 	t.Helper()
 	m := tb.mark()
-	setPresence(t, tb, auth, true)
 	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
 	defer cancel()
-	if _, err := chromedp.Run(ctx, chromedp.Steps(
+	starts, err := chromedp.Run(ctx, chromedp.Evaluate[bool](startsConditionalJS, chromedp.EvalAwaitPromise))
+	if err != nil {
+		t.Fatalf("whether the page starts a conditional request: %v", err)
+	}
+	var steps []chromedp.Action[chromedp.Void]
+	if starts {
+		steps = append(steps, chromedp.WaitReady(chromedp.CSS(`html[data-rasputin-conditional]`)))
+	}
+	steps = append(steps,
 		chromedp.Evaluate[chromedp.Void](`(() => { const b = document.getElementById('authenticateWebAuthnButton'); if (b) b.click(); })()`),
 		chromedp.WaitVisible(chromedp.CSS(`body[data-page-id="rasputin-stub"]`)),
-	)); err != nil {
-		reqs, errs := tb.since(m)
-		var sent []string
-		for _, r := range reqs {
-			sent = append(sent, fmt.Sprintf("%s %s %d %s", r.method, redactURL(r.url), r.status, r.failed))
+	)
+	_, err = chromedp.Run(ctx, chromedp.Steps(steps...))
+	reqs, errs := tb.since(m)
+	var sent []string
+	posts := 0
+	for _, r := range reqs {
+		sent = append(sent, fmt.Sprintf("%s %s %d %s", r.method, redactURL(r.url), r.status, r.failed))
+		if r.method == http.MethodPost && strings.Contains(r.url, "/login-actions/authenticate") {
+			posts++
 		}
-		t.Fatalf("the passkey sign-in did not reach the client's callback: %v; the requests since: %q; the console since: %q", err, sent, errs)
+	}
+	if err != nil {
+		t.Fatalf("the passkey sign-in did not reach the client's callback (the page starts a conditional request: %t): %v; the requests since: %q; the console since: %q", starts, err, sent, errs)
+	}
+	if posts != 1 {
+		t.Fatalf("the passkey sign-in posted to login-actions/authenticate %d times, want once; the requests since: %q", posts, sent)
 	}
 	return tb.pageID()
 }
