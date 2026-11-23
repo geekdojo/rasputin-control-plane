@@ -428,6 +428,29 @@ func TestFit(t *testing.T) {
 	}
 }
 
+// When the CA permits none of the spec's DNS names and not its CommonName
+// either, Fit has no kept name to put in the CommonName: it drops every DNS
+// name, keeps the CommonName as given and keeps the permitted addresses,
+// without indexing an empty list (geekdojo/geekdojo-brain#258, F-258-29).
+func TestFit_NoPermittedDNSName_KeepsCommonName(t *testing.T) {
+	spec := tlsca.LeafSpec{
+		Usage:       tlsca.UsageServer,
+		CommonName:  "mesh.example.com",
+		DNSNames:    []string{"mesh.example.com", "localhost", "other.local"},
+		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv4(203, 0, 113, 7)},
+	}
+	got := clusterCA(t, "bench").Fit(spec)
+	if len(got.DNSNames) != 0 {
+		t.Errorf("DNSNames = %v, want none", got.DNSNames)
+	}
+	if got.CommonName != "mesh.example.com" {
+		t.Errorf("CommonName = %q, want mesh.example.com unchanged", got.CommonName)
+	}
+	if ips := fmtIPs(got.IPAddresses); !slices.Equal(ips, []string{"127.0.0.1"}) {
+		t.Errorf("IPAddresses = %v, want [127.0.0.1]", ips)
+	}
+}
+
 func fmtIPs(ips []net.IP) []string {
 	out := make([]string, 0, len(ips))
 	for _, ip := range ips {
