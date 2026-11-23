@@ -246,6 +246,11 @@ func TestControlGate_UnknownAndApplying(t *testing.T) {
 	if err := r.c.ControlGate(t.Context()); !errors.Is(err, ErrSignInRulesApplying) || errors.Is(err, ErrSignInRulesDiffer) {
 		t.Errorf("applying: gate = %v, want ErrSignInRulesApplying", err)
 	}
+	// The control lock tells the two apart by ControlApplying (auth).
+	var a interface{ ControlApplying() bool }
+	if !errors.As(ErrSignInRulesApplying, &a) || !a.ControlApplying() || errors.As(ErrSignInRulesDiffer, &a) {
+		t.Error("ControlApplying does not tell applying from differing")
+	}
 }
 
 // TC-987-39: only the listed admin event types mark the pass; PassEnded runs
