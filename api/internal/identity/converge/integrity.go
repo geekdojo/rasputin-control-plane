@@ -24,8 +24,22 @@ const SignInRulesAlertID = "identity:signin-rules-differ"
 // signInRulesTitle is the alert's sentence.
 const signInRulesTitle = "Sign-in rules differ from Rasputin's settings. Administrator tools are locked until they are restored."
 
-// ErrSignInRulesDiffer is ControlGate's answer while control is locked.
+// ErrSignInRulesDiffer is ControlGate's answer while the rules have drifted
+// or failed to apply: the states that raise the alert.
 var ErrSignInRulesDiffer = errors.New("converge: the sign-in rules differ from Rasputin's")
+
+// ErrSignInRulesApplying is ControlGate's answer while the rules are not yet
+// read or Rasputin is applying its own change to them: no alert is raised in
+// either state. Its ControlApplying method tells the control lock to say so
+// (auth's controlApplyingBody).
+var ErrSignInRulesApplying error = applyingError{}
+
+type applyingError struct{}
+
+func (applyingError) Error() string { return "converge: Rasputin is applying its sign-in rules" }
+
+// ControlApplying marks the lock as Rasputin's own apply.
+func (applyingError) ControlApplying() bool { return true }
 
 // Integrity is the integrity state.
 type Integrity int
@@ -128,10 +142,11 @@ func (c *Converger) newRulesAlert() *proto.Alert {
 }
 
 // ControlGate is the control lock's gate: ErrSignInRulesDiffer while the
-// rules are being applied, have drifted or failed to apply, and while the
-// state is still unknown with the identity service ready (ERR-CLOSED,
-// F-987-09). Before the service is ready an unknown state locks nothing
-// (identity-authz.md §10 row 1: console sessions continue).
+// rules have drifted or failed to apply, and ErrSignInRulesApplying while
+// they are being applied or the state is still unknown with the identity
+// service ready (ERR-CLOSED, F-987-09; ERR-MESSAGE, F-987-19). Before the
+// service is ready an unknown state locks nothing (identity-authz.md §10
+// row 1: console sessions continue).
 func (c *Converger) ControlGate(ctx context.Context) error {
 	switch c.State() {
 	case Intact:
@@ -140,6 +155,9 @@ func (c *Converger) ControlGate(ctx context.Context) error {
 		if c.d.Ready(ctx) != nil {
 			return nil
 		}
+		return ErrSignInRulesApplying
+	case Applying:
+		return ErrSignInRulesApplying
 	}
 	return ErrSignInRulesDiffer
 }

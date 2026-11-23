@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -94,6 +95,24 @@ func TestControlLock(t *testing.T) {
 	if !strings.Contains(rec.Text(), "route=GET /ws/bmc/{nodeId}/sol") || !strings.Contains(rec.Text(), "method=POST") {
 		t.Errorf("the records lack the method or the route:\n%s", rec.Text())
 	}
+	// F-987-19: a gate locking while Rasputin applies its rules answers its
+	// own code and sentence, never the differing one.
+	f.svc.SetControlGate(func(context.Context) error { return fmt.Errorf("start: %w", applyingErr{}) }, log)
+	for _, c := range cases {
+		w := send(c.method, c.path, c.upgrade)
+		if !c.locked {
+			if w.Code != http.StatusOK {
+				t.Errorf("applying: %s %s = %d, want 200", c.method, c.path, w.Code)
+			}
+			continue
+		}
+		body := w.Body.String()
+		if w.Code != http.StatusLocked || !strings.Contains(body, `"code":"signin_rules_applying"`) ||
+			!strings.Contains(body, "Administrator tools are locked while Rasputin applies its sign-in rules. They unlock when it finishes.") ||
+			strings.Contains(body, "see Alerts") {
+			t.Errorf("applying: %s %s = %d %s", c.method, c.path, w.Code, body)
+		}
+	}
 	f.svc.SetControlGate(func(context.Context) error { return nil }, log)
 	for _, c := range cases {
 		if w := send(c.method, c.path, c.upgrade); w.Code != http.StatusOK {
@@ -112,3 +131,10 @@ func TestControlLock(t *testing.T) {
 		t.Error("the gate set is not reported")
 	}
 }
+
+// applyingErr is a gate error locking control while Rasputin applies its
+// sign-in rules, as converge.ErrSignInRulesApplying is.
+type applyingErr struct{}
+
+func (applyingErr) Error() string         { return "applying" }
+func (applyingErr) ControlApplying() bool { return true }

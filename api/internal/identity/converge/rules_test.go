@@ -90,6 +90,9 @@ func TestIntegrity_DriftTransitions(t *testing.T) {
 	if r.c.State() != Failed || r.rulesAlert() == nil {
 		t.Errorf("after a failed rebuild: state %s, alert %v", r.c.State(), r.rulesAlert())
 	}
+	if !errors.Is(r.c.ControlGate(t.Context()), ErrSignInRulesDiffer) {
+		t.Error("control is not locked as differing while failed")
+	}
 	// A failed write (not a rebuild) is errWrite and failed too.
 	r = newRig(t)
 	r.storeHash()
@@ -223,15 +226,25 @@ func TestClientPaused(t *testing.T) {
 }
 
 // F-987-09: an unknown state locks control once the service is ready, and
-// not before.
-func TestControlGate_Unknown(t *testing.T) {
+// not before. F-987-19: unknown and applying lock as Rasputin applying its
+// rules, never as the rules differing.
+func TestControlGate_UnknownAndApplying(t *testing.T) {
 	r := newRig(t)
-	if !errors.Is(r.c.ControlGate(t.Context()), ErrSignInRulesDiffer) {
-		t.Error("unknown with the service ready: control not locked")
+	if err := r.c.ControlGate(t.Context()); !errors.Is(err, ErrSignInRulesApplying) || errors.Is(err, ErrSignInRulesDiffer) {
+		t.Errorf("unknown with the service ready: gate = %v, want ErrSignInRulesApplying", err)
 	}
 	r.readyErr = errors.New("not ready")
 	if r.c.ControlGate(t.Context()) != nil {
 		t.Error("unknown with the service not ready: control locked")
+	}
+	r = newRig(t)
+	r.disableDeny() // a difference with no stored hash: Rasputin's own install
+	r.c.Recheck(t.Context())
+	if s := r.c.State(); s != Applying {
+		t.Fatalf("state %s, want applying", s)
+	}
+	if err := r.c.ControlGate(t.Context()); !errors.Is(err, ErrSignInRulesApplying) || errors.Is(err, ErrSignInRulesDiffer) {
+		t.Errorf("applying: gate = %v, want ErrSignInRulesApplying", err)
 	}
 }
 

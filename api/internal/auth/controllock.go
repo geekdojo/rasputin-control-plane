@@ -7,6 +7,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -18,8 +19,17 @@ import (
 // them, an error locks them (*converge.Converger's ControlGate).
 type ControlGate func(ctx context.Context) error
 
-// controlLockedBody is the refusal's body: its code and its sentence.
+// controlLockedBody is the refusal's body while the sign-in rules differ:
+// its code and its sentence.
 const controlLockedBody = `{"code":"signin_rules_differ","error":"Administrator tools are locked because Rasputin's sign-in rules differ from its settings. They unlock when Rasputin restores them; see Alerts."}`
+
+// controlApplyingBody is the refusal's body while Rasputin applies its
+// sign-in rules, when no alert is raised (F-987-19).
+const controlApplyingBody = `{"code":"signin_rules_applying","error":"Administrator tools are locked while Rasputin applies its sign-in rules. They unlock when it finishes."}`
+
+// applyingLock is a gate error that locks control while Rasputin applies
+// its own sign-in rules (converge.ErrSignInRulesApplying).
+type applyingLock interface{ ControlApplying() bool }
 
 // selfPrefix is the account's own routes (sign-in, sign-out, its passkeys),
 // which the lock never refuses.
@@ -83,8 +93,14 @@ func (s *Service) controlLocked(w http.ResponseWriter, r *http.Request) bool {
 	if gate == nil || !isControl(r) {
 		return false
 	}
-	if gate(r.Context()) == nil {
+	err := gate(r.Context())
+	if err == nil {
 		return false
+	}
+	body := controlLockedBody
+	var a applyingLock
+	if errors.As(err, &a) && a.ControlApplying() {
+		body = controlApplyingBody
 	}
 	if log != nil {
 		log.LogAttrs(r.Context(), slog.LevelInfo, "A control request was refused: the sign-in rules differ from Rasputin's.",
@@ -92,6 +108,6 @@ func (s *Service) controlLocked(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusLocked)
-	_, _ = w.Write([]byte(controlLockedBody))
+	_, _ = w.Write([]byte(body))
 	return true
 }
