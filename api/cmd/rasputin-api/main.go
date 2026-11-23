@@ -169,12 +169,9 @@ func main() {
 	// NATS bind defaults to 127.0.0.1:4222 (api-local agents only). Operators
 	// federating agents from other nodes set RASPUTIN_NATS_HOST=0.0.0.0
 	// (or a specific LAN IP) so the embedded server is reachable. Port
-	// override is rarely useful but kept symmetric.
+	// override is rarely useful but kept symmetric. -1 means any free port.
 	natsHost := envOr(busauth.EnvNATSHost, "127.0.0.1")
-	natsPort := 4222
-	if p, err := strconv.Atoi(envOr("RASPUTIN_NATS_PORT", "4222")); err == nil && p > 0 {
-		natsPort = p
-	}
+	natsPort := bus.ParsePort(os.Getenv("RASPUTIN_NATS_PORT"))
 
 	// Bus auth (RASPUTIN_BUS_AUTH=off|enforce). Under enforcement, external
 	// agents must present a per-node join token that the in-process busauth
@@ -2262,7 +2259,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: http: %v", err)
 	}
-	log.Printf("rasputin-api: http listening on %s", httpAddr)
+	logger.Info("rasputin-api: http listening", "addr", httpLn.Addr().String())
 	go func() {
 		if err := httpSrv.Serve(httpLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatalf("rasputin-api: http: %v", err)

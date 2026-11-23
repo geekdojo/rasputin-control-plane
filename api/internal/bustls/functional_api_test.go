@@ -20,9 +20,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -30,6 +33,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bustls/bustlstest"
@@ -87,6 +91,11 @@ func buildAPI(t *testing.T) string {
 // answered on the "bus" port and TestFunctional_RealAPIProcess_BusCertDown
 // reported a bus listener that did not exist. A port in taken (one a stopped
 // api used and the next one reuses) is held and skipped, never returned.
+//
+// Only the floor release's api (apiOpts.bin) is given ports chosen this way:
+// it cannot report a port it picked itself. The api built from this workspace
+// binds every listener on a port the OS picks and the test reads it back from
+// the api's log, so no port is released for it to bind again.
 func freePorts(t *testing.T, n int, taken ...int) []int {
 	t.Helper()
 	skip := make(map[int]bool, len(taken))
@@ -114,8 +123,8 @@ func freePorts(t *testing.T, n int, taken ...int) []int {
 	return ports
 }
 
-// TestFreePortsDistinct pins the guarantee runAPI relies on: every port
-// freePorts returns is distinct and none is a port it was told is taken.
+// TestFreePortsDistinct pins the guarantee runAPI relies on for the floor
+// api: every port freePorts returns is distinct and none is a port it was told is taken.
 func TestFreePortsDistinct(t *testing.T) {
 	taken := freePorts(t, 2)
 	got := freePorts(t, 200, taken...)
@@ -133,9 +142,15 @@ func TestFreePortsDistinct(t *testing.T) {
 
 // apiProc is one running rasputin-api, with its log captured.
 type apiProc struct {
-	cmd      *exec.Cmd
-	dataDir  string
+	cmd     *exec.Cmd
+	dataDir string
+	// floor is the floor release's api, which logs its HTTP line as
+	// "http listening on <addr>" and was given every port in advance.
+	floor bool
+	// httpBase is set by waitHTTP from the api's HTTP listening line.
 	httpBase string
+	// natsPort is the bus port given in advance; zero means the OS picks it
+	// and busPort reads it from the log.
 	natsPort int
 	cookie   *http.Cookie
 
@@ -157,11 +172,7 @@ func (a *apiProc) count(subs ...string) int {
 	defer a.mu.Unlock()
 	n := 0
 	for _, l := range a.lines {
-		all := true
-		for _, s := range subs {
-			all = all && strings.Contains(l, s)
-		}
-		if all {
+		if hasAll(l, subs) {
 			n++
 		}
 	}
@@ -176,6 +187,143 @@ func (a *apiProc) waitLog(t *testing.T, what string, subs ...string) {
 		}
 		return a.count(subs...) > 0
 	}, a.log)
+}
+
+func hasAll(line string, subs []string) bool {
+	for _, s := range subs {
+		if !strings.Contains(line, s) {
+			return false
+		}
+	}
+	return true
+}
+
+// waitLine waits for a log line containing every one of subs and returns the
+// first such line.
+func (a *apiProc) waitLine(t *testing.T, what string, subs ...string) string {
+	t.Helper()
+	a.waitLog(t, what, subs...)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, l := range a.lines {
+		if hasAll(l, subs) {
+			return l
+		}
+	}
+	t.Fatalf("no log line holds %q after waiting for %s", subs, what)
+	return ""
+}
+
+// logField is the value of key in a slog text line, unquoted when quoted, or
+// "" when the line has no such key.
+func logField(line, key string) string {
+	i := strings.Index(" "+line, " "+key+"=")
+	if i < 0 {
+		return ""
+	}
+	v := line[i+len(key)+1:]
+	if strings.HasPrefix(v, `"`) {
+		q, err := strconv.QuotedPrefix(v)
+		if err != nil {
+			return ""
+		}
+		u, err := strconv.Unquote(q)
+		if err != nil {
+			return ""
+		}
+		return u
+	}
+	v, _, _ = strings.Cut(v, " ")
+	return v
+}
+
+// listenAddr splits a host:port the api logged, failing the test when it
+// does not parse or names port 0.
+func listenAddr(t *testing.T, what, hostPort string) (host string, port int) {
+	t.Helper()
+	host, p, err := net.SplitHostPort(hostPort)
+	if err == nil {
+		port, err = strconv.Atoi(p)
+	}
+	if err != nil || port <= 0 {
+		t.Fatalf("%s: the api logged %q, not a host:port with a port (%v)", what, hostPort, err)
+	}
+	return host, port
+}
+
+// httpAddr is the host and port the api's HTTP listening line names.
+func (a *apiProc) httpAddr(t *testing.T) (host string, port int) {
+	t.Helper()
+	if a.floor {
+		const floorLine = "rasputin-api: http listening on "
+		l := a.waitLine(t, "the HTTP listener", floorLine)
+		_, addr, _ := strings.Cut(l, floorLine)
+		return listenAddr(t, "the HTTP listener", strings.TrimSpace(addr))
+	}
+	l := a.waitLine(t, "the HTTP listener", "rasputin-api: http listening")
+	return listenAddr(t, "the HTTP listener", logField(l, "addr"))
+}
+
+// waitHTTP waits for the api's HTTP listener and points httpBase at it.
+func (a *apiProc) waitHTTP(t *testing.T) {
+	t.Helper()
+	host, port := a.httpAddr(t)
+	a.httpBase = "http://" + net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// busPort is the bus port: the one given in advance, else the one the api's
+// bus listening line names.
+func (a *apiProc) busPort(t *testing.T) int {
+	t.Helper()
+	if a.natsPort != 0 {
+		return a.natsPort
+	}
+	l := a.waitLine(t, "the bus listener", "rasputin-api: bus listening")
+	u, err := url.Parse(logField(l, "url"))
+	if err != nil {
+		t.Fatalf("the bus listening line %q: %v", l, err)
+	}
+	_, port := listenAddr(t, "the bus listener", u.Host)
+	return port
+}
+
+// nodePort is the port the api's node listener line names.
+func (a *apiProc) nodePort(t *testing.T) int {
+	t.Helper()
+	l := a.waitLine(t, "the node listener", "rasputin-api: node listener up")
+	_, port := listenAddr(t, "the node listener", logField(l, "addr"))
+	return port
+}
+
+// assertOSChosenPorts checks that the test chose no port for a workspace api
+// it gave none (TC-988-31), and that the HTTP line names the configured host
+// and the port that answers (TC-988-33).
+func assertOSChosenPorts(t *testing.T, a *apiProc) {
+	t.Helper()
+	// TC-988-31: every listener is left to the OS.
+	for _, want := range []string{"RASPUTIN_HTTP_ADDR=127.0.0.1:0", "RASPUTIN_NATS_PORT=-1", "RASPUTIN_OBS_INGEST_ADDR=127.0.0.1:0"} {
+		if !slices.Contains(a.cmd.Env, want) {
+			t.Fatalf("the api's environment does not hold %s: %q", want, a.cmd.Env)
+		}
+	}
+	host, httpPort := a.httpAddr(t)
+	busPort, nodePort := a.busPort(t), a.nodePort(t)
+	// TC-988-31: three nonzero ports (listenAddr refuses 0), all different,
+	// and the -1 reached the bus rather than being mapped to 4222.
+	if httpPort == busPort || httpPort == nodePort || busPort == nodePort {
+		t.Fatalf("the api logged HTTP %d, bus %d and node %d: want three different ports", httpPort, busPort, nodePort)
+	}
+	if busPort == bus.DefaultPort {
+		t.Fatalf("the bus listens on %d: RASPUTIN_NATS_PORT=-1 was mapped to the default", busPort)
+	}
+	// TC-988-33: the configured host is kept, and the logged port answers.
+	if host != "127.0.0.1" {
+		t.Fatalf("the HTTP line names host %q, want the configured 127.0.0.1", host)
+	}
+	resp, _, err := a.do(http.MethodGet, "/healthz", "")
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /healthz on the logged HTTP port %d = (%v, %v), want 200", httpPort, resp, err)
+	}
 }
 
 func (a *apiProc) hasExited() bool {
@@ -212,10 +360,10 @@ type apiOpts struct {
 	// bin runs another api binary (the compatibility tests' floor api); ""
 	// builds this workspace's.
 	bin string
-	// dataDir and the two ports reuse a previous api's (the swap to a new
-	// build); zero values are fresh.
-	dataDir            string
-	httpPort, natsPort int
+	// dataDir and natsPort reuse a previous api's (the swap to a new build);
+	// zero values are fresh.
+	dataDir  string
+	natsPort int
 	// noSeed leaves the data dir alone: no key, no settings, no session. An
 	// older api then creates its own database rather than open one a newer
 	// build's schema already migrated; with no key it generates one.
@@ -308,22 +456,29 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 
 // runAPI starts the api binary on dataDir and waits for its HTTP listener,
 // unless o.noWait.
+//
+// The api built from this workspace binds HTTP and the node listener on :0
+// and the bus on -1 (any free port), or on o.natsPort when one is given; the
+// test reads the ports back from its log. The floor api cannot report a port
+// it picked, so it alone gets ports chosen in advance, in one draw.
 func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 	t.Helper()
-	httpPort, natsPort := o.httpPort, o.natsPort
-	// One draw for every port this api needs, so no two are the same and none
-	// repeats a port carried over from the previous api.
-	fresh := freePorts(t, 3, httpPort, natsPort)
-	if httpPort == 0 {
-		httpPort = fresh[1]
+	natsPort := o.natsPort
+	httpAddr, ingestAddr := "127.0.0.1:0", "127.0.0.1:0"
+	if o.bin != "" {
+		fresh := freePorts(t, 3, natsPort)
+		if natsPort == 0 {
+			natsPort = fresh[2]
+		}
+		httpAddr, ingestAddr = fmt.Sprintf("127.0.0.1:%d", fresh[1]), fmt.Sprintf("127.0.0.1:%d", fresh[0])
 	}
-	if natsPort == 0 {
-		natsPort = fresh[2]
+	natsPortEnv := strconv.Itoa(bus.AnyPort)
+	if natsPort != 0 {
+		natsPortEnv = strconv.Itoa(natsPort)
 	}
-	ingestPort := fresh[0]
 	a := &apiProc{
 		dataDir:  dataDir,
-		httpBase: fmt.Sprintf("http://127.0.0.1:%d", httpPort),
+		floor:    o.bin != "",
 		natsPort: natsPort,
 		cookie:   &http.Cookie{Name: "rasputin-session", Value: sessToken},
 		exited:   make(chan struct{}),
@@ -338,10 +493,10 @@ func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + dataDir,
 		"RASPUTIN_DATA_DIR=" + dataDir,
-		"RASPUTIN_HTTP_ADDR=" + fmt.Sprintf("127.0.0.1:%d", httpPort),
+		"RASPUTIN_HTTP_ADDR=" + httpAddr,
 		"RASPUTIN_NATS_HOST=127.0.0.1",
-		"RASPUTIN_NATS_PORT=" + fmt.Sprint(natsPort),
-		"RASPUTIN_OBS_INGEST_ADDR=" + fmt.Sprintf("127.0.0.1:%d", ingestPort),
+		"RASPUTIN_NATS_PORT=" + natsPortEnv,
+		"RASPUTIN_OBS_INGEST_ADDR=" + ingestAddr,
 		"RASPUTIN_SELF_NODE_ID=cp1",
 		"RASPUTIN_MESH_BACKEND=mock",
 		"RASPUTIN_DNS=off",
@@ -391,7 +546,7 @@ func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 		}
 	})
 	if !o.noWait {
-		a.waitLog(t, "the HTTP listener", "rasputin-api: http listening on")
+		a.waitHTTP(t)
 	}
 	return a
 }
@@ -466,12 +621,15 @@ func TestFunctional_RealAPIProcess_StaleModeChangesNothing(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api, pin := startAPI(t, apiOpts{recordMode: "offer", env: tc.env})
-			api.waitLog(t, "the bus listener", "rasputin-api: bus listening")
-			bustlstest.AssertPlaintextRefused(t, fmt.Sprintf("127.0.0.1:%d", api.natsPort))
+			assertOSChosenPorts(t, api)
+			// TC-988-32: plaintext is refused, and the pinned agent joins, on
+			// the bus port the api's log names.
+			busPort := api.busPort(t)
+			bustlstest.AssertPlaintextRefused(t, fmt.Sprintf("127.0.0.1:%d", busPort))
 
 			// And the bus works: a node seeded with the pin joins.
 			id := tc.node
-			a := startAgent(t, agentOpts{id: id, url: fmt.Sprintf("nats://127.0.0.1:%d", api.natsPort), token: api.mint(t, id), pin: pin})
+			a := startAgent(t, agentOpts{id: id, url: fmt.Sprintf("nats://127.0.0.1:%d", busPort), token: api.mint(t, id), pin: pin})
 			a.waitLog(t, "the node on the bus", "agent/bus: connected")
 
 			if got := api.count("level=WARN", "RASPUTIN_BUS_TLS is set but no longer read"); got != tc.wantWarns {
@@ -501,18 +659,27 @@ func TestFunctional_RealAPIProcess_StaleModeChangesNothing(t *testing.T) {
 // busDown is the shared body of TC-517-30 and TC-517-44: the api keeps
 // running with no bus listener, a crit alert naming failedFile, coded 503s on
 // GET /api/bus/tls and mint, no token minted, and no listener claimed.
+//
+// TC-988-34: the test holds the bus port P from before the api starts until
+// after it has stopped (the listener's Close is registered before the api's
+// stop, and cleanups run last-in first-out). A bus that tried to bind P would
+// fail to start and end the api before its HTTP listener, so an api that is
+// up, answering and still running has no bus listener. P is never released,
+// so no other socket can be mistaken for one.
 func busDown(t *testing.T, o apiOpts, failedFile, otherFile, logWhat string) {
 	t.Helper()
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = held.Close() })
+	o.natsPort = held.Addr().(*net.TCPAddr).Port
 	api, _ := startAPI(t, o)
 	api.waitLog(t, logWhat, logWhat, "file=", failedFile)
 
 	resp, _, err := api.do(http.MethodGet, "/healthz", "")
 	if err != nil || resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET /healthz = (%v, %v), want 200", resp, err)
-	}
-	if c, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", api.natsPort), 2*time.Second); err == nil {
-		_ = c.Close()
-		t.Fatalf("something accepts on the bus port %d with the bus down", api.natsPort)
 	}
 
 	resp, body, err := api.do(http.MethodGet, "/api/alerts", "")
