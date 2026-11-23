@@ -34,6 +34,7 @@ import (
 	"github.com/chromedp/cdproto/webauthn"
 	"github.com/chromedp/chromedp"
 
+	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
@@ -218,7 +219,15 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, stubPage)
 	})
-	r.sites, err = env.ServeDoors(r.home, r.app, stub, stub)
+	sites, err := apipkg.NewSites(apipkg.SitesConfig{
+		Console: stub, Home: r.home, App: r.app,
+		HomeHost: table.Home.Host, AppHost: table.App.Host, RequestLifetime: time.Minute, Now: time.Now,
+		IDs: func() string { return fmt.Sprintf("rules-site-%d", r.ids.Add(1)) }, Log: log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.sites, err = env.ServeDoors(sites, stub)
 	if err != nil {
 		t.Fatal(err)
 	}
