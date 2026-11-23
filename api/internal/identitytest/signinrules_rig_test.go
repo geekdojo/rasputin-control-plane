@@ -91,12 +91,15 @@ func (rulesApps) AppClient(_ context.Context, id string) (policy.AppClient, bool
 	return policy.AppClient{}, ok, nil
 }
 
-// doorBindings are TestDoor's bindings: its four app clients are bound and
-// unpaused; any other client outside the door table is paused, as a policy
+// doorBindings are TestDoor's bindings: the door table's clients and its
+// four app clients are unpaused; any other client is paused, as a policy
 // built without Bindings would pause it.
-type doorBindings struct{}
+type doorBindings struct{ table doors.Table }
 
-func (doorBindings) ClientPaused(id string) bool {
+func (b doorBindings) ClientPaused(id string) bool {
+	if slices.Contains(b.table.Home.Clients, id) || slices.Contains(b.table.App.Clients, id) {
+		return false
+	}
 	_, ok, _ := doorApps{}.AppClient(context.Background(), id)
 	return !ok
 }

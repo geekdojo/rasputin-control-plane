@@ -281,7 +281,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: doorApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Now: time.Now, Bindings: doorBindings{}})
+		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Now: time.Now, Bindings: doorBindings{table: table}})
 	if err != nil {
 		t.Fatal(err)
 	}
