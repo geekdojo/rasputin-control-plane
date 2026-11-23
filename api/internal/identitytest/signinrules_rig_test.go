@@ -506,8 +506,9 @@ func (k *keyTab) rpNames() []string {
 }
 
 // keyTab opens a tab at origin with a virtual authenticator whose
-// simulated presence is held back until a step gives it.
-func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin string) *keyTab {
+// simulated presence is held back until a step gives it: a platform one,
+// or with securityKey a USB one, which a security-key request asks for.
+func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin string, securityKey ...bool) *keyTab {
 	t.Helper()
 	k := &keyTab{tab: newTab(t, browserCtx, origin)}
 	k.step(chromedp.ExposeFunc("rasputinRPSpy", func(_ context.Context, name string) (bool, error) {
@@ -524,7 +525,11 @@ func (r *rulesRig) keyTab(t *testing.T, browserCtx context.Context, origin strin
 	if _, err := chromedp.Call(ctx, webauthn.Enable, webauthn.EnableParams{EnableUI: new(false)}); err != nil {
 		t.Fatal(err)
 	}
-	k.auth = addAuthenticator(t, k.tab, webauthn.AuthenticatorTransportInternal)
+	transport := webauthn.AuthenticatorTransportInternal
+	if len(securityKey) > 0 && securityKey[0] {
+		transport = webauthn.AuthenticatorTransportUsb
+	}
+	k.auth = addAuthenticator(t, k.tab, transport)
 	setPresence(t, k.tab, k.auth, false)
 	return k
 }
@@ -551,8 +556,8 @@ func (r *rulesRig) registerKey(t *testing.T, k *keyTab, a account, auth string, 
 		t.Fatalf("the sign-in opened %q", id)
 	}
 	r.settle(t)
-	if got := signIn(k.tab, a.name, a.pw); got != "login-webauthn-register" {
-		t.Fatalf("the registration action led to %q, want login-webauthn-register", got)
+	if got := r.tabSignIn(k, a); got != "login-webauthn-register" {
+		t.Fatalf("the registration action led to %q (%q), want login-webauthn-register", got, alertOf(k.tab))
 	}
 	setPresence(t, k.tab, k.auth, true)
 	k.step(chromedp.SetValue(chromedp.ID("rasputin-passkey-name"), "Rules key"), "type the NAME")
@@ -601,12 +606,29 @@ func (r *rulesRig) passwordThenKey(t *testing.T, k *keyTab, a account, auth stri
 		t.Fatalf("the sign-in opened %q", id)
 	}
 	r.settle(t)
-	got := signIn(k.tab, a.name, a.pw)
+	got := r.tabSignIn(k, a)
 	if !answer || got != "login-webauthn-authenticate" {
 		return got
 	}
 	r.settle(t)
 	return pressPasskey(t, k.tab, k.auth)
+}
+
+// tabSignIn submits the sign-in page with a's password, and its name when
+// the page asks for one: an app-door session the tab holds keeps the
+// person and asks for the password alone.
+func (r *rulesRig) tabSignIn(k *keyTab, a account) string {
+	k.t.Helper()
+	k.step(chromedp.Evaluate[chromedp.Void](`(() => {
+  const u = document.getElementById('username'); if (u) u.value = `+jsString(a.name)+`;
+  document.getElementById('password').value = `+jsString(string(a.pw.Reveal()))+`;
+})()`), "fill the form")
+	return k.submit(chromedp.Click(chromedp.CSS("#kc-login")), "sign in")
+}
+
+// alertOf is the page's alert or error sentence, for a failure message.
+func alertOf(tb *tab) string {
+	return evalT[string](tb, `((document.querySelector('.rasp-alert-text') || document.querySelector('.kc-feedback-text') || {}).textContent || '').trim()`)
 }
 
 // codeOf is the code in a callback URL.

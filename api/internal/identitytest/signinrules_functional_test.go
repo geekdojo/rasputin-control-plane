@@ -717,7 +717,7 @@ func (r *rulesRig) tc12(t *testing.T) {
 		}
 		r.passkeyAlone(t, k, d.auth())
 		sk := r.account(t, "tc12-key-"+strings.Fields(d.name)[0], nil)
-		k2 := r.keyTab(t, bctx, origin)
+		k2 := r.keyTab(t, bctx, origin, true)
 		r.registerKey(t, k2, sk, d.auth(), true)
 		if got := r.passwordThenKey(t, k2, sk, d.auth(), true); got != "rasputin-stub" {
 			t.Errorf("%s: password and security key led to %q", d.name, got)
@@ -822,8 +822,19 @@ func (r *rulesRig) upstreamClient(t *testing.T) *goClient {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &goClient{t: t, jar: jar, c: &http.Client{Transport: tr, Jar: jar,
+	return &goClient{t: t, jar: jar, c: &http.Client{Transport: forwardedFor{tr}, Jar: jar,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}
+}
+
+// forwardedFor names a documentation address as the client, which Keycloak
+// in door mode takes from loopback, so the failures land on that source in
+// the drained events and never on 127.0.0.1, the browser's.
+type forwardedFor struct{ inner http.RoundTripper }
+
+func (f forwardedFor) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("X-Forwarded-For", "192.0.2.15")
+	return f.inner.RoundTrip(req)
 }
 
 // TC-987-15: 99 wrong passwords, sent straight to Keycloak so the doors'
