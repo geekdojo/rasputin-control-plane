@@ -53,6 +53,10 @@ type doorMountDeps struct {
 	readiness policy.Readiness
 	throttle  *policy.Throttle
 	version   *door.ResourceVersion
+	// bindings is the identity converger's client pause
+	// (identityConverge.doorBindings, geekdojo/geekdojo-brain#987); nil
+	// pauses every client outside the door table.
+	bindings policy.Bindings
 	// identityCA is the identity CA's certificate: the relay trusts it alone
 	// and presents the door's client leaf from dataDir.
 	identityCA    []byte
@@ -111,14 +115,7 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("the relay's client TLS: %w", err)
 	}
-	pol, err := policy.New(policy.Deps{
-		Table: d.table, Readiness: d.readiness, Throttle: d.throttle,
-		// The fail-closed stand-ins until Identity 7.3 (app clients), the
-		// launcher (actions) and Identity 4.8 (registration) wire theirs.
-		AppClients: policy.NoAppClients{}, Actions: policy.NoActionsIssued{},
-		Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{},
-		Now: d.now,
-	})
+	pol, err := policy.New(doorPolicyDeps(d))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -128,6 +125,18 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 		Theme: allow, Assets: os.DirFS(filepath.Join(d.themeDir, "login", "resources")),
 		Version: d.version, InstallName: d.installName, Dirty: d.dirty, IDs: d.ids, Log: d.log,
 	})
+}
+
+// doorPolicyDeps are the door policy's collaborators.
+func doorPolicyDeps(d doorMountDeps) policy.Deps {
+	return policy.Deps{
+		Table: d.table, Readiness: d.readiness, Throttle: d.throttle,
+		// The fail-closed stand-ins until Identity 7.3 (app clients), the
+		// launcher (actions) and Identity 4.8 (registration) wire theirs.
+		AppClients: policy.NoAppClients{}, Actions: policy.NoActionsIssued{},
+		Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{},
+		Now: d.now, Bindings: d.bindings,
+	}
 }
 
 // doorThrottle is startEvents' throttle, nil outside keycloak or before

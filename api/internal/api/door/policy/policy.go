@@ -85,9 +85,8 @@ type Deps struct {
 	Waiting    Waiting
 	Now        func() time.Time
 	// Bindings pauses clients bound stricter than the realm default while
-	// the rules differ. Nil pauses no client: until Identity 7.3 registers
-	// app clients, no client is bound stricter than the realm default, and
-	// 7.3 wires the converger here when it does.
+	// the rules differ. Nil fails closed: every client outside the door
+	// table is paused (ERR-CLOSED).
 	Bindings Bindings
 }
 
@@ -119,15 +118,25 @@ func New(d Deps) (*Service, error) {
 		return nil, errors.New("policy: Deps." + missing + " is missing")
 	}
 	if d.Bindings == nil {
-		d.Bindings = noneBound{}
+		d.Bindings = newPauseAppClients(d.Table)
 	}
 	return &Service{d: d}, nil
 }
 
-// noneBound pauses no client.
-type noneBound struct{}
+// pauseAppClients is the Bindings a policy built without one gets: it
+// pauses every client outside the door table, whose bindings it cannot
+// read, and none of the door table's own.
+type pauseAppClients map[string]bool
 
-func (noneBound) ClientPaused(string) bool { return false }
+func newPauseAppClients(t doors.Table) pauseAppClients {
+	own := pauseAppClients{}
+	for _, c := range append(append([]string{}, t.Home.Clients...), t.App.Clients...) {
+		own[c] = true
+	}
+	return own
+}
+
+func (own pauseAppClients) ClientPaused(clientID string) bool { return !own[clientID] }
 
 // Decision is Check's answer.
 type Decision struct {

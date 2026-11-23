@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
@@ -92,6 +93,16 @@ func wireControlGate(svc controlGated, w identityConverge) {
 		return
 	}
 	svc.SetControlGate(w.converger.ControlGate, w.log)
+}
+
+// doorBindings is the converger as the door policy's client pause, or nil
+// outside keycloak, which the policy answers by pausing every client
+// outside the door table (geekdojo/geekdojo-brain#987, F-987-18).
+func (w identityConverge) doorBindings() policy.Bindings {
+	if w.converger == nil {
+		return nil
+	}
+	return w.converger
 }
 
 // convergeSinks are the converger's sinks on the sign-in history drain: its

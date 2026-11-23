@@ -2153,6 +2153,7 @@ func main() {
 		homeDoor, appDoorH := mountDoors(ctx, doorMountDeps{
 			mode: identityW.mode, table: doorTable, doorsOn: doorsOn, readiness: doorReady,
 			throttle: identityState.events.doorThrottle(), version: identityState.events.doorVersion(),
+			bindings:   identityConv.doorBindings(),
 			identityCA: identityCAPEM(identityCA), dataDir: dataDir, upstream: identityW.upstream, themeDir: identityTheme,
 			consoleOrigin: "https://" + clusterHostname(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },

@@ -184,3 +184,26 @@ func TestClockSyncFact(t *testing.T) {
 		t.Error("no timesyncd: the TLS gate does not trust the clock")
 	}
 }
+
+// F-987-18: under keycloak the mounted door's policy gets the converger as
+// its Bindings; in every other mode it gets nil, which the policy answers by
+// pausing every client outside the door table.
+func TestDoorPolicy_BindingsAreTheConverger(t *testing.T) {
+	st, err := identityStateWiring(identityDeps(t, identityModeKeycloak, &identityCounts{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := identityConvergeWiring(convergeDeps(t, identityModeKeycloak, &st))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := doorPolicyDeps(doorMountDeps{bindings: w.doorBindings()}).Bindings; b == nil || b != any(w.converger) {
+		t.Errorf("keycloak: the door policy's Bindings = %v, want the converger", b)
+	}
+	for _, mode := range []string{identityModeOff, identityModeMock} {
+		off, _ := identityConvergeWiring(identityConvergeDeps{mode: mode})
+		if b := doorPolicyDeps(doorMountDeps{bindings: off.doorBindings()}).Bindings; b != nil {
+			t.Errorf("%s: the door policy's Bindings = %v, want nil", mode, b)
+		}
+	}
+}

@@ -19,7 +19,8 @@ func (a someApps) AppClient(_ context.Context, id string) (AppClient, bool, erro
 
 // TC-987-33: a paused client's authorization request answers 503 with its
 // sentence and reason; its other routes, and other clients, are unaffected;
-// with no Bindings no client is paused.
+// with nil Bindings an app client outside the door table is paused and the
+// door table's own clients are not.
 func TestCheck_PausedClient(t *testing.T) {
 	th, _ := newThrottle(t)
 	deps := Deps{Table: table(t), Readiness: okReady{}, Throttle: th, AppClients: someApps{"strict": true, "plain": true},
@@ -51,7 +52,21 @@ func TestCheck_PausedClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if d := open.Check(context.Background(), auth("strict")); !d.Allow {
-		t.Errorf("with no Bindings a client was refused: %+v", d)
+	for _, c := range []string{"strict", "plain"} {
+		if d := open.Check(context.Background(), auth(c)); d.Allow || d.Reason != ReasonClientPaused {
+			t.Errorf("with nil Bindings app client %q was not paused: %+v", c, d)
+		}
+	}
+	for _, door := range []struct {
+		kind    Kind
+		clients []string
+	}{{Home, deps.Table.Home.Clients}, {App, deps.Table.App.Clients}} {
+		for _, c := range door.clients {
+			r := Request{Door: door.kind, Route: RouteAuth, Method: http.MethodGet, ClientIDs: []string{c},
+				Params: map[string][]string{"response_type": {"code"}}}
+			if d := open.Check(context.Background(), r); d.Reason == ReasonClientPaused {
+				t.Errorf("with nil Bindings door-table client %q was paused: %+v", c, d)
+			}
+		}
 	}
 }

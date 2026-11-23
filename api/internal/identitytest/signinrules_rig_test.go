@@ -91,6 +91,16 @@ func (rulesApps) AppClient(_ context.Context, id string) (policy.AppClient, bool
 	return policy.AppClient{}, ok, nil
 }
 
+// doorBindings are TestDoor's bindings: its four app clients are bound and
+// unpaused; any other client outside the door table is paused, as a policy
+// built without Bindings would pause it.
+type doorBindings struct{}
+
+func (doorBindings) ClientPaused(id string) bool {
+	_, ok, _ := doorApps{}.AppClient(context.Background(), id)
+	return !ok
+}
+
 // recordingTransport counts each authorization request the door forwarded,
 // by client.
 type recordingTransport struct {
