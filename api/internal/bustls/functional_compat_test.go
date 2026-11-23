@@ -61,7 +61,7 @@ func TestCompat_FloorAgentOnTheNewAPI(t *testing.T) {
 // TC-517-32: the new agent on the floor release's api, which is at require.
 // It joins and registers; that api still wants busTls before it takes node
 // keys, so it logs that it refuses them and records none. Swapping the api for
-// this release's build — same data dir, same ports — records them on the
+// this release's build — same data dir, same bus port — records them on the
 // agent's next registration, with the agent process never restarted.
 func TestCompat_NewAgentOnTheFloorAPI(t *testing.T) {
 	oldAPI := oldBinary(t, "RASPUTIN_BUSCOMPAT_OLD_API")
@@ -90,8 +90,10 @@ func TestCompat_NewAgentOnTheFloorAPI(t *testing.T) {
 		t.Fatalf("the floor api recorded keys %v it logged it refused", keys)
 	}
 
-	// The swap: this release's api on the same data dir and ports.
-	opts.bin, opts.dataDir, opts.httpPort, opts.natsPort = "", api.dataDir, httpPortOf(api), api.natsPort
+	// The swap: this release's api on the same data dir and the bus port the
+	// floor api bound, which the agent reconnects to (TC-988-36). The agent
+	// dials only the bus, so the new api's HTTP port is the OS's choice.
+	opts.bin, opts.dataDir, opts.natsPort = "", api.dataDir, api.busPort(t)
 	opts.preseed = nil
 	api2, _ := startAPI(t, opts)
 	a.waitLogSince(t, since, "the same agent back on the new api", "agent/bus: reconnected")
@@ -121,13 +123,6 @@ func nodeKeysIn(t *testing.T, dataDir, id string) proto.NodeKeys {
 }
 
 func itoa(n int) string { return strconv.Itoa(n) }
-
-// httpPortOf is the HTTP port an apiProc listens on.
-func httpPortOf(a *apiProc) int {
-	_, port, _ := strings.Cut(strings.TrimPrefix(a.httpBase, "http://"), ":")
-	n, _ := strconv.Atoi(port)
-	return n
-}
 
 // waitRecorded blocks until id's registration has been written to the node
 // row, which is the fact inventory's post-write hook reports. It lives here,

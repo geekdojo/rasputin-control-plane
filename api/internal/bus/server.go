@@ -35,7 +35,7 @@ type Server struct {
 // Config controls the embedded NATS server's listen address and storage.
 type Config struct {
 	Host     string // default 127.0.0.1
-	Port     int    // default 4222
+	Port     int    // default DefaultPort; AnyPort for any free port
 	StoreDir string // JetStream storage root; must exist and be writable
 
 	// AuthEnforce turns on NATS auth callout. When false (default) the bus is
@@ -87,7 +87,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		cfg.Host = "127.0.0.1"
 	}
 	if cfg.Port == 0 {
-		cfg.Port = 4222
+		cfg.Port = DefaultPort
 	}
 	if cfg.StoreDir == "" {
 		return nil, fmt.Errorf("bus: StoreDir is required")

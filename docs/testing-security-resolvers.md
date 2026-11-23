@@ -228,10 +228,10 @@ cookie_warns() {
 
 ```bash
 start_api RASPUTIN_RP_ORIGINS=" , "
-wait_for_log "http listening on 127.0.0.1:$HTTP_PORT"
+wait_for_log "http listening\" addr=127.0.0.1:$HTTP_PORT"
 grep 'rasputin-api: cluster identity:' "$LOG"
 grep "node listener up" "$LOG" | grep "addr=127.0.0.1:$OBS_PORT"
-grep "http listening on 127.0.0.1:$HTTP_PORT" "$LOG"
+grep "http listening" "$LOG" | grep "addr=127.0.0.1:$HTTP_PORT"
 grep -E 'rasputin-api: bus:|node listener:|level=ERROR|panic' "$LOG" || echo "no fatal line"
 lsof -a -p "$PID" -iTCP -sTCP:LISTEN -nP
 echo "assigned: HTTP $HTTP_PORT, NATS $NATS_PORT, obs $OBS_PORT"
@@ -273,7 +273,7 @@ so no mesh or certificate setup is needed; `curl -k` accepts the self-minted lea
 ```bash
 for setting in ture on false unset; do
   if [ "$setting" = unset ]; then start_api; else start_api RASPUTIN_SECURE_COOKIES="$setting"; fi
-  wait_for_log "http listening on 127.0.0.1:$HTTP_PORT" && grep -q 'rasputin-api: cluster identity:' "$LOG" || { stop_api; break; }
+  wait_for_log "http listening\" addr=127.0.0.1:$HTTP_PORT" && grep -q 'rasputin-api: cluster identity:' "$LOG" || { stop_api; break; }
   echo "== RASPUTIN_SECURE_COOKIES=$setting, plain HTTP"
   pending_cookie http "$HTTP_PORT"
   cookie_warns || echo "(no WARN)"
