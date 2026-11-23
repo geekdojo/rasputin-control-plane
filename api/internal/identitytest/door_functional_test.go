@@ -813,11 +813,14 @@ func (r *doorRig) so10(t *testing.T, browserCtx context.Context) {
 	if framed {
 		t.Errorf("the console framed the home door's page: its frames %q (console log %q)", frames, errs)
 	}
-	// The block itself, positively: the browser refused the home door's page
+	// The block itself, positively: the browser blocked the home door's page
 	// in the frame for its frame-ancestors, and says so in the embedding
-	// page's console.
+	// page's console ("Framing 'https://sso-ci.local/' violates the following
+	// Content Security Policy directive: "frame-ancestors 'none'". The
+	// request has been blocked.", in the pinned Chrome's words).
 	refused := slices.ContainsFunc(errs, func(e string) bool {
-		return strings.Contains(e, "Refused to frame") && strings.Contains(e, r.sites.Table.Home.Host) && strings.Contains(e, "frame-ancestors")
+		return strings.Contains(e, r.sites.Table.Home.Host) && strings.Contains(e, "frame-ancestors 'none'") &&
+			(strings.Contains(e, "has been blocked") || strings.Contains(e, "Refused to frame"))
 	})
 	if !refused {
 		t.Errorf("the browser did not refuse the console's frame of the home door for its frame-ancestors: frames %q, console log %q", frames, errs)
@@ -897,7 +900,9 @@ var resourceVersionRE = regexp.MustCompile(`/resources/([^/]+)/(login|common)/`)
 // headers, no inline script, no policy violation in the walk, the resource
 // version the live server serves, and no /resources/ redirect.
 func (r *doorRig) so11(t *testing.T, browserCtx context.Context) {
-	name, pw := r.user(t, "door-walk")
+	// r.user returns the user's id; the sign-in is by name.
+	const name = "door-walk"
+	_, pw := r.user(t, name)
 	for _, d := range []struct {
 		host, client, reset, policy string
 	}{
@@ -1284,21 +1289,32 @@ func (r *doorRig) ts26(t *testing.T, browserCtx context.Context) {
 		t.Fatalf("registering the passkey led to %q", got)
 	}
 
-	// Four wrong passwords from 127.0.0.1, one at a time.
+	// Wrong passwords from 127.0.0.1, one at a time, until it waits: the
+	// fourth failure from an address sets its first wait (D22), so it waits
+	// after at most four. The browser shares 127.0.0.1, so an earlier case's
+	// failure there counts too.
 	g := r.client(t, "127.0.0.1")
 	page := g.follow(r.homeAuth(baselineConsole, nil))
-	for i := range 4 {
+	waiting := false
+	for i := 0; i <= 4 && !waiting; i++ {
 		r.settle(t)
 		a := g.credentialPost(page, name, "wrong-"+fmt.Sprint(i))
-		if a.status != http.StatusOK || a.pageID() != "login-login" {
+		switch {
+		case a.status == http.StatusTooManyRequests && i > 0:
+			waiting = true
+		case a.status != http.StatusOK || a.pageID() != "login-login":
 			t.Fatalf("wrong password %d answered %d %q", i+1, a.status, a.pageID())
+		default:
+			page = a
 		}
-		page = a
+	}
+	if !waiting {
+		t.Fatal("127.0.0.1 was not waiting after four wrong passwords")
 	}
 	r.settle(t)
 	a := g.credentialPost(page, name, string(pw.Reveal()))
 	if a.status != http.StatusTooManyRequests || a.header.Get("Retry-After") == "" {
-		t.Fatalf("a post from the waiting address answered %d (Retry-After %q), want 429", a.status, a.header.Get("Retry-After"))
+		t.Fatalf("the right password from the waiting address answered %d (Retry-After %q), want 429", a.status, a.header.Get("Retry-After"))
 	}
 	// The account from another address.
 	r.client(t, "127.0.0.2").signIn(r.homeAuth(baselineConsole, nil), name, pw).code(t)
@@ -1410,15 +1426,21 @@ func (r *doorRig) kEvents(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+	// The test's own Admin API token is minted before the drain settles: its
+	// client_credentials login stores a CLIENT_LOGIN event (saved by
+	// default at 26.8.2), which the settle's pass then takes. Its reads below
+	// store nothing.
+	api := r.admin(t)
 	r.settle(t)
 	// The stored events, read page by page.
 	type stored struct {
 		ID   string `json:"id"`
 		Time int64  `json:"time"`
+		Type string `json:"type"`
 	}
 	var all []stored
 	for first := 0; ; first += 100 {
-		_, out := r.admin(t).must(http.StatusOK, http.MethodGet, fmt.Sprintf("/events?first=%d&max=100", first), nil)
+		_, out := api.must(http.StatusOK, http.MethodGet, fmt.Sprintf("/events?first=%d&max=100", first), nil)
 		var pageOf []stored
 		if err := json.Unmarshal(out, &pageOf); err != nil {
 			t.Fatal(err)
@@ -1447,7 +1469,7 @@ func (r *doorRig) kEvents(t *testing.T) {
 			t.Fatal("a stored event carries no id")
 		}
 		if n := delivered[e.ID]; n != 1 {
-			t.Errorf("event %s reached the sink %d times, want once", e.ID, n)
+			t.Errorf("event %s (%s at %d) reached the sink %d times, want once", e.ID, e.Type, e.Time, n)
 		}
 		if i > 0 && all[i-1].Time == e.Time {
 			sameMS++
