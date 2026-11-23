@@ -1,0 +1,146 @@
+{
+  "attributes": [
+    {
+      "name": "username",
+      "validations": {
+        "length": {
+          "max": 32,
+          "min": 2
+        },
+        "pattern": {
+          "error-message": "A sign-in name is 2 to 32 lowercase letters, digits, dots, dashes or underscores, and starts with a letter.",
+          "pattern": "^[a-z][a-z0-9._-]{1,31}$"
+        },
+        "up-username-not-idn-homograph": {},
+        "username-prohibited-characters": {}
+      }
+    },
+    {
+      "displayName": "${email}",
+      "name": "email"
+    },
+    {
+      "displayName": "Name",
+      "name": "firstName"
+    },
+    {
+      "displayName": "Pet",
+      "name": "pet",
+      "permissions": {
+        "edit": [
+          "user"
+        ],
+        "view": [
+          "user"
+        ]
+      }
+    },
+    {
+      "name": "claim_x",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_app_role",
+      "multivalued": false,
+      "name": "rasputin_app_role",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_network",
+      "multivalued": true,
+      "name": "rasputin_network",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_second_step_any",
+      "multivalued": false,
+      "name": "rasputin_second_step_any",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_second_step_app",
+      "multivalued": false,
+      "name": "rasputin_second_step_app",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_second_step_home",
+      "multivalued": false,
+      "name": "rasputin_second_step_home",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_webauthn_app",
+      "multivalued": false,
+      "name": "rasputin_webauthn_app",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
+      "displayName": "rasputin_webauthn_home",
+      "multivalued": false,
+      "name": "rasputin_webauthn_home",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    }
+  ],
+  "groups": [
+    {
+      "name": "g"
+    }
+  ]
+}

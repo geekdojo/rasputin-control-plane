@@ -142,8 +142,9 @@ On the CI runner (linux/amd64), by the self-test `selftest_functional_test.go`:
   land with the items whose CI cases need them; the vector file already carries their sections.
 - The ID token's signature. The client decodes the payload of a token it received over TLS from
   the issuer.
-- The baseline's sign-in flows. Its flow skeletons are empty and unbound until Identity 4.5
-  converges them, so the sign-ins above run Keycloak's default browser flow.
+- The baseline's sign-in flows in the self-test above: its flow skeletons are empty and unbound
+  until converge runs, so those sign-ins run Keycloak's default browser flow. The sign-in rules
+  are proved by their own test; see [The sign-in rules](#the-sign-in-rules).
 - Stability beyond the runs CI makes.
 - The Python client's conformance to the vector file, which is #967's.
 
@@ -544,3 +545,56 @@ What it does not prove:
 - a Keycloak upgrade that changes `<v>` on a running cluster: the re-learning on that fact is
   unit-tested in api/internal/api/door (TC-985-48);
 - the bench (IDT-03, TC-985-46).
+
+## The sign-in rules
+
+`TestSignInRules_AgainstPinnedKeycloak` (api/internal/identitytest/signinrules_functional_test.go
+and signinrules_rig_test.go, geekdojo/geekdojo-brain#987, TC-987-01 to TC-987-23) converges the
+sign-in rules that package `flows` defines into the imported baseline with the real converger, then
+signs in through both doors, built as in [The sign-in doors](#the-sign-in-doors), with the Go door
+client and, for the passkey and security-key cases, the pinned Chrome's virtual authenticator. The
+drain feeds the throttle, the marker writer and the converger's admin-event recheck, and the door
+policy pauses clients through the converger. Five test app clients are bound through `AppBindings`
+to the app-clients, administering, administrators-first and network-devices variants.
+`TestConverge_AgainstPinnedKeycloak` carries the upgrade path (TC-987-17).
+
+To run it locally, use the theme command in [The sign-in theme walk](#the-sign-in-theme-walk) with
+this test's name. It takes over six minutes: TC-987-20 opens a page first and answers it last.
+
+```sh
+RASPUTIN_IDENTITY_THEME=/tmp/rasputin-identity-theme RASPUTIN_IDENTITY_HOME="$HOME/.cache/rasputin-identity" \
+  RASPUTIN_IDENTITY_FUNCTIONAL=required go test -v -timeout 25m -run 'TestSignInRules_AgainstPinnedKeycloak' ./api/internal/identitytest/
+```
+
+What it proves at the pin (capability rows T130 to T136):
+
+- D8, C3, C22 and C29 at both doors: a privileged password alone is refused with its sentence
+  (TC-987-01); a household password alone signs in (TC-987-02); an other-door passkey never asks
+  for a step (TC-987-03); the authenticator app and a recovery code standing in, inside the second
+  step (TC-987-04, F-987-01's two second-step sub-flows); recovery codes alone never ask
+  (TC-987-09); a passkey alone at its door (TC-987-10); every method at each door, and the access
+  gate on a cookie sign-in (TC-987-12); no page asks for a step the account lacks, and no setup
+  page appears (TC-987-13).
+- The administering, administrators-first and network-devices variants with their sentences
+  (TC-987-08, TC-987-14).
+- The markers: written from drained credential events and by `BeforePrivilege` before a role
+  takes effect (TC-987-03, TC-987-11).
+- `CONFIGURE_TOTP` follows the clock-sync fact, with no critical alert while Rasputin applies it
+  (TC-987-05).
+- An Admin API edit of a flow raises the critical alert and locks control, the two-way serial
+  console's upgrade included, until converge restores it (TC-987-06); a stricter client whose
+  binding was removed is paused at the app door and never reaches Keycloak (TC-987-16).
+- Sign-in names, the password policy, sessions, email, the per-account backstop and the passkey
+  relying-party name (TC-987-07, TC-987-15, TC-987-18, TC-987-19).
+- A recovery-codes page left open 6 minutes, past Keycloak's stock 5-minute action timeout,
+  completes, and the realm holds 1800 seconds (TC-987-20).
+- K-ACR, K-PROFILE and K-DEFAULT-ACTION (TC-987-21 to TC-987-23).
+- The upgrade path: a baseline realm with the previous release's stored hash converges with no
+  critical alert and no ERROR, and a second run writes nothing (TC-987-17).
+
+What it does not prove:
+
+- the reset flow (Identity 4.10), clearing markers (4.12), the real privilege Jobs (4.8, 6.3),
+  console sign-in through Keycloak (4.7) or SAML at the door (9.x);
+- how real devices show the relying-party name;
+- the bench (IDT-02, in the `rasputin-identity-test` skill).

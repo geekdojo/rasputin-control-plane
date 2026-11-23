@@ -1,0 +1,307 @@
+[
+  {
+    "alias": "rasputin-signin-home-mesh-authenticate",
+    "requirement": "REQUIRED",
+    "children": [
+      {
+        "provider": "auth-cookie",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "alias": "rasputin-signin-home-mesh-sign-in",
+        "requirement": "ALTERNATIVE",
+        "children": [
+          {
+            "provider": "auth-username-password-form",
+            "requirement": "REQUIRED"
+          },
+          {
+            "alias": "rasputin-signin-home-mesh-second-step-webauthn",
+            "requirement": "CONDITIONAL",
+            "children": [
+              {
+                "provider": "conditional-credential",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-webauthn-no-passkey",
+                "config": {
+                  "credentials": "webauthn-passwordless",
+                  "included": "false"
+                }
+              },
+              {
+                "provider": "conditional-user-attribute",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-webauthn-marker",
+                "config": {
+                  "attribute_expected_value": "true",
+                  "attribute_name": "rasputin_second_step_home",
+                  "include_group_attributes": "false",
+                  "not": "false",
+                  "regex": "false"
+                }
+              },
+              {
+                "provider": "conditional-user-attribute",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-webauthn-door",
+                "config": {
+                  "attribute_expected_value": "true",
+                  "attribute_name": "rasputin_webauthn_home",
+                  "include_group_attributes": "false",
+                  "not": "false",
+                  "regex": "false"
+                }
+              },
+              {
+                "provider": "webauthn-authenticator-passwordless",
+                "requirement": "ALTERNATIVE"
+              },
+              {
+                "provider": "webauthn-authenticator",
+                "requirement": "ALTERNATIVE"
+              },
+              {
+                "provider": "auth-otp-form",
+                "requirement": "ALTERNATIVE"
+              },
+              {
+                "provider": "auth-recovery-authn-code-form",
+                "requirement": "ALTERNATIVE"
+              }
+            ]
+          },
+          {
+            "alias": "rasputin-signin-home-mesh-second-step-codes",
+            "requirement": "CONDITIONAL",
+            "children": [
+              {
+                "provider": "conditional-credential",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-codes-no-passkey",
+                "config": {
+                  "credentials": "webauthn-passwordless",
+                  "included": "false"
+                }
+              },
+              {
+                "provider": "conditional-user-attribute",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-codes-marker",
+                "config": {
+                  "attribute_expected_value": "true",
+                  "attribute_name": "rasputin_second_step_home",
+                  "include_group_attributes": "false",
+                  "not": "false",
+                  "regex": "false"
+                }
+              },
+              {
+                "provider": "conditional-user-attribute",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-second-step-codes-door",
+                "config": {
+                  "attribute_expected_value": "true",
+                  "attribute_name": "rasputin_webauthn_home",
+                  "include_group_attributes": "false",
+                  "not": "true",
+                  "regex": "false"
+                }
+              },
+              {
+                "provider": "conditional-user-configured",
+                "requirement": "REQUIRED"
+              },
+              {
+                "provider": "auth-otp-form",
+                "requirement": "ALTERNATIVE"
+              },
+              {
+                "provider": "auth-recovery-authn-code-form",
+                "requirement": "ALTERNATIVE"
+              }
+            ]
+          },
+          {
+            "alias": "rasputin-signin-home-mesh-privileged-admin",
+            "requirement": "CONDITIONAL",
+            "children": [
+              {
+                "provider": "conditional-user-role",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-admin-role",
+                "config": {
+                  "condUserRole": "rasputin-console.admin",
+                  "negate": "false"
+                }
+              },
+              {
+                "provider": "conditional-credential",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-admin-no-passkey",
+                "config": {
+                  "credentials": "webauthn-passwordless",
+                  "included": "false"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-admin-no-webauthn-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-webauthn"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-admin-no-codes-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-codes"
+                }
+              },
+              {
+                "provider": "deny-access-authenticator",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-admin-deny",
+                "config": {
+                  "denyErrorMessage": "This account signs in with two steps, and none of its second steps works here. Ask another administrator to reset your sign-in."
+                }
+              }
+            ]
+          },
+          {
+            "alias": "rasputin-signin-home-mesh-privileged-operator",
+            "requirement": "CONDITIONAL",
+            "children": [
+              {
+                "provider": "conditional-user-role",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-operator-role",
+                "config": {
+                  "condUserRole": "rasputin-console.operator",
+                  "negate": "false"
+                }
+              },
+              {
+                "provider": "conditional-credential",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-operator-no-passkey",
+                "config": {
+                  "credentials": "webauthn-passwordless",
+                  "included": "false"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-operator-no-webauthn-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-webauthn"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-operator-no-codes-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-codes"
+                }
+              },
+              {
+                "provider": "deny-access-authenticator",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-operator-deny",
+                "config": {
+                  "denyErrorMessage": "This account signs in with two steps, and none of its second steps works here. Ask another administrator to reset your sign-in."
+                }
+              }
+            ]
+          },
+          {
+            "alias": "rasputin-signin-home-mesh-privileged-gear-admin",
+            "requirement": "CONDITIONAL",
+            "children": [
+              {
+                "provider": "conditional-user-attribute",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-gear-admin-grant",
+                "config": {
+                  "attribute_expected_value": "^gear-admin$",
+                  "attribute_name": "rasputin_network",
+                  "include_group_attributes": "false",
+                  "not": "false",
+                  "regex": "true"
+                }
+              },
+              {
+                "provider": "conditional-credential",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-gear-admin-no-passkey",
+                "config": {
+                  "credentials": "webauthn-passwordless",
+                  "included": "false"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-gear-admin-no-webauthn-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-webauthn"
+                }
+              },
+              {
+                "provider": "conditional-sub-flow-executed",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-gear-admin-no-codes-step",
+                "config": {
+                  "check_result": "not-executed",
+                  "flow_to_check": "rasputin-signin-home-mesh-second-step-codes"
+                }
+              },
+              {
+                "provider": "deny-access-authenticator",
+                "requirement": "REQUIRED",
+                "configAlias": "rasputin-signin-home-mesh-privileged-gear-admin-deny",
+                "config": {
+                  "denyErrorMessage": "This account signs in with two steps, and none of its second steps works here. Ask another administrator to reset your sign-in."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-signin-home-mesh-access-gate",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-attribute",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-signin-home-mesh-access-gate-attribute",
+        "config": {
+          "attribute_expected_value": "^(user|admin)$",
+          "attribute_name": "rasputin_app_role",
+          "include_group_attributes": "false",
+          "not": "true",
+          "regex": "true"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-signin-home-mesh-access-gate-deny",
+        "config": {
+          "denyErrorMessage": "Your account doesn't have access to apps yet. Ask an administrator."
+        }
+      }
+    ]
+  }
+]

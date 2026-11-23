@@ -604,3 +604,25 @@ func TestSignal_Horizon(t *testing.T) {
 		t.Fatalf("horizon %d with nothing open, want now 300", h)
 	}
 }
+
+// TC-987-38: a user event's credential_type detail is its CredentialType,
+// empty without details, and the event key is unchanged by details.
+func TestUserEvent_CredentialType(t *testing.T) {
+	with := userRep{ID: "e1", Time: 5, Type: "UPDATE_CREDENTIAL", ClientID: "c", UserID: "u",
+		Details: map[string]string{"credential_type": "webauthn-passwordless"}}
+	without := with
+	without.Details = nil
+	if got := with.event().CredentialType; got != "webauthn-passwordless" {
+		t.Errorf("CredentialType = %q", got)
+	}
+	if got := without.event().CredentialType; got != "" {
+		t.Errorf("CredentialType without details = %q", got)
+	}
+	noID := with
+	noID.ID = ""
+	noIDBare := noID
+	noIDBare.Details = nil
+	if with.key() != without.key() || noID.key() != noIDBare.key() {
+		t.Error("details changed the event key")
+	}
+}

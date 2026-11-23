@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -109,10 +112,11 @@ type eventsMarks interface {
 }
 
 // startEvents builds the drain (and, with a door table, the throttle it
-// feeds) and the doors' resource version, binds them to the monitor's facts,
-// marks both for this start and runs them until ctx ends. It does nothing
-// outside keycloak.
-func (w identityState) startEvents(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, log *slog.Logger) {
+// feeds), the marker writer and the converger's recheck as its sinks, and
+// the doors' resource version, binds them to the monitor's facts, marks both
+// for this start and runs them until ctx ends. It does nothing outside
+// keycloak.
+func (w identityState) startEvents(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, log *slog.Logger) {
 	ev := w.events
 	if ev == nil || idw.mode != identityModeKeycloak || idw.dirty == nil {
 		return
@@ -127,16 +131,9 @@ func (w identityState) startEvents(ctx context.Context, idw identityWiring, mark
 			go rv.Run(ctx)
 		}
 	}
-	deps := events.Deps{Admin: idw.session, Marks: marks, Signal: idw.dirty, Realm: identityRealm, Log: log}
-	if tableErr == nil {
-		th, err := policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: time.Now})
-		if err != nil {
-			log.ErrorContext(ctx, "sign-in throttle not built", "component", "identity", "err", err.Error())
-		} else {
-			deps.UserSinks = append(deps.UserSinks, th)
-			deps.PassSinks = append(deps.PassSinks, th)
-			ev.throttle.Store(th)
-		}
+	deps, th := eventsDeps(ctx, idw, marks, table, tableErr, sinks, log)
+	if th != nil {
+		ev.throttle.Store(th)
 	}
 	d, err := events.New(deps)
 	if err != nil {
@@ -148,4 +145,50 @@ func (w identityState) startEvents(ctx context.Context, idw identityWiring, mark
 	ev.signal.Store(idw.dirty)
 	d.MarkDirty()
 	go d.Run(ctx)
+}
+
+// eventsDeps is the drain's collaborators: the throttle (with a door table)
+// as a user and pass sink, the marker writer as a user sink, and the
+// converger's sinks (geekdojo/geekdojo-brain#987). It returns the throttle
+// it built, nil for none. A part that cannot be built is logged and left
+// out.
+func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, log *slog.Logger) (events.Deps, *policy.Throttle) {
+	deps := events.Deps{Admin: idw.session, Marks: marks, Signal: idw.dirty, Realm: identityRealm, Log: log,
+		AdminSinks: sinks.admin, PassSinks: append([]events.PassSink{}, sinks.pass...)}
+	var th *policy.Throttle
+	if tableErr == nil {
+		var err error
+		th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: time.Now})
+		if err != nil {
+			th = nil
+			log.ErrorContext(ctx, "sign-in throttle not built", "component", "identity", "err", err.Error())
+		} else {
+			deps.UserSinks = append(deps.UserSinks, th)
+			deps.PassSinks = append(deps.PassSinks, th)
+		}
+	}
+	mw, err := markers.New(markers.Deps{Admin: idw.session, Realm: identityRealm, DoorOf: doorOf(table, tableErr), Log: log})
+	if err != nil {
+		log.ErrorContext(ctx, "sign-in marker writer not built", "component", "identity", "err", err.Error())
+	} else {
+		deps.UserSinks = append(deps.UserSinks, mw)
+	}
+	return deps, th
+}
+
+// doorOf is the door each client in the door table belongs to; with no
+// table, no client has one. App clients get theirs when Identity 7.3
+// registers them.
+func doorOf(table doors.Table, tableErr error) func(string) (flows.Door, bool) {
+	return func(client string) (flows.Door, bool) {
+		switch {
+		case tableErr != nil:
+			return "", false
+		case slices.Contains(table.Home.Clients, client):
+			return flows.DoorHome, true
+		case slices.Contains(table.App.Clients, client):
+			return flows.DoorApp, true
+		}
+		return "", false
+	}
 }

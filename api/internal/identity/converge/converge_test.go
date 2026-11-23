@@ -240,8 +240,8 @@ func TestRun_ClientsAndFallbackKeys(t *testing.T) {
 	}
 }
 
-// TC-981-06: a missing key provider and a blank WebAuthn entity name are
-// refused with zero writes; every failure fails with a fixed sentence and
+// TC-981-06: a missing key provider is refused with zero writes (a blank
+// WebAuthn entity name as read is now repaired: TC-987-40); every failure fails with a fixed sentence and
 // stores no hash.
 func TestRun_FailurePaths(t *testing.T) {
 	down := &idclient.Error{Op: "admin", Path: realmPath, Status: 503, Kind: idclient.ErrUnreachable}
@@ -255,10 +255,6 @@ func TestRun_FailurePaths(t *testing.T) {
 			r.kc.realm["displayName"] = "drifted"
 			r.kc.keys = r.kc.keys[1:]
 		}, errKeyMissing, false},
-		{"a blank entity name", func(r *rig) {
-			r.kc.realm["webAuthnPolicyRpId"] = "x.example"
-			r.kc.realm["webAuthnPolicyPasswordlessRpEntityName"] = ""
-		}, errEntityName, false},
 		{"the inputs unreadable", func(r *rig) {
 			r.c.d.Inputs = func(context.Context) (Inputs, error) { return Inputs{}, errors.New("settings db") }
 		}, errInputs, false},

@@ -397,8 +397,13 @@ jobs:
           # The built sign-in theme, linked as the harness's themes/rasputin;
           # unset, the theme walk fails under required (TC-988-28).
           RASPUTIN_IDENTITY_THEME: ${{ runner.temp }}/identity-theme
+        # -timeout 25m: api/internal/identitytest measured 460 s on main
+        # before geekdojo/geekdojo-brain#987, whose TC-987-20 leaves a
+        # sign-in page open 6 minutes by definition (past Keycloak's stock
+        # 5-minute action timeout), so the package passes go test's default
+        # 10-minute limit. 25 minutes bounds a hung run, and decides nothing.
         run: |
-          go test -race -coverprofile=api.coverage.out -covermode=atomic ./api/...
+          go test -race -timeout 25m -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
       # The identity tests that need root and the runner's real systemd
       # (geekdojo/geekdojo-brain#979, docs/testing-identity.md): the pinned

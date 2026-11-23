@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"log"
+	"log/slog"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -73,9 +76,57 @@ func (c *trustedClock) ok() bool {
 	if c.ctx.Err() != nil {
 		return false
 	}
-	if _, err := os.Stat(clockSyncMarker); err == nil {
+	if _, synced, _ := readClockSync(); synced {
 		c.synced.Store(true)
 		return true
 	}
 	return false
+}
+
+// readClockSync is the one non-blocking read of systemd-timesyncd's
+// synchronization signal (clockSyncDir, clockSyncMarker). timesyncd is
+// whether the host runs timesyncd at all (its directory exists); synced is
+// whether the marker is present, empty included: timesyncd touches it, so an
+// empty file means synced. A stat error other than "not found" on the marker
+// is returned with synced false. Each caller applies its own policy to a
+// host without timesyncd.
+func readClockSync() (timesyncd, synced bool, err error) {
+	if _, err := os.Stat(clockSyncDir); err != nil {
+		return false, false, nil // not a systemd-timesyncd system
+	}
+	switch _, err := os.Stat(clockSyncMarker); {
+	case err == nil:
+		return true, true, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return true, false, nil
+	default:
+		return true, false, err
+	}
+}
+
+// clockSyncFact is the clock-sync fact the sign-in rules read
+// (geekdojo/geekdojo-brain#987): CONFIGURE_TOTP is offered only while it
+// holds. A host without timesyncd, or with the marker absent, is not
+// synced; a marker that cannot be read is not synced either, with one WARN
+// per outage (security resolver row R49).
+type clockSyncFact struct {
+	read func() (timesyncd, synced bool, err error)
+	log  *slog.Logger
+
+	mu   sync.Mutex
+	down bool
+}
+
+// Synced reads the fact.
+func (f *clockSyncFact) Synced(ctx context.Context) bool {
+	timesyncd, synced, err := f.read()
+	f.mu.Lock()
+	first := err != nil && !f.down
+	f.down = err != nil
+	f.mu.Unlock()
+	if first {
+		f.log.LogAttrs(ctx, slog.LevelWarn, "The clock-sync signal could not be read, so the authenticator app is not offered.",
+			slog.String("event", "identity.clock_sync_unreadable"), slog.String("err", err.Error()))
+	}
+	return timesyncd && synced && err == nil
 }

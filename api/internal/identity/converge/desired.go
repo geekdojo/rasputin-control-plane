@@ -18,6 +18,8 @@ import (
 	"slices"
 	"strconv"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 )
 
 // storedEventsExpiry is how long the identity service keeps stored user and
@@ -58,6 +60,12 @@ type Inputs struct {
 	// RedirectURIs are each rasputin-* client's redirect URIs, by client id.
 	// A client it does not name gets none.
 	RedirectURIs map[string][]string
+	// ClockSynced is the clock-sync fact: the authenticator app is offered
+	// only while it holds (geekdojo/geekdojo-brain#987).
+	ClockSynced bool
+	// AppBindings are the app clients' sign-in variants, by client id: nil
+	// until Identity 7.3 registers app clients.
+	AppBindings map[string]flows.Variant
 }
 
 // Desired is every field converge owns, with its value. Its JSON is
@@ -83,6 +91,13 @@ type Desired struct {
 	// origin, which the sign-in pages link to (geekdojo/geekdojo-brain#988).
 	// "" holds the attribute absent.
 	ConsoleURL string `json:"consoleUrl"`
+	// Rules are the sign-in rules (geekdojo/geekdojo-brain#987): the seven
+	// flows, the realm's session, password, brute-force and passkey rules,
+	// the required actions, the profile, roles, scopes and bindings.
+	Rules flows.Rules `json:"rules"`
+	// flowsIn are the inputs Rules was rendered from, for the parts that
+	// also read the server (the required actions it lists).
+	flowsIn flows.Inputs
 }
 
 // NewDesired is the desired state for in.
@@ -106,6 +121,8 @@ func NewDesired(in Inputs) Desired {
 		d.RedirectURIs[c] = sorted(in.RedirectURIs[c])
 	}
 	d.ConsoleURL = consoleOrigin(in.RedirectURIs["rasputin-console"])
+	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings}
+	d.Rules = flows.Render(d.flowsIn)
 	return d
 }
 
@@ -131,8 +148,8 @@ func consoleOrigin(uris []string) string {
 
 // Hash is the sha256 of d's canonical JSON, in hex.
 func (d Desired) Hash() string {
-	// Desired holds strings, bools, an int, and slices and maps of
-	// strings, which always encode.
+	// Desired holds strings, bools, ints, and slices and maps of them,
+	// which always encode.
 	b, _ := json.Marshal(d)
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])

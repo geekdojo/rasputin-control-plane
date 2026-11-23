@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,9 +34,11 @@ import (
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/migrations"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -86,7 +89,7 @@ func newRealmRig(t *testing.T, env *Env, client *idclient.Client, realm string) 
 		Inputs: func(context.Context) (converge.Inputs, error) {
 			return converge.Inputs{InstallName: convergeInstallName, RedirectURIs: map[string][]string{}}, nil
 		},
-		Now: time.Now, Log: env.log,
+		Now: time.Now, Ready: func(context.Context) error { return nil }, Log: env.log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -384,6 +387,8 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 		}
 	})
 
+	t.Run("TC-987-17 the upgrade path converges the sign-in rules quietly", func(t *testing.T) { convergeUpgrade(t, env, client, raw) })
+
 	t.Run("TC-981-17 one end state over migrations.All then two fixtures", func(t *testing.T) {
 		all := append(append([]migrations.Migration{}, migrations.All...), fixtureMigrations(len(migrations.All))...)
 		n := len(all)
@@ -438,6 +443,56 @@ func TestConverge_AgainstPinnedKeycloak(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TC-987-17 (the upgrade path): a baseline realm with empty flow shells and
+// the previous release's stored hash converges to every flow as defined, the
+// state intact, with no critical alert and no ERROR; a second run writes
+// nothing. (The fresh install is the sign-in rules rig's own converge.)
+func convergeUpgrade(t *testing.T, env *Env, client *idclient.Client, raw func(*testing.T, string) adminAPI) {
+	const name = "tc987-upgrade"
+	importRealms(t, env, []string{name})
+	sess, err := idclient.NewSession(idclient.SessionConfig{Login: client, Admin: client, Realm: name, ClientID: baselineAdminClient, Log: env.log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, rec := logkittest.New()
+	settings := &memSettings{m: map[string]string{converge.HashKey: "the-previous-release"}}
+	admin := &countingAdmin{inner: sess}
+	conv, err := converge.New(converge.Deps{
+		Admin: admin, Settings: settings, Realm: name, Lock: &sync.Mutex{},
+		Inputs: func(context.Context) (converge.Inputs, error) {
+			return converge.Inputs{InstallName: convergeInstallName, RedirectURIs: map[string][]string{}, ClockSynced: true}, nil
+		},
+		Now: time.Now, Ready: func(context.Context) error { return nil }, Log: log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conv.Run(t.Context()); err != nil {
+		t.Fatalf("the upgrade's converge: %v", err)
+	}
+	api := raw(t, name)
+	for _, v := range flows.Variants {
+		if !flows.SameSteps(flows.Flatten(v.Alias(), flows.Flow(v)), flowStepsOf(t, api, v.Alias())) {
+			t.Errorf("%s does not read back as its definition", v.Alias())
+		}
+	}
+	if conv.State() != converge.Intact {
+		t.Errorf("state %s, want intact", conv.State())
+	}
+	for _, a := range conv.Alerts(t.Context(), time.Now()) {
+		if a.ID == converge.SignInRulesAlertID {
+			t.Errorf("the critical alert was raised: %+v", a)
+		}
+	}
+	if n := len(rec.Matching(slog.LevelError, "")); n != 0 {
+		t.Errorf("%d ERROR records:\n%s", n, rec.Text())
+	}
+	before := admin.writeCount()
+	if again, err := conv.Run(t.Context()); err != nil || len(again) != 0 || admin.writeCount() != before {
+		t.Errorf("the second run: %v, %v, %d writes; want nothing written", again, err, admin.writeCount()-before)
+	}
 }
 
 // checkConverged asserts every owned field reads back as converge wants it,
@@ -622,7 +677,7 @@ func importRealms(t *testing.T, env *Env, names []string) {
 	if err := dec.Decode(&realm); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(env.root, "tc17-import")
+	dir := filepath.Join(env.root, names[0]+"-import") // one directory per import, so each imports only its own
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}

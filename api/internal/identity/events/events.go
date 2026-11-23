@@ -43,6 +43,9 @@ type UserEvent struct {
 	// X-Forwarded-For. It is the zero Addr when the event carries none, or
 	// one that does not parse.
 	IP netip.Addr
+	// CredentialType is the event's credential_type detail, "" when it has
+	// none: a credential event's type (otp, webauthn, ...).
+	CredentialType string
 }
 
 // AdminEvent is one stored admin event. It has no sink until #323.
