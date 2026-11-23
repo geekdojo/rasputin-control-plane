@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -63,9 +65,13 @@ type Deps struct {
 	Lock *sync.Mutex
 	// Inputs reads the facts the desired state is built from.
 	Inputs func(ctx context.Context) (Inputs, error)
-	// Now stamps the drift alert's Since, and nothing else.
+	// Now stamps the alerts' Since, and nothing else.
 	Now func() time.Time
-	Log *slog.Logger
+	// Ready is the identity service's readiness (identitystate.Monitor's
+	// Ready): the control gate locks while the integrity state is unknown
+	// only once the service is ready.
+	Ready func(ctx context.Context) error
+	Log   *slog.Logger
 }
 
 // Converger runs identity.converge's one step.
@@ -76,17 +82,28 @@ type Converger struct {
 	mu sync.Mutex
 	// drift is the raised drift alert, nil for none.
 	drift *proto.Alert
+	// state is the integrity state; rulesAlert the critical alert, nil for
+	// none; bindings the variants the last reading wanted, by client.
+	state      Integrity
+	rulesAlert *proto.Alert
+	bindings   map[string]flows.Variant
+	// recheckDue is a pass holding an admin event that can change a rule;
+	// recheckDown the once-per-outage WARN flag; generation counts the
+	// Rechecks that found a difference.
+	recheckDue  bool
+	recheckDown bool
+	generation  uint64
 }
 
 // New checks d and returns a Converger. It does no I/O.
 func New(d Deps) (*Converger, error) {
-	if d.Admin == nil || d.Settings == nil || d.Lock == nil || d.Inputs == nil || d.Now == nil || d.Log == nil {
+	if d.Admin == nil || d.Settings == nil || d.Lock == nil || d.Inputs == nil || d.Now == nil || d.Ready == nil || d.Log == nil {
 		return nil, errors.New("converge: a collaborator is nil")
 	}
 	if d.Realm == "" {
 		return nil, errors.New("converge: Deps.Realm is empty")
 	}
-	return &Converger{d: d, log: d.Log.With("component", "identity")}, nil
+	return &Converger{d: d, log: d.Log.With("component", "identity"), bindings: flows.Bindings(nil)}, nil
 }
 
 // stepError is a failure sentence a person reads: the runner stores a failed
@@ -110,11 +127,39 @@ const (
 // client is a client's owned fields, by its internal id. The secret is
 // never decoded.
 type client struct {
-	ID                        string   `json:"id"`
-	ClientID                  string   `json:"clientId"`
-	Enabled                   *bool    `json:"enabled"`
-	DirectAccessGrantsEnabled *bool    `json:"directAccessGrantsEnabled"`
-	RedirectURIs              []string `json:"redirectUris"`
+	ID                        string            `json:"id"`
+	ClientID                  string            `json:"clientId"`
+	Enabled                   *bool             `json:"enabled"`
+	DirectAccessGrantsEnabled *bool             `json:"directAccessGrantsEnabled"`
+	RedirectURIs              []string          `json:"redirectUris"`
+	DefaultClientScopes       []string          `json:"defaultClientScopes"`
+	OptionalClientScopes      []string          `json:"optionalClientScopes"`
+	Bindings                  map[string]string `json:"authenticationFlowBindingOverrides"`
+	// switches are the client's boolean switches as read, by name.
+	switches map[string]bool
+}
+
+// UnmarshalJSON reads the owned fields and the boolean switches, and
+// nothing else: the secret is never decoded.
+func (cl *client) UnmarshalJSON(b []byte) error {
+	type plain client
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(b, &all); err != nil {
+		return err
+	}
+	p.switches = map[string]bool{}
+	for _, name := range flows.ClientSwitches() {
+		var v bool
+		if raw, ok := all[name]; ok && json.Unmarshal(raw, &v) == nil {
+			p.switches[name] = v
+		}
+	}
+	*cl = client(p)
+	return nil
 }
 
 // component is a key provider.
@@ -128,6 +173,7 @@ type observed struct {
 	realm   map[string]json.RawMessage
 	clients map[string]client // by client id
 	keys    []component
+	rules   observedRules
 }
 
 // writes is what a diff calls for.
@@ -143,10 +189,24 @@ type writes struct {
 	deletes []string
 	// missingKeys are the expected key providers absent.
 	missingKeys []string
-	// blankEntity is set when a WebAuthn policy must be rewritten and its
-	// entity name is blank: Keycloak would replace that policy with its
-	// defaults.
+	// blankEntity is set when a WebAuthn policy must be rewritten and the
+	// entity name it would be written with is blank: Keycloak would replace
+	// that policy with its defaults.
 	blankEntity bool
+	// rules are the sign-in rules' own writes.
+	rules ruleWrites
+}
+
+// addClient adds field=value to cl's partial PUT body and names the field.
+func (w *writes) addClient(cl client, field string, value any) {
+	w.fields = append(w.fields, "client."+cl.ClientID+"."+field)
+	body, ok := w.clients[cl.ID]
+	if !ok {
+		body = map[string]any{}
+		w.clients[cl.ID] = body
+		w.clientOrder = append(w.clientOrder, cl.ID)
+	}
+	body[field] = value
 }
 
 func (c *Converger) realmPath() string { return "/admin/realms/" + url.PathEscape(c.d.Realm) }
@@ -166,6 +226,14 @@ func (c *Converger) observe(ctx context.Context) (observed, error) {
 		o.clients[cl.ClientID] = cl
 	}
 	if _, err := c.d.Admin.Admin(ctx, http.MethodGet, c.realmPath()+"/components?type="+url.QueryEscape(keyProviderType), nil, &o.keys); err != nil {
+		return o, err
+	}
+	rules, err := c.observeRules(ctx)
+	if err != nil {
+		return o, err
+	}
+	o.rules = rules
+	if err := c.observeConsoleRoles(ctx, &o); err != nil {
 		return o, err
 	}
 	return o, nil
@@ -208,6 +276,16 @@ func diff(d Desired, o observed) writes {
 	if len(smtp) != 0 {
 		drift("smtpServer", d.SMTPServer)
 	}
+	// The sign-in rules' realm fields but WebAuthn's, which the policy
+	// block below sends whole.
+	for _, k := range slices.Sorted(maps.Keys(d.Rules.Realm)) {
+		if strings.HasPrefix(k, webAuthnPrefix) {
+			continue
+		}
+		if v := d.Rules.Realm[k]; !flows.SameJSON(o.realm[k], v) {
+			drift(k, v)
+		}
+	}
 
 	// attributes: sent only when an owned attribute must change, and then as
 	// the whole map as read, because Keycloak removes every attribute a sent
@@ -244,25 +322,32 @@ func diff(d Desired, o observed) writes {
 
 	// WebAuthn: Keycloak applies a policy only with a non-empty entity name,
 	// and then rebuilds it from the request with defaults for every field
-	// left out. So each policy is sent whole, as read, with only its RP ID
-	// cleared.
-	rpDrift := str(o.realm, rpIDKey) != d.WebAuthnRPID
-	pwDrift := str(o.realm, rpIDSecondPolicy) != d.WebAuthnPasswordlessRPID
-	if rpDrift || pwDrift {
-		if rpDrift {
-			w.fields = append(w.fields, "realm."+rpIDKey)
+	// left out. So each policy is sent whole, as read, with the owned fields
+	// (its RP ID, its entity name and the rules' fields) set over it.
+	owned := map[string]any{rpIDKey: d.WebAuthnRPID, rpIDSecondPolicy: d.WebAuthnPasswordlessRPID}
+	for k, v := range d.Rules.Realm {
+		if strings.HasPrefix(k, webAuthnPrefix) {
+			owned[k] = v
 		}
-		if pwDrift {
-			w.fields = append(w.fields, "realm."+rpIDSecondPolicy)
+	}
+	policyDrift := false
+	for _, k := range slices.Sorted(maps.Keys(owned)) {
+		if !flows.SameJSON(o.realm[k], owned[k]) {
+			w.fields = append(w.fields, "realm."+k)
+			policyDrift = true
 		}
-		w.blankEntity = strings.TrimSpace(str(o.realm, entityName)) == "" || strings.TrimSpace(str(o.realm, entitySecondPolicy)) == ""
+	}
+	if policyDrift {
+		// The guard tests the names the policies would be written with,
+		// so a blank name as read is repaired (F-987-11).
+		w.blankEntity = strings.TrimSpace(fmt.Sprint(owned[entityName])) == "" ||
+			strings.TrimSpace(fmt.Sprint(owned[entitySecondPolicy])) == ""
 		for k, v := range o.realm {
 			if strings.HasPrefix(k, webAuthnPrefix) {
 				realm[k] = v
 			}
 		}
-		realm[rpIDKey] = d.WebAuthnRPID
-		realm[rpIDSecondPolicy] = d.WebAuthnPasswordlessRPID
+		maps.Copy(realm, owned)
 	}
 	if len(realm) > 0 {
 		w.realm = realm
@@ -270,16 +355,7 @@ func diff(d Desired, o observed) writes {
 
 	// Clients: one partial body per drifted client, the owned fields only.
 	w.clients = map[string]map[string]any{}
-	addClient := func(cl client, field string, value any) {
-		w.fields = append(w.fields, "client."+cl.ClientID+"."+field)
-		body, ok := w.clients[cl.ID]
-		if !ok {
-			body = map[string]any{}
-			w.clients[cl.ID] = body
-			w.clientOrder = append(w.clientOrder, cl.ID)
-		}
-		body[field] = value
-	}
+	addClient := w.addClient
 	for _, id := range d.DisabledClients {
 		cl, ok := o.clients[id]
 		if !ok {
@@ -320,6 +396,10 @@ func diff(d Desired, o observed) writes {
 			w.missingKeys = append(w.missingKeys, name)
 		}
 	}
+	diffRules(d, o, &w)
+	if len(realm) > 0 {
+		w.realm = realm
+	}
 	return w
 }
 
@@ -351,27 +431,46 @@ func (c *Converger) RunJob(ctx context.Context, jobID string) ([]string, error) 
 		return fail(errRead, "The sign-in service's settings could not be read.", err)
 	}
 	w := diff(desired, o)
+	// The integrity state, from this reading (F-987-02): a difference
+	// Rasputin's own input change explains is applying, not drift.
+	c.setBindings(in.AppBindings)
+	integrity := integrityFields(w.fields)
+	c.decide(ctx, integrity, stored == hash)
+	failRules := func(e stepError, msg string, err error, extra ...slog.Attr) ([]string, error) {
+		if len(integrity) > 0 {
+			c.fail()
+		}
+		return fail(e, msg, err, extra...)
+	}
 	if len(w.missingKeys) > 0 {
-		return fail(errKeyMissing, "A signing key provider is missing; nothing was written.", nil,
+		return failRules(errKeyMissing, "A signing key provider is missing; nothing was written.", nil,
 			slog.Any("key_providers", w.missingKeys))
 	}
 	if w.blankEntity {
-		return fail(errEntityName, "A WebAuthn policy's entity name is blank; nothing was written.", nil)
+		return failRules(errEntityName, "A WebAuthn policy's entity name is blank; nothing was written.", nil)
+	}
+	if err := c.writeRules(ctx, desired, o, w.rules); err != nil {
+		var rb *rebuildError
+		if errors.As(err, &rb) {
+			return failRules(errFlowRebuild, "A sign-in flow could not be rebuilt.", err, slog.String("flow", rb.alias))
+		}
+		return failRules(errWrite, "A sign-in setting could not be written.", err, slog.Any("fields", w.fields))
 	}
 	if err := c.write(ctx, w); err != nil {
-		return fail(errWrite, "A sign-in setting could not be written.", err, slog.Any("fields", w.fields))
+		return failRules(errWrite, "A sign-in setting could not be written.", err, slog.Any("fields", w.fields))
 	}
 	after, err := c.observe(ctx)
 	if err != nil {
-		return fail(errRead, "The sign-in service's settings could not be read back.", err)
+		return failRules(errRead, "The sign-in service's settings could not be read back.", err)
 	}
 	if left := diff(desired, after); len(left.fields) > 0 || len(left.missingKeys) > 0 {
-		return fail(errStillDiffers, "A sign-in setting still differs after converge wrote it.", nil,
+		return failRules(errStillDiffers, "A sign-in setting still differs after converge wrote it.", nil,
 			slog.Any("fields", left.fields), slog.Any("key_providers", left.missingKeys))
 	}
 	if err := c.d.Settings.Set(ctx, HashKey, hash); err != nil {
-		return fail(errHashWrite, "The converge record could not be stored.", err)
+		return failRules(errHashWrite, "The converge record could not be stored.", err)
 	}
+	c.decide(ctx, nil, true)
 	c.settle(ctx, jobID, w.fields, stored == hash)
 	return w.fields, nil
 }
@@ -424,14 +523,19 @@ func (c *Converger) settle(ctx context.Context, jobID string, fields []string, s
 	}
 }
 
-// Alerts is the drift alert while it is raised.
+// Alerts are the drift alert and the sign-in rules alert, each while it is
+// raised.
 func (c *Converger) Alerts(context.Context, time.Time) []proto.Alert {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.drift == nil {
-		return nil
+	var out []proto.Alert
+	if c.rulesAlert != nil {
+		out = append(out, *c.rulesAlert)
 	}
-	return []proto.Alert{*c.drift}
+	if c.drift != nil {
+		out = append(out, *c.drift)
+	}
+	return out
 }
 
 // Pending reports the desired state's hash and the stored one, for the

@@ -1,0 +1,59 @@
+[
+  {
+    "alias": "CONFIGURE_RECOVERY_AUTHN_CODES",
+    "enabled": true,
+    "config": {
+      "max_auth_age": "300",
+      "warning_threshold": "4"
+    }
+  },
+  {
+    "alias": "CONFIGURE_TOTP",
+    "enabled": false,
+    "defaultAction": false
+  },
+  {
+    "alias": "TERMS_AND_CONDITIONS",
+    "enabled": false,
+    "defaultAction": false
+  },
+  {
+    "alias": "UPDATE_PASSWORD",
+    "enabled": true,
+    "defaultAction": false,
+    "config": {
+      "max_auth_age": "300"
+    }
+  },
+  {
+    "alias": "UPDATE_PROFILE",
+    "enabled": false,
+    "defaultAction": false
+  },
+  {
+    "alias": "VERIFY_EMAIL",
+    "enabled": false,
+    "defaultAction": false
+  },
+  {
+    "alias": "delete_credential",
+    "enabled": false,
+    "defaultAction": false
+  },
+  {
+    "alias": "webauthn-register",
+    "enabled": true,
+    "defaultAction": false,
+    "config": {
+      "max_auth_age": "300"
+    }
+  },
+  {
+    "alias": "webauthn-register-passwordless",
+    "enabled": true,
+    "defaultAction": false,
+    "config": {
+      "max_auth_age": "300"
+    }
+  }
+]

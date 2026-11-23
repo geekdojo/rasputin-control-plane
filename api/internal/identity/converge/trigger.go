@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"sync"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -135,7 +136,8 @@ type lagging interface {
 
 // ConvergeCond is identity.converge's condition: the realm has every shipped
 // migration, and it is wanted on each readiness episode; a desired state
-// whose hash differs from the stored one re-arms it.
+// whose hash differs from the stored one re-arms it, and so does a Recheck
+// that found a difference (its generation is folded into the key).
 func ConvergeCond(c *Converger, mig lagging) Cond {
 	return func(ctx context.Context) (bool, string, string, error) {
 		applied, want, err := mig.Lagging(ctx)
@@ -149,8 +151,15 @@ func ConvergeCond(c *Converger, mig lagging) Cond {
 		if err != nil {
 			return false, "", "", err
 		}
+		gen := ""
+		if g := c.Generation(); g > 0 {
+			gen = "recheck:" + strconv.FormatUint(g, 10)
+		}
 		if desired != stored {
-			return true, "the sign-in settings Rasputin wants are not yet applied", desired, nil
+			return true, "the sign-in settings Rasputin wants are not yet applied", desired + gen, nil
+		}
+		if gen != "" {
+			return true, "a sign-in setting differs from Rasputin's", gen, nil
 		}
 		return true, "the identity service became ready", "", nil
 	}

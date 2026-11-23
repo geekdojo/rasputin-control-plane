@@ -50,6 +50,8 @@ type fakeKC struct {
 	// lock, when set, is the realm lock; calls made without it are counted.
 	lock     *sync.Mutex
 	unlocked int
+	// rulesState is the sign-in rules' state (helpers_rules_test.go).
+	rulesState *fakeRules
 }
 
 // convergedRealm is a realm in the state converge wants, with install name
@@ -108,7 +110,8 @@ func convergedKeys() []map[string]any {
 }
 
 func newFakeKC() *fakeKC {
-	return &fakeKC{realm: convergedRealm(), clients: convergedClients(), keys: convergedKeys(), fail: map[string]error{}, seen: map[string]int{}}
+	return &fakeKC{realm: convergedRealm(), clients: convergedClients(), keys: convergedKeys(), fail: map[string]error{}, seen: map[string]int{},
+		rulesState: newFakeRules()}
 }
 
 func roundTrip(v any, out any) error {
@@ -142,6 +145,9 @@ func (f *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		if err := f.failOn(method, path, f.seen[key]); err != nil {
 			return idclient.Response{}, err
 		}
+	}
+	if resp, err, ok := f.rules(method, path, body, out); ok {
+		return resp, err
 	}
 	switch {
 	case method == http.MethodGet && path == realmPath:
@@ -247,6 +253,7 @@ type rig struct {
 	c        *Converger
 	rec      *logkittest.Recorder
 	lock     *sync.Mutex
+	readyErr error
 }
 
 func newRig(t *testing.T) *rig {
@@ -255,16 +262,38 @@ func newRig(t *testing.T) *rig {
 	r.kc.lock = r.lock
 	log, rec := logkittest.New()
 	r.rec = rec
-	c, err := New(Deps{
+	deps := Deps{
 		Admin: r.kc, Settings: r.settings, Realm: testRealm, Lock: r.lock,
 		Inputs: func(context.Context) (Inputs, error) { return r.inputs, nil },
-		Now:    func() time.Time { return testNow }, Log: log,
-	})
+		Now:    func() time.Time { return testNow }, Ready: func(context.Context) error { return r.readyErr }, Log: log,
+	}
+	c, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.c = c
+	r.convergeRules(t, deps)
 	return r
+}
+
+// convergeRules brings the fake's sign-in rules to the definition with a
+// throwaway converger, so the rig starts with Keycloak in the wanted state,
+// then forgets its calls and its stored hash.
+func (r *rig) convergeRules(t *testing.T, deps Deps) {
+	t.Helper()
+	log, _ := logkittest.New()
+	deps.Log = log
+	pre, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pre.Run(t.Context()); err != nil {
+		t.Fatalf("converge the fake's rules: %v", err)
+	}
+	r.kc.mu.Lock()
+	r.kc.calls, r.kc.seen = nil, map[string]int{}
+	r.kc.mu.Unlock()
+	delete(r.settings.m, HashKey)
 }
 
 // stored is the hash the current inputs want, stored as though converge

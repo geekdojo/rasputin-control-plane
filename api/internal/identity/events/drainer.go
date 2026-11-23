@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// detailCredentialType is the event detail naming a credential's type
+// (Keycloak's Details.CREDENTIAL_TYPE).
+const detailCredentialType = "credential_type"
+
 // pageSize is how many events one Admin API call asks for.
 const pageSize = 100
 
@@ -145,13 +149,14 @@ type stored interface {
 
 // userRep is Keycloak's EventRepresentation, the fields the drain reads.
 type userRep struct {
-	ID        string `json:"id"`
-	Time      int64  `json:"time"`
-	Type      string `json:"type"`
-	ClientID  string `json:"clientId"`
-	UserID    string `json:"userId"`
-	IPAddress string `json:"ipAddress"`
-	Error     string `json:"error"`
+	ID        string            `json:"id"`
+	Time      int64             `json:"time"`
+	Type      string            `json:"type"`
+	ClientID  string            `json:"clientId"`
+	UserID    string            `json:"userId"`
+	IPAddress string            `json:"ipAddress"`
+	Error     string            `json:"error"`
+	Details   map[string]string `json:"details"`
 }
 
 func (e userRep) ms() int64 { return e.Time }
@@ -169,7 +174,7 @@ func (e userRep) event() UserEvent {
 		ip = netip.Addr{}
 	}
 	return UserEvent{ID: e.key(), Time: time.UnixMilli(e.Time), Type: e.Type, ClientID: e.ClientID,
-		UserID: e.UserID, Error: e.Error, IP: ip}
+		UserID: e.UserID, Error: e.Error, IP: ip, CredentialType: e.Details[detailCredentialType]}
 }
 
 // adminRep is Keycloak's AdminEventRepresentation, the fields the drain

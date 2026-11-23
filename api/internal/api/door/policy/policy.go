@@ -66,7 +66,15 @@ type Throttler interface {
 	Admit(door Kind, addr netip.Addr, now time.Time) Admission
 }
 
-// Deps are the service's collaborators. New refuses a missing one.
+// Bindings answers whether a client's sign-in is paused: its binding is
+// stricter than the realm default and the sign-in rules are not intact
+// (*converge.Converger, geekdojo/geekdojo-brain#987; row B90).
+type Bindings interface {
+	ClientPaused(clientID string) bool
+}
+
+// Deps are the service's collaborators. New refuses a missing one; Bindings
+// is optional.
 type Deps struct {
 	Table      doors.Table
 	Readiness  Readiness
@@ -76,6 +84,10 @@ type Deps struct {
 	Network    Network
 	Waiting    Waiting
 	Now        func() time.Time
+	// Bindings pauses clients bound stricter than the realm default while
+	// the rules differ. Nil fails closed: every client outside the door
+	// table is paused (ERR-CLOSED).
+	Bindings Bindings
 }
 
 // Service is the door policy.
@@ -105,8 +117,26 @@ func New(d Deps) (*Service, error) {
 	if missing != "" {
 		return nil, errors.New("policy: Deps." + missing + " is missing")
 	}
+	if d.Bindings == nil {
+		d.Bindings = newPauseAppClients(d.Table)
+	}
 	return &Service{d: d}, nil
 }
+
+// pauseAppClients is the Bindings a policy built without one gets: it
+// pauses every client outside the door table, whose bindings it cannot
+// read, and none of the door table's own.
+type pauseAppClients map[string]bool
+
+func newPauseAppClients(t doors.Table) pauseAppClients {
+	own := pauseAppClients{}
+	for _, c := range append(append([]string{}, t.Home.Clients...), t.App.Clients...) {
+		own[c] = true
+	}
+	return own
+}
+
+func (own pauseAppClients) ClientPaused(clientID string) bool { return !own[clientID] }
 
 // Decision is Check's answer.
 type Decision struct {
@@ -154,7 +184,11 @@ const (
 	sentenceRegisterFull    = "Too many accounts are waiting for access. Ask an administrator to give access to the ones waiting, then try again."
 	sentenceRegisterUnknown = "Creating an account isn't available right now. Ask whoever runs this cluster to add you."
 	sentenceBusy            = "Another sign-in from this device is still being checked. Try again in a moment."
+	sentenceClientPaused    = "Signing in to this app is paused because its sign-in settings changed. An administrator can see why in Rasputin's alerts."
 )
+
+// ReasonClientPaused is a paused client's refusal reason.
+const ReasonClientPaused = "client_paused"
 
 func refuse(status int, reason, sentence string) Decision {
 	return Decision{Status: status, Reason: reason, Sentence: sentence}
@@ -184,6 +218,9 @@ func (s *Service) Check(ctx context.Context, r Request) Decision {
 	client, d, ok := s.client(ctx, r)
 	if !ok {
 		return d
+	}
+	if r.Route == RouteAuth && s.d.Bindings.ClientPaused(client) {
+		return refuse(http.StatusServiceUnavailable, ReasonClientPaused, sentenceClientPaused)
 	}
 	for _, name := range Filtered {
 		if len(r.Params[name]) > 1 {

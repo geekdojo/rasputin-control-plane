@@ -10,8 +10,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/migrations"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -73,6 +76,48 @@ type identityConverge struct {
 	workflows []jobs.Workflow
 	entryList []scheduler.Entry
 	converger *converge.Converger
+	log       *slog.Logger
+}
+
+// controlGated is the auth service's control-lock setter (*auth.Service).
+type controlGated interface {
+	SetControlGate(g auth.ControlGate, log *slog.Logger)
+}
+
+// wireControlGate installs the converger's control gate on the auth
+// service under keycloak; in every other mode there is no converger and
+// nothing is installed, so control is never locked
+// (geekdojo/geekdojo-brain#987, F-987-10).
+func wireControlGate(svc controlGated, w identityConverge) {
+	if w.converger == nil {
+		return
+	}
+	svc.SetControlGate(w.converger.ControlGate, w.log)
+}
+
+// doorBindings is the converger as the door policy's client pause, or nil
+// outside keycloak, which the policy answers by pausing every client
+// outside the door table (geekdojo/geekdojo-brain#987, F-987-18).
+func (w identityConverge) doorBindings() policy.Bindings {
+	if w.converger == nil {
+		return nil
+	}
+	return w.converger
+}
+
+// convergeSinks are the converger's sinks on the sign-in history drain: its
+// admin-event recheck. Both are empty outside keycloak.
+type convergeSinks struct {
+	admin []events.AdminSink
+	pass  []events.PassSink
+}
+
+// eventSinks is the converger as an admin and a pass sink, or none.
+func (w identityConverge) eventSinks() convergeSinks {
+	if w.converger == nil {
+		return convergeSinks{}
+	}
+	return convergeSinks{admin: []events.AdminSink{w.converger}, pass: []events.PassSink{w.converger}}
 }
 
 // register registers the three workflows.
@@ -111,15 +156,17 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		return identityConverge{}, fmt.Errorf("identity converge: %w", err)
 	}
 	settings := d.settings
+	clock := &clockSyncFact{read: readClockSync, log: d.log}
 	conv, err := converge.New(converge.Deps{
 		Admin: d.session, Settings: settings, Realm: identityRealm, Lock: lock,
 		// RedirectURIs is empty until Identity 4.1's door table passes one
-		// (#983): the baseline's own state, so it fails closed.
+		// (#983): the baseline's own state, so it fails closed. AppBindings
+		// is nil until Identity 7.3 registers app clients.
 		Inputs: func(ctx context.Context) (converge.Inputs, error) {
 			name, err := settings.Get(ctx, setup.KeyInstallName)
-			return converge.Inputs{InstallName: name, RedirectURIs: map[string][]string{}}, err
+			return converge.Inputs{InstallName: name, RedirectURIs: map[string][]string{}, ClockSynced: clock.Synced(ctx)}, err
 		},
-		Now: d.now, Log: d.log,
+		Now: d.now, Ready: d.monitor.Ready, Log: d.log,
 	})
 	if err != nil {
 		return identityConverge{}, fmt.Errorf("identity converge: %w", err)
@@ -138,6 +185,7 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 			converge.ArmWorkflow(armer, identityRealmStepTimeout),
 		},
 		converger: conv,
+		log:       d.log,
 	}
 	for _, t := range []struct {
 		kind  string

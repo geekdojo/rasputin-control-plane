@@ -1279,6 +1279,7 @@ func main() {
 		os.Exit(1)
 	}
 	identityConv.register(runner)
+	wireControlGate(authSvc, identityConv) // the control lock, under keycloak only (#987)
 	// identity.recover_admin's trigger (#1127): due only once the restored
 	// alert's holder is set below, and then on its fact.
 	adminEntry, adminTrigger, err := identityAdminTrigger(identityW.mode, identityState.monitor, identityW.session, jobStore,
@@ -1777,7 +1778,7 @@ func main() {
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
-	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, logger) // the sign-in history drain, marked for this start (#985)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, identityConv.eventSinks(), logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -2152,6 +2153,7 @@ func main() {
 		homeDoor, appDoorH := mountDoors(ctx, doorMountDeps{
 			mode: identityW.mode, table: doorTable, doorsOn: doorsOn, readiness: doorReady,
 			throttle: identityState.events.doorThrottle(), version: identityState.events.doorVersion(),
+			bindings:   identityConv.doorBindings(),
 			identityCA: identityCAPEM(identityCA), dataDir: dataDir, upstream: identityW.upstream, themeDir: identityTheme,
 			consoleOrigin: "https://" + clusterHostname(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
@@ -2394,10 +2396,11 @@ var (
 // failure). The deadline uses the monotonic clock, so an NTP step mid-wait
 // does not distort it.
 func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
-	if _, err := os.Stat(clockSyncDir); err != nil {
+	timesyncd, synced, _ := readClockSync()
+	if !timesyncd {
 		return true // not a systemd-timesyncd system; nothing to wait for
 	}
-	if _, err := os.Stat(clockSyncMarker); err == nil {
+	if synced {
 		return true // already synchronized
 	}
 	log.Printf("rasputin-api: waiting up to %s for the system clock to NTP-synchronize before minting the HTTPS leaf…", timeout)
@@ -2409,7 +2412,7 @@ func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
 		case <-ctx.Done():
 			return false
 		case <-tick.C:
-			if _, err := os.Stat(clockSyncMarker); err == nil {
+			if _, synced, _ := readClockSync(); synced {
 				return true
 			}
 			if !time.Now().Before(deadline) {

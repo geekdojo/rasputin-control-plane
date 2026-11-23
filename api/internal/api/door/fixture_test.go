@@ -94,6 +94,12 @@ func (f *fakeReady) Ready(ctx context.Context) error {
 	return f.err
 }
 
+// noneBound pauses no client: these tests are about the door, not the
+// sign-in rules' bindings (geekdojo/geekdojo-brain#987).
+type noneBound struct{}
+
+func (noneBound) ClientPaused(string) bool { return false }
+
 type fakeApps struct {
 	m   map[string]policy.AppClient
 	err error
@@ -202,7 +208,8 @@ func newFixture(t *testing.T) *fixture {
 		t.Fatal(err)
 	}
 	f.policySvc, err = policy.New(policy.Deps{Table: table, Readiness: f.ready, Throttle: f.th, AppClients: f.apps,
-		Actions: f.actions, Network: f.network, Waiting: f.waiting, Now: func() time.Time { return f.now }})
+		Actions: f.actions, Network: f.network, Waiting: f.waiting, Now: func() time.Time { return f.now },
+		Bindings: noneBound{}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -40,6 +40,9 @@ type Service struct {
 	hookMu    sync.RWMutex
 	loginHook LoginHook
 
+	// control is the control lock's gate (controllock.go).
+	control controlGate
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -436,8 +439,9 @@ func (s *Service) resolveSession(r *http.Request) (*Session, *User, error) {
 }
 
 // RequireSession wraps an http.Handler so it returns 401 unless a valid
-// session cookie is present, and 403 when the request carries an Origin that
-// is not on the allowlist.
+// session cookie is present, 403 when the request carries an Origin that
+// is not on the allowlist, and 423 when it uses a control capability while
+// the control lock's gate refuses (controllock.go).
 //
 // The Origin check covers what the other layers do not: WebSocket upgrades
 // are GETs, which http.CrossOriginProtection lets through, and the WebSocket
@@ -461,6 +465,9 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"auth required"}`))
+			return
+		}
+		if s.controlLocked(w, r) {
 			return
 		}
 		ctx := context.WithValue(r.Context(), ctxUser, user)
