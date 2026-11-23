@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
@@ -153,12 +154,15 @@ func TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 			t.Run("TC-591-16 "+cluster.name+" "+s.name, func(t *testing.T) {
 				setOrUnset(t, "RASPUTIN_CLUSTER_ID", cluster.absent, cluster.id)
 				setOrUnset(t, env, s.absent, s.value)
-				got := rpOriginsFromEnv()
+				got, refused := rpOriginsFromEnv()
 				if !slices.Equal(got, cluster.want) {
 					t.Errorf("%s %s with cluster %q: got %q, want %q", env, s.name, cluster.id, got, cluster.want)
 				}
 				if len(got) == 0 {
 					t.Errorf("%s %s: resolved to no origins", env, s.name)
+				}
+				if len(refused) != 0 {
+					t.Errorf("%s %s: refused %q with no door hosts", env, s.name, refused)
 				}
 			})
 		}
@@ -167,7 +171,7 @@ func TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		t.Setenv("RASPUTIN_CLUSTER_ID", "c1")
 		t.Setenv(env, "https://a.local,https://b.local")
 		want := []string{"https://a.local", "https://b.local"}
-		if got := rpOriginsFromEnv(); !slices.Equal(got, want) {
+		if got, _ := rpOriginsFromEnv(); !slices.Equal(got, want) {
 			t.Errorf("%s set: got %q, want %q", env, got, want)
 		}
 	})
@@ -180,7 +184,7 @@ func TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 		for _, rpID := range []string{"x", "x.local"} {
 			t.Run("TC-591-17 malformed "+v+" rp-id "+rpID, func(t *testing.T) {
 				t.Setenv(env, v)
-				if _, err := auth.NewService(nil, auth.Config{RPID: rpID, RPOrigins: rpOriginsFromEnv()}); err == nil {
+				if _, err := auth.NewService(nil, auth.Config{RPID: rpID, RPOrigins: firstOf(rpOriginsFromEnv())}); err == nil {
 					t.Errorf("%s=%q with RPID %q: auth.NewService accepted it", env, v, rpID)
 				}
 			})
@@ -190,11 +194,53 @@ func TestRPOriginsFromEnv_FailsClosedOnEveryShapeOfInput(t *testing.T) {
 	// "x.local" refusals above are the origins' and not the fixture's.
 	t.Run("TC-591-17 well-formed control", func(t *testing.T) {
 		t.Setenv(env, "https://x.local")
-		if _, err := auth.NewService(nil, auth.Config{RPID: "x.local", RPOrigins: rpOriginsFromEnv()}); err != nil {
+		if _, err := auth.NewService(nil, auth.Config{RPID: "x.local", RPOrigins: firstOf(rpOriginsFromEnv())}); err != nil {
 			t.Fatalf("well-formed origin refused: %v", err)
 		}
 	})
+
+	// TC-986-14: a door origin, in any case, port or scheme, alone or mixed
+	// with the console's, is refused and the rest kept; an all-door list
+	// gives the derived default; with the doors off nothing is refused; and
+	// auth.NewService built from the kept list never allows a door origin.
+	t.Run("TC-986-14 door origins", func(t *testing.T) {
+		t.Setenv("RASPUTIN_CLUSTER_ID", "x")
+		hosts := []string{"sso-x.local", "signin.x.internal"}
+		doorOrigins := []string{"https://sso-x.local", "HTTPS://SSO-X.LOCAL:443", "https://sso-x.local:8443",
+			"http://signin.x.internal", "https://signin.x.internal"}
+		for _, o := range doorOrigins {
+			t.Setenv(env, o)
+			got, refused := rpOriginsFromEnv(hosts...)
+			if !slices.Equal(refused, []string{o}) || !slices.Equal(got, []string{"https://x.local"}) {
+				t.Errorf("%s=%q alone: kept %q refused %q; want the derived default kept and it refused", env, o, got, refused)
+			}
+			t.Setenv(env, "https://x.local,"+o+",https://other.local")
+			got, refused = rpOriginsFromEnv(hosts...)
+			if !slices.Equal(refused, []string{o}) || !slices.Equal(got, []string{"https://x.local", "https://other.local"}) {
+				t.Errorf("%s mixed with %q: kept %q refused %q", env, o, got, refused)
+			}
+			svc, err := auth.NewService(nil, auth.Config{RPID: "x.local", RPOrigins: got})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if svc.Origins().Allows(o) {
+				t.Errorf("the console allows the door origin %q", o)
+			}
+		}
+		t.Setenv(env, strings.Join(doorOrigins, ","))
+		got, refused := rpOriginsFromEnv(hosts...)
+		if !slices.Equal(refused, doorOrigins) || !slices.Equal(got, []string{"https://x.local"}) {
+			t.Errorf("all door origins: kept %q refused %q", got, refused)
+		}
+		got, refused = rpOriginsFromEnv()
+		if len(refused) != 0 || !slices.Equal(got, doorOrigins) {
+			t.Errorf("doors off: kept %q refused %q, want every origin kept", got, refused)
+		}
+	})
 }
+
+// firstOf is a two-value call's first value.
+func firstOf[A, B any](a A, _ B) A { return a }
 
 // TC-758-15: fail-closed table test for secretStoreBackendFromEnv
 // (security-resolvers R40). Absent and empty are "not configured"; every

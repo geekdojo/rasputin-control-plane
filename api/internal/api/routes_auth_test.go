@@ -214,6 +214,54 @@ func doorOpenRoutes(t *testing.T) (all map[string]string, doorPatterns map[strin
 	return all, doorPatterns
 }
 
+// TC-986-06: route enumeration sees each site's mux. Every door pattern,
+// made concrete, answers at its own door through NewSites over a real TLS
+// server, relayed to the identity service or served as a door page: never
+// 401, never 503 and never the console. A pattern only the other door serves
+// answers this door's 404 page, and every pattern at the console's name
+// answers the console's own 404 page.
+func TestDoorRoutesAnswerAtTheirOwnDoor(t *testing.T) {
+	console, notFound := consoleWithUI(t)
+	r := newSitesRig(t, sitesOpts{console: console})
+	probed := 0
+	for _, d := range []struct {
+		kind, other door.Kind
+		host        string
+	}{{door.Home, door.App, r.table.Home.Host}, {door.App, door.Home, r.table.App.Host}} {
+		own := map[string]bool{}
+		for _, rt := range door.Routes(d.kind) {
+			own[rt.Pattern] = true
+			probed++
+			path := concretePath(rt.Pattern)
+			consoleBefore, upBefore := r.console.n.Load(), r.up.n.Load()
+			a := r.do(d.host, d.host, rt.Methods[0], path, nil)
+			relayed := r.up.n.Load() == upBefore+1
+			if a.status == http.StatusUnauthorized || a.status == http.StatusServiceUnavailable || r.console.n.Load() != consoleBefore ||
+				(!relayed && !strings.HasPrefix(a.pageID(), "rasputin-door-")) {
+				t.Errorf("%s %s at %s: %d %q (relayed %v), want the door's answer", rt.Methods[0], path, d.host, a.status, a.pageID(), relayed)
+			}
+			if a := r.do(sitesConsole, sitesConsole, http.MethodGet, path, nil); a.status != http.StatusNotFound || a.body != notFound {
+				t.Errorf("%s at %s: %d, want the console's 404 page", path, sitesConsole, a.status)
+			}
+		}
+		for _, rt := range door.Routes(d.other) {
+			if own[rt.Pattern] {
+				continue
+			}
+			path := concretePath(rt.Pattern)
+			if a := r.do(d.host, d.host, http.MethodGet, path, nil); a.status != http.StatusNotFound || a.pageID() != "rasputin-door-refusal" {
+				t.Errorf("%s (the other door's) at %s: %d %q, want this door's 404 page", path, d.host, a.status, a.pageID())
+			}
+		}
+	}
+	if want := len(door.Routes(door.Home)) + len(door.Routes(door.App)); probed != want || probed < 15 {
+		t.Fatalf("probed %d door patterns, want %d", probed, want)
+	}
+	if n := r.console.n.Load(); n != int64(probed) {
+		t.Errorf("the console saw %d requests, want only the %d at its own name", n, probed)
+	}
+}
+
 // TC-985-35: every door pattern sits in the registry with its reason.
 func TestDoorRoutesAreOpenRoutesWithReasons(t *testing.T) {
 	all, doorPatterns := doorOpenRoutes(t)
@@ -246,8 +294,10 @@ func TestEveryRouteRequiresSessionUnlessAllowlisted(t *testing.T) {
 	}
 
 	// Stale allowlist: every entry must name a registered route. The door
-	// routes are registered on the doors' own handlers, which Identity 4.4
-	// mounts; until then they are registered here and skip the 401 probe.
+	// routes are registered on the doors' own handlers, which NewSites serves
+	// at each door's own name (sites.go), so they count as registered here and
+	// skip the console's 401 probe; TestDoorRoutesAnswerAtTheirOwnDoor probes
+	// them at their doors.
 	for p := range doorPatterns {
 		registered[p] = true
 	}

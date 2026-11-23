@@ -2,6 +2,7 @@ package main
 
 import (
 	"cmp"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,17 +47,45 @@ func rpIDFromEnv() string {
 }
 
 // rpOriginsFromEnv resolves RASPUTIN_RP_ORIGINS, the comma-separated browser
-// origins the passkey ceremony accepts. A value that yields no origin — empty,
-// blank, or only commas — gives the derived default: https://<cluster-id>.local
-// on an appliance, the two localhost origins on a dev box. It never returns an
-// empty list, so auth.NewService's own localhost fallback is never reached.
-func rpOriginsFromEnv() []string {
-	if origins := splitCSV(os.Getenv("RASPUTIN_RP_ORIGINS")); len(origins) > 0 {
-		return origins
+// origins the passkey ceremony accepts. An origin whose host is a sign-in
+// door's (doorHosts), compared case-insensitively whatever its scheme or port,
+// is dropped and returned in refused: the console's allowlist never holds a
+// door's origin (geekdojo/geekdojo-brain#986). A value that yields no other
+// origin — empty, blank, only commas, or only door origins — gives the derived
+// default: https://<cluster-id>.local on an appliance, the two localhost
+// origins on a dev box. It never returns an empty list, so
+// auth.NewService's own localhost fallback is never reached. Like its
+// neighbours it does not log: main logs each refused origin.
+func rpOriginsFromEnv(doorHosts ...string) (origins, refused []string) {
+	for _, o := range splitCSV(os.Getenv("RASPUTIN_RP_ORIGINS")) {
+		if isDoorOrigin(o, doorHosts) {
+			refused = append(refused, o)
+			continue
+		}
+		origins = append(origins, o)
+	}
+	if len(origins) > 0 {
+		return origins, refused
 	}
 	return splitCSV(applianceOr(
 		func(h string) string { return "https://" + h },
-		"http://localhost:3000,http://localhost:8080"))
+		"http://localhost:3000,http://localhost:8080")), refused
+}
+
+// isDoorOrigin reports whether origin's host is one of doorHosts. An origin
+// that does not parse, or has no host, is not a door's: auth.NewService
+// refuses it on its own.
+func isDoorOrigin(origin string, doorHosts []string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	for _, h := range doorHosts {
+		if h != "" && strings.EqualFold(u.Hostname(), h) {
+			return true
+		}
+	}
+	return false
 }
 
 // doorTableFromEnv resolves RASPUTIN_CLUSTER_ID into the sign-in door table:

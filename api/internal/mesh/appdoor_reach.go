@@ -47,3 +47,31 @@ func (s *Service) AppDoorReachAlerts(ctx context.Context, now time.Time) []proto
 		RelatedID:   s.cfg.SelfNodeID,
 	}}
 }
+
+// AppDoorOnline reports whether the app sign-in door is reachable over the
+// private network now (geekdojo/geekdojo-brain#986, the app door's
+// rasputin_signin_door_up fact): the doors are on, the control plane has its
+// one bound device with a tailnet IP (selfDevice, as the door's record needs),
+// and that device was online at a reconcile younger than MembershipMaxAge
+// (membershipAt, the one place "on the mesh" is decided). With no current
+// observation it reads false. A devices read error is returned.
+func (s *Service) AppDoorOnline(ctx context.Context) (bool, error) {
+	return s.appDoorOnlineAt(ctx, time.Now().UTC())
+}
+
+// appDoorOnlineAt is AppDoorOnline with the clock injected; see the tests.
+func (s *Service) appDoorOnlineAt(ctx context.Context, now time.Time) (bool, error) {
+	if s.cfg.AppDoorHost == "" || s.cfg.SelfNodeID == "" {
+		return false, nil
+	}
+	devices, err := s.store.ListDevices(ctx)
+	if err != nil {
+		return false, fmt.Errorf("mesh devices: %w", err)
+	}
+	bound, _ := BoundDevices(devices)
+	if s.selfDevice(bound) == nil {
+		return false, nil
+	}
+	m := s.membershipAt(ctx, now)[s.cfg.SelfNodeID]
+	return m != nil && m.Online, nil
+}

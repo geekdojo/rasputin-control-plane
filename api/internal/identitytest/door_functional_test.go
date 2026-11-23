@@ -10,8 +10,10 @@ package identitytest
 // clients reaching sso-ci.local, signin.ci.internal, ci.local and
 // app.ci.internal by name on port 443.
 //
-// The doors are not mounted by the api yet (Identity 4.4): this test serves
-// them itself. The test's policy collaborators stand in for later items: every
+// The doors, the test's stand-in console and the test app's site are served
+// as the api serves them (geekdojo/geekdojo-brain#986, Identity 4.4): home,
+// app and console on one TLS address behind the api's own :443 dispatcher
+// (api.NewSites), a leaf per name chosen by SNI. The test's policy collaborators stand in for later items: every
 // app client the test registers is the app door's (7.3), the launcher has
 // issued UPDATE_PASSWORD (the launcher), and registration admits 127.0.0.0/24
 // outside a test tailnet range while nobody waits (4.8).
@@ -48,6 +50,7 @@ import (
 	"github.com/chromedp/cdproto/webauthn"
 	"github.com/chromedp/chromedp"
 
+	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
@@ -105,6 +108,20 @@ type doorRig struct {
 	cookiesMu sync.Mutex
 	cookiesIn map[string][]string
 	ids       atomic.Int64
+	// upstream counts the requests the doors relayed to the identity
+	// service (#986: SO-5's counter).
+	upstream atomic.Int64
+}
+
+// countingTransport counts each request it sends.
+type countingTransport struct {
+	inner http.RoundTripper
+	n     *atomic.Int64
+}
+
+func (c countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.n.Add(1)
+	return c.inner.RoundTrip(r)
 }
 
 // eventSink keeps every user event the drain delivered.
@@ -292,7 +309,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 	}
 	t.Cleanup(relay.CloseIdleConnections)
 	r.home, r.app, err = door.Build(table, door.Shared{
-		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
+		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: countingTransport{inner: relay, n: &r.upstream},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return doorInstall, nil }, Dirty: r.drainer,
 		IDs: func() string { return fmt.Sprintf("door-%d", r.ids.Add(1)) }, Log: env.log,
@@ -304,8 +321,16 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = io.WriteString(w, stubPage)
 	})
-	r.sites, err = env.ServeDoors(r.recordCookies("home", r.home), r.recordCookies("app", r.app),
-		consolePage("https://"+table.Home.Host+"/realms/rasputin/protocol/openid-connect/auth?"+doorAuthQuery(baselineConsole, "https://"+ConsoleHost, nil)), stub)
+	sites, err := apipkg.NewSites(apipkg.SitesConfig{
+		Console: consolePage("https://" + table.Home.Host + "/realms/rasputin/protocol/openid-connect/auth?" + doorAuthQuery(baselineConsole, "https://"+ConsoleHost, nil)),
+		Home:    r.recordCookies("home", r.home), App: r.recordCookies("app", r.app),
+		HomeHost: table.Home.Host, AppHost: table.App.Host, RequestLifetime: time.Minute, Now: time.Now,
+		IDs: func() string { return fmt.Sprintf("site-%d", r.ids.Add(1)) }, Log: env.log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.sites, err = env.ServeDoors(sites, stub)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -701,6 +726,14 @@ func TestDoor_AgainstPinnedKeycloak(t *testing.T) {
 		return
 	}
 
+	// #986's cases run first: TC-985-42 leaves 127.0.0.1, the browser's
+	// address, waiting.
+	t.Run("TC-986-19 SO-1 discovery at each door", func(t *testing.T) { r.so1(t) })
+	t.Run("TC-986-20 SO-2 a code flow with PKCE at each door", func(t *testing.T) { r.so2(t) })
+	t.Run("TC-986-21 SO-3 a refresh token stays at its door", func(t *testing.T) { r.so3(t) })
+	t.Run("TC-986-22 SO-5 the dispatcher's 421 and the console's names", func(t *testing.T) { r.so5Sites(t) })
+	t.Run("TC-986-23 SO-9 a passkey from one door fails at the other", func(t *testing.T) { r.so9(t, browserCtx) })
+	// TC-986-24: #985's cases, now through the mounted dispatcher.
 	t.Run("TC-985-36 SO-5 forged forwarding never changes an issuer", func(t *testing.T) { r.so5(t) })
 	t.Run("TC-985-37 SO-6 door binding", func(t *testing.T) { r.so6(t, browserCtx) })
 	t.Run("TC-985-38 SO-10 script policy and framing", func(t *testing.T) { r.so10(t, browserCtx) })
@@ -713,16 +746,22 @@ func TestDoor_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-985-45 TC-1127-15 through both doors", func(t *testing.T) { r.floods(t) })
 }
 
-// TC-985-36: forged Host, X-Forwarded-Host, -Port, -Prefix and Forwarded
-// leave each door's discovery issuer exactly the door table's.
+// TC-985-36: forged X-Forwarded-Host, -Port, -Prefix and Forwarded leave
+// each door's discovery issuer exactly the door table's. A forged Host now
+// names another site than the door's SNI, so the dispatcher answers 421 and
+// nothing reaches the identity service (TC-986-24, F-986-04).
 func (r *doorRig) so5(t *testing.T) {
 	g := r.client(t, "127.0.0.11")
 	for _, d := range []struct{ host, issuer string }{
 		{r.sites.Table.Home.Host, r.sites.Table.Home.Issuer}, {r.sites.Table.App.Host, r.sites.Table.App.Issuer},
 	} {
+		before := r.upstream.Load()
+		if a := g.send(http.MethodGet, "https://"+d.host+"/realms/rasputin/.well-known/openid-configuration", nil,
+			http.Header{"Host": {"evil.example:8443"}}); a.status != http.StatusMisdirectedRequest || r.upstream.Load() != before {
+			t.Errorf("%s with a forged Host: %d (%d upstream requests), want 421 with none", d.host, a.status, r.upstream.Load()-before)
+		}
 		for name, hdr := range map[string]http.Header{
 			"none":               nil,
-			"Host":               {"Host": {"evil.example:8443"}},
 			"X-Forwarded-Host":   {"X-Forwarded-Host": {"evil.example"}},
 			"X-Forwarded-Port":   {"X-Forwarded-Port": {"8443"}},
 			"X-Forwarded-Prefix": {"X-Forwarded-Prefix": {"/evil"}},
@@ -739,6 +778,327 @@ func (r *doorRig) so5(t *testing.T) {
 				t.Errorf("%s with forged %s: issuer %q, want exactly %q", d.host, name, disc.Issuer, d.issuer)
 			}
 		}
+	}
+}
+
+// ---- #986: the doors behind the api's :443 dispatcher -------------------------
+
+// TC-986-19: each door's discovery names that door's issuer and endpoints
+// exactly, with no :443.
+func (r *doorRig) so1(t *testing.T) {
+	g := r.client(t, "127.0.0.30")
+	for _, d := range []doors.Door{r.sites.Table.Home, r.sites.Table.App} {
+		a := g.send(http.MethodGet, "https://"+d.Host+"/realms/rasputin/.well-known/openid-configuration", nil, nil)
+		var disc map[string]any
+		if a.status != http.StatusOK || json.Unmarshal(a.body, &disc) != nil {
+			t.Fatalf("%s: discovery answered %d", d.Host, a.status)
+		}
+		for k, want := range map[string]string{
+			"issuer": d.Issuer, "authorization_endpoint": d.Issuer + "/protocol/openid-connect/auth",
+			"token_endpoint": d.Issuer + "/protocol/openid-connect/token", "jwks_uri": d.Issuer + "/protocol/openid-connect/certs",
+		} {
+			if got, _ := disc[k].(string); got != want || strings.Contains(got, ":443") {
+				t.Errorf("%s: %s = %q, want exactly %q", d.Host, k, got, want)
+			}
+		}
+	}
+}
+
+// doorTokens are a token endpoint's answer.
+type doorTokens struct {
+	IDToken      string `json:"id_token"`
+	RefreshToken string `json:"refresh_token"`
+}
+
+// claimIss is a JWT's iss claim.
+func claimIss(t *testing.T, jwt string) string {
+	t.Helper()
+	parts := strings.Split(jwt, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a JWT: %d parts", len(parts))
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c struct {
+		Iss string `json:"iss"`
+	}
+	if err := json.Unmarshal(payload, &c); err != nil {
+		t.Fatal(err)
+	}
+	return c.Iss
+}
+
+// meshBasic is the Authorization header of rasputin-mesh, the home door's
+// client-secret client, with a secret the test sets (the baseline carries
+// none).
+func (r *doorRig) meshBasic(t *testing.T) http.Header {
+	t.Helper()
+	api := r.admin(t)
+	id, _ := api.clientRep(baselineMesh)
+	_, out := api.must(http.StatusOK, http.MethodPost, "/clients/"+id+"/client-secret", nil)
+	defer clear(out)
+	var cred struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(out, &cred); err != nil || cred.Value == "" {
+		t.Fatalf("the mesh client's secret: no value (%v)", err)
+	}
+	return http.Header{"Authorization": {"Basic " + base64.StdEncoding.EncodeToString([]byte(baselineMesh+":"+cred.Value))}}
+}
+
+// exchange posts a code to tokenURL and returns the tokens.
+func (g *goClient) exchange(t *testing.T, tokenURL string, form url.Values, hdr http.Header) doorTokens {
+	t.Helper()
+	form.Set("grant_type", "authorization_code")
+	form.Set("code_verifier", doorPKCE)
+	a := g.send(http.MethodPost, tokenURL, form, hdr)
+	var tok doorTokens
+	if a.status != http.StatusOK || json.Unmarshal(a.body, &tok) != nil || tok.IDToken == "" {
+		t.Fatalf("the code exchange at %s answered %d", redactURL(tokenURL), a.status)
+	}
+	return tok
+}
+
+// meshFlow signs name in for rasputin-mesh at the home door and exchanges
+// the code there; it returns the authorization response's iss and the
+// tokens.
+func (r *doorRig) meshFlow(t *testing.T, g *goClient, name string, pw secret.Value, basic http.Header) (string, doorTokens) {
+	t.Helper()
+	r.settle(t)
+	a := g.signIn(r.homeAuth(baselineMesh, nil), name, pw)
+	code := a.code(t)
+	tok := g.exchange(t, r.homeURL("/realms/rasputin/protocol/openid-connect/token"), url.Values{
+		"code": {code}, "redirect_uri": {callbackOn(ConsoleHost)}}, basic)
+	return a.loc.Query().Get("iss"), tok
+}
+
+// TC-986-20: a password code flow with PKCE at each door, rasputin-mesh at
+// the home door and the test app at the app door: the authorization
+// response's iss (RFC 9207) and the ID token's iss are that door's issuer.
+func (r *doorRig) so2(t *testing.T) {
+	const name = "door-so2"
+	_, pw := r.user(t, name)
+	home := r.sites.Table.Home.Issuer
+	iss, tok := r.meshFlow(t, r.client(t, "127.0.0.31"), name, pw, r.meshBasic(t))
+	if iss != home || claimIss(t, tok.IDToken) != home {
+		t.Errorf("home door: authorization iss %q, ID token iss %q; want %q", iss, claimIss(t, tok.IDToken), home)
+	}
+	g := r.client(t, "127.0.0.32")
+	r.settle(t)
+	a := g.signIn(r.appAuth(doorTestApp, nil), name, pw)
+	code := a.code(t)
+	tok = g.exchange(t, r.appURL("/realms/rasputin/protocol/openid-connect/token"), url.Values{
+		"code": {code}, "client_id": {doorTestApp}, "redirect_uri": {callbackOn(AppSiteHost)}}, nil)
+	app := r.sites.Table.App.Issuer
+	if got := a.loc.Query().Get("iss"); got != app || claimIss(t, tok.IDToken) != app {
+		t.Errorf("app door: authorization iss %q, ID token iss %q; want %q", got, claimIss(t, tok.IDToken), app)
+	}
+}
+
+// TC-986-21: a refresh token from the home door: sent to the identity
+// service with the app door's forwarded headers over the door's leaf it is
+// invalid_grant; through the app door it is refused with a sentence; through
+// the home door it refreshes. That order, so neither refusal is a reuse.
+func (r *doorRig) so3(t *testing.T) {
+	const name = "door-so3"
+	_, pw := r.user(t, name)
+	g := r.client(t, "127.0.0.33")
+	basic := r.meshBasic(t)
+	_, tok := r.meshFlow(t, g, name, pw, basic)
+	if tok.RefreshToken == "" {
+		t.Fatal("the home door's code exchange issued no refresh token")
+	}
+	refresh := func() url.Values {
+		return url.Values{"grant_type": {"refresh_token"}, "refresh_token": {tok.RefreshToken}}
+	}
+
+	relay, err := r.env.DoorTransport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost,
+		r.env.KeycloakUpstream().String()+"/realms/rasputin/protocol/openid-connect/token", strings.NewReader(refresh().Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := r.sites.Table.App.Host
+	req.Host = app
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", basic.Get("Authorization"))
+	req.Header.Set("X-Forwarded-Host", app)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Port", "443")
+	resp, err := (&http.Client{Transport: relay}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	_ = resp.Body.Close()
+	var kc struct {
+		Error string `json:"error"`
+	}
+	if resp.StatusCode != http.StatusBadRequest || json.Unmarshal(body, &kc) != nil || kc.Error != "invalid_grant" {
+		t.Errorf("the refresh at the identity service as the app door: %d %q, want 400 invalid_grant", resp.StatusCode, kc.Error)
+	}
+
+	if a := g.send(http.MethodPost, r.appURL("/realms/rasputin/protocol/openid-connect/token"), refresh(), basic); a.status != http.StatusBadRequest || !isDoorSentence(a.sentence()) {
+		t.Errorf("the refresh through the app door: %d %q, want 400 with the door's sentence", a.status, a.sentence())
+	}
+
+	a := g.send(http.MethodPost, r.homeURL("/realms/rasputin/protocol/openid-connect/token"), refresh(), basic)
+	var again doorTokens
+	if a.status != http.StatusOK || json.Unmarshal(a.body, &again) != nil || again.IDToken == "" {
+		t.Errorf("the refresh through the home door: %d, want new tokens", a.status)
+	}
+}
+
+// codedRefusal is the dispatcher's coded error body.
+type codedRefusal struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+// TC-986-22: with the TLS server name set apart from the Host, every
+// cross-site pair answers the coded 421; discovery at the console's names,
+// 127.0.0.1, localhost and an unknown Host is the console's, and the identity
+// service sees none of it.
+func (r *doorRig) so5Sites(t *testing.T) {
+	const disc = "/realms/rasputin/.well-known/openid-configuration"
+	home, app := r.sites.Table.Home.Host, r.sites.Table.App.Host
+	local := netip.MustParseAddr("127.0.0.34")
+	before := r.upstream.Load()
+	for _, p := range [][2]string{
+		{home, ConsoleHost}, {app, ConsoleHost}, {ConsoleHost, home}, {ConsoleHost, app},
+		{home, app}, {app, home}, {"", home}, {"", app},
+	} {
+		at := p[0]
+		if at == "" {
+			at = "127.0.0.1" // an IP literal: no server name is sent
+		}
+		g := &goClient{t: t, c: r.sites.ClientSNI(local, p[0])}
+		a := g.send(http.MethodGet, "https://"+at+disc, nil, http.Header{"Host": {p[1]}})
+		var c codedRefusal
+		if a.status != http.StatusMisdirectedRequest || json.Unmarshal(a.body, &c) != nil || c.Code != "misdirected_request" || !isDoorSentence(c.Error) {
+			t.Errorf("SNI %q Host %q: %d %q, want the coded 421", p[0], p[1], a.status, a.body)
+		}
+	}
+	for _, c := range []struct{ sni, url, host string }{
+		{ConsoleHost, "https://" + ConsoleHost + disc, ""}, {"", "https://127.0.0.1" + disc, ""},
+		{"localhost", "https://localhost" + disc, ""}, {ConsoleHost, "https://" + ConsoleHost + disc, "unknown.example"},
+	} {
+		g := &goClient{t: t, c: r.sites.ClientSNI(local, c.sni)}
+		var hdr http.Header
+		if c.host != "" {
+			hdr = http.Header{"Host": {c.host}}
+		}
+		if a := g.send(http.MethodGet, c.url, nil, hdr); a.status != http.StatusOK || a.pageID() != "rasputin-console" {
+			t.Errorf("%s (Host %q): %d %q, want the console", redactURL(c.url), c.host, a.status, a.pageID())
+		}
+	}
+	if n := r.upstream.Load() - before; n != 0 {
+		t.Errorf("the identity service saw %d requests", n)
+	}
+}
+
+// credentials are auth's credentials.
+func credentials(t *testing.T, tb *tab, auth webauthn.AuthenticatorID) []*webauthn.Credential {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	res, err := chromedp.Call(ctx, webauthn.GetCredentials, webauthn.GetCredentialsParams{AuthenticatorID: auth})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res.Credentials
+}
+
+// registerPasskey signs name in at authURL in a fresh tab with its own
+// authenticator and registers a passkey, the account's required action. It
+// returns the tab, the authenticator and the one credential.
+func (r *doorRig) registerPasskey(t *testing.T, browserCtx context.Context, origin, authURL, name string, pw secret.Value) (*tab, webauthn.AuthenticatorID, *webauthn.Credential) {
+	t.Helper()
+	tb := newTab(t, browserCtx, origin)
+	tb.beforeSubmit = func(t *testing.T) { r.settle(t) }
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	if _, err := chromedp.Call(ctx, webauthn.Enable, webauthn.EnableParams{EnableUI: new(false)}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	auth := addAuthenticator(t, tb, webauthn.AuthenticatorTransportInternal)
+	tb.navigate(authURL)
+	if got := signIn(tb, name, pw); got != "login-webauthn-register" {
+		t.Fatalf("the passkey required action led to %q", got)
+	}
+	tb.step(chromedp.SetValue(chromedp.ID("rasputin-passkey-name"), "SO-9 laptop"), "type the NAME")
+	if got := tb.submit(chromedp.Click(chromedp.ID("rasputin-passkey-this-device")), "register the passkey"); got != "rasputin-stub" {
+		t.Fatalf("registering the passkey led to %q", got)
+	}
+	creds := credentials(t, tb, auth)
+	if len(creds) != 1 {
+		t.Fatalf("the authenticator holds %d credentials, want 1", len(creds))
+	}
+	return tb, auth, creds[0]
+}
+
+// noAssertion asks, from a page of the other door's origin, for cred by its
+// id: the browser yields no assertion (NotAllowedError), and the
+// credential's counter does not move.
+func noAssertion(t *testing.T, tb *tab, auth webauthn.AuthenticatorID, origin string, cred *webauthn.Credential) {
+	t.Helper()
+	if id := tb.navigate(origin + "/nothing"); id != "rasputin-door-refusal" {
+		t.Fatalf("%s/nothing showed %q, want the door's 404 page", origin, id)
+	}
+	js := fmt.Sprintf(`navigator.credentials.get({publicKey: {challenge: new Uint8Array(32), rpId: location.hostname,`+
+		` allowCredentials: [{type: 'public-key', id: Uint8Array.from(atob(%q), c => c.charCodeAt(0))}],`+
+		` userVerification: 'preferred', timeout: 30000}}).then(() => 'asserted', e => e.name)`,
+		base64.StdEncoding.EncodeToString(cred.CredentialID))
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	got, err := chromedp.Run(ctx, chromedp.Evaluate[string](js, chromedp.EvalAwaitPromise))
+	if err != nil {
+		t.Fatalf("ask for the passkey at %s: %v", origin, err)
+	}
+	if got != "NotAllowedError" {
+		t.Errorf("the passkey for %s asked for at %s: %q, want NotAllowedError", cred.RpID, origin, got)
+	}
+	after := credentials(t, tb, auth)
+	if len(after) != 1 || after[0].SignCount != cred.SignCount {
+		t.Errorf("the credential was used at %s: %+v", origin, after)
+	}
+}
+
+// TC-986-23: a passkey registered at the home door has RP ID sso-ci.local
+// and yields no assertion at the app door, where the account's password
+// signs in with no second step; and the other way, a passkey registered at
+// the app door has RP ID signin.ci.internal and yields none at the home door,
+// where the password signs in (F-986-06).
+func (r *doorRig) so9(t *testing.T, browserCtx context.Context) {
+	home, app := r.sites.Table.Home, r.sites.Table.App
+	for _, d := range []struct {
+		name                 string
+		at, other            doors.Door
+		authAt, passwordThen func() string
+	}{
+		{"door-so9-home", home, app, func() string { return r.homeAuth(baselineConsole, nil) }, func() string { return r.appAuth(doorTestApp, nil) }},
+		{"door-so9-app", app, home, func() string { return r.appAuth(doorTestApp, nil) }, func() string { return r.homeAuth(baselineConsole, nil) }},
+	} {
+		t.Run(d.at.Host, func(t *testing.T) {
+			_, pw := r.user(t, d.name, "webauthn-register-passwordless")
+			tb, auth, cred := r.registerPasskey(t, browserCtx, "https://"+d.at.Host, d.authAt(), d.name, pw)
+			if cred.RpID != d.at.RPID || cred.RpID != d.at.Host {
+				t.Errorf("the passkey made at %s has RP ID %q, want %q", d.at.Host, cred.RpID, d.at.Host)
+			}
+			noAssertion(t, tb, auth, "https://"+d.other.Host, cred)
+			if id := tb.navigate(d.passwordThen()); id != "login-login" {
+				t.Fatalf("the sign-in at %s showed %q, want the sign-in page", d.other.Host, id)
+			}
+			if got := signIn(tb, d.name, pw); got != "rasputin-stub" {
+				t.Errorf("the password at %s led to %q, want the client's callback with no second step", d.other.Host, got)
+			}
+		})
 	}
 }
 
