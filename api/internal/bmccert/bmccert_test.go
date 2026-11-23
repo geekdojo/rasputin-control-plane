@@ -82,10 +82,15 @@ func newFixture(t *testing.T) *fixture {
 	return newFixtureFor(t, "bench")
 }
 
-// newFixtureFor is newFixture for the cluster clusterID.
+// newFixtureFor is newFixture for the cluster clusterID, under the
+// controlplane CA minted for that cluster, so the signed leaf is proven to fit
+// its name constraint (TC-258-07, geekdojo/geekdojo-brain#258).
 func newFixtureFor(t *testing.T, clusterID string) *fixture {
 	t.Helper()
-	ca := tlscatest.Controlplane(t, "")
+	ca, err := tlsca.Ensure(tlsca.ControlplaneConfig().ForCluster(clusterID), t.TempDir(), "test", tlscatest.Deps())
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
 	f := &fixture{ca: ca, issuer: &countingIssuer{next: ca}, log: &logCapture{}}
 	s, err := New(f.issuer, ca.Cert, ca.CertPEM, clusterID, f.log.logger())
 	if err != nil {

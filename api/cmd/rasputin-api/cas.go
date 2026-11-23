@@ -30,6 +30,10 @@ import (
 // data-present guard: nothing persisted depends on it, so on a restore it is
 // created afresh and the leaf sweep re-mints everything it signs.
 //
+// clusterID is RASPUTIN_CLUSTER_ID, read by main: a controlplane CA this call
+// creates is limited to that cluster's names (tlsca.Config.ForCluster,
+// geekdojo/geekdojo-brain#258), and one already on disk is loaded as it is.
+//
 // tlsca.Ensure logs the load or create itself; neither record here carries key
 // material, because tlsca's errors name the file and the failure only.
 //
@@ -39,9 +43,9 @@ import (
 // to nothing the data's roles pin and would hide that the CA was lost; one
 // ERROR names it, the store CA is nil, and the store wiring turns the store
 // off as a configfault, so readiness raises secret-store:unreachable.
-func ensureCAs(ctx context.Context, logger *slog.Logger, exit func(int), trustDir, installName string, deps tlsca.Deps,
+func ensureCAs(ctx context.Context, logger *slog.Logger, exit func(int), trustDir, installName, clusterID string, deps tlsca.Deps,
 	storeDataDir string, storeDataPresent bool) (controlplane, store, identity *tlsca.CA) {
-	controlplane, err := tlsca.Ensure(tlsca.ControlplaneConfig(), trustDir, installName, deps)
+	controlplane, err := tlsca.Ensure(tlsca.ControlplaneConfig().ForCluster(clusterID), trustDir, installName, deps)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: controlplane CA did not load", "ca", tlsca.ControlplaneConfig().Name, "err", err.Error())
 		exit(1)

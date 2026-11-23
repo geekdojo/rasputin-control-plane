@@ -553,7 +553,7 @@ func main() {
 	// secret store's server leaf and the api's client leaf at the store, and
 	// the identity CA the identity service's leaves, both wired just below;
 	// see ensureCAs for why neither failing to load is fatal.
-	cpCA, storeCA, identityCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName,
+	cpCA, storeCA, identityCA := ensureCAs(ctx, logger, os.Exit, trustDir, installName, strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")),
 		tlsca.Deps{Now: time.Now, Rand: cryptorand.Reader, LeafClock: clockGate.ok, Log: logger},
 		storeDataDir, storeDataPresent(storeDataDir))
 	// The secret store (geekdojo/geekdojo-brain#758). RASPUTIN_SECRETSTORE_BACKEND
@@ -2127,7 +2127,7 @@ func main() {
 			Dir:  filepath.Join(dataDir, "tls", "api"),
 			Spec: func() (tlsca.LeafSpec, error) {
 				hostname, _ := os.Hostname()
-				return apiLeafSpec(hostname, lanWatch.PrimaryIP()), nil
+				return fittedAPILeafSpec(cpCA, hostname, lanWatch.PrimaryIP()), nil
 			},
 			Reload: func(context.Context, tlsca.LeafPaths) error {
 				return leaf.refresh(lanWatch.PrimaryIP())
@@ -2383,7 +2383,7 @@ func waitForTrustworthyClock(ctx context.Context, timeout time.Duration) bool {
 // Headscale leaf at <dataDir>/mesh/headscale/certs/.
 func ensureAPILeaf(cpCA *tlsca.CA, dataDir string, lanIP net.IP) (tlsca.LeafPaths, error) {
 	hostname, _ := os.Hostname()
-	spec := apiLeafSpec(hostname, lanIP)
+	spec := fittedAPILeafSpec(cpCA, hostname, lanIP)
 	return cpCA.MintLeafToDisk(filepath.Join(dataDir, "tls", "api"), spec)
 }
 
@@ -2423,6 +2423,15 @@ func apiLeafSpec(hostname string, lanIP net.IP) tlsca.LeafSpec {
 		DNSNames:    dns,
 		IPAddresses: ips,
 	}
+}
+
+// fittedAPILeafSpec is apiLeafSpec keeping only the names ca may sign for
+// (tlsca.CA.Fit): on a cluster whose CA is limited to its own names it drops
+// localhost, the bare hostname, a public LAN address and another cluster's
+// rasputin.local; under an unconstrained CA it is apiLeafSpec unchanged, so
+// an existing cluster's leaf is not re-minted.
+func fittedAPILeafSpec(ca *tlsca.CA, hostname string, lanIP net.IP) tlsca.LeafSpec {
+	return ca.Fit(apiLeafSpec(hostname, lanIP))
 }
 
 // reconcileEntries is the fixed part of the api's schedule: the drift
