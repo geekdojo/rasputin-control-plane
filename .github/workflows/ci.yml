@@ -405,6 +405,28 @@ jobs:
         run: |
           go test -race -timeout 25m -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
+      # The console's own pages under their page policy, in the pinned Chrome
+      # the steps above installed (geekdojo/geekdojo-brain#999, CI UI-1's
+      # console part): every page of the static export, served by the api's
+      # real handler, over plain HTTP, over TLS at rasputin.local and on the
+      # plain-HTTP trust page, with no 'unsafe-inline' and no violation, and
+      # a negative control that proves a violation is recorded.
+      # RASPUTIN_CONSOLE_FUNCTIONAL=required turns a missing export or browser
+      # into a failure; the step above runs the same test, where it skips.
+      - name: build the console export
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: test (console pages under their script policy, pinned Chrome)
+        env:
+          RASPUTIN_CONSOLE_FUNCTIONAL: required
+          RASPUTIN_CONSOLE_UI_DIR: ${{ github.workspace }}/ui/out
+          RASPUTIN_IDENTITY_HOME: ${{ runner.temp }}/identity
+        run: |
+          go test -race -count=1 -v -run '^TestConsolePagesPolicy' ./api/internal/api
+
       # The identity tests that need root and the runner's real systemd
       # (geekdojo/geekdojo-brain#979, docs/testing-identity.md): the pinned
       # PostgreSQL and Keycloak run as transient units, so the states they
@@ -617,9 +639,12 @@ jobs:
     #
     # The same steps prove the starter dashboard's panels return data: each
     # panel's own query, with its own datasource reference, against seeded
-    # series in the real VictoriaMetrics — on a fresh install and on an
-    # existing cluster whose Grafana DB holds the pre-fix, name-derived
-    # datasource uid (grafana_datasource_functional_linux_test.go).
+    # series in the real VictoriaMetrics, on a fresh install
+    # (grafana_datasource_functional_linux_test.go). They also prove
+    # Grafana's own script policy (geekdojo/geekdojo-brain#999): every
+    # response through the proxy that passes Grafana's CSP middleware carries
+    # it with a fresh nonce, and every provisioned dashboard renders under it
+    # in the pinned Chrome.
     #
     # It runs under sudo because that is the appliance: the api is root there,
     # so the socket directory is chowned to Grafana's own uid (472) and the
@@ -656,11 +681,23 @@ jobs:
             echo "::error::docker pull $1 failed 3 times"
             return 1
           }
-          pull grafana/grafana:11.5.1
+          pull grafana/grafana:13.3.1
           pull victoriametrics/victoria-metrics:v1.103.0
           pull grafana/alloy:v1.4.2
           pull grafana/loki:3.4.1
           pull curlimages/curl:8.11.1
+
+      # The pinned Chrome the dashboard walk renders Grafana in, from the
+      # identity installer the backend job runs, through the same cache
+      # (api/internal/identitytest/pin.go pins it).
+      - name: restore the pinned identity downloads
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/identity-download
+          key: identity-${{ runner.os }}-${{ hashFiles('api/internal/identitytest/pin.go') }}
+
+      - name: install the pinned browser
+        run: ./scripts/install-identity.sh "$RUNNER_TEMP/identity" "$RUNNER_TEMP/identity-download"
 
       - name: build the obs test binary
         run: go test -c -race -o "$RUNNER_TEMP/obs.test" ./api/internal/obs
@@ -691,11 +728,15 @@ jobs:
         # REAL proxy handler against the REAL Grafana: the app shell and every
         # static asset it references, a dashboard page, the API calls the UI
         # makes (incl. a panel query), and a Grafana Live websocket carried
-        # through to a Live connect reply. Run after the obs step, never in
-        # parallel with it: the compose template pins container names.
+        # through to a Live connect reply. It also checks Grafana's own
+        # script policy on those responses and renders every provisioned
+        # dashboard in the pinned Chrome (geekdojo/geekdojo-brain#999). Run
+        # after the obs step, never in parallel with it: the compose template
+        # pins container names.
         run: |
           sudo env \
             RASPUTIN_GRAFANA_FUNCTIONAL=required \
+            RASPUTIN_IDENTITY_HOME="$RUNNER_TEMP/identity" \
             PATH="$PATH" \
             "$RUNNER_TEMP/api.test" -test.v -test.count=1 -test.timeout=15m \
               -test.run 'TestObsProxyGrafanaUI_OverSocket'

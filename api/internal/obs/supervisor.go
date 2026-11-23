@@ -394,7 +394,18 @@ const (
 	// equivalent of -storage.minFreeDiskSpaceBytes — so time retention plus
 	// the 85% alert is the whole defense. See storage.md §5.
 	defaultLokiRetention = "720h"
-	defaultGrafanaImage  = "grafana/grafana:11.5.1@sha256:5781759b3d27734d4d548fcbaf60b1180dbf4290e708f01f292faa6ae764c5e6"
+	// defaultGrafanaImage is past both cross-site scripting advisories the
+	// previous pin, 11.5.1, sat inside (geekdojo/geekdojo-brain#999):
+	//
+	//   - CVE-2025-4123, fixed in 11.5.4+security-01 and 12.0.0+security-01;
+	//   - CVE-2025-6023, fixed in 11.5.6+security-01 and 12.0.2+security-01,
+	//     with a bypass of that fix closed in 12.1.2.
+	//
+	// 13.3.1 is the newest release of the latest line and not an x.y.0. The
+	// 13.3 line is supported until 2027-07-20 (Grafana's support table,
+	// checked 2026-11-23). The digest is the multi-arch index (amd64, arm64,
+	// arm/v7); the image runs as uid 472 on both amd64 and arm64.
+	defaultGrafanaImage = "grafana/grafana:13.3.1@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf"
 	// Used ONLY by the non-Linux developer fallback — on Linux Grafana
 	// has no TCP listener (UseGrafanaSocket). 3000 is the most contended
 	// port on a dev box — every common JS framework defaults to it — so
@@ -1172,17 +1183,44 @@ func (s *DockerComposeSupervisor) grafanaConfigPaths() []string {
 func (s *DockerComposeSupervisor) renderGrafanaIni() (string, error) {
 	var buf bytes.Buffer
 	err := grafanaIniTmpl.Execute(&buf, struct {
-		UseSocket  bool
-		SocketPath string
+		UseSocket   bool
+		SocketPath  string
+		CSPTemplate string
 	}{
-		UseSocket:  s.grafanaSocketEnabled(),
-		SocketPath: grafanaContainerSocketPath,
+		UseSocket:   s.grafanaSocketEnabled(),
+		SocketPath:  grafanaContainerSocketPath,
+		CSPTemplate: GrafanaCSPTemplate,
 	})
 	if err != nil {
 		return "", fmt.Errorf("obs supervisor: render grafana.ini: %w", err)
 	}
 	return buf.String(), nil
 }
+
+// GrafanaCSPTemplate is the script policy Grafana renders onto every response
+// that passes its CSP middleware (geekdojo/geekdojo-brain#999). Grafana
+// replaces $NONCE with a fresh 'nonce-…' per request, and $ROOT_PATH with
+// root_url minus its scheme (localhost/observability/).
+//
+//   - script-src 'strict-dynamic' $NONCE: only the shell's own nonced scripts
+//     run, plus what they load. No 'unsafe-inline' and no 'unsafe-eval', which
+//     Grafana's default template carries.
+//   - connect-src 'self' wss://$ROOT_PATH: 'self' already covers Grafana Live
+//     through the api's proxy. The wss:// source is kept because the issue
+//     mandates the template exactly; it names the viewer's own machine.
+//   - base-uri 'self', not the issue's 'none': Grafana's shell carries its own
+//     <base href="/observability/">, and 'none' blocks it, so no dashboard
+//     loads (measured on 13.3.1). 'self' admits a base address on the
+//     console's own origin only, and script-src still needs the nonce.
+//   - style-src 'unsafe-inline': Grafana's frontend sets inline styles.
+//
+// Grafana serves its static public/ files before that middleware, so those
+// files carry only the api's frame-ancestors 'self' (sameOriginFraming).
+// Exported for the api package's header check on /observability/ responses.
+const GrafanaCSPTemplate = "script-src 'strict-dynamic' $NONCE; object-src 'none'; base-uri 'self'; " +
+	"frame-ancestors 'self'; form-action 'self'; connect-src 'self' wss://$ROOT_PATH; " +
+	"img-src 'self' data: blob:; font-src 'self'; style-src 'self' 'unsafe-inline' blob:; " +
+	"manifest-src 'self'; media-src 'none'"
 
 // grafanaIniTmpl — main Grafana config. The non-default knobs:
 //
@@ -1253,6 +1291,10 @@ disable_initial_admin_creation = true
 # browser sees: framing by the api's own origin only (sameOriginFraming in
 # api/internal/api/security_headers.go).
 allow_embedding = true
+# Grafana's own script policy, rendered on every response that passes its
+# CSP middleware, with a fresh nonce each time. See obs.GrafanaCSPTemplate.
+content_security_policy = true
+content_security_policy_template = """{{.CSPTemplate}}"""
 
 [users]
 allow_sign_up = false

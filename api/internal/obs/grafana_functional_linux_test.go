@@ -212,14 +212,13 @@ func containerTCPListeners(t *testing.T, container string) []string {
 	return held
 }
 
-// assertStarterDashboard waits for the checkable fact — Grafana has
-// committed the provisioned dashboard to its own DB (see
-// waitForProvisionedDashboardRow for why that and not a timeout) — and then
-// requires the FIRST authenticated search to show it. One read: nothing
-// here retries until it happens to pass.
+// assertStarterDashboard waits for the checkable fact — Grafana's search
+// lists the provisioned dashboard (see waitForProvisionedDashboard for why
+// that and not a timeout) — and then requires the FIRST search as user to
+// show it. One read: nothing here retries until it happens to pass.
 func assertStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user string) {
 	t.Helper()
-	waitForProvisionedDashboardRow(t, sup.cfg.StateDir, 3*time.Minute)
+	waitForProvisionedDashboard(t, sup, 3*time.Minute)
 	code, body := grafanaGet(t, sup, "/api/search?type=dash-db", user)
 	if code != http.StatusOK || !strings.Contains(body, "Cluster Overview") {
 		logs, _ := exec.Command("docker", "logs", "--tail", "200", grafanaFuncContainer).CombinedOutput()
@@ -231,7 +230,7 @@ func assertStarterDashboard(t *testing.T, sup *DockerComposeSupervisor, user str
 				ls = append(ls, l)
 			}
 		}
-		t.Fatalf("dashboard row is committed but search does not show it: %d %s\n--- grafana log (filtered) ---\n%s",
+		t.Fatalf("search lists the dashboard but not to %s: %d %s\n--- grafana log (filtered) ---\n%s", user,
 			code, body, strings.Join(ls, "\n"))
 	}
 }
@@ -258,9 +257,8 @@ func TestGrafanaSocket_TransitionFromPublishedPort(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("published-port Grafana /api/health = %d, want 200", code)
 	}
-	// No authenticated request before provisioning has committed — see
-	// waitForProvisionedDashboardRow.
-	waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
+	// Provisioning has finished — see waitForProvisionedDashboard.
+	waitForProvisionedDashboard(t, before, 3*time.Minute)
 	// This is the bug, reproduced against the shipped image: no
 	// credential, one header, authenticated.
 	code, body := grafanaGet(t, before, "/api/user", "mallory-not-an-account")

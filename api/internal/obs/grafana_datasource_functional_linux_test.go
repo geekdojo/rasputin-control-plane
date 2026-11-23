@@ -8,22 +8,25 @@
 // PBFA97CFB590B2093, which Rasputin never provisioned: Grafana derived
 // P4169E866C3094E38 from the name "VictoriaMetrics" instead, and every panel
 // showed "Datasource PBFA97CFB590B2093 was not found". The unit tests check
-// the reference statically; this proves Grafana agrees, and that an EXISTING
-// cluster — whose Grafana database already holds the datasource under the
-// derived uid — converges on the next Start with nothing done by hand.
+// the reference statically; this proves Grafana agrees on a fresh install.
+//
+// An existing cluster whose Grafana database still holds the datasource under
+// the derived uid (one never updated past v2026.09.4) used to converge in
+// place on the next Start; TestGrafanaDatasourceUID_TransitionFromAutoUID
+// proved that on Grafana 11.5.1. That in-place transition was 11.5.1
+// behaviour and is not supported from Grafana 13 (geekdojo/geekdojo-brain#999:
+// Alpha, such clusters are not carried to 13.3.1), so the test is retired.
 
 package obs
 
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -49,19 +52,6 @@ func grafanaPost(t *testing.T, sup *DockerComposeSupervisor, path, webauthUser, 
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(b)
-}
-
-// legacyGrafanaProvisioning is the provisioning as it shipped before the fix:
-// the datasources and starter dashboard from testdata, the (unchanged)
-// dashboard provider from today.
-func legacyGrafanaProvisioning(t *testing.T) []grafanaFile {
-	t.Helper()
-	read := func(name string) string { return string(readLegacyGrafana(t, name)) }
-	return []grafanaFile{
-		{grafanaDatasourcesPath, read("datasources.yaml")},
-		{grafanaDashboardsPath, grafanaDashboardsYAML},
-		{grafanaStarterDashboardPath, read("cluster-overview.json")},
-	}
 }
 
 // seedClusterMetrics writes two nodes' worth of the rasputin_* series the
@@ -279,160 +269,71 @@ func assertPanelsReturnData(t *testing.T, sup *DockerComposeSupervisor, user str
 	}
 }
 
+// frontendDS is one datasource in the list Grafana hands its frontend, what
+// panels resolve their references against.
 type frontendDS struct {
-	ID   int    `json:"id"`
-	UID  string `json:"uid"`
-	Type string `json:"type"`
-}
-
-// frontendDatasources is the datasource list Grafana hands its frontend —
-// what panels resolve their references against — keyed by name.
-func frontendDatasources(t *testing.T, sup *DockerComposeSupervisor, user string) map[string]frontendDS {
-	t.Helper()
-	code, body := grafanaGet(t, sup, "/api/frontend/settings", user)
-	if code != http.StatusOK {
-		t.Fatalf("frontend settings = %d", code)
-	}
-	var fs struct {
-		Datasources map[string]frontendDS `json:"datasources"`
-	}
-	if err := json.Unmarshal([]byte(body), &fs); err != nil {
-		t.Fatalf("frontend settings json: %v", err)
-	}
-	return fs.Datasources
+	UID string `json:"uid"`
 }
 
 // waitForGrafanaProvisioned waits for the checkable facts that Grafana has
-// applied the provisioning now on disk: the VictoriaMetrics datasource row
-// carries wantDSUID ("" = any uid) and the starter dashboard row contains
-// wantDashRef. Read from
-// Grafana's own database, read-only; the deadline bounds only how long the
-// (re)started Grafana may take to provision.
-func waitForGrafanaProvisioned(t *testing.T, stateDir, wantDSUID, wantDashRef string, within time.Duration) {
+// applied the provisioning now on disk, as Grafana itself reports them: the
+// VictoriaMetrics datasource its frontend settings list carries wantDSUID
+// ("" = any uid), and the starter dashboard model it serves contains
+// wantDashRef. Not Grafana's database: from Grafana 13 the dashboard lives in
+// unified storage and the legacy dashboard table stays empty (see
+// waitForProvisionedDashboard). A request that fails while the (re)started
+// Grafana comes up is retried; the deadline bounds only how long Grafana may
+// take to provision.
+func waitForGrafanaProvisioned(t *testing.T, sup *DockerComposeSupervisor, wantDSUID, wantDashRef string, within time.Duration) {
 	t.Helper()
-	dbPath := filepath.Join(stateDir, grafanaDataDir, "grafana.db")
 	deadline := time.Now().Add(within)
 	var lastUID string
 	var lastRef bool
 	var lastErr error
 	for {
-		db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
-		if err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err = db.QueryRowContext(ctx,
-				`SELECT uid FROM data_source WHERE name = 'VictoriaMetrics'`).Scan(&lastUID)
-			if err == nil {
-				var n int
-				err = db.QueryRowContext(ctx,
-					// CAST: Grafana stores a re-provisioned dashboard's
-					// data as a BLOB, which LIKE does not match (measured).
-					`SELECT COUNT(*) FROM dashboard WHERE uid = ? AND CAST(data AS TEXT) LIKE ?`,
-					starterDashboardUID, "%"+wantDashRef+"%").Scan(&n)
-				lastRef = n > 0
-			}
-			cancel()
-			_ = db.Close()
-		}
-		lastErr = err
-		if err == nil && lastUID != "" && (wantDSUID == "" || lastUID == wantDSUID) && lastRef {
+		lastUID, lastRef, lastErr = provisionedState(sup, wantDashRef)
+		if lastErr == nil && lastUID != "" && (wantDSUID == "" || lastUID == wantDSUID) && lastRef {
 			return
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("Grafana did not apply the provisioning within %s: datasource uid = %q (want %q), dashboard contains %q = %v, last error = %v\n%s",
-				within, lastUID, wantDSUID, wantDashRef, lastRef, lastErr, grafanaProvisioningDiagnostics(dbPath))
+				within, lastUID, wantDSUID, wantDashRef, lastRef, lastErr, grafanaProvisioningDiagnostics(sup))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 }
 
-// TestGrafanaDatasourceUID_TransitionFromAutoUID: a cluster provisioned by
-// the pre-fix api (datasource with a Grafana-derived uid, dashboard pointing
-// at a uid that does not exist) is started by the new code on the same state
-// and Grafana database. With nothing done by hand, the datasource row takes
-// the fixed uid in place and every panel returns data.
-func TestGrafanaDatasourceUID_TransitionFromAutoUID(t *testing.T) {
-	requireDocker(t)
-	stateDir := funcStateDir(t)
-	composeDown()
-	t.Cleanup(composeDown)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	// --- BEFORE: the provisioning every cluster runs today.
-	before := grafanaFuncSupervisor(t, stateDir, true)
-	before.grafanaProvisioning = legacyGrafanaProvisioning(t)
-	if err := before.Start(ctx); err != nil {
-		t.Fatalf("start (pre-fix provisioning): %v", err)
+// provisionedState reads, from Grafana's API, the VictoriaMetrics
+// datasource's uid and whether the starter dashboard model contains ref.
+func provisionedState(sup *DockerComposeSupervisor, ref string) (string, bool, error) {
+	code, body, err := grafanaFetch(sup, "/api/frontend/settings")
+	if err != nil {
+		return "", false, err
 	}
-	waitForGrafanaProvisioned(t, stateDir, "", "PBFA97CFB590B2093", 3*time.Minute)
-	waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
-	seedClusterMetrics(t, before)
-
-	dsBefore := frontendDatasources(t, before, "alice")["VictoriaMetrics"]
-	if dsBefore.UID == "" || dsBefore.UID == vmDatasourceUID {
-		t.Fatalf("precondition: VictoriaMetrics uid = %q; want Grafana's derived uid", dsBefore.UID)
+	if code != http.StatusOK {
+		return "", false, fmt.Errorf("frontend settings = %d", code)
 	}
-	t.Logf("pre-fix: VictoriaMetrics has Grafana-derived uid %s (row id %d)", dsBefore.UID, dsBefore.ID)
-	// Reproduce the customer-visible bug: the panel's own query names a
-	// datasource Grafana does not have. (The browser renders this as
-	// "Datasource PBFA97CFB590B2093 was not found"; the API answers 404
-	// "Data source not found", measured on 11.5.1.)
-	qs := dashboardPanelQueries(t, before, "alice")
-	if qs[0].dsUID != "PBFA97CFB590B2093" {
-		t.Fatalf("precondition: pre-fix dashboard points at %q", qs[0].dsUID)
+	var fs struct {
+		Datasources map[string]frontendDS `json:"datasources"`
 	}
-	code, body := runPanelQuery(t, before, "alice", qs[0])
-	if code != http.StatusNotFound || !strings.Contains(body, "Data source not found") {
-		t.Fatalf("precondition: the pre-fix panel query should fail with datasource-not-found, got %d %.400s", code, body)
+	if err := json.Unmarshal([]byte(body), &fs); err != nil {
+		return "", false, fmt.Errorf("frontend settings json: %w", err)
 	}
-	t.Logf("pre-fix panel query, as on the bench: %d %.200s", code, body)
-
-	// --- AFTER: the new code, same state dir and Grafana database. This is
-	// exactly what the api does on its next Start after an update.
-	after := grafanaFuncSupervisor(t, stateDir, true)
-	if err := after.Start(ctx); err != nil {
-		t.Fatalf("start (fixed provisioning): %v", err)
+	uid := fs.Datasources["VictoriaMetrics"].UID
+	code, body, err = grafanaFetch(sup, "/api/dashboards/uid/"+starterDashboardUID)
+	if err != nil {
+		return uid, false, err
 	}
-	waitForGrafanaProvisioned(t, stateDir, vmDatasourceUID, vmDatasourceUID, 3*time.Minute)
-
-	t.Run("datasource took the fixed uid in place", func(t *testing.T) {
-		all := frontendDatasources(t, after, "alice")
-		ds := all["VictoriaMetrics"]
-		if ds.UID != vmDatasourceUID {
-			t.Fatalf("VictoriaMetrics uid = %q, want %q", ds.UID, vmDatasourceUID)
-		}
-		// Same row, not a second datasource beside the old one.
-		if ds.ID != dsBefore.ID {
-			t.Errorf("datasource id %d -> %d; want the existing row updated", dsBefore.ID, ds.ID)
-		}
-		prom := 0
-		for name, d := range all {
-			if d.Type == "prometheus" {
-				prom++
-				if name != "VictoriaMetrics" {
-					t.Errorf("unexpected prometheus datasource %q (%s)", name, d.UID)
-				}
-			}
-		}
-		if prom != 1 {
-			t.Errorf("%d prometheus datasources, want 1", prom)
-		}
-		if lk := all["Loki"]; lk.UID != "" {
-			// Loki is off in this harness; if present it must be fixed too.
-			if lk.UID != lokiDatasourceUID {
-				t.Errorf("Loki uid = %q, want %q", lk.UID, lokiDatasourceUID)
-			}
-		}
-	})
-
-	t.Run("every panel returns data", func(t *testing.T) {
-		assertPanelsReturnData(t, after, "alice")
-	})
+	if code != http.StatusOK {
+		return uid, false, fmt.Errorf("dashboard model = %d", code)
+	}
+	return uid, strings.Contains(body, ref), nil
 }
 
 // TestGrafanaDatasourceUID_FreshInstall: a node that has never run the obs
-// stack gets the fixed uid directly and every panel returns data.
+// stack gets the fixed uid directly and every panel returns data. The
+// in-place transition from the derived uid was 11.5.1 behaviour and is not
+// supported from Grafana 13 (see the file comment).
 func TestGrafanaDatasourceUID_FreshInstall(t *testing.T) {
 	requireDocker(t)
 	stateDir := funcStateDir(t)
@@ -446,36 +347,23 @@ func TestGrafanaDatasourceUID_FreshInstall(t *testing.T) {
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForGrafanaProvisioned(t, stateDir, vmDatasourceUID, vmDatasourceUID, 3*time.Minute)
-	waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
+	waitForGrafanaProvisioned(t, sup, vmDatasourceUID, vmDatasourceUID, 3*time.Minute)
+	waitForProvisionedDashboard(t, sup, 3*time.Minute)
 	seedClusterMetrics(t, sup)
 	assertPanelsReturnData(t, sup, "alice")
 }
 
-// grafanaProvisioningDiagnostics is what a failed wait prints: Grafana's
-// provisioning records, the stored dashboard's datasource references, and
-// its provisioning log lines.
-func grafanaProvisioningDiagnostics(dbPath string) string {
+// grafanaProvisioningDiagnostics is what a failed wait prints: the stored
+// dashboard's datasource references, as Grafana serves the model, and
+// Grafana's provisioning log lines.
+func grafanaProvisioningDiagnostics(sup *DockerComposeSupervisor) string {
 	var b strings.Builder
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
-	if err == nil {
-		defer db.Close()
-		rows, err := db.Query(`SELECT dashboard_id, external_id, check_sum, updated FROM dashboard_provisioning`)
-		if err == nil {
-			for rows.Next() {
-				var id, updated int64
-				var ext, sum string
-				_ = rows.Scan(&id, &ext, &sum, &updated)
-				fmt.Fprintf(&b, "dashboard_provisioning: id=%d %s sum=%s updated=%d\n", id, ext, sum, updated)
-			}
-			_ = rows.Close()
+	if code, data, err := grafanaFetch(sup, "/api/dashboards/uid/"+starterDashboardUID); err == nil && code == http.StatusOK {
+		for _, part := range strings.Split(data, `"datasource"`)[1:] {
+			fmt.Fprintf(&b, "stored datasource ref: %.80s\n", part)
 		}
-		var data string
-		if db.QueryRow(`SELECT CAST(data AS TEXT) FROM dashboard WHERE uid = ?`, starterDashboardUID).Scan(&data) == nil {
-			for _, part := range strings.Split(data, `"datasource"`)[1:] {
-				fmt.Fprintf(&b, "stored datasource ref: %.80s\n", part)
-			}
-		}
+	} else {
+		fmt.Fprintf(&b, "dashboard model: %d %v\n", code, err)
 	}
 	logs, _ := exec.Command("docker", "logs", "--tail", "400", grafanaFuncContainer).CombinedOutput()
 	for _, l := range strings.Split(string(logs), "\n") {

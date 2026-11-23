@@ -5,18 +5,13 @@ import "net/http"
 // Security response headers carried by every response the api writes, on all
 // three listeners (Handler, BootstrapHandler, ObsIngestHandler).
 const (
-	// contentSecurityPolicy is the baseline policy. It is written for the web
-	// UI, because the UI is the only HTML the api serves; on a JSON or file
-	// response it is inert. Each relaxation is something the shipped UI needs:
+	// contentSecurityPolicy is the baseline policy, on every response the
+	// api writes. It is written for the web UI, the only HTML the api serves,
+	// but a console page replaces its script-src with the page's own (see
+	// pagePolicy in ui_policy.go), so here it governs only responses that are
+	// not console pages: JSON, files and redirects, where script-src 'none'
+	// has no effect. Each relaxation is something the shipped UI needs:
 	//
-	//   - script-src 'unsafe-inline': the UI is a Next.js static export. Its
-	//     pages carry inline <script> tags (the RSC flight payload, and the
-	//     theme bootstrap in app/layout.tsx), and a static export has no
-	//     server to mint a per-request nonce. Hashes would have to be computed
-	//     per build; that is a later tightening, not a baseline.
-	//   - script-src 'wasm-unsafe-eval': the backup-key passphrase KDF is
-	//     Argon2id from hash-wasm (ui/lib/passphrase-kdf.ts), which compiles
-	//     WebAssembly. It permits WebAssembly compilation only, not eval().
 	//   - style-src 'unsafe-inline': the prerendered HTML carries style="..."
 	//     attributes (React inline styles).
 	//   - font-src data:: the UI bundles JetBrains Mono (ui/styles/fonts,
@@ -33,9 +28,12 @@ const (
 	// frame-ancestors 'none' (with X-Frame-Options: DENY for older browsers)
 	// forbids framing everywhere except the Grafana proxy — see
 	// sameOriginFraming.
-	contentSecurityPolicy = "default-src 'self'; " +
-		"script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; " +
-		"style-src 'self' 'unsafe-inline'; " +
+	contentSecurityPolicy = cspHead + "script-src 'none'; " + cspTail
+
+	// cspHead and cspTail are every directive of the baseline except
+	// script-src, which sits between them; a page policy shares them.
+	cspHead = "default-src 'self'; "
+	cspTail = "style-src 'self' 'unsafe-inline'; " +
 		"font-src 'self' data:; " +
 		"img-src 'self' data: blob:; " +
 		"connect-src 'self'; " +
@@ -81,7 +79,9 @@ func securityHeaders(next http.Handler) http.Handler {
 // It replaces the baseline CSP rather than adding frame-ancestors to it,
 // because the baseline's script and style rules are written for the web UI
 // and would break Grafana's frontend. The proxy's responses are Grafana's
-// pages, and Grafana owns their content policy.
+// pages, and Grafana owns their content policy: grafana.ini turns on its own
+// script policy (obs.GrafanaCSPTemplate), which Grafana adds beside this one
+// on every response that passes its CSP middleware.
 //
 // It is mounted inside the session gate, so the exception covers only
 // authenticated responses that actually come from the proxy.
@@ -92,4 +92,9 @@ func sameOriginFraming(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", "frame-ancestors 'self'")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// cspWithScriptSrc is the baseline policy with its script-src replaced by src.
+func cspWithScriptSrc(src string) string {
+	return cspHead + "script-src " + src + "; " + cspTail
 }

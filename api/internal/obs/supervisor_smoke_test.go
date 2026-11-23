@@ -243,10 +243,10 @@ func TestObsSupervisor_LiveLifecycle(t *testing.T) {
 			return resp, string(body)
 		}
 
-		// Before ANY request to Grafana: wait for it to commit the
-		// provisioned dashboard (see waitForProvisionedDashboardRow for why
+		// Before any other request to Grafana: wait for its search to list
+		// the provisioned dashboard (see waitForProvisionedDashboard for why
 		// a fact and not a timeout).
-		waitForProvisionedDashboardRow(t, stateDir, 3*time.Minute)
+		waitForProvisionedDashboard(t, sup, 3*time.Minute)
 
 		if runtime.GOOS == "linux" && sup.GrafanaSocketPath() == "" {
 			t.Fatal("on Linux Grafana must serve on a unix socket, not a published port " +
