@@ -860,7 +860,9 @@ func (s *DockerSupervisor) leafSpec() (tlsca.LeafSpec, error) {
 		}
 	}
 	spec.DNSNames = append(spec.DNSNames, s.cfg.ExtraLeafDNSNames...)
-	return spec, nil
+	// Only the names the CA may sign for (geekdojo/geekdojo-brain#258): a
+	// no-op under an unconstrained CA.
+	return s.cfg.MeshCA.Fit(spec), nil
 }
 
 // serverURLHost returns the hostname from a server URL like

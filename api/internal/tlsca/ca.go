@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
@@ -73,12 +74,24 @@ type Config struct {
 	Lifetime time.Duration
 	// Usages are the leaf kinds this CA issues. MintLeaf refuses any other.
 	Usages []Usage
+	// Constraints, when not zero, are stamped on a CA this Config CREATES as
+	// a critical name-constraints extension. A CA loaded from disk keeps
+	// whatever it was minted with: an existing CA is never re-minted (D21).
+	Constraints NameConstraints
+}
+
+// ForCluster is c limited to cluster cid's names (ClusterConstraints). An
+// empty cid is the dev fallback "rasputin". The cluster id is the caller's:
+// the composition root reads it, never this package.
+func (c Config) ForCluster(cid string) Config {
+	c.Constraints = ClusterConstraints(cid)
+	return c
 }
 
 // ControlplaneConfig is the CA that signs every HTTPS leaf the controlplane
 // serves (the api, Headscale, the per-app leaves). Its subject is unchanged
 // from the release that created it, so installed devices keep the name they
-// show.
+// show. It is unconstrained; the api mints it through ForCluster.
 func ControlplaneConfig() Config {
 	return Config{
 		Name:          "controlplane",
@@ -222,7 +235,8 @@ func Ensure(cfg Config, dir, installName string, d Deps) (*CA, error) {
 	ca.deps = d
 	sum := sha256.Sum256(ca.Cert.Raw)
 	d.Log.Info(msg, "ca", cfg.Name, "subject", ca.Cert.Subject.CommonName,
-		"not_after", ca.Cert.NotAfter.UTC().Format(time.RFC3339), "sha256", hex.EncodeToString(sum[:]))
+		"not_after", ca.Cert.NotAfter.UTC().Format(time.RFC3339), "sha256", hex.EncodeToString(sum[:]),
+		"constrained", !ca.Constraints().IsZero())
 	return ca, nil
 }
 
@@ -269,6 +283,13 @@ func create(cfg Config, d Deps, certPath, keyPath, installName string) (*CA, err
 		IsCA:                  true,
 		BasicConstraintsValid: true,
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+	if !cfg.Constraints.IsZero() {
+		// Critical, so a client that cannot enforce the constraint refuses
+		// the CA rather than trusting it for every name.
+		tmpl.PermittedDNSDomainsCritical = true
+		tmpl.PermittedDNSDomains = slices.Clone(cfg.Constraints.DNSDomains)
+		tmpl.PermittedIPRanges = slices.Clone(cfg.Constraints.IPRanges)
 	}
 	der, err := x509.CreateCertificate(d.Rand, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {

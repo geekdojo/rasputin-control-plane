@@ -217,7 +217,7 @@ func TestIdentityLeaves_StartupSweepMintsSix(t *testing.T) {
 func TestIdentityCA_RestoreReMintsCAAndLeaves(t *testing.T) {
 	trustDir, dataDir := t.TempDir(), t.TempDir()
 	noExit := func(c int) { t.Fatalf("exit %d", c) }
-	_, _, oldCA := ensureCAs(t.Context(), slog.New(slog.DiscardHandler), noExit, trustDir, "home1", tlscatest.Deps(), "", false)
+	_, _, oldCA := ensureCAs(t.Context(), slog.New(slog.DiscardHandler), noExit, trustDir, "home1", "", tlscatest.Deps(), "", false)
 	identitySweep(t, wireIdentityCALeaves(t, oldCA, dataDir, (&scriptedRun{}).run), slog.New(slog.DiscardHandler))
 	for _, f := range []string{tlsca.IdentityCertFile, tlsca.IdentityKeyFile} {
 		if err := os.Remove(filepath.Join(trustDir, f)); err != nil {
@@ -236,7 +236,7 @@ func TestIdentityCA_RestoreReMintsCAAndLeaves(t *testing.T) {
 	log, rec := logkittest.New()
 	d := tlscatest.Deps()
 	d.Log = log
-	cp, store, newCA := ensureCAs(t.Context(), log, noExit, trustDir, "home1", d, "", false)
+	cp, store, newCA := ensureCAs(t.Context(), log, noExit, trustDir, "home1", "", d, "", false)
 	if cp == nil || store == nil || newCA == nil {
 		t.Fatalf("cp=%v store=%v identity=%v, want all three", cp != nil, store != nil, newCA != nil)
 	}
@@ -550,7 +550,7 @@ func TestEnsureCAs_IdentityCAFailureIsNonFatalAndIndependent(t *testing.T) {
 			d := tlscatest.Deps()
 			d.Log = log
 			var exits []int
-			cp, store, identity := ensureCAs(t.Context(), log, func(c int) { exits = append(exits, c) }, trustDir, "home1", d,
+			cp, store, identity := ensureCAs(t.Context(), log, func(c int) { exits = append(exits, c) }, trustDir, "home1", "", d,
 				filepath.Join(trustDir, "..", "openbao"), tc.storeDataPresent)
 			if len(exits) != 0 || cp == nil {
 				t.Fatalf("exits %v cp=%v, want no exit and a controlplane CA", exits, cp != nil)
@@ -752,7 +752,7 @@ func TestIdentityCA_UpgradeFromThePreviousRelease(t *testing.T) {
 	d := tlscatest.Deps()
 	d.Log = log
 	run := &scriptedRun{fail: func(string) error { return errors.New("Unit keycloak-db.service not found.") }}
-	_, _, identityCA := ensureCAs(t.Context(), log, func(c int) { t.Fatalf("exit %d", c) }, trustDir, "home1", d,
+	_, _, identityCA := ensureCAs(t.Context(), log, func(c int) { t.Fatalf("exit %d", c) }, trustDir, "home1", "", d,
 		filepath.Join(dataDir, storeDataDirName), storeDataPresent(filepath.Join(dataDir, storeDataDirName)))
 	if identityCA == nil {
 		t.Fatal("no identity CA after an upgrade")
