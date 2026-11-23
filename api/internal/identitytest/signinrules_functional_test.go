@@ -1024,6 +1024,7 @@ func (r *rulesRig) tc20finish(t *testing.T, p recoveryPage) {
 			t.Fatal("the test ended before the page had been open 6 minutes")
 		}
 	}
+	p.g.t = t // the client was made in the subtest that opened the page, which has ended
 	got := r.post(t, p.g, p.page, "kc-recovery-codes-settings-form", nil)
 	if strings.Contains(got.pageID(), "expired") {
 		t.Fatalf("the page expired after %s", time.Since(p.opened))
