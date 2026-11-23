@@ -162,6 +162,47 @@ func TestFunctional_ClusterRecords(t *testing.T) {
 	}
 }
 
+// TC-997-11: the home sign-in door's sso-<cid>.local, beside <cid>.local, over
+// real UDP and TCP on loopback. A failed bind fails the test; there is no skip.
+func TestFunctional_HomeDoorName(t *testing.T) {
+	const home = "sso-home1.local"
+	loopback := net.IPv4(127, 0, 0, 1)
+	ip := func() net.IP { return testIP }
+	resp := NewResponder(testZone,
+		NewSelfSource(testZone, testLocal, ip),
+		NewDoorSource(home, ip, func() bool { return false }))
+	srv := NewServer(func() net.IP { return loopback }, 0, resp)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer srv.Stop()
+
+	for _, tr := range []struct{ proto, addr string }{{"udp", srv.UDPAddr()}, {"tcp", srv.TCPAddr()}} {
+		proto, addr := tr.proto, tr.addr
+		t.Run(proto, func(t *testing.T) {
+			if addr == "" {
+				t.Fatalf("Server %s address empty after Start", proto)
+			}
+			for _, name := range []string{home, testLocal} {
+				m := exchange(t, proto, addr, name, dns.TypeA)
+				if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 1 {
+					t.Fatalf("%s A: rcode=%s answers=%d", name, dns.RcodeToString[m.Rcode], len(m.Answer))
+				}
+				if a, ok := m.Answer[0].(*dns.A); !ok || !a.A.Equal(testIP) {
+					t.Fatalf("%s A answer = %v, want %v", name, m.Answer, testIP)
+				}
+			}
+			m := exchange(t, proto, addr, home, dns.TypeAAAA)
+			if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 0 {
+				t.Fatalf("%s AAAA: rcode=%s answers=%d, want NOERROR with none (NODATA)", home, dns.RcodeToString[m.Rcode], len(m.Answer))
+			}
+			assertSingleSOA(t, m.Ns)
+		})
+	}
+}
+
 func exchange(t *testing.T, proto, addr, name string, qtype uint16) *dns.Msg {
 	t.Helper()
 	req := new(dns.Msg)

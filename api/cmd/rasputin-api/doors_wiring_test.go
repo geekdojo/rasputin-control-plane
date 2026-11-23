@@ -153,8 +153,7 @@ func newDoorRig(t *testing.T, lister appLister, deps *tlsca.Deps) *doorRig {
 	zone := proto.BaseDomain(rigCID)
 	lan := func() net.IP { return rigLAN }
 	resp := nameserver.NewResponder(zone,
-		nameserver.NewSelfSource(zone, rigCID+".local", lan),
-		nameserver.NewDoorSource(r.table.App.Host, lan, r.appDoor.withheld))
+		controlPlaneSources(zone, rigCID+".local", r.table, true, lan, r.appDoor.withheld)...)
 	srv := nameserver.NewServer(func() net.IP { return net.IPv4(127, 0, 0, 1) }, 0, resp)
 	sctx, cancel := context.WithCancel(ctx)
 	t.Cleanup(cancel)
@@ -394,13 +393,15 @@ func TestDoorWiring_EveryNameAnsweredForTheControlPlaneIsOnItsLeaf(t *testing.T)
 	lan := func() net.IP { return rigLAN }
 	zone := proto.BaseDomain(rigCID)
 	srcs := map[string]nameserver.Source{
-		"SelfSource": nameserver.NewSelfSource(zone, rigCID+".local", lan),
 		"ClusterSource": nameserver.NewClusterSource("lan."+zone,
 			func() []nameserver.NodeAddr {
 				return []nameserver.NodeAddr{{ID: rigCPNode, Hostname: rigCID, IP: rigLAN}}
 			},
 			func() []nameserver.AppRec { return nil }),
-		"DoorSource": nameserver.NewDoorSource(r.table.App.Host, lan, r.appDoor.withheld),
+	}
+	// main's own list, so a name main adds is checked here too (TC-997-10).
+	for i, s := range controlPlaneSources(zone, rigCID+".local", r.table, true, lan, r.appDoor.withheld) {
+		srcs[sourceName(i, s)] = s
 	}
 	var names []string
 	for what, s := range srcs {
