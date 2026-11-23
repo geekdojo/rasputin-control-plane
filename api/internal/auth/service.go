@@ -539,18 +539,36 @@ func (s *Service) createSession(ctx context.Context, userID []byte) (*Session, e
 	return sess, nil
 }
 
-// StripCookies removes the api's own cookies — the session and the pending
-// WebAuthn ceremony — from the Cookie header of a request about to be
-// forwarded to another service (the Grafana proxy). The other service has no
-// use for them, and a credential it never sees is one it cannot log, store or
-// leak. Every other cookie is kept, so the upstream's own cookies still work.
+// ownCookiePrefix starts the name of every cookie the api sets, once an
+// optional __Host- or __Secure- prefix is removed (signin-origin.md §5.3).
+const ownCookiePrefix = "rasputin-"
+
+// IsOwnCookie reports whether name is one of the api's own cookies: with an
+// optional __Host- or __Secure- prefix removed, it starts with rasputin-
+// (the session, the pending ceremony, the repair session and any later
+// one). The sign-in doors strip these both ways, and StripCookies drops
+// them before a request is forwarded (geekdojo/geekdojo-brain#985).
+func IsOwnCookie(name string) bool {
+	if rest, ok := strings.CutPrefix(name, "__Host-"); ok {
+		name = rest
+	} else if rest, ok := strings.CutPrefix(name, "__Secure-"); ok {
+		name = rest
+	}
+	return strings.HasPrefix(name, ownCookiePrefix)
+}
+
+// StripCookies removes the api's own cookies (IsOwnCookie) from the Cookie
+// header of a request about to be forwarded to another service (the Grafana
+// proxy). The other service has no use for them, and a credential it never
+// sees is one it cannot log, store or leak. Every other cookie is kept, so
+// the upstream's own cookies still work.
 func StripCookies(h http.Header) {
 	if len(h.Values("Cookie")) == 0 {
 		return
 	}
 	kept := make([]string, 0)
 	for _, c := range (&http.Request{Header: h}).Cookies() {
-		if c.Name == sessionCookie || c.Name == pendingCookie {
+		if IsOwnCookie(c.Name) {
 			continue
 		}
 		kept = append(kept, c.String())

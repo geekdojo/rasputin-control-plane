@@ -1,0 +1,114 @@
+package door
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/netip"
+	"strconv"
+	"strings"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
+)
+
+// clientCertHeaders are the client-certificate headers a proxy in front of
+// Keycloak could set; a client's copy never reaches upstream.
+var clientCertHeaders = []string{
+	"X-Client-Cert", "X-SSL-Client-Cert", "X-Forwarded-Client-Cert", "Ssl-Client-Cert", "Client-Cert", "Client-Cert-Chain",
+}
+
+// newProxy is the relay: the door's own connection pool, the forwarded
+// headers written from the door table, the cookie and header rules on the
+// way back, and the not-ready page for an upstream that does not answer.
+func (h *Handler) newProxy() *httputil.ReverseProxy {
+	return &httputil.ReverseProxy{
+		Rewrite:        h.rewrite,
+		Transport:      h.cfg.Transport,
+		ModifyResponse: h.modifyResponse,
+		ErrorHandler:   h.upstreamFailed,
+		// Copy errors after the answer started go through the injected
+		// logger (F-985-14).
+		ErrorLog: slog.NewLogLogger(h.log.Handler(), slog.LevelWarn),
+	}
+}
+
+// rewrite builds the outbound request: every client Forwarded,
+// X-Forwarded-* and client-certificate header deleted, then Host, Proto,
+// Port and For written from the door table and the peer, the door's host as
+// Host, and the cookies filtered.
+func (h *Handler) rewrite(pr *httputil.ProxyRequest) {
+	pr.SetURL(h.cfg.Upstream)
+	out := pr.Out.Header
+	for k := range out {
+		if k == "Forwarded" || strings.HasPrefix(k, "X-Forwarded-") {
+			delete(out, k)
+		}
+	}
+	for _, k := range clientCertHeaders {
+		out.Del(k)
+	}
+	out.Set("X-Forwarded-Host", h.cfg.Door.Host)
+	out.Set("X-Forwarded-Proto", "https")
+	out.Set("X-Forwarded-Port", strconv.Itoa(doors.Port))
+	if ap, err := netip.ParseAddrPort(pr.In.RemoteAddr); err == nil {
+		out.Set("X-Forwarded-For", ap.Addr().Unmap().String())
+	}
+	pr.Out.Host = h.cfg.Door.Host
+	inboundCookies(h.cfg.Kind, out)
+}
+
+// modifyResponse applies the response headers and the outbound cookie rule.
+func (h *Handler) modifyResponse(resp *http.Response) error {
+	h.pol.setHeaders(resp.Header, h.pol.relayed)
+	outboundCookies(h.cfg.Kind, resp.Header)
+	return nil
+}
+
+// upstreamFailed answers a request the identity service did not answer with
+// the not-ready page as a 502, and records the error's class only: never its
+// text, which names the URL.
+func (h *Handler) upstreamFailed(w http.ResponseWriter, r *http.Request, err error) {
+	st := stateOf(r)
+	st.errorClass = errorClass(err)
+	h.render(w, http.StatusBadGateway, h.notReadyPage(r, st))
+}
+
+// errorClass is a transport error's class.
+func errorClass(err error) string {
+	var opErr *net.OpError
+	var certErr *tls.CertificateVerificationError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.As(err, &certErr):
+		return "tls"
+	case errors.As(err, &opErr) && opErr.Op == "dial":
+		return "connect"
+	case errors.As(err, &opErr) && opErr.Op == "remote error":
+		return "tls"
+	}
+	return "transport"
+}
+
+// relay forwards an admitted request. Once the identity service has answered
+// (or failed to), a held credential post's slot is reported answered, and a
+// route that stores events marks the drain dirty, in that order, so the
+// pass that releases the slot starts after the answer.
+func (h *Handler) relay(w http.ResponseWriter, r *http.Request, rt Route, d policy.Decision) {
+	defer func() {
+		if d.Held {
+			h.cfg.Throttle.Answered(d.HeldKey)
+		}
+		if rt.Kind.EventProducing() {
+			h.cfg.Dirty.MarkDirty()
+		}
+	}()
+	h.proxy.ServeHTTP(w, r)
+}

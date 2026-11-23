@@ -9,9 +9,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/backupxfer"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -185,8 +189,47 @@ func routeFixture(t *testing.T) *apiFixture {
 	return f
 }
 
+// doorOpenRoutes is the open-route registry the stale check reads: openRoutes
+// plus every sign-in door route with its reason (geekdojo/geekdojo-brain#985,
+// F-985-19). A door request carries no Rasputin session, so each door pattern
+// is an open route; the reason text lives once, on the door's Route. It fails
+// on a pattern that collides with an openRoutes entry, or one the two doors
+// give different reasons.
+func doorOpenRoutes(t *testing.T) (all map[string]string, doorPatterns map[string]bool) {
+	t.Helper()
+	all = map[string]string{}
+	for p, why := range openRoutes {
+		all[p] = why
+	}
+	doorPatterns = map[string]bool{}
+	for _, k := range []door.Kind{door.Home, door.App} {
+		for _, r := range door.Routes(k) {
+			if why, ok := all[r.Pattern]; ok && (!doorPatterns[r.Pattern] || why != r.Reason) {
+				t.Fatalf("door route %q collides with the open-route entry %q", r.Pattern, why)
+			}
+			all[r.Pattern] = r.Reason
+			doorPatterns[r.Pattern] = true
+		}
+	}
+	return all, doorPatterns
+}
+
+// TC-985-35: every door pattern sits in the registry with its reason.
+func TestDoorRoutesAreOpenRoutesWithReasons(t *testing.T) {
+	all, doorPatterns := doorOpenRoutes(t)
+	if len(doorPatterns) < 15 {
+		t.Fatalf("%d door patterns in the registry", len(doorPatterns))
+	}
+	for p := range doorPatterns {
+		if strings.TrimSpace(all[p]) == "" {
+			t.Errorf("door route %q has no reason", p)
+		}
+	}
+}
+
 func TestEveryRouteRequiresSessionUnlessAllowlisted(t *testing.T) {
 	f := routeFixture(t)
+	allOpen, doorPatterns := doorOpenRoutes(t)
 	patterns := f.srv.routes().Patterns()
 	if len(patterns) < 100 {
 		// A guard on the enumeration itself: if registration stops going
@@ -202,9 +245,14 @@ func TestEveryRouteRequiresSessionUnlessAllowlisted(t *testing.T) {
 		registered[p] = true
 	}
 
-	// Stale allowlist: every entry must name a registered route.
+	// Stale allowlist: every entry must name a registered route. The door
+	// routes are registered on the doors' own handlers, which Identity 4.4
+	// mounts; until then they are registered here and skip the 401 probe.
+	for p := range doorPatterns {
+		registered[p] = true
+	}
 	var stale []string
-	for p := range openRoutes {
+	for p := range allOpen {
 		if !registered[p] {
 			stale = append(stale, p)
 		}
@@ -387,5 +435,32 @@ func TestConcretePath(t *testing.T) {
 		if got := concretePath(in); got != want {
 			t.Errorf("concretePath(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TC-985-20: the observability proxy, which strips the api's own cookies
+// through auth.StripCookies, also drops their __Host- and __Secure- names,
+// so Grafana never receives __Host-rasputin-session.
+func TestObsProxy_StripsPrefixedOwnCookies(t *testing.T) {
+	var got atomic.Value // []string
+	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Values("Cookie"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer stub.Close()
+	sup := &fakeSupGrafana{healthy: true, vmURL: "http://x", grafanaURL: stub.URL}
+	sink, _ := obs.NewVMSink(obs.VMSinkConfig{Supervisor: sup})
+	srv := &Server{obs: obs.NewStatus(sup, sink, nil)}
+	req := httptest.NewRequest(http.MethodGet, "/observability/api/search", nil)
+	req.Header.Set("Cookie", "__Host-rasputin-session=s3cret; grafana_session=g1; __Secure-rasputin-pending=p; rasputin-repair=r")
+	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "alice"}))
+	w := httptest.NewRecorder()
+	srv.handleObservabilityProxy(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", w.Code)
+	}
+	cookies, _ := got.Load().([]string)
+	if joined := strings.Join(cookies, "; "); joined != "grafana_session=g1" {
+		t.Errorf("Cookie at Grafana = %q, want grafana_session=g1", joined)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -53,6 +54,7 @@ func (e *Env) startBrowser(ctx context.Context) (*browserEnv, error) {
 	if err != nil {
 		return nil, err
 	}
+	spki = strings.Join(append([]string{spki}, e.browserSPKI...), ",")
 	profile := filepath.Join(e.root, "chrome")
 	if err := os.Mkdir(profile, 0o700); err != nil {
 		return nil, fmt.Errorf("identitytest: browser profile: %w", err)
@@ -73,6 +75,11 @@ func (e *Env) startBrowser(ctx context.Context) (*browserEnv, error) {
 			b.cmd = cmd
 		}),
 	)
+	if e.browserRules != "" {
+		// ServeDoors' names, each mapped with its port to its loopback
+		// server, so a page's origin keeps port 443 as on a cluster.
+		opts = append(opts, chromedp.Flag("host-resolver-rules", e.browserRules))
+	}
 	allocCtx, allocCancel := chromedp.NewExecAllocator(e.ctx, opts...)
 	b.allocCancel = allocCancel
 	b.browserCtx, b.browserCancel = chromedp.NewContext(allocCtx)

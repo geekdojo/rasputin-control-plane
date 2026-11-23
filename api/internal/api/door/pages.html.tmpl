@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html class="rasp-signin" lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{.Title}}</title>
+<link rel="icon" href="/_signin/img/favicon.svg" type="image/svg+xml">
+<link href="/_signin/css/tokens.css" rel="stylesheet">
+<link href="/_signin/css/components.css" rel="stylesheet">
+<link href="/_signin/css/signin.css" rel="stylesheet">
+</head>
+<body class="rasp-body" data-page-id="rasputin-door-{{.Kind}}" data-rasputin-theme="rasputin">
+<div class="rasp-shell">
+<div class="rasp-brand"><span class="rasp-brand-mark"><span class="rasp-icon rasp-icon-brand" aria-hidden="true"></span> RASPUTIN</span>{{if .InstallName}} <span class="rasp-brand-name">{{.InstallName}}</span>{{end}}</div>
+<main class="rasp-card">
+<header class="rasp-card-header"><h1 id="kc-page-title">{{.Heading}}</h1></header>
+<div id="kc-feedback" class="rasp-alert{{if .Error}} rasp-alert-error{{end}}" role="alert"><span class="rasp-alert-text">{{.Sentence}}</span></div>
+{{if .Name}}<p class="rasp-hint">{{.Name}}</p>{{end}}
+<div class="rasp-buttons">
+{{if .TryAgain}}<a class="rasp-btn rasp-btn-block" id="rasputin-try-again" href="{{.TryAgain}}">TRY AGAIN</a>{{end}}
+{{if .Back}}<a class="rasp-link" id="rasputin-back" href="{{.Back}}">{{.BackText}}</a>{{end}}
+</div>
+<p class="rasp-hint" id="rasputin-correlation">Reference: {{.CorrelationID}}</p>
+</main>
+</div>
+</body>
+</html>

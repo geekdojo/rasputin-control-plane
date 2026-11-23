@@ -30,6 +30,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -46,6 +47,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -195,9 +197,12 @@ func (r *triggerRig) jobsOfKind(t *testing.T) []*jobs.Job {
 // are a 400 whose body is exactly sentence (http.Error adds a newline), the
 // front's refusal.
 type sentenceCount struct {
-	inner    http.RoundTripper
-	sentence string
-	n        int
+	inner http.RoundTripper
+	// refusal reports whether a 400's body is the guard's refusal: the
+	// front's bare sentence, or the door's page carrying it.
+	refusal func(body []byte) bool
+	mu      sync.Mutex
+	n       int
 }
 
 func (c *sentenceCount) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -211,10 +216,90 @@ func (c *sentenceCount) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
-	if strings.TrimSuffix(string(body), "\n") == c.sentence {
+	if c.refusal(body) {
+		c.mu.Lock()
 		c.n++
+		c.mu.Unlock()
 	}
 	return resp, nil
+}
+
+func (c *sentenceCount) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+// frontRefusal is the front's refusal: the guard's sentence alone.
+func frontRefusal(body []byte) bool {
+	return strings.TrimSuffix(string(body), "\n") == adminguard.Sentence(adminguard.ErrAdminAccount)
+}
+
+// adminFlood is TC-1127-15's outside floods (b) to (e), each sent n times
+// through the realm rasputin at base (the front, or a door), over transport:
+// client-credentials naming rasputin-admin in the form and in Basic, the
+// password grant and the login form naming its service account, the form
+// reached through clientID's sign-in to redirectURI. Every one must draw the
+// guard's refusal, as refusal reads it. It returns how many of each kind
+// went, the counter of refusals seen, and the login-form client for the
+// control's wrong password.
+func adminFlood(t *testing.T, env *Env, base string, transport http.RoundTripper, refusal func([]byte) bool, n int,
+	clientID, redirectURI string, bogus, wrong secret.Value) (map[string]int, *sentenceCount, *signin.Client) {
+	t.Helper()
+	ctx := t.Context()
+	seen := &sentenceCount{inner: transport, refusal: refusal}
+	c := &http.Client{Transport: seen, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	tokenURL := base + "/realms/" + baselineRealm + "/protocol/openid-connect/token"
+	post := func(kind string, form url.Values, authorization string) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if authorization != "" {
+			req.Header.Set("Authorization", authorization)
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatalf("%s: %v", kind, err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			t.Fatalf("%s: read the answer: %v", kind, err)
+		}
+		if resp.StatusCode != http.StatusBadRequest || !refusal(body) {
+			t.Fatalf("%s: answered %d %.200q, want 400 with the guard's sentence", kind, resp.StatusCode, body)
+		}
+	}
+	form, err := signin.New(signin.Config{Transport: seen, Issuer: base + "/realms/" + baselineRealm,
+		ClientID: clientID, RedirectURI: redirectURI, Rand: env.h.cfg.Rand, Logger: env.log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	basicAdmin := "Basic " + base64.StdEncoding.EncodeToString([]byte(baselineAdminClient+":"+string(bogus.Reveal())))
+	counts := map[string]int{}
+	for range n {
+		post("(b)", url.Values{"grant_type": {"client_credentials"}, "client_id": {baselineAdminClient}}, "")
+		counts["(b) client-credentials, form client_id"]++
+
+		post("(c)", url.Values{"grant_type": {"client_credentials"}}, basicAdmin)
+		counts["(c) client-credentials, Basic"]++
+
+		post("(d)", url.Values{"grant_type": {"password"}, "client_id": {baselineConsole},
+			"username": {serviceAccountUser}, "password": {string(wrong.Reveal())}}, "")
+		counts["(d) password grant"]++
+
+		before := seen.count()
+		if _, err := form.PasswordCodeFlow(ctx, serviceAccountUser, wrong); err == nil {
+			t.Fatalf("(e) the login form signed %s in", serviceAccountUser)
+		}
+		if seen.count() != before+1 {
+			t.Fatalf("(e) the login-form post as %s drew %d refusals, want 1", serviceAccountUser, seen.count()-before)
+		}
+		counts["(e) login form"]++
+	}
+	return counts, seen, form
 }
 
 // realmStatus is the session's GET of the realm: its status, 0 with the
@@ -308,7 +393,6 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		r := newTriggerRig(t, env, client, readRepoBaseline)
 		n := baselineFailureFactor(t) + 1
 		ctx := t.Context()
-		refusal := adminguard.Sentence(adminguard.ErrAdminAccount)
 
 		bogus, err := randomSecret(env.h.cfg.Rand)
 		if err != nil {
@@ -376,40 +460,8 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		// refusal sentence is counted.
 		frontTransport := &http.Transport{TLSClientConfig: env.ClientTLS()}
 		t.Cleanup(frontTransport.CloseIdleConnections)
-		seen := &sentenceCount{inner: frontTransport, sentence: refusal}
-		frontHTTP := &http.Client{Transport: seen,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-		tokenURL := env.FrontURL() + "/realms/" + baselineRealm + "/protocol/openid-connect/token"
-		frontPost := func(kind string, form url.Values, authorization string) {
-			req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenURL, strings.NewReader(form.Encode()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			if authorization != "" {
-				req.Header.Set("Authorization", authorization)
-			}
-			resp, err := frontHTTP.Do(req)
-			if err != nil {
-				t.Fatalf("%s: %v", kind, err)
-			}
-			body, err := io.ReadAll(resp.Body)
-			_ = resp.Body.Close()
-			if err != nil {
-				t.Fatalf("%s: read the answer: %v", kind, err)
-			}
-			if resp.StatusCode != http.StatusBadRequest || strings.TrimSuffix(string(body), "\n") != refusal {
-				t.Fatalf("%s: the front answered %d %.200q, want 400 %q", kind, resp.StatusCode, body, refusal)
-			}
-		}
-		form, err := signin.New(signin.Config{Transport: seen, Issuer: env.FrontURL() + "/realms/" + baselineRealm,
-			ClientID: baselineConsole, RedirectURI: RedirectURI, Rand: env.h.cfg.Rand, Logger: env.log})
-		if err != nil {
-			t.Fatal(err)
-		}
-		basicAdmin := "Basic " + base64.StdEncoding.EncodeToString([]byte(baselineAdminClient+":"+string(bogus.Reveal())))
-
-		counts := map[string]int{}
+		counts, seen, form := adminFlood(t, env, env.FrontURL(), frontTransport, frontRefusal, n,
+			baselineConsole, RedirectURI, bogus, wrong)
 		for range n {
 			tok, err := door.ClientCredentials(ctx, baselineRealm, baselineAdminClient, nil)
 			if err == nil || tok.Len() != 0 {
@@ -417,25 +469,6 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 				t.Fatal("(a) client-credentials as rasputin-admin with the door leaf succeeded")
 			}
 			counts["(a) direct client-credentials, door leaf"]++
-
-			frontPost("(b)", url.Values{"grant_type": {"client_credentials"}, "client_id": {baselineAdminClient}}, "")
-			counts["(b) front client-credentials, form client_id"]++
-
-			frontPost("(c)", url.Values{"grant_type": {"client_credentials"}}, basicAdmin)
-			counts["(c) front client-credentials, Basic"]++
-
-			frontPost("(d)", url.Values{"grant_type": {"password"}, "client_id": {baselineConsole},
-				"username": {serviceAccountUser}, "password": {string(wrong.Reveal())}}, "")
-			counts["(d) front password grant"]++
-
-			before := seen.n
-			if _, err := form.PasswordCodeFlow(ctx, serviceAccountUser, wrong); err == nil {
-				t.Fatalf("(e) the login form signed %s in", serviceAccountUser)
-			}
-			if seen.n != before+1 {
-				t.Fatalf("(e) the login-form post as %s drew %d refusals from the front, want 1", serviceAccountUser, seen.n-before)
-			}
-			counts["(e) front login form"]++
 		}
 		for kind, c := range counts {
 			t.Logf("%s: %d requests (failureFactor+1 = %d)", kind, c, n)
@@ -446,8 +479,8 @@ func TestRecoverAdminTrigger_AgainstPinnedKeycloak(t *testing.T) {
 		if len(counts) != 5 {
 			t.Fatalf("%d kinds of request, want 5", len(counts))
 		}
-		if got, want := env.FrontRefusals()-r0, int64(4*n); got != want || seen.n != 4*n {
-			t.Fatalf("the front refused %d requests and %d answers carried the sentence, want %d of each", got, seen.n, want)
+		if got, want := env.FrontRefusals()-r0, int64(4*n); got != want || seen.count() != 4*n {
+			t.Fatalf("the front refused %d requests and %d answers carried the sentence, want %d of each", got, seen.count(), want)
 		}
 
 		// The control: one wrong password through the same front.

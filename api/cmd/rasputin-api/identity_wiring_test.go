@@ -14,9 +14,11 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -462,5 +464,188 @@ func TestIdentityBootstrap_ZeroesItsCopyAndKeepsTheSecret(t *testing.T) {
 		if string(sec.Reveal()) != text {
 			t.Errorf("runner error %v: the caller's secret no longer reveals its bytes", runErr)
 		}
+	}
+}
+
+// ---- the sign-in history drain's wiring (geekdojo/geekdojo-brain#985) ----
+
+// adminCall is a scripted Admin API answer.
+type scriptedAdmin struct {
+	resp  idclient.Response
+	err   error
+	calls atomic.Int64
+	gets  chan string
+}
+
+func (a *scriptedAdmin) Admin(_ context.Context, _ secret.Value, method, path string, _, out any) (idclient.Response, error) {
+	a.calls.Add(1)
+	if a.gets != nil && method == http.MethodGet {
+		a.gets <- path
+	}
+	if out != nil && a.err == nil {
+		_ = json.Unmarshal([]byte("[]"), out)
+	}
+	return a.resp, a.err
+}
+
+type countingSignal struct{ n atomic.Int64 }
+
+func (c *countingSignal) MarkDirty() { c.n.Add(1) }
+
+// TC-985-32: the session's decorator marks the drain dirty only after a
+// successful call that is not a GET, and returns the inner answer and error
+// unchanged.
+func TestDirtyAdmin_MarksOnlySuccessfulWrites(t *testing.T) {
+	refused := &idclient.Error{Op: "admin", Path: "/admin/realms/rasputin/users", Status: 409, Kind: idclient.ErrConflict}
+	for _, c := range []struct {
+		method string
+		err    error
+		marks  int64
+	}{
+		{http.MethodGet, nil, 0}, {http.MethodPost, nil, 1}, {http.MethodPut, nil, 1}, {http.MethodDelete, nil, 1},
+		{http.MethodPost, refused, 0}, {http.MethodGet, refused, 0},
+	} {
+		inner := &scriptedAdmin{resp: idclient.Response{Status: 201, Location: "https://x/users/1"}, err: c.err}
+		sig := &countingSignal{}
+		resp, err := dirtyAdmin{inner: inner, dirty: sig}.Admin(t.Context(), secret.Value{}, c.method, "/admin/realms/rasputin/users", nil, nil)
+		if sig.n.Load() != c.marks {
+			t.Errorf("%s err=%v: %d marks, want %d", c.method, c.err, sig.n.Load(), c.marks)
+		}
+		if resp != inner.resp || err != c.err {
+			t.Errorf("%s: the answer %+v, %v was changed from %+v, %v", c.method, resp, err, inner.resp, c.err)
+		}
+		var ie *idclient.Error
+		if c.err != nil && (!errors.As(err, &ie) || ie != refused) {
+			t.Errorf("%s: errors.As to *idclient.Error lost the inner error", c.method)
+		}
+	}
+}
+
+// TC-985-32: under keycloak the wiring builds the dirty signal; under off and
+// mock it builds none, so no drainer is ever built and history-behind is
+// never raised.
+func TestWireIdentity_DirtySignalUnderKeycloakOnly(t *testing.T) {
+	ca := ensureIdentityCA(t, t.TempDir(), tlscatest.Deps())
+	srv := newIdentityServer(t, ca)
+	for backend, want := range map[string]bool{"": false, "mock": false, "keycloak": true} {
+		w, err := wireIdentity(t.Context(), slog.New(slog.DiscardHandler), false, backend, srv.URL, srv.URL, ca, t.TempDir(),
+			(&scriptedRun{}).run, noRunIn, &atomic.Pointer[restoredFunc]{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (w.dirty != nil) != want {
+			t.Errorf("backend %q: dirty signal built = %v, want %v", backend, w.dirty != nil, want)
+		}
+		// startEvents on the state each mode wires does nothing outside
+		// keycloak.
+		st, err := identityStateWiring(identityDeps(t, w.mode, &identityCounts{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.startEvents(t.Context(), w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, slog.New(slog.DiscardHandler))
+		if !want && st.events != nil {
+			t.Errorf("backend %q: an events holder was built", backend)
+		}
+	}
+}
+
+// memMarks is an in-memory settings store.
+type memMarks struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+func (s *memMarks) Get(_ context.Context, k string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.m[k], nil
+}
+
+func (s *memMarks) Set(_ context.Context, k, v string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.m[k] = v
+	return nil
+}
+
+func doorsTable(t *testing.T) doors.Table {
+	t.Helper()
+	tb, err := doors.New("ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tb
+}
+
+// TC-985-32: under keycloak, start marks the drain once, its pass reads both
+// event streams, the monitor's history-behind reads the drain, BecameReady
+// marks it again, and the throttle is built from the door table and fed by
+// the drain.
+func TestStartEvents_KeycloakMarksOnceAndBinds(t *testing.T) {
+	st, err := identityStateWiring(identityDeps(t, identityModeKeycloak, &identityCounts{}))
+	if err != nil || st.events == nil {
+		t.Fatalf("keycloak state wiring: events %v, %v", st.events, err)
+	}
+	if b, _ := st.events.behind(t.Context()); b {
+		t.Fatal("history-behind raised before the drain started")
+	}
+	st.events.markDirty() // before start: nothing bound, nothing marked
+	admin := &scriptedAdmin{resp: idclient.Response{Status: 200}, gets: make(chan string, 16)}
+	session, err := idclient.NewSession(idclient.SessionConfig{Login: tokenLogin{}, Admin: admin, Realm: identityRealm,
+		ClientID: identityAdminClient, Log: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := newIdentityDirty()
+	w := identityWiring{mode: identityModeKeycloak, session: session, dirty: sig}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	st.startEvents(ctx, w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, slog.New(slog.DiscardHandler))
+	for _, want := range []string{"/admin/realms/rasputin/events?", "/admin/realms/rasputin/admin-events?"} {
+		if got := <-admin.gets; !strings.HasPrefix(got, want) {
+			t.Fatalf("the start's pass read %q, want %q...", got, want)
+		}
+	}
+	d := st.events.drainer.Load()
+	if d == nil || st.events.throttle.Load() == nil {
+		t.Fatal("start bound no drainer or no throttle")
+	}
+	if n := d.Pass(); n != 1 {
+		t.Fatalf("%d passes after start, want exactly 1", n)
+	}
+	st.events.markDirty() // BecameReady's hook
+	<-admin.gets
+	<-admin.gets
+	if n := d.Pass(); n != 2 {
+		t.Fatalf("%d passes after BecameReady's mark, want 2", n)
+	}
+	if b, _ := st.events.behind(t.Context()); b {
+		t.Error("history-behind raised after good passes")
+	}
+}
+
+// tokenLogin always logs in.
+type tokenLogin struct{}
+
+func (tokenLogin) ClientCredentials(context.Context, string, string, *secret.Value) (secret.Value, error) {
+	return secret.New([]byte("tok")), nil
+}
+
+// With no door table, the drain still runs, with no throttle.
+func TestStartEvents_NoDoorsNoThrottle(t *testing.T) {
+	st, err := identityStateWiring(identityDeps(t, identityModeKeycloak, &identityCounts{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin := &scriptedAdmin{resp: idclient.Response{Status: 200}, gets: make(chan string, 16)}
+	session, _ := idclient.NewSession(idclient.SessionConfig{Login: tokenLogin{}, Admin: admin, Realm: identityRealm,
+		ClientID: identityAdminClient, Log: slog.New(slog.DiscardHandler)})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	st.startEvents(ctx, identityWiring{mode: identityModeKeycloak, session: session, dirty: newIdentityDirty()},
+		&memMarks{m: map[string]string{}}, doors.Table{}, doors.ErrNoClusterID, slog.New(slog.DiscardHandler))
+	<-admin.gets
+	if st.events.throttle.Load() != nil || st.events.drainer.Load() == nil {
+		t.Error("with no door table: a throttle was built, or no drainer")
 	}
 }

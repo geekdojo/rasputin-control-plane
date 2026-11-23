@@ -29,8 +29,11 @@ type kcPorts struct {
 // server leaf, the test CA as the trust store (https-client-auth=required is
 // a build option), no plain HTTP, loopback only, the local cache, the front's
 // URL as hostname, and the database. It is #959's keycloak.conf.tmpl with the
-// harness's values. The caller clears the returned bytes, which hold the
-// database password.
+// harness's values. With hostname "" it is door mode, as rasputin-os's
+// keycloak.conf runs behind the sign-in doors (geekdojo/geekdojo-brain#985):
+// no hostname, so every address follows the forwarded headers the door
+// writes, trusted only from loopback. The caller clears the returned bytes,
+// which hold the database password.
 func renderKeycloakConf(p kcPaths, ports kcPorts, hostname string, dbPassword secret.Value) []byte {
 	var b bytes.Buffer
 	line := func(k, v string) { b.WriteString(k + "=" + v + "\n") }
@@ -42,7 +45,14 @@ func renderKeycloakConf(p kcPaths, ports kcPorts, hostname string, dbPassword se
 	line("https-certificate-file", p.CertFile)
 	line("https-certificate-key-file", p.KeyFile)
 	line("https-trust-store-file", p.TrustFile)
-	line("hostname", hostname)
+	if hostname != "" {
+		line("hostname", hostname)
+	} else {
+		line("hostname-strict", "false")
+		line("hostname-backchannel-dynamic", "false")
+		line("proxy-headers", "xforwarded")
+		line("proxy-trusted-addresses", "127.0.0.1/32")
+	}
 	line("cache", "local")
 	line("vault-dir", p.VaultDir)
 	line("db-url", "jdbc:postgresql://127.0.0.1:"+strconv.Itoa(ports.DB)+"/"+dbName)

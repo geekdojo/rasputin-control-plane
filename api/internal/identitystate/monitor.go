@@ -107,6 +107,12 @@ type Deps struct {
 	// geekdojo/geekdojo-brain#981). true is a mismatch; an error is a check
 	// that could not finish.
 	Features func(ctx context.Context, kcInvocation string) (bool, error)
+	// BecameReady is called once on each reading that finds the service
+	// ready after any other state, or on the first reading that finds it
+	// ready: the sign-in history drain is marked dirty on that fact
+	// (geekdojo/geekdojo-brain#985). nil calls nothing: only the keycloak
+	// mode has a drain, and its wiring sets it.
+	BecameReady func()
 	// Now stamps when a state was first observed, and nothing else.
 	Now func() time.Time
 	Log *slog.Logger
@@ -537,6 +543,9 @@ func (m *Monitor) record(ctx context.Context, st State, f facts) time.Time {
 	m.mu.Unlock()
 	if st == Ready {
 		m.log.LogAttrs(ctx, slog.LevelInfo, "identity service ready")
+		if m.d.BecameReady != nil {
+			m.d.BecameReady()
+		}
 		return since
 	}
 	attrs := []slog.Attr{

@@ -210,10 +210,29 @@ func TestRequireSessionChecksOrigin(t *testing.T) {
 	}
 }
 
+// TC-985-20: IsOwnCookie matches every rasputin- name, prefixed or not, and
+// nothing else.
+func TestIsOwnCookie(t *testing.T) {
+	for name, want := range map[string]bool{
+		"rasputin-session":          true,
+		"__Host-rasputin-session":   true,
+		"__Secure-rasputin-pending": true,
+		"rasputin-repair":           true,
+		"KEYCLOAK_IDENTITY":         false,
+		"grafana_session":           false,
+		"__Host-KEYCLOAK_IDENTITY":  false,
+		"__Host-__Secure-rasputin":  false,
+	} {
+		if got := IsOwnCookie(name); got != want {
+			t.Errorf("IsOwnCookie(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
 func TestStripCookies(t *testing.T) {
 	h := http.Header{}
 	h.Add("Cookie", "rasputin-session=s3cret; grafana_session=g1")
-	h.Add("Cookie", "rasputin-pending=p3nding; theme=dark")
+	h.Add("Cookie", "rasputin-pending=p3nding; theme=dark; __Host-rasputin-session=h; __Secure-rasputin-x=y")
 	StripCookies(h)
 	if got := h.Values("Cookie"); !reflect.DeepEqual(got, []string{"grafana_session=g1; theme=dark"}) {
 		t.Errorf("Cookie = %q", got)
