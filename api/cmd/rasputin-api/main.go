@@ -59,6 +59,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storestate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/secretstore/storeswitch"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/signinname"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storeaudit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -832,6 +833,11 @@ func main() {
 	if err := lanWatch.Start(ctx); err != nil {
 		log.Printf("rasputin-api: LAN address changes will not be followed (%v); using the start-time address: %s", err, lanWatch.Snapshot())
 	}
+	// The home sign-in name's mDNS responder (#995), on the same addresses.
+	// Wait is deferred so the goodbye goes out before exit; it is nil-safe.
+	signinName := wireSigninName(ctx, logger, doorTable, doorErr, lanWatch,
+		signinname.GroupOpener(signinname.SystemClock{}), signinname.SystemClock{})
+	defer signinName.Wait()
 	// The BMC host's node id lives in settings (bmc.host_node_id,
 	// bmc-settings.md S-5) and is read live so a Settings change
 	// redirects routing without a restart. The env var seeds first boot
@@ -1640,7 +1646,7 @@ func main() {
 	// The fan-out adds the secret store's health to the node metrics while
 	// obs is on (geekdojo/geekdojo-brain#939).
 	fanout := func(vm *obs.VMSink) metrics.Sink {
-		return obsFanout(vm, readiness, selfNodeID, storeDataDir, logger)
+		return signinNameFanout(obsFanout(vm, readiness, selfNodeID, storeDataDir, logger), vm, signinName, selfNodeID, logger)
 	}
 	obsSup, setObsSink, obsStatus := mustWireObs(ctx, logger, dataDir, selfNodeID, metricsSvc, idsLogDir, storeW.mode, obsEnabled, fanout)
 	defer func() {
@@ -1991,6 +1997,10 @@ func main() {
 	// The OS security-update alert (#772), computed on each read from the
 	// floor the daily job last read and the inventory.
 	alertsSvc.SetSecurityUpdateAlerts(secWatch.alerts)
+	// The home sign-in name's alerts (#995), computed on read.
+	if signinName != nil {
+		alertsSvc.SetSigninNameAlerts(signinName.Alerts)
+	}
 	// Per-app backup state (design/storage.md §4.4, #298): one derivation over
 	// the backup ledger, the fan-out records in the job ledger, the installed
 	// apps joined to the LIVE catalog, and the schedule — read by the /api/apps

@@ -59,6 +59,12 @@
 //     SetAppDoorReachAlerts wires (mesh.Service.AppDoorReachAlerts,
 //     geekdojo/geekdojo-brain#984): up while the control plane has not joined
 //     its private network; clears on the bind.
+//   - security   → signin-name:<conflict|unpublished|refused> (crit), at most
+//     one, from the source SetSigninNameAlerts wires
+//     (signinname.Responder.Alerts, geekdojo/geekdojo-brain#995): another
+//     device holds the home sign-in name, the name is not being published, or
+//     the cluster id cannot carry it. Computed on read from the responder's
+//     facts, so it clears the moment the name is published again.
 //
 // Adding a source is a single function on Service that appends to the
 // accumulator; everything else (HTTP handler, UI types, drill-through) is
@@ -157,6 +163,9 @@ type Service struct {
 	// appDoorReachAlerts, when set, reports app sign-in with no private
 	// network record (mesh.Service.AppDoorReachAlerts). Nil means no such alert.
 	appDoorReachAlerts func(ctx context.Context, now time.Time) []proto.Alert
+	// signinNameAlerts, when set, reports the home sign-in name's state
+	// (signinname.Responder.Alerts). Nil means no such alert.
+	signinNameAlerts func(now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -273,6 +282,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if s.appDoorReachAlerts != nil {
 		out = append(out, s.appDoorReachAlerts(ctx, now)...)
+	}
+	if s.signinNameAlerts != nil {
+		out = append(out, s.signinNameAlerts(now)...)
 	}
 	if s.outcomeAlerts != nil {
 		alerts, err := s.outcomeAlerts(ctx, now)

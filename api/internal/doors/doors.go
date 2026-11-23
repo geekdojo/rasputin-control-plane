@@ -35,16 +35,26 @@ const realmPath = "/realms/rasputin"
 // with no cluster name, where there are no doors. It is not a fault.
 var ErrNoClusterID = errors.New("doors: no cluster id")
 
+// ErrNotLabel is a RefusedError's Err for a cluster id that is not a
+// lowercase DNS label.
+var ErrNotLabel = errors.New("doors: cluster id is not a lowercase DNS label")
+
 // RefusedError is New's answer to a cluster id it will not build doors from.
-// It carries the id, so the composition root can log it as a configfault.
+// It carries the id, so the composition root can log it as a configfault, and
+// the rule it broke as Err (ErrNotLabel, proto.ErrClusterIDTooLong or
+// proto.ErrClusterIDReservedPrefix), so a consumer can say which rule.
 type RefusedError struct {
 	ClusterID string
 	Reason    string
+	Err       error
 }
 
 func (e *RefusedError) Error() string {
 	return fmt.Sprintf("doors: cluster id %q refused: %s", e.ClusterID, e.Reason)
 }
+
+// Unwrap returns the rule the id broke.
+func (e *RefusedError) Unwrap() error { return e.Err }
 
 // Door is one sign-in door.
 type Door struct {
@@ -82,17 +92,24 @@ type Table struct {
 }
 
 // New builds the table for cid. It refuses an empty cid (ErrNoClusterID), a
-// cid that is not a lowercase DNS label, and one whose sso- label would not be
-// a DNS label (over 59 characters).
+// cid that is not a lowercase DNS label, and one proto.CheckClusterID refuses:
+// over 59 characters, so its sso- label would not be a DNS label, or starting
+// with sso-, so its own name would be another cluster's sign-in name. A
+// refused id turns both doors off (geekdojo/geekdojo-brain#995).
 func New(cid string) (Table, error) {
 	if cid == "" {
 		return Table{}, ErrNoClusterID
 	}
 	if !tileschema.ValidDNSLabel(cid) {
-		return Table{}, &RefusedError{ClusterID: cid, Reason: "it is not a lowercase DNS label"}
+		return Table{}, &RefusedError{ClusterID: cid, Reason: "it is not a lowercase DNS label", Err: ErrNotLabel}
 	}
-	if home := proto.SignInHomePrefix + cid; !tileschema.ValidDNSLabel(home) {
-		return Table{}, &RefusedError{ClusterID: cid, Reason: fmt.Sprintf("the home door's label %q would exceed 63 characters", home)}
+	switch err := proto.CheckClusterID(cid); {
+	case errors.Is(err, proto.ErrClusterIDTooLong):
+		return Table{}, &RefusedError{ClusterID: cid, Err: err,
+			Reason: fmt.Sprintf("it is %d characters, and a cluster id allows at most %d so the home door's label fits in 63", len(cid), proto.ClusterIDMaxLen)}
+	case err != nil:
+		return Table{}, &RefusedError{ClusterID: cid, Err: err,
+			Reason: fmt.Sprintf("it starts with %q, which is reserved for sign-in names", proto.SignInHomePrefix)}
 	}
 	return Table{
 		Home: door(HomeName, proto.SignInHomeFQDN(cid), "rasputin-console", "rasputin-reset-home", "rasputin-mesh"),
