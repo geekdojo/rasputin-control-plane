@@ -315,7 +315,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	// The real BMC certificate request signer, over a real controlplane CA
 	// (geekdojo/geekdojo-brain#1065).
 	bmcCA := tlscatest.Controlplane(t, filepath.Join(dir, "bmc-ca"))
-	bmcCSR, err := bmccert.New(bmcCA, bmcCA.Cert, bmcCA.CertPEM, slog.New(logs))
+	bmcCSR, err := bmccert.New(bmcCA, bmcCA.Cert, bmcCA.CertPEM, "bench", slog.New(logs))
 	if err != nil {
 		t.Fatalf("bmccert New: %v", err)
 	}

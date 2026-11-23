@@ -25,7 +25,12 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 )
 
-const goodName = "rasputin-bmc-0123456789ab.local"
+// goodName is the name the firmware puts in its request; signedName is the
+// name the leaf carries for it on cluster bench (geekdojo/geekdojo-brain#1142).
+const (
+	goodName   = "rasputin-bmc-0123456789ab.local"
+	signedName = "bmc-0123456789ab.bench.internal"
+)
 
 // countingIssuer wraps an Issuer and counts the calls that reach it.
 type countingIssuer struct {
@@ -74,9 +79,15 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
+	return newFixtureFor(t, "bench")
+}
+
+// newFixtureFor is newFixture for the cluster clusterID.
+func newFixtureFor(t *testing.T, clusterID string) *fixture {
+	t.Helper()
 	ca := tlscatest.Controlplane(t, "")
 	f := &fixture{ca: ca, issuer: &countingIssuer{next: ca}, log: &logCapture{}}
-	s, err := New(f.issuer, ca.Cert, ca.CertPEM, f.log.logger())
+	s, err := New(f.issuer, ca.Cert, ca.CertPEM, clusterID, f.log.logger())
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -127,8 +138,12 @@ func mustExt(t *testing.T, id asn1.ObjectIdentifier, v any) pkix.Extension {
 	return pkix.Extension{Id: id, Critical: true, Value: b}
 }
 
-// TC-1065-05: a valid request is signed as a server leaf for its one name,
-// over its own key, expiring with the CA; the request's subject is ignored.
+// TC-1065-05: a valid request is signed as a server leaf, over its own key,
+// expiring with the CA; the request's subject is ignored.
+// TC-258-07 (S3, geekdojo/geekdojo-brain#1142): on cluster bench a request
+// naming rasputin-bmc-0123456789ab.local gets a leaf whose CN and only SAN
+// are bmc-0123456789ab.bench.internal; Signed.Name and the record's name are
+// that name, and the leaf verifies for it against the returned CA PEM.
 // TC-1065-13: that signing writes exactly one INFO record, with no
 // certificate material in any record.
 func TestSign_HappyPathAndRecord(t *testing.T) {
@@ -139,8 +154,8 @@ func TestSign_HappyPathAndRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if got.Name != goodName {
-		t.Errorf("Name = %q, want %q", got.Name, goodName)
+	if got.Name != signedName {
+		t.Errorf("Name = %q, want %q", got.Name, signedName)
 	}
 	block, _ := pem.Decode(got.LeafPEM)
 	if block == nil || block.Type != "CERTIFICATE" {
@@ -150,10 +165,10 @@ func TestSign_HappyPathAndRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaf.Subject.CommonName != goodName {
-		t.Errorf("CN = %q, want %q (the request's subject must be ignored)", leaf.Subject.CommonName, goodName)
+	if leaf.Subject.CommonName != signedName {
+		t.Errorf("CN = %q, want %q (the request's subject must be ignored)", leaf.Subject.CommonName, signedName)
 	}
-	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != goodName {
+	if len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != signedName {
 		t.Errorf("DNSNames = %v", leaf.DNSNames)
 	}
 	if len(leaf.IPAddresses)+len(leaf.EmailAddresses)+len(leaf.URIs) != 0 {
@@ -171,9 +186,12 @@ func TestSign_HappyPathAndRecord(t *testing.T) {
 	if !leaf.NotAfter.Equal(f.ca.Cert.NotAfter) {
 		t.Errorf("leaf NotAfter = %v, want the CA's %v", leaf.NotAfter, f.ca.Cert.NotAfter)
 	}
+	// TC-258-07: verified against the CA PEM the response returns.
 	roots := x509.NewCertPool()
-	roots.AddCert(f.ca.Cert)
-	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: goodName, Roots: roots}); err != nil {
+	if !roots.AppendCertsFromPEM(got.CAPEM) {
+		t.Fatal("CAPEM holds no certificate")
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{DNSName: signedName, Roots: roots}); err != nil {
 		t.Errorf("Verify: %v", err)
 	}
 	if !bytes.Equal(got.CAPEM, f.ca.CertPEM) {
@@ -193,7 +211,7 @@ func TestSign_HappyPathAndRecord(t *testing.T) {
 		"level":  "INFO",
 		"msg":    "bmc server leaf signed",
 		"event":  "bmccert.signed",
-		"name":   goodName,
+		"name":   signedName,
 		"serial": leaf.SerialNumber.Text(16),
 		"user":   "bryce",
 	}
@@ -208,6 +226,25 @@ func TestSign_HappyPathAndRecord(t *testing.T) {
 	raw := f.log.buf.String()
 	if strings.Contains(raw, "BEGIN") || strings.Contains(raw, base64.StdEncoding.EncodeToString(der)[:40]) {
 		t.Errorf("log carries certificate material: %s", raw)
+	}
+}
+
+// TC-258-07: with no cluster id the leaf is named in the rasputin zone, as
+// the app leaves are (proto.BaseDomain).
+func TestSign_NoClusterIDNamesTheRasputinZone(t *testing.T) {
+	f := newFixtureFor(t, "")
+	csr, _, _ := goodCSR(t)
+	got, err := f.signer.Sign(context.Background(), "bryce", csr)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	const want = "bmc-0123456789ab.rasputin.internal"
+	leaf, err := parseLeaf(got.LeafPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != want || leaf.Subject.CommonName != want || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != want {
+		t.Errorf("Name %q, CN %q, SANs %v, want %s", got.Name, leaf.Subject.CommonName, leaf.DNSNames, want)
 	}
 }
 
@@ -280,7 +317,8 @@ func TestSign_KeyType(t *testing.T) {
 }
 
 // TC-1065-09: the request names exactly one rasputin-bmc-<12 lowercase
-// hex>.local host and nothing else.
+// hex>.local host and nothing else. TC-258-07: these refusals are unchanged
+// by the leaf's new name.
 func TestSign_NameRefused(t *testing.T) {
 	f := newFixture(t)
 	uri, _ := url.Parse("https://rasputin-bmc-0123456789ab.local/")
@@ -348,8 +386,8 @@ func TestSign_IssuerFailure(t *testing.T) {
 	if len(recs) != 1 {
 		t.Fatalf("got %d records, want 1: %s", len(recs), f.log.buf.String())
 	}
-	if recs[0]["level"] != "ERROR" || recs[0]["name"] != goodName {
-		t.Errorf("record = %v, want one ERROR naming %s", recs[0], goodName)
+	if recs[0]["level"] != "ERROR" || recs[0]["name"] != signedName {
+		t.Errorf("record = %v, want one ERROR naming %s", recs[0], signedName)
 	}
 }
 
@@ -359,7 +397,7 @@ func TestSign_IssuerReturnsNoCertificate(t *testing.T) {
 	ca := tlscatest.Controlplane(t, "")
 	lc := &logCapture{}
 	s, err := New(issuerFunc(func(tlsca.LeafSpec, crypto.PublicKey) ([]byte, error) { return []byte("junk"), nil }),
-		ca.Cert, ca.CertPEM, lc.logger())
+		ca.Cert, ca.CertPEM, "bench", lc.logger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,10 +419,10 @@ func TestNew_RefusesMissingCollaborators(t *testing.T) {
 	ca := tlscatest.Controlplane(t, "")
 	log := slog.New(slog.DiscardHandler)
 	cases := map[string]func() (*Signer, error){
-		"nil issuer":  func() (*Signer, error) { return New(nil, ca.Cert, ca.CertPEM, log) },
-		"nil caCert":  func() (*Signer, error) { return New(ca, nil, ca.CertPEM, log) },
-		"empty caPEM": func() (*Signer, error) { return New(ca, ca.Cert, nil, log) },
-		"nil logger":  func() (*Signer, error) { return New(ca, ca.Cert, ca.CertPEM, nil) },
+		"nil issuer":  func() (*Signer, error) { return New(nil, ca.Cert, ca.CertPEM, "bench", log) },
+		"nil caCert":  func() (*Signer, error) { return New(ca, nil, ca.CertPEM, "bench", log) },
+		"empty caPEM": func() (*Signer, error) { return New(ca, ca.Cert, nil, "bench", log) },
+		"nil logger":  func() (*Signer, error) { return New(ca, ca.Cert, ca.CertPEM, "bench", nil) },
 	}
 	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {

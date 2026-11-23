@@ -25,6 +25,9 @@ import (
 const (
 	bmcCSRPath = "/api/bmc/csr"
 	bmcCSRName = "rasputin-bmc-0123456789ab.local"
+	// bmcSignedName is the name the fixture's signer (cluster bench) gives
+	// the leaf for bmcCSRName (geekdojo/geekdojo-brain#1142).
+	bmcSignedName = "bmc-0123456789ab.bench.internal"
 )
 
 // fakeBMCSigner counts calls and returns err.
@@ -89,6 +92,7 @@ func bmcCSRServer(t *testing.T, f *apiFixture, signer bmcCSRSigner) (func(body s
 
 // TC-1065-14: a signed-in operator posts a valid request and gets the leaf,
 // the CA and the expiry, through the real signer over a real CA.
+// TC-258-07: the response's name and the leaf's are the cluster's BMC name.
 func TestBMCSignCSR_Success(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
@@ -107,8 +111,8 @@ func TestBMCSignCSR_Success(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != bmcCSRName {
-		t.Errorf("name = %q", got.Name)
+	if got.Name != bmcSignedName {
+		t.Errorf("name = %q, want %q", got.Name, bmcSignedName)
 	}
 	block, _ := pem.Decode([]byte(got.LeafPEM))
 	if block == nil {
@@ -118,7 +122,7 @@ func TestBMCSignCSR_Success(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaf.Subject.CommonName != bmcCSRName || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != bmcCSRName {
+	if leaf.Subject.CommonName != bmcSignedName || len(leaf.DNSNames) != 1 || leaf.DNSNames[0] != bmcSignedName {
 		t.Errorf("leaf CN %q, SANs %v", leaf.Subject.CommonName, leaf.DNSNames)
 	}
 	if len(leaf.ExtKeyUsage) != 1 || leaf.ExtKeyUsage[0] != x509.ExtKeyUsageServerAuth {

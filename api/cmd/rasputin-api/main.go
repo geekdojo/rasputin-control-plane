@@ -1797,7 +1797,7 @@ func main() {
 	// POST /api/bmc/csr signs a Super4C BMC's certificate request under the
 	// controlplane CA (geekdojo/geekdojo-brain#1065). ensureCAs exits when that
 	// CA will not load, so it is never nil here.
-	bmcCSR, err := bmccert.New(cpCA, cpCA.Cert, cpCA.CertPEM, logger)
+	bmcCSR, err := bmccert.New(cpCA, cpCA.Cert, cpCA.CertPEM, strings.TrimSpace(os.Getenv("RASPUTIN_CLUSTER_ID")), logger)
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: bmc certificate signer", "err", err.Error())
 		os.Exit(1)
