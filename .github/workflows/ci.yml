@@ -422,6 +422,23 @@ jobs:
             RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required \
             "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestIdentitySystemd_'
 
+      # CI SO-19 (geekdojo/geekdojo-brain#995): the home sign-in name's mDNS
+      # responder in two network namespaces joined by a veth pair, beside a
+      # wildcard SO_REUSEADDR socket on 5353 playing the part of resolved. It
+      # needs root to make the namespaces, so the binary is built as the runner
+      # user and only RUN under sudo; the step above runs the same test
+      # unprivileged, where it skips. RASPUTIN_SIGNINNAME_FUNCTIONAL=required
+      # turns a missing ip tool or namespace support into a failure. What it
+      # proves is in functional_linux_test.go.
+      - name: test (sign-in name responder in network namespaces, root)
+        run: |
+          go test -c -race -o "$RUNNER_TEMP/signinname.test" ./api/internal/signinname
+          cd api/internal/signinname
+          sudo env \
+            PATH="$PATH" \
+            RASPUTIN_SIGNINNAME_FUNCTIONAL=required \
+            "$RUNNER_TEMP/signinname.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestSO19_'
+
       - name: test (remaining modules)
         env:
           # The agent's Compose test for secret values carried beside the

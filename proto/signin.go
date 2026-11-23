@@ -1,6 +1,9 @@
 package proto
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 // The sign-in doors' names (geekdojo/geekdojo-brain#983, signin-origin.md §6).
 //
@@ -47,4 +50,33 @@ func SignInHomeFQDN(clusterID string) string {
 // themselves, so no app, catalog tile, node or tailnet device may take it.
 func IsReservedLabel(s string) bool {
 	return s == SignInLabel || s == RadiusLabel
+}
+
+// ClusterIDMaxLen is the longest cluster id: sso-<cid> must still fit in one
+// 63-character DNS label (D25), so the prefix's length comes off the label's.
+const ClusterIDMaxLen = 63 - len(SignInHomePrefix)
+
+// The two rules only a cluster id has, beyond being a DNS label
+// (geekdojo/geekdojo-brain#995, D25). CheckClusterID returns one of them.
+var (
+	// ErrClusterIDTooLong: the id is longer than ClusterIDMaxLen.
+	ErrClusterIDTooLong = errors.New("proto: cluster id is longer than 59 characters")
+	// ErrClusterIDReservedPrefix: the id starts with SignInHomePrefix, so its
+	// own name would be another cluster's sign-in name.
+	ErrClusterIDReservedPrefix = errors.New("proto: cluster id starts with the reserved prefix sso-")
+)
+
+// CheckClusterID applies the cluster-id rules the sign-in name needs: at most
+// ClusterIDMaxLen characters, and no SignInHomePrefix. The length is checked
+// first. It does not check that id is a DNS label; its callers do that. This
+// is the one copy of the rule: the provisioner and the door table both call
+// it.
+func CheckClusterID(id string) error {
+	if len(id) > ClusterIDMaxLen {
+		return ErrClusterIDTooLong
+	}
+	if strings.HasPrefix(id, SignInHomePrefix) {
+		return ErrClusterIDReservedPrefix
+	}
+	return nil
 }

@@ -98,3 +98,27 @@ func TestWithheldBy(t *testing.T) {
 		}
 	}
 }
+
+// TC-995-16 (doors half): the door table applies the one cluster-id rule, so
+// an sso- id turns both doors off, and each refusal carries the rule it broke.
+func TestNew_AppliesTheClusterIDRule(t *testing.T) {
+	for cid, want := range map[string]error{
+		"sso-bench":             proto.ErrClusterIDReservedPrefix,
+		strings.Repeat("a", 60): proto.ErrClusterIDTooLong,
+		"Bench":                 ErrNotLabel,
+	} {
+		tbl, err := New(cid)
+		var refused *RefusedError
+		if !errors.As(err, &refused) || refused.ClusterID != cid || !errors.Is(err, want) {
+			t.Errorf("New(%q) = %v; want a RefusedError naming it, carrying %v", cid, err, want)
+		}
+		if tbl.App.Host != "" || tbl.Home.Host != "" {
+			t.Errorf("New(%q) returned doors with its refusal", cid)
+		}
+	}
+	for _, cid := range []string{"ssobench", "sso"} {
+		if _, err := New(cid); err != nil {
+			t.Errorf("New(%q) refused: %v", cid, err)
+		}
+	}
+}
