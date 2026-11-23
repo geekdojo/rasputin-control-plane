@@ -132,7 +132,9 @@ func (f *fakeKC) rules(method, path string, body []byte, out any) (idclient.Resp
 	if !found {
 		return idclient.Response{}, nil, false
 	}
-	ok200 := func(v any) (idclient.Response, error, bool) { return idclient.Response{Status: 200}, roundTrip(v, out), true }
+	ok200 := func(v any) (idclient.Response, error, bool) {
+		return idclient.Response{Status: 200}, roundTrip(v, out), true
+	}
 	done := func() (idclient.Response, error, bool) { return idclient.Response{Status: 204}, nil, true }
 	write := !f.ignoreWrites
 	var in map[string]any
