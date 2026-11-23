@@ -307,10 +307,13 @@ type tab struct {
 }
 
 // stubAnswers are what the tab answers for the addresses outside Keycloak.
+// The stub declares an empty icon: without one Chrome asks the front for
+// /favicon.ico after the stub loads, and Keycloak's 404 is charged to the
+// next page the walk checks.
 const (
 	callbackPath = "/rasputin-callback"
 	acsPath      = "/rasputin-saml-acs"
-	stubPage     = `<!doctype html><html lang="en"><head><title>Signed in</title></head><body data-page-id="rasputin-stub"><h1>Signed in</h1></body></html>`
+	stubPage     = `<!doctype html><html lang="en"><head><title>Signed in</title><link rel="icon" href="data:,"></head><body data-page-id="rasputin-stub"><h1>Signed in</h1></body></html>`
 )
 
 func newTab(t *testing.T, browserCtx context.Context, front string) *tab {
@@ -761,7 +764,11 @@ func decodeQR(dataURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	res, err := qrcode.NewQRCodeReader().Decode(bmp, nil)
+	// Keycloak's code is a pure render (ZXing QRCodeWriter, no rotation or
+	// noise). The default finder-pattern detector misses about 2% of those
+	// clean codes, in Java ZXing and gozxing alike; PURE_BARCODE reads them
+	// all (TestThemeWalk_DecodeQR).
+	res, err := qrcode.NewQRCodeReader().Decode(bmp, map[gozxing.DecodeHintType]interface{}{gozxing.DecodeHintType_PURE_BARCODE: true})
 	if err != nil {
 		return "", err
 	}
