@@ -389,14 +389,23 @@ func (s *consoleStack) startKeycloak(ctx context.Context) error {
 	if err := copyFile(filepath.Join("..", "..", "..", "identity", "realm-baseline.json"), baseline); err != nil {
 		return err
 	}
-	importCmd := s.kcExec(e, home, conf, "import", "--optimized", "--file", baseline)
-	if out, err := s.cfg.Run(ctx, importCmd[0], importCmd[1:]...); err != nil {
+	importCmd, importEnv, err := s.kcExec(e, home, conf, "import", "--optimized", "--file", baseline)
+	if err != nil {
+		return err
+	}
+	if out, err := s.cfg.Run(ctx, "/usr/bin/env", append(append([]string{"-i"}, importEnv...), importCmd...)...); err != nil {
 		return fmt.Errorf("import the realm baseline: %w\n%s", err, tail(out, 40))
 	}
-	start := s.kcExec(e, home, conf, "start", "--optimized")
+	start, startEnv, err := s.kcExec(e, home, conf, "start", "--optimized")
+	if err != nil {
+		return err
+	}
 	var u strings.Builder
 	u.WriteString("[Unit]\nDescription=identitytest console stack identity service\nRequires=" + p.DBUnit + "\nAfter=" + p.DBUnit + "\n")
 	u.WriteString("\n[Service]\nRestart=no\nSuccessExitStatus=143\nWorkingDirectory=" + home + "\n")
+	for _, kv := range startEnv {
+		u.WriteString("Environment=\"" + kv + "\"\n")
+	}
 	u.WriteString("StandardOutput=append:" + filepath.Join(p.root, "kc.out") + "\nStandardError=append:" + filepath.Join(p.root, "kc.out") + "\n")
 	u.WriteString("ExecStart=" + strings.Join(start, " ") + "\n")
 	if err := p.writeUnit(ctx, p.KCUnit, u.String()); err != nil {
@@ -412,18 +421,30 @@ func (s *consoleStack) startKeycloak(ctx context.Context) error {
 	return nil
 }
 
-// kcExec is the command that runs kc.sh with args: directly, through env
-// -i with the unit's JVM environment, or, with a platform set, in a
-// container of that platform on the pinned PostgreSQL image as its glibc
-// base, with every path it reads mounted at the same place.
-func (s *consoleStack) kcExec(e *Env, home, conf string, args ...string) []string {
+// kcExec is the command that runs kc.sh with args, and the environment it
+// needs set around it: directly, with the unit's JVM environment, or, with a
+// platform set, in a container of that platform on the pinned PostgreSQL
+// image as its glibc base, with every path it reads mounted at the same
+// place and the JVM environment in an env file (its values hold spaces, which
+// neither a unit's ExecStart nor an argv word can carry).
+func (s *consoleStack) kcExec(e *Env, home, conf string, args ...string) (cmd, env []string, err error) {
 	kc := append([]string{filepath.Join(home, "bin", "kc.sh"), "--config-file=" + conf}, args...)
 	platform := os.Getenv(ConsoleKCPlatformEnv)
 	if platform == "" {
-		return append(append([]string{"/usr/bin/env", "-i"}, e.kcEnv()...), kc...)
+		return kc, e.kcEnv(), nil
 	}
-	cmd := []string{s.cfg.DockerBin, "run", "--rm", "--label", s.pair.label(), "--platform", platform, "--network", "host",
-		"--entrypoint", kc[0], "-w", home}
+	var lines []string
+	for _, kv := range e.kcEnv() {
+		if !strings.HasPrefix(kv, "PATH=") {
+			lines = append(lines, kv)
+		}
+	}
+	envFile := filepath.Join(e.root, "kc.env")
+	if err := os.WriteFile(envFile, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		return nil, nil, err
+	}
+	cmd = []string{s.cfg.DockerBin, "run", "--rm", "--label", s.pair.label(), "--platform", platform, "--network", "host",
+		"--env-file", envFile, "--entrypoint", kc[0], "-w", home}
 	seen := map[string]bool{}
 	for _, dir := range []string{s.work, s.cfg.KeycloakHome, s.cfg.JavaHome, s.cfg.ThemeDir} {
 		if dir != "" && !seen[dir] {
@@ -431,12 +452,7 @@ func (s *consoleStack) kcExec(e *Env, home, conf string, args ...string) []strin
 			cmd = append(cmd, "-v", dir+":"+dir)
 		}
 	}
-	for _, kv := range e.kcEnv() {
-		if !strings.HasPrefix(kv, "PATH=") {
-			cmd = append(cmd, "-e", kv)
-		}
-	}
-	return append(append(cmd, PostgresImage), kc[1:]...)
+	return append(append(cmd, PostgresImage), kc[1:]...), []string{"PATH=/usr/bin:/bin"}, nil
 }
 
 // adminSession is the Admin API as rasputin-admin over the api's own
