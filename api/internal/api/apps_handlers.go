@@ -654,8 +654,8 @@ func (s *Server) handlePutAppCompose(w http.ResponseWriter, r *http.Request) {
 // acceptPrivilegeTier covers the tier the tile declares (dec 12, #522). The
 // 409 carries privilegeRaise — the tiers, grants and reason the consent
 // prompt shows — beside the error. With consent, it is recorded on the app
-// {at, by, what} before the job starts, and the job refuses the raise unless
-// that record is for the very compose it pulls. The consent check comes
+// {at, by, what} once the job is authorized and before it starts, and the
+// job refuses the raise unless that record is for the very compose it pulls. The consent check comes
 // before the dropped-volume check, which asks the node: an owner is asked
 // whether to accept the privilege before being asked what to delete.
 func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, app *apps.App, source string, acceptTier *string, deleteVolumes []string) {
@@ -684,6 +684,7 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 	if s.refuseDroppedVolumes(w, r, app, named, s.catalogDropped(r, app, target.Tile)) {
 		return
 	}
+	var consent func(jobID string) error
 	if change.Raises {
 		by := userName(r)
 		if by == "" {
@@ -691,17 +692,15 @@ func (s *Server) putComposeFromCatalog(w http.ResponseWriter, r *http.Request, a
 			writeError(w, http.StatusInternalServerError, "no authenticated user to record the privilege consent against; nothing was recorded or started")
 			return
 		}
-		ack := apps.PrivilegeAck{At: time.Now().UTC(), By: by, What: change.Consent(target)}
-		if err := s.apps.RecordPrivilegeAck(r.Context(), app.ID, app.ComposeSHA256, ack); err != nil {
-			if errors.Is(err, apps.ErrComposeChanged) {
-				writeError(w, http.StatusConflict, "the app's compose changed while this upgrade was being requested; nothing was recorded or started — check the app and request the upgrade again")
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err.Error())
-			return
+		// The consent is written in the job's prepare, which the runner calls
+		// only once the job is authorized, so a person the runner refuses
+		// leaves no consent behind (geekdojo/geekdojo-brain#1002, F-1002-02).
+		consent = func(string) error {
+			ack := apps.PrivilegeAck{At: time.Now().UTC(), By: by, What: change.Consent(target)}
+			return s.apps.RecordPrivilegeAck(r.Context(), app.ID, app.ComposeSHA256, ack)
 		}
 	}
-	s.submitComposeJob(w, r, "app.upgrade", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, nil)
+	s.submitComposeJob(w, r, "app.upgrade", apps.ComposeChangeSpec{AppID: app.ID, DeleteVolumes: named}, consent)
 }
 
 // privilegeRaise is the body of the 409 a tier-raising upgrade without
@@ -837,9 +836,10 @@ func (s *Server) putComposeByHash(w http.ResponseWriter, r *http.Request, app *a
 }
 
 // submitComposeJob starts a compose change and answers 202 with its job.
-// stash, when set, runs with the job's id before the job starts, so a compose
-// that must not be in the spec is where the job will look for it by the time
-// its first step runs.
+// stash, when set, runs with the job's id once the runner has authorized the
+// job and before the job starts, so a compose that must not be in the spec is
+// where the job will look for it by the time its first step runs, and an
+// upgrade's privilege consent is recorded only for a job that will run.
 func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind string, spec any, stash func(jobID string) error) {
 	var stashedFor string
 	prepare := func(jobID string) error {
@@ -859,8 +859,13 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 	if err != nil {
 		// No job will run under that id, so no OnTerminal will discard what
 		// was held for it.
-		if stashedFor != "" {
+		if stashedFor != "" && s.composeStash != nil {
 			s.composeStash.Discard(stashedFor)
+		}
+		if errors.Is(err, apps.ErrComposeChanged) {
+			// The upgrade's consent record found another compose in place.
+			writeError(w, http.StatusConflict, "the app's compose changed while this upgrade was being requested; nothing was recorded or started — check the app and request the upgrade again")
+			return
 		}
 		s.writeSubmitError(w, r, kind, http.StatusBadRequest, err)
 		return

@@ -102,6 +102,11 @@ const (
 	// codeSigninUnavailable: a sign-in door's site was reached but its door
 	// is not being served, so the not-ready page answered 503.
 	codeSigninUnavailable = "signin_unavailable"
+	// codeRouteNotPermitted: the signed-in person lacks what the route's
+	// class needs (geekdojo/geekdojo-brain#1002), so the router refused the
+	// request before its handler ran. A Job route's refusal answers the kind
+	// table's "job_" code instead.
+	codeRouteNotPermitted = "route_not_permitted"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

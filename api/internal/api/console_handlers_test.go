@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -382,9 +384,15 @@ func TestConsoleRootPassword_PutWhosePushDidNotStartIsAnError(t *testing.T) {
 func TestConsoleRootPassword_PutWhosePushIsRefusedKeepsTheSave(t *testing.T) {
 	f := newAPIFixture(t)
 	f.runner.Register(jobs.Workflow{Kind: console.PushKind})
-	viewer := f.authenticateAs(t, "sub-vic", "vic", "viewer")
-
-	w := f.do(t, http.MethodPut, "/api/console/root-password", `{"password":"`+testConsolePassword+`"}`, viewer)
+	// TC-1002-21: the router now refuses a viewer's PUT before the handler
+	// (route_not_permitted, geekdojo/geekdojo-brain#1002), so the handler is
+	// driven directly with a viewer principal to keep proving what it does
+	// when the save passes and the runner refuses the push.
+	req := httptest.NewRequest(http.MethodPut, "/api/console/root-password", strings.NewReader(`{"password":"`+testConsolePassword+`"}`))
+	req.Pattern = "PUT /api/console/root-password"
+	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-vic", Name: "vic", Roles: []string{"viewer"}}))
+	w := httptest.NewRecorder()
+	f.srv.handlePutConsoleRootPassword(w, req)
 	if w.Code != http.StatusOK {
 		t.Fatalf("PUT: %d %s, want 200", w.Code, w.Body.String())
 	}

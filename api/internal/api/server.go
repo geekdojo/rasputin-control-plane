@@ -11,6 +11,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
@@ -324,7 +325,9 @@ func (s *Server) routes() *routeMux {
 
 	// Open
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	s.auth.RegisterRoutes(mux)
+	// The sign-in routes: each is an open route or a pinned sign-in session
+	// route (routes_matrix_test.go, signinSessionRoutes).
+	s.auth.RegisterRoutes(signinRegistrar{mux})
 	// GET /api/setup/state is intentionally unauthenticated — the wizard
 	// runs before any passkey exists and needs to read step state to know
 	// which form to show first. The response carries no secrets.
@@ -352,85 +355,90 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("GET /api/restore/candidates", s.handleListRestoreCandidates)
 	mux.HandleFunc("POST /api/restore", s.handleRestore)
 
-	// Authenticated
-	reqd := s.auth.RequireSessionFunc
+	// Authenticated. Every session route is registered through gate with its
+	// class (routeclass.go, geekdojo/geekdojo-brain#1002): view, control
+	// under a capability, self, or the floor of the Job kinds it submits.
+	// The router refuses a person who lacks it before the handler runs, and
+	// routes_matrix_test.go holds the table every class here is checked
+	// against.
+	gate := func(pattern string, rule routeRule, h http.HandlerFunc) { s.gate(mux, pattern, rule, h) }
 
-	mux.HandleFunc("POST /api/jobs", reqd(s.handleCreateJob))
-	mux.HandleFunc("GET /api/jobs", reqd(s.handleListJobs))
-	mux.HandleFunc("GET /api/jobs/{id}", reqd(s.handleGetJob))
-	mux.HandleFunc("GET /api/jobs/{id}/steps", reqd(s.handleListSteps))
-	mux.HandleFunc("GET /api/jobs/{id}/events", reqd(s.handleListEvents))
+	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
+	gate("GET /api/jobs", needs(authz.NeedView()), s.handleListJobs)
+	gate("GET /api/jobs/{id}", needs(authz.NeedView()), s.handleGetJob)
+	gate("GET /api/jobs/{id}/steps", needs(authz.NeedView()), s.handleListSteps)
+	gate("GET /api/jobs/{id}/events", needs(authz.NeedView()), s.handleListEvents)
 
-	mux.HandleFunc("GET /api/nodes", reqd(s.handleListNodes))
-	mux.HandleFunc("GET /api/nodes/{id}", reqd(s.handleGetNode))
-	mux.HandleFunc("GET /api/nodes/{id}/removal-impact", reqd(s.handleGetNodeRemovalImpact))
-	mux.HandleFunc("DELETE /api/nodes/{id}", reqd(s.handleDeleteNode))
+	gate("GET /api/nodes", needs(authz.NeedView()), s.handleListNodes)
+	gate("GET /api/nodes/{id}", needs(authz.NeedView()), s.handleGetNode)
+	gate("GET /api/nodes/{id}/removal-impact", needs(authz.NeedView()), s.handleGetNodeRemovalImpact)
+	gate("DELETE /api/nodes/{id}", needs(authz.NeedControl(authz.Nodes)), s.handleDeleteNode)
 
-	mux.HandleFunc("GET /api/metrics/{id}", reqd(s.handleGetMetrics))
+	gate("GET /api/metrics/{id}", needs(authz.NeedView()), s.handleGetMetrics)
 
-	mux.HandleFunc("GET /api/firewall/intents", reqd(s.handleListIntents))
-	mux.HandleFunc("POST /api/firewall/intents", reqd(s.handleCreateIntent))
-	mux.HandleFunc("PATCH /api/firewall/intents/{id}", reqd(s.handleUpdateIntent))
-	mux.HandleFunc("DELETE /api/firewall/intents/{id}", reqd(s.handleDeleteIntent))
-	mux.HandleFunc("GET /api/firewall/state", reqd(s.handleGetFirewallState))
-	mux.HandleFunc("POST /api/firewall/apply", reqd(s.handleApplyFirewall))
-	mux.HandleFunc("POST /api/firewall/reconcile", reqd(s.handleReconcileFirewall))
+	gate("GET /api/firewall/intents", needs(authz.NeedView()), s.handleListIntents)
+	gate("POST /api/firewall/intents", needs(authz.NeedControl(authz.Firewall)), s.handleCreateIntent)
+	gate("PATCH /api/firewall/intents/{id}", needs(authz.NeedControl(authz.Firewall)), s.handleUpdateIntent)
+	gate("DELETE /api/firewall/intents/{id}", needs(authz.NeedControl(authz.Firewall)), s.handleDeleteIntent)
+	gate("GET /api/firewall/state", needs(authz.NeedView()), s.handleGetFirewallState)
+	gate("POST /api/firewall/apply", job("firewall.apply"), s.handleApplyFirewall)
+	gate("POST /api/firewall/reconcile", job("firewall.reconcile"), s.handleReconcileFirewall)
 
-	mux.HandleFunc("GET /api/apps", reqd(s.handleListApps))
-	mux.HandleFunc("POST /api/apps", reqd(s.handleCreateApp))
-	mux.HandleFunc("GET /api/apps/{id}", reqd(s.handleGetApp))
-	mux.HandleFunc("PATCH /api/apps/{id}", reqd(s.handleUpdateApp))
-	mux.HandleFunc("DELETE /api/apps/{id}", reqd(s.handleDeleteApp))
-	mux.HandleFunc("POST /api/apps/{id}/deploy", reqd(s.handleDeployApp))
-	mux.HandleFunc("POST /api/apps/{id}/stop", reqd(s.handleStopApp))
+	gate("GET /api/apps", needs(authz.NeedView()), s.handleListApps)
+	gate("POST /api/apps", needs(authz.NeedControl(authz.AppsHost)), s.handleCreateApp)
+	gate("GET /api/apps/{id}", needs(authz.NeedView()), s.handleGetApp)
+	gate("PATCH /api/apps/{id}", needs(authz.NeedControl(authz.Apps)), s.handleUpdateApp)
+	gate("DELETE /api/apps/{id}", job("app.delete"), s.handleDeleteApp)
+	gate("POST /api/apps/{id}/deploy", job("app.deploy"), s.handleDeployApp)
+	gate("POST /api/apps/{id}/stop", job("app.stop"), s.handleStopApp)
 	// The app's compose, as a resource: upgrade, custom edit and re-apply by
 	// hash (geekdojo/geekdojo-brain#410). It replaced POST .../upgrade and
 	// POST .../revert, which no release ever carried.
-	mux.HandleFunc("PUT /api/apps/{id}/compose", reqd(s.handlePutAppCompose))
+	gate("PUT /api/apps/{id}/compose", job("app.upgrade", "app.edit", "app.revert"), s.handlePutAppCompose)
 	// geekdojo/geekdojo-brain#399: the uninstall prompt's facts, and the path
 	// for volumes earlier uninstalls left behind.
-	mux.HandleFunc("GET /api/apps/{id}/volumes", reqd(s.handleAppVolumes))
+	gate("GET /api/apps/{id}/volumes", needs(authz.NeedView()), s.handleAppVolumes)
 	// geekdojo/geekdojo-brain#291 phase 2: restore one app's data from a
 	// backup generation. Explicit, per app, operator-initiated.
-	mux.HandleFunc("GET /api/apps/{id}/restore-sources", reqd(s.handleAppRestoreSources))
-	mux.HandleFunc("POST /api/apps/{id}/restore", reqd(s.handleAppRestore))
+	gate("GET /api/apps/{id}/restore-sources", needs(authz.NeedView()), s.handleAppRestoreSources)
+	gate("POST /api/apps/{id}/restore", job(storage.RestoreAppJobKind), s.handleAppRestore)
 	// geekdojo/geekdojo-brain#604: the app's owner-supplied secrets,
 	// write-only. GET reports which are set; PUT sets one.
-	mux.HandleFunc("GET /api/apps/{id}/secrets", reqd(s.handleListOperatorSecrets))
-	mux.HandleFunc("PUT /api/apps/{id}/secrets/{name}", reqd(s.handlePutOperatorSecret))
-	mux.HandleFunc("GET /api/volumes/orphans", reqd(s.handleListOrphanVolumes))
-	mux.HandleFunc("POST /api/volumes/orphans/reclaim", reqd(s.handleReclaimOrphanVolumes))
-	mux.HandleFunc("GET /api/catalog", reqd(s.handleListCatalog))
+	gate("GET /api/apps/{id}/secrets", needs(authz.NeedView()), s.handleListOperatorSecrets)
+	gate("PUT /api/apps/{id}/secrets/{name}", needs(authz.NeedControl(authz.Secrets)), s.handlePutOperatorSecret)
+	gate("GET /api/volumes/orphans", needs(authz.NeedView()), s.handleListOrphanVolumes)
+	gate("POST /api/volumes/orphans/reclaim", needs(authz.NeedControl(authz.Apps)), s.handleReclaimOrphanVolumes)
+	gate("GET /api/catalog", needs(authz.NeedView()), s.handleListCatalog)
 	// Registered BEFORE the {id} route for readability; Go's mux prefers the
 	// more specific pattern regardless, and "_status" cannot be a tile id.
-	mux.HandleFunc("GET /api/catalog/_status", reqd(s.handleCatalogStatus))
-	mux.HandleFunc("POST /api/catalog/_refresh", reqd(s.handleCatalogRefresh))
-	mux.HandleFunc("GET /api/catalog/{id}", reqd(s.handleGetCatalogTile))
-	mux.HandleFunc("POST /api/catalog/{id}/install", reqd(s.handleInstallCatalogTile))
+	gate("GET /api/catalog/_status", needs(authz.NeedView()), s.handleCatalogStatus)
+	gate("POST /api/catalog/_refresh", needs(authz.NeedControl(authz.Apps)), s.handleCatalogRefresh)
+	gate("GET /api/catalog/{id}", needs(authz.NeedView()), s.handleGetCatalogTile)
+	gate("POST /api/catalog/{id}/install", needs(authz.NeedControl(authz.Apps)), s.handleInstallCatalogTile)
 
 	// Bundle bytes are content-addressed: the SHA-256 in the path is the
 	// capability. Agents have no session cookie in v0; the tailnet is
 	// the network boundary. List / upload / delete still require auth
 	// because they read or mutate the bundle catalog. (v1 adds per-node
 	// mTLS so the agent can authenticate; see updates.md.)
-	mux.HandleFunc("GET /api/bundles", reqd(s.handleListBundles))
-	mux.HandleFunc("POST /api/bundles", reqd(s.handleUploadBundle))
+	gate("GET /api/bundles", needs(authz.NeedView()), s.handleListBundles)
+	gate("POST /api/bundles", needs(authz.NeedControl(authz.Updates)), s.handleUploadBundle)
 	mux.HandleFunc("GET /api/bundles/{sha}", s.handleGetBundle)        // unauthenticated
 	mux.HandleFunc("GET /api/bundles/{sha}/sig", s.handleGetBundleSig) // unauthenticated
-	mux.HandleFunc("DELETE /api/bundles/{sha}", reqd(s.handleDeleteBundle))
-	mux.HandleFunc("POST /api/updates", reqd(s.handleCreateUpdate))
-	mux.HandleFunc("POST /api/updates/system", reqd(s.handleCreateSystemUpdate))
-	mux.HandleFunc("POST /api/updates/system/plan", reqd(s.handleSystemUpdatePlan))
-	mux.HandleFunc("GET /api/updates", reqd(s.handleListUpdates))
-	mux.HandleFunc("POST /api/updates/check", reqd(s.handleCheckUpdates))
-	mux.HandleFunc("POST /api/updates/pull", reqd(s.handlePullUpdate))
+	gate("DELETE /api/bundles/{sha}", needs(authz.NeedControl(authz.Updates)), s.handleDeleteBundle)
+	gate("POST /api/updates", job("node.update"), s.handleCreateUpdate)
+	gate("POST /api/updates/system", job("system.update"), s.handleCreateSystemUpdate)
+	gate("POST /api/updates/system/plan", needs(authz.NeedControl(authz.Updates)), s.handleSystemUpdatePlan)
+	gate("GET /api/updates", needs(authz.NeedView()), s.handleListUpdates)
+	gate("POST /api/updates/check", needs(authz.NeedControl(authz.Updates)), s.handleCheckUpdates)
+	gate("POST /api/updates/pull", needs(authz.NeedControl(authz.Updates)), s.handlePullUpdate)
 
 	// Backup targets (design/storage.md §4.8). GET candidates is a read-only
 	// agent RPC the picker calls before any job exists; POST targets submits
 	// the backup.target.claim saga, which is the only path that formats a disk.
-	mux.HandleFunc("GET /api/backup/candidates", reqd(s.handleListBackupCandidates))
-	mux.HandleFunc("GET /api/backup/targets", reqd(s.handleListBackupTargets))
-	mux.HandleFunc("POST /api/backup/targets", reqd(s.handleClaimBackupTarget))
+	gate("GET /api/backup/candidates", needs(authz.NeedView()), s.handleListBackupCandidates)
+	gate("GET /api/backup/targets", needs(authz.NeedView()), s.handleListBackupTargets)
+	gate("POST /api/backup/targets", job(storage.ClaimJobKind), s.handleClaimBackupTarget)
 
 	// Backup RUNS (design/storage.md §4.1). GET runs is the ledger, failures
 	// included — §4.4 wants a failed backup visible, not absent. POST runs is
@@ -440,79 +448,79 @@ func (s *Server) routes() *routeMux {
 	// The backup INGEST and restore EGRESS endpoints are not on this
 	// listener: a node moves members only on the node listener, by its
 	// registered agent key (obsIngestRoutes).
-	mux.HandleFunc("GET /api/backup/runs", reqd(s.handleListBackupRuns))
-	mux.HandleFunc("POST /api/backup/runs", reqd(s.handleStartBackupRun))
-	mux.HandleFunc("GET /api/backup/restores", reqd(s.handleListRestores))
-	mux.HandleFunc("GET /api/backup/schedule", reqd(s.handleGetBackupSchedule))
-	mux.HandleFunc("PUT /api/backup/schedule", reqd(s.handleSetBackupSchedule))
+	gate("GET /api/backup/runs", needs(authz.NeedView()), s.handleListBackupRuns)
+	gate("POST /api/backup/runs", job(storage.RunJobKind), s.handleStartBackupRun)
+	gate("GET /api/backup/restores", needs(authz.NeedView()), s.handleListRestores)
+	gate("GET /api/backup/schedule", needs(authz.NeedView()), s.handleGetBackupSchedule)
+	gate("PUT /api/backup/schedule", needs(authz.NeedControl(authz.System)), s.handleSetBackupSchedule)
 
-	mux.HandleFunc("GET /api/mesh/state", reqd(s.handleMeshState))
-	mux.HandleFunc("GET /api/mesh/devices", reqd(s.handleListMeshDevices))
-	mux.HandleFunc("DELETE /api/mesh/devices/{hsId}", reqd(s.handleDeleteMeshDevice))
-	mux.HandleFunc("GET /api/mesh/keys", reqd(s.handleListMeshKeys))
-	mux.HandleFunc("POST /api/mesh/keys", reqd(s.handleCreateMeshKey))
-	mux.HandleFunc("PATCH /api/mesh/keys/{id}", reqd(s.handleUpdateMeshKey))
-	mux.HandleFunc("DELETE /api/mesh/keys/{id}", reqd(s.handleDeleteMeshKey))
-	mux.HandleFunc("GET /api/mesh/routes", reqd(s.handleListMeshRoutes))
-	mux.HandleFunc("POST /api/mesh/routes", reqd(s.handleCreateMeshRoute))
-	mux.HandleFunc("PATCH /api/mesh/routes/{id}", reqd(s.handleUpdateMeshRoute))
-	mux.HandleFunc("DELETE /api/mesh/routes/{id}", reqd(s.handleDeleteMeshRoute))
-	mux.HandleFunc("POST /api/mesh/apply", reqd(s.handleMeshApply))
-	mux.HandleFunc("POST /api/mesh/reconcile", reqd(s.handleMeshReconcile))
-	mux.HandleFunc("POST /api/mesh/enroll/{nodeId}", reqd(s.handleMeshEnrollNode))
-	mux.HandleFunc("GET /api/mesh/enroll-defaults/{nodeId}", reqd(s.handleMeshEnrollDefaults))
+	gate("GET /api/mesh/state", needs(authz.NeedView()), s.handleMeshState)
+	gate("GET /api/mesh/devices", needs(authz.NeedView()), s.handleListMeshDevices)
+	gate("DELETE /api/mesh/devices/{hsId}", needs(authz.NeedControl(authz.Mesh)), s.handleDeleteMeshDevice)
+	gate("GET /api/mesh/keys", needs(authz.NeedControl(authz.Mesh)), s.handleListMeshKeys)
+	gate("POST /api/mesh/keys", needs(authz.NeedControl(authz.Mesh)), s.handleCreateMeshKey)
+	gate("PATCH /api/mesh/keys/{id}", needs(authz.NeedControl(authz.Mesh)), s.handleUpdateMeshKey)
+	gate("DELETE /api/mesh/keys/{id}", needs(authz.NeedControl(authz.Mesh)), s.handleDeleteMeshKey)
+	gate("GET /api/mesh/routes", needs(authz.NeedView()), s.handleListMeshRoutes)
+	gate("POST /api/mesh/routes", needs(authz.NeedControl(authz.Mesh)), s.handleCreateMeshRoute)
+	gate("PATCH /api/mesh/routes/{id}", needs(authz.NeedControl(authz.Mesh)), s.handleUpdateMeshRoute)
+	gate("DELETE /api/mesh/routes/{id}", needs(authz.NeedControl(authz.Mesh)), s.handleDeleteMeshRoute)
+	gate("POST /api/mesh/apply", job("mesh.apply"), s.handleMeshApply)
+	gate("POST /api/mesh/reconcile", job("mesh.reconcile"), s.handleMeshReconcile)
+	gate("POST /api/mesh/enroll/{nodeId}", job("mesh.enroll_node"), s.handleMeshEnrollNode)
+	gate("GET /api/mesh/enroll-defaults/{nodeId}", needs(authz.NeedView()), s.handleMeshEnrollDefaults)
 
 	// Bus join tokens — the per-node credential agents present to the
 	// auth-callout. Authed (an operator mints/revokes them).
-	mux.HandleFunc("GET /api/bus/tokens", reqd(s.handleListBusTokens))
-	mux.HandleFunc("POST /api/bus/tokens", reqd(s.handleMintBusToken))
-	mux.HandleFunc("DELETE /api/bus/tokens/{id}", reqd(s.handleRevokeBusToken))
+	gate("GET /api/bus/tokens", needs(authz.NeedView()), s.handleListBusTokens)
+	gate("POST /api/bus/tokens", needs(authz.NeedControl(authz.Nodes)), s.handleMintBusToken)
+	gate("DELETE /api/bus/tokens/{id}", needs(authz.NeedControl(authz.Nodes)), s.handleRevokeBusToken)
 	// Bus TLS: read-only status of the automatic mode ladder and the pin (#448).
-	mux.HandleFunc("GET /api/bus/tls", reqd(s.handleGetBusTLS))
+	gate("GET /api/bus/tls", needs(authz.NeedView()), s.handleGetBusTLS)
 
-	mux.HandleFunc("POST /api/setup/install-name", reqd(s.handleSetupInstallName))
-	mux.HandleFunc("POST /api/setup/mode", reqd(s.handleSetupMode))
-	mux.HandleFunc("POST /api/setup/mesh", reqd(s.handleSetupMesh))
-	mux.HandleFunc("POST /api/setup/complete", reqd(s.handleSetupComplete))
+	gate("POST /api/setup/install-name", needs(authz.NeedControl(authz.System)), s.handleSetupInstallName)
+	gate("POST /api/setup/mode", needs(authz.NeedControl(authz.Firewall)), s.handleSetupMode)
+	gate("POST /api/setup/mesh", job("mesh.enroll_node"), s.handleSetupMesh)
+	gate("POST /api/setup/complete", needs(authz.NeedControl(authz.System)), s.handleSetupComplete)
 
-	mux.HandleFunc("GET /api/settings/dns-forwarding", reqd(s.handleGetDNSForwarding))
-	mux.HandleFunc("POST /api/settings/dns-forwarding", reqd(s.handleSetDNSForwarding))
+	gate("GET /api/settings/dns-forwarding", needs(authz.NeedView()), s.handleGetDNSForwarding)
+	gate("POST /api/settings/dns-forwarding", needs(authz.NeedControl(authz.System)), s.handleSetDNSForwarding)
 
 	// Operator SSH key — the one key the Add-node wizard prefills (public-key
 	// material; authed because it's operator configuration).
-	mux.HandleFunc("GET /api/enroll/operator-key", reqd(s.handleGetOperatorKey))
-	mux.HandleFunc("PUT /api/enroll/operator-key", reqd(s.handlePutOperatorKey))
+	gate("GET /api/enroll/operator-key", needs(authz.NeedView()), s.handleGetOperatorKey)
+	gate("PUT /api/enroll/operator-key", needs(authz.NeedControl(authz.Nodes)), s.handlePutOperatorKey)
 
 	// Console root password (#587): chosen in the first-run wizard, changed
 	// from Settings, applied to every node by console.root_push. Authed —
 	// the wizard registers the operator's passkey before this step. The GET
 	// never returns the hash; see console_handlers.go.
-	mux.HandleFunc("GET /api/console/root-password", reqd(s.handleGetConsoleRootPassword))
-	mux.HandleFunc("PUT /api/console/root-password", reqd(s.handlePutConsoleRootPassword))
-	mux.HandleFunc("POST /api/console/root-password/push", reqd(s.handlePushConsoleRootPassword))
+	gate("GET /api/console/root-password", needs(authz.NeedView()), s.handleGetConsoleRootPassword)
+	gate("PUT /api/console/root-password", needs(authz.NeedControl(authz.Nodes)), s.handlePutConsoleRootPassword)
+	gate("POST /api/console/root-password/push", job(console.PushKind), s.handlePushConsoleRootPassword)
 
-	mux.HandleFunc("GET /api/bmc", reqd(s.handleListBMCStates))
-	mux.HandleFunc("GET /api/bmc/backends", reqd(s.handleBMCBackends))
-	mux.HandleFunc("GET /api/bmc/config", reqd(s.handleBMCGetConfig))
-	mux.HandleFunc("POST /api/bmc/config", reqd(s.handleBMCSetConfig))
-	mux.HandleFunc("POST /api/bmc/probe", reqd(s.handleBMCProbe))
-	mux.HandleFunc("POST /api/bmc/csr", reqd(s.handleBMCSignCSR))
-	mux.HandleFunc("GET /api/bmc/{nodeId}/status", reqd(s.handleBMCStatus))
-	mux.HandleFunc("POST /api/bmc/{nodeId}/power/{verb}", reqd(s.handleBMCPower))
-	mux.HandleFunc("GET /ws/bmc/{nodeId}/sol", reqd(s.handleBMCSOL))
+	gate("GET /api/bmc", needs(authz.NeedView()), s.handleListBMCStates)
+	gate("GET /api/bmc/backends", needs(authz.NeedView()), s.handleBMCBackends)
+	gate("GET /api/bmc/config", needs(authz.NeedView()), s.handleBMCGetConfig)
+	gate("POST /api/bmc/config", needs(authz.NeedControl(authz.BMC)), s.handleBMCSetConfig)
+	gate("POST /api/bmc/probe", needs(authz.NeedControl(authz.BMC)), s.handleBMCProbe)
+	gate("POST /api/bmc/csr", needs(authz.NeedControl(authz.BMC)), s.handleBMCSignCSR)
+	gate("GET /api/bmc/{nodeId}/status", needs(authz.NeedView()), s.handleBMCStatus)
+	gate("POST /api/bmc/{nodeId}/power/{verb}", job("bmc.power"), s.handleBMCPower)
+	gate("GET /ws/bmc/{nodeId}/sol", needs(authz.NeedControl(authz.BMC)), s.handleBMCSOL)
 
-	mux.HandleFunc("GET /api/alerts", reqd(s.handleListAlerts))
-	mux.HandleFunc("POST /api/alerts/{id}/ack", reqd(s.handleAlertAck))
-	mux.HandleFunc("POST /api/alerts/{id}/dismiss", reqd(s.handleAlertDismiss))
+	gate("GET /api/alerts", needs(authz.NeedView()), s.handleListAlerts)
+	gate("POST /api/alerts/{id}/ack", needs(authz.NeedControl(authz.System)), s.handleAlertAck)
+	gate("POST /api/alerts/{id}/dismiss", needs(authz.NeedControl(authz.System)), s.handleAlertDismiss)
 
-	mux.HandleFunc("GET /api/obs/status", reqd(s.handleObsStatus))
-	mux.HandleFunc("GET /api/obs/logs", reqd(s.handleObsLogs))
-	mux.HandleFunc("GET /api/obs/series", reqd(s.handleObsSeries))
-	mux.HandleFunc("GET /api/obs/containers", reqd(s.handleObsContainers))
+	gate("GET /api/obs/status", needs(authz.NeedView()), s.handleObsStatus)
+	gate("GET /api/obs/logs", needs(authz.NeedView()), s.handleObsLogs)
+	gate("GET /api/obs/series", needs(authz.NeedView()), s.handleObsSeries)
+	gate("GET /api/obs/containers", needs(authz.NeedView()), s.handleObsContainers)
 	// The write half of the obs surface. Both are async (they return a
 	// job) — a cold enable pulls ~500 MB. See obs/jobs.go.
-	mux.HandleFunc("POST /api/obs/enable", reqd(s.handleObsEnable))
-	mux.HandleFunc("POST /api/obs/disable", reqd(s.handleObsDisable))
+	gate("POST /api/obs/enable", job("obs.enable"), s.handleObsEnable)
+	gate("POST /api/obs/disable", job("obs.disable"), s.handleObsDisable)
 
 	// /observability/* is the auth-proxy in front of Grafana. The
 	// trailing slash matters — Go's ServeMux uses it as the prefix
@@ -520,17 +528,17 @@ func (s *Server) routes() *routeMux {
 	// (panel saves) and we forward all of them.
 	// sameOriginFraming is the one relaxation of the frame-ancestors 'none'
 	// every other response carries; see its comment.
-	mux.Handle("/observability/", s.auth.RequireSession(sameOriginFraming(http.HandlerFunc(s.handleObservabilityProxy))))
+	gate("/observability/", needs(authz.NeedView()), sameOriginFraming(http.HandlerFunc(s.handleObservabilityProxy)).ServeHTTP)
 
-	mux.HandleFunc("GET /ws/jobs", reqd(s.bridgeSubject(proto.AllJobsFilter)))
-	mux.HandleFunc("GET /ws/inventory", reqd(s.bridgeSubject(proto.AllInventoryFilter)))
-	mux.HandleFunc("GET /ws/firewall", reqd(s.bridgeSubject(proto.AllFirewallChangesFilter)))
-	mux.HandleFunc("GET /ws/apps", reqd(s.bridgeSubject(proto.AllAppsFilter)))
-	mux.HandleFunc("GET /ws/updates", reqd(s.bridgeSubject(proto.AllUpdatesFilter)))
-	mux.HandleFunc("GET /ws/updates/system", reqd(s.bridgeSubject(proto.AllSystemUpdatesFilter)))
-	mux.HandleFunc("GET /ws/mesh", reqd(s.bridgeSubject(proto.AllMeshChangesFilter)))
-	mux.HandleFunc("GET /ws/bmc", reqd(s.bridgeSubject(proto.AllBMCChangesFilter)))
-	mux.HandleFunc("GET /ws/alerts", reqd(s.bridgeSubject(proto.AlertsChangesSubject)))
+	gate("GET /ws/jobs", needs(authz.NeedView()), s.bridgeSubject(proto.AllJobsFilter))
+	gate("GET /ws/inventory", needs(authz.NeedView()), s.bridgeSubject(proto.AllInventoryFilter))
+	gate("GET /ws/firewall", needs(authz.NeedView()), s.bridgeSubject(proto.AllFirewallChangesFilter))
+	gate("GET /ws/apps", needs(authz.NeedView()), s.bridgeSubject(proto.AllAppsFilter))
+	gate("GET /ws/updates", needs(authz.NeedView()), s.bridgeSubject(proto.AllUpdatesFilter))
+	gate("GET /ws/updates/system", needs(authz.NeedView()), s.bridgeSubject(proto.AllSystemUpdatesFilter))
+	gate("GET /ws/mesh", needs(authz.NeedView()), s.bridgeSubject(proto.AllMeshChangesFilter))
+	gate("GET /ws/bmc", needs(authz.NeedView()), s.bridgeSubject(proto.AllBMCChangesFilter))
+	gate("GET /ws/alerts", needs(authz.NeedView()), s.bridgeSubject(proto.AlertsChangesSubject))
 
 	// Web UI: the mux fallback. "/" is the least-specific pattern, so every
 	// /api, /ws, /healthz and /observability route above wins; only paths

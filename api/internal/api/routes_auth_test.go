@@ -36,12 +36,11 @@ import (
 //     so does one whose route answers 401 anyway (it does not need to be open,
 //     so it must not sit on the list).
 //
-// Extending it to roles (geekdojo/geekdojo-brain#320): enumerateRoutes and
-// routeProbe are the reusable half. A per-role matrix replaces the single
-// "401 unless open" expectation with a table from pattern to required
-// capability, runs the same probes with one session per role, and expects 403
-// where the role lacks the capability. Keep the enumeration authoritative —
-// derive probes from the mux, never from a copied list.
+// The per-role matrix is routes_matrix_test.go (geekdojo/geekdojo-brain#1002):
+// it reuses enumerateRoutes and routeProbe, reads each route's class off the
+// same recording mux, and checks it against a literal table with one session
+// per role. Keep the enumeration authoritative — derive probes from the mux,
+// never from a copied list.
 
 // openRoutes is the allowlist of routes on Handler() that deliberately answer
 // without a session. Keyed by the exact registered pattern; the value is the
