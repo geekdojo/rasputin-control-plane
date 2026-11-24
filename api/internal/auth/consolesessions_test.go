@@ -102,6 +102,47 @@ func TestConsoleSessions_HashOnlyExpiryAndEnds(t *testing.T) {
 	}
 }
 
+// F-989-17 (verifier r1): one janitor sweep, with one session at
+// sessionLifetime and one younger, deletes the expired row and keeps the
+// live one. Read straight from the table: Resolve deletes an expired row on
+// its own, so it would hide a sweep that deleted nothing, and it would not
+// show a sweep that deleted every row until the live one was presented.
+func TestConsoleSessions_SweepKeepsLiveRows(t *testing.T) {
+	f := newAuthFixture(t)
+	consoleCookie(t, f, Principal{Sub: "expired"})
+	f.clock.Add(2 * 24 * time.Hour)
+	consoleCookie(t, f, Principal{Sub: "live"})
+	f.clock.Add(sessionLifetime - 2*24*time.Hour)
+
+	f.svc.sweep(f.ctx, f.clock.Now())
+
+	subs := map[string]bool{}
+	rows, err := f.store.db.QueryContext(f.ctx, `SELECT sub FROM console_sessions`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var sub string
+		if err := rows.Scan(&sub); err != nil {
+			t.Fatal(err)
+		}
+		subs[sub] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !subs["live"] {
+		t.Error("the sweep deleted a session younger than sessionLifetime")
+	}
+	if subs["expired"] {
+		t.Error("the sweep kept a session at sessionLifetime")
+	}
+	if len(subs) != 1 {
+		t.Errorf("rows after the sweep = %v, want only the live one", subs)
+	}
+}
+
 // TC-989-18: a database from the previous release opens with
 // console_sessions added and its users and legacy sessions untouched; the
 // legacy cookie gets 401; a console session puts the Principal in the
