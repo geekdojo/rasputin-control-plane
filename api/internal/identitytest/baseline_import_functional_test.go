@@ -427,10 +427,18 @@ func TestIdentity_BaselineImportedWorks(t *testing.T) {
 			if catch.access == "" {
 				t.Fatal("the token answer carried no access token")
 			}
+			claims := jwtClaims(t, catch.access)
 			if clientID != baselineConsole {
+				// TC-1000-22 (IA-F6, TS-20's own-client half): the user
+				// holds the console role viewer, and no other client's
+				// token carries console roles or client-role maps.
+				for _, k := range []string{"rasputin_roles", "resource_access"} {
+					if v, ok := claims[k]; ok {
+						t.Errorf("TC-1000-22: %s's access token carries %s = %v", clientID, k, v)
+					}
+				}
 				return
 			}
-			claims := jwtClaims(t, catch.access)
 			if at, _ := claims["auth_time"].(float64); at <= 0 {
 				t.Errorf("the console access token's auth_time = %v, want a sign-in time", claims["auth_time"])
 			}

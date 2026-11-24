@@ -498,6 +498,7 @@ func TestConsole_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-989-35 IA-F7 no token in rasputin.db", func(t *testing.T) { r.tc35(t) })
 	t.Run("TC-989-38 T161 the upstream shapes", func(t *testing.T) { r.tc38(t) })
 	t.Run("TC-989-39 the sentinel scan", func(t *testing.T) { r.tc39(t, pw) })
+	t.Run("TC-1000-20 TC-1000-21 IA-F6 TS-20 console tokens and capabilities", func(t *testing.T) { r.tc1000(t, id, pw) })
 }
 
 // TC-989-37: converge's own write sets rasputin.console-url to the
@@ -865,4 +866,99 @@ func (r *consoleRig) tc39(t *testing.T, pw secret.Value) {
 			}
 		}
 	}
+}
+
+// TC-1000-20 and TC-1000-21 (IA-F6, TS-20; geekdojo/geekdojo-brain#1000).
+// It runs last: TC-989-38 requires rasputin_roles on every captured ID
+// token, and the role-less fixture's token carries none.
+//
+// TC-1000-21: capabilities come from console roles alone, and app access
+// adds none. The viewer fixture's /api/auth/me is exactly [view self]; a
+// role-less fixture holding rasputin_app_role=user signs in through the
+// console's real route and gets exactly [self].
+//
+// TC-1000-20: every captured console ID token carries no groups,
+// rasputin_app_role, resource_access or realm_access, no claim_* key and
+// no rasputin_* key but rasputin_roles. The viewer fixture's tokens, which
+// it holds rasputin_app_role=user for, carry rasputin_roles ["viewer"]; the
+// role-less fixture's carry none, or an empty list.
+func (r *consoleRig) tc1000(t *testing.T, viewerID string, viewerPW secret.Value) {
+	const roleless = "console-fixture-roleless"
+	rolelessID, pw := r.user(t, roleless)
+	r.appRoleUser(t, rolelessID)
+	r.settle(t)
+	for _, c := range []struct {
+		name string
+		pw   secret.Value
+		from string
+		want []string
+	}{
+		{"console-fixture", viewerPW, "127.0.0.60", []string{"view", "self"}},
+		{roleless, pw, "127.0.0.61", []string{"self"}},
+	} {
+		status, body := me(t, r.signInGo(t, c.from, c.name, c.pw))
+		if status != http.StatusOK {
+			t.Fatalf("TC-1000-21 %s: /api/auth/me = %d", c.name, status)
+		}
+		if got := stringList(body["capabilities"]); !slices.Equal(got, c.want) {
+			t.Errorf("TC-1000-21 %s: capabilities %v, want exactly %v", c.name, body["capabilities"], c.want)
+		}
+	}
+
+	r.mu.Lock()
+	tokens := slices.Clone(r.idTokens)
+	r.mu.Unlock()
+	viewers, roleLess := 0, 0
+	for i, tok := range tokens {
+		c := jwtClaims(t, tok)
+		for k := range c {
+			switch {
+			case k == "groups", k == "rasputin_app_role", k == "resource_access", k == "realm_access",
+				strings.HasPrefix(k, "claim_"), strings.HasPrefix(k, "rasputin_") && k != "rasputin_roles":
+				t.Errorf("TC-1000-20: console ID token %d of %d carries %s", i+1, len(tokens), k)
+			}
+		}
+		switch c["sub"] {
+		case viewerID:
+			viewers++
+			if got := stringList(c["rasputin_roles"]); !slices.Equal(got, []string{"viewer"}) {
+				t.Errorf("TC-1000-20: a viewer fixture token's rasputin_roles = %v, want [viewer]", c["rasputin_roles"])
+			}
+		case rolelessID:
+			roleLess++
+			if got := stringList(c["rasputin_roles"]); len(got) != 0 {
+				t.Errorf("TC-1000-20: the role-less fixture's rasputin_roles = %v, want none", c["rasputin_roles"])
+			}
+		}
+	}
+	if viewers == 0 || roleLess == 0 {
+		t.Errorf("TC-1000-20: %d ID tokens, %d of the viewer fixture and %d of the role-less one: the assertions above proved nothing", len(tokens), viewers, roleLess)
+	}
+}
+
+// appRoleUser gives the account id rasputin_app_role=user: app access.
+func (r *consoleRig) appRoleUser(t *testing.T, id string) {
+	t.Helper()
+	api := r.admin(t)
+	_, out := api.must(http.StatusOK, http.MethodGet, "/users/"+id, nil)
+	var rep map[string]any
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatal(err)
+	}
+	rep["attributes"] = map[string][]string{"rasputin_app_role": {"user"}}
+	api.must(http.StatusNoContent, http.MethodPut, "/users/"+id, rep)
+}
+
+// stringList is a JSON list of strings, nil for anything else.
+func stringList(v any) []string {
+	vs, _ := v.([]any)
+	var out []string
+	for _, x := range vs {
+		s, ok := x.(string)
+		if !ok {
+			return nil
+		}
+		out = append(out, s)
+	}
+	return out
 }

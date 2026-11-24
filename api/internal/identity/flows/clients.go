@@ -3,6 +3,8 @@ package flows
 import (
 	"maps"
 	"slices"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 )
 
 // OwnClient is one of Rasputin's own clients as the rules want it: its
@@ -42,8 +44,8 @@ func OwnClients() []OwnClient {
 // ConsoleClient is the console's client, which holds the console roles.
 const ConsoleClient = consoleClient
 
-// ConsoleRoles are the console's client roles.
-var ConsoleRoles = []string{consoleRoleAdmin, consoleRoleOperator, consoleRoleViewer}
+// ConsoleRoles are the console's client roles, as authz names them.
+var ConsoleRoles = authz.RoleNames()
 
 // DefaultRolesName is the realm's default role, whose composites are empty:
 // an account gets nothing it was not given.

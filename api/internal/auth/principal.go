@@ -4,6 +4,8 @@ import (
 	"context"
 	"slices"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 )
 
 // SessionRef names the console session a request was authenticated by: the
@@ -32,6 +34,13 @@ type Principal struct {
 
 // HasRole reports whether p holds role.
 func (p Principal) HasRole(role string) bool { return slices.Contains(p.Roles, role) }
+
+// Capabilities is what p may do, computed from its Sub and Roles by
+// authz.For, the one capability function. A console session carries no
+// grant.
+func (p Principal) Capabilities() authz.Set {
+	return authz.For(authz.Subject{Sub: p.Sub, Roles: p.Roles})
+}
 
 type principalKey struct{}
 

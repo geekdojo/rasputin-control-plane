@@ -55,7 +55,7 @@ func TestOldPasskeyRoutesGone(t *testing.T) {
 }
 
 // TC-989-24: status carries firstRun and ready and never a count, and user
-// only with a console session; me is {sub, name, roles}, or 401.
+// only with a console session; me is {sub, name, roles, capabilities}, or 401.
 func TestStatusAndMe(t *testing.T) {
 	r := newSigninRig(t)
 	st := status(t, r.h)
@@ -83,8 +83,9 @@ func TestStatusAndMe(t *testing.T) {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	if !slices.Equal(keys, []string{"name", "roles", "sub"}) || me["sub"] != "sub-a" {
-		t.Errorf("me = %v, want exactly sub, name, roles", me)
+	// capabilities joined in geekdojo/geekdojo-brain#1000 (TC-1000-18).
+	if !slices.Equal(keys, []string{"capabilities", "name", "roles", "sub"}) || me["sub"] != "sub-a" {
+		t.Errorf("me = %v, want exactly sub, name, roles, capabilities", me)
 	}
 	if w := get(r.h, "/api/auth/me"); w.Code != http.StatusUnauthorized {
 		t.Errorf("me without a session: %d", w.Code)
