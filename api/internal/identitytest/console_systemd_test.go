@@ -28,6 +28,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +54,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
@@ -181,6 +183,7 @@ func TestIdentitySystemd_ConsoleSignIn(t *testing.T) {
 	admin := s.adminSession(t)
 	s.awaitReady(ctx, admin)
 	sub := s.fixture(t, admin)
+	s.awaitGrantDrained(ctx, admin, sub)
 	pw := s.fixturePassword
 	defer pw.Destroy()
 
@@ -593,6 +596,94 @@ func (s *consoleStack) fixture(t *testing.T, admin *idclient.Session) string {
 		t.Fatal(err)
 	}
 	return id
+}
+
+// grantEvent is the part of an admin event the drain wait reads.
+type grantEvent struct {
+	ID           string `json:"id"`
+	Time         int64  `json:"time"`
+	ResourcePath string `json:"resourcePath"`
+}
+
+// awaitGrantDrained waits on the fact that the api's sign-in history drain
+// has delivered the fixture's role-grant admin event, so that event cannot
+// end the session the sign-in is about to make (F-989-19; the product
+// behaviour is F-989-18, an accepted gap). The grant went straight to the
+// identity service, past the api's Admin API session, so nothing in the api
+// marked its drain dirty: one GET of the console's authorization page
+// through the home door does (relay.go marks the drain dirty after every
+// event-producing route). The fact is the api's stored admin mark
+// (events.AdminMarkKey in rasputin.db, read-only) covering the event: a
+// floor past its time, or its id among the floor's delivered ids. The mark
+// is stored after the pass has delivered the event to every admin sink.
+// The test's deadline bounds the wait.
+func (s *consoleStack) awaitGrantDrained(ctx context.Context, admin *idclient.Session, sub string) {
+	t := s.t
+	t.Helper()
+	var evs []grantEvent
+	if _, err := admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/admin-events?resourceTypes=CLIENT_ROLE_MAPPING&max=1000", nil, &evs); err != nil {
+		t.Fatalf("read the role-grant admin event: %v", err)
+	}
+	i := slices.IndexFunc(evs, func(e grantEvent) bool {
+		return strings.HasPrefix(e.ResourcePath, "users/"+sub+"/role-mappings/")
+	})
+	if i < 0 || evs[i].ID == "" {
+		t.Fatalf("no CLIENT_ROLE_MAPPING admin event with an id for users/%s/role-mappings/ among %d", sub, len(evs))
+	}
+	grant := evs[i]
+
+	c := s.client(nil)
+	resp, err := c.Get("https://" + consoleCID + ".local/api/auth/signin")
+	if err != nil {
+		t.Fatalf("the console's sign-in launcher: %v", err)
+	}
+	_ = resp.Body.Close()
+	loc, err := resp.Location()
+	if err != nil {
+		t.Fatalf("the console's sign-in launcher answered %d with no usable Location: %v", resp.StatusCode, err)
+	}
+	if resp, err = c.Get(loc.String()); err != nil {
+		t.Fatalf("the home door's authorization page: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the home door's authorization page answered %d, want 200", resp.StatusCode)
+	}
+
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(s.dataDir, "rasputin.db")+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	err = proctest.Await(ctx, nil, func(ctx context.Context) (bool, string, error) {
+		if err := s.apiAlive(); err != nil {
+			return false, "", &proctest.Final{Err: err}
+		}
+		var raw string
+		switch err := db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, events.AdminMarkKey).Scan(&raw); {
+		case errors.Is(err, sql.ErrNoRows):
+			return false, "no admin mark stored", nil
+		case err != nil:
+			return false, err.Error(), nil
+		}
+		var m struct {
+			Time int64    `json:"time"`
+			IDs  []string `json:"ids"`
+		}
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			return false, "", &proctest.Final{Err: fmt.Errorf("the admin mark %q: %w", raw, err)}
+		}
+		if m.Time > grant.Time || slices.Contains(m.IDs, grant.ID) {
+			return true, "", nil
+		}
+		return false, fmt.Sprintf("admin mark at %d, the grant at %d", m.Time, grant.Time), nil
+	}, func(last string) {
+		s.cfg.Logger.Info("console stack: waiting for the drain to deliver the role grant", "last", last)
+	})
+	if err != nil {
+		t.Fatal(errNamed("the api's drain delivered the fixture's role-grant admin event", err))
+	}
+	s.cfg.Logger.Info("console stack: the drain delivered the role grant", "event", grant.ID)
 }
 
 // signInGo signs the fixture in with the Go client through the launcher's
