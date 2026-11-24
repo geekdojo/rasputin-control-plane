@@ -198,6 +198,12 @@ func (s *Server) writeSubmitError(w http.ResponseWriter, r *http.Request, kind s
 // the spec, the target or the person. A check that could not finish
 // (authz.ErrCheckFailed) or a runner that runs only the system's jobs
 // (jobs.ErrNotSystem) is 500 job_check_failed, under one ERROR record.
+//
+// CodeQL reports go/log-injection at that ERROR record, since kind can be the
+// requester's own text; the register (.github/codeql-register.tsv) records it
+// as a false positive. s.log is logkit.New's, whose slog.TextHandler quotes
+// and escapes every value, so no kind can forge a record. The verdict holds
+// while the logger injected into NewServer is logkit.New's.
 func (s *Server) refusedSubmit(w http.ResponseWriter, r *http.Request, kind string, err error) bool {
 	var kr *authz.KindRefusal
 	switch {
