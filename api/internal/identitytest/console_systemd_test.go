@@ -66,6 +66,11 @@ const (
 	ConsoleRigEnv = "RASPUTIN_CONSOLE_RIG"
 	// ConsoleOutEnv is the output directory; a temporary one when unset.
 	ConsoleOutEnv = "RASPUTIN_CONSOLE_OUT"
+	// ConsoleWorkEnv is the stack's working directory (the api's data, the
+	// pair's PostgreSQL data, Keycloak's home); <out>/work when unset. The
+	// Mac recipe points it off the host bind mount, where root cannot
+	// create what PostgreSQL and the installs need.
+	ConsoleWorkEnv = "RASPUTIN_CONSOLE_WORK"
 	// ConsolePortEnv is the api's https port; 443 when unset, where the
 	// identity service's back-channel logout reaches it.
 	ConsolePortEnv = "RASPUTIN_CONSOLE_PORT"
@@ -139,7 +144,7 @@ func TestIdentitySystemd_ConsoleSignIn(t *testing.T) {
 	hold := os.Getenv(ConsoleRigEnv) == "hold"
 	cfg.ThemeDir = theme
 	s := &consoleStack{t: t, cfg: cfg, port: cmpOr(os.Getenv(ConsolePortEnv), "443"), out: cmpOr(os.Getenv(ConsoleOutEnv), t.TempDir())}
-	s.work = filepath.Join(s.out, "work")
+	s.work = cmpOr(os.Getenv(ConsoleWorkEnv), filepath.Join(s.out, "work"))
 	if err := atrest.EnsureSecretDir(s.work); err != nil {
 		t.Fatal(err)
 	}
