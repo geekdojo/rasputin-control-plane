@@ -133,9 +133,12 @@ type pageVisit struct {
 }
 
 // visit navigates to url, which waits for the load event, and then reads the
-// page's violations and the value of each probe expression. The read is
-// queued behind the page's pending tasks (a zero-delay task), so violations
-// the parser queued are dispatched before it.
+// page's violations and the value of each probe expression. When the tab's
+// init script defines window.__rasputinSettled, a function returning a
+// promise, the read first waits for it: the fact the page must reach before
+// it is judged (the console walk's: every script it holds has loaded or
+// failed). The read is then queued behind the page's pending tasks (a
+// zero-delay task), so violations the parser queued are dispatched before it.
 func (w *walkTab) visit(t *testing.T, url string, probes map[string]string) pageVisit {
 	t.Helper()
 	w.mu.Lock()
@@ -150,10 +153,11 @@ func (w *walkTab) visit(t *testing.T, url string, probes map[string]string) page
 	for k, e := range probes {
 		exprs = append(exprs, fmt.Sprintf("%q: (() => { try { return (%s); } catch (e) { return 'error: ' + e; } })()", k, e))
 	}
-	js := `new Promise((resolve) => setTimeout(() => resolve(JSON.stringify({
+	js := `Promise.resolve(typeof window.__rasputinSettled === 'function' ? window.__rasputinSettled() : null)
+.then(() => new Promise((resolve) => setTimeout(() => resolve(JSON.stringify({
   violations: window.__rasputinCSPV || ['spy missing'],
   state: {` + strings.Join(exprs, ",\n") + `}
-})), 0))`
+})), 0)))`
 	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](js, chromedp.EvalAwaitPromise))
 	if err != nil {
 		t.Fatalf("read %s: %v", url, err)

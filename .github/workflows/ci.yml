@@ -639,7 +639,9 @@ jobs:
     #
     # The same steps prove the starter dashboard's panels return data: each
     # panel's own query, with its own datasource reference, against seeded
-    # series in the real VictoriaMetrics, on a fresh install
+    # series in the real VictoriaMetrics, on a fresh install and on an
+    # existing cluster whose Grafana 11.5.1 database still holds the
+    # datasource under its derived uid, started at the new pin
     # (grafana_datasource_functional_linux_test.go). They also prove
     # Grafana's own script policy (geekdojo/geekdojo-brain#999): every
     # response through the proxy that passes Grafana's CSP middleware carries
@@ -682,6 +684,9 @@ jobs:
             return 1
           }
           pull grafana/grafana:13.3.1
+          # The Grafana existing clusters ran before the 13.3.1 pin: the
+          # datasource-uid transition test starts from its database.
+          pull grafana/grafana:11.5.1
           pull victoriametrics/victoria-metrics:v1.103.0
           pull grafana/alloy:v1.4.2
           pull grafana/loki:3.4.1

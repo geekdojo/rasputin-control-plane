@@ -53,15 +53,58 @@ const (
 // nothing else in the UI sets it without a click.
 const themeSeedJS = `try { localStorage.setItem('rasputin.theme', 'cyberdeck'); } catch (e) {}`
 
-// pageProbes are read from every visited page.
+// scriptSettleJS records, from before any page script runs, each script
+// element's load or error event (a script the policy blocks fires error),
+// and defines window.__rasputinSettled (see walkTab.visit): a promise that
+// resolves once every script the document holds has fired one of them. It
+// re-checks on each such event and on each DOM change, because Next.js
+// inserts scripts after the load event: an unauthenticated page calls
+// router.replace('/login') (ui/app/(authed)/layout.tsx), which inserts the
+// login route's chunks. Reading at the load event raced those fetches
+// (F-999-17). The scripts are judged at the moment that fact holds, in
+// __rasputinScriptsAtSettle (src and outcome of each), so a script inserted
+// after it does not race the read either. nomodule scripts are never
+// fetched by a module-capable browser, so they are not waited for.
+const scriptSettleJS = `(() => {
+  const settled = new WeakMap();
+  let wake = null;
+  const record = (e) => {
+    const s = e.target;
+    if (s && s.tagName === 'SCRIPT' && s.src) {
+      settled.set(s, e.type);
+      if (wake) wake();
+    }
+  };
+  document.addEventListener('load', record, true);
+  document.addEventListener('error', record, true);
+  const scripts = () => Array.from(document.querySelectorAll('script[src]')).filter((s) => !s.noModule);
+  window.__rasputinSettled = () => new Promise((resolve) => {
+    let watch = null;
+    const check = () => {
+      const now = scripts();
+      if (now.every((s) => settled.has(s))) {
+        window.__rasputinScriptsAtSettle = now.map((s) => [s.src, settled.get(s)]);
+        wake = null;
+        if (watch) watch.disconnect();
+        resolve();
+      }
+    };
+    watch = new MutationObserver(check);
+    watch.observe(document, {childList: true, subtree: true});
+    wake = check;
+    check();
+  });
+})();
+`
+
+// pageProbes are read from every visited page, once scriptSettleJS's fact
+// holds.
 var pageProbes = map[string]string{
 	// The inline theme bootstrap ran.
 	"theme": `document.documentElement.getAttribute('data-theme')`,
-	// Every /_next/ script the page names was fetched (a script blocked by
-	// policy is never fetched, so it has no resource entry). nomodule
-	// scripts are never fetched by a module-capable browser.
-	"missing": `Array.from(document.querySelectorAll('script[src]')).filter((s) => !s.noModule)
-	  .map((s) => s.src).filter((u) => performance.getEntriesByName(u).length === 0)`,
+	// Every script the page held when they had all settled loaded: none
+	// failed (a script blocked by policy fires error).
+	"missing": `window.__rasputinScriptsAtSettle.filter(([, how]) => how !== 'load').map(([src, how]) => src + ' ' + how)`,
 	"scripts": `document.querySelectorAll('script[src^="/_next/"]').length`,
 }
 
@@ -189,7 +232,7 @@ func TestConsolePagesPolicy(t *testing.T) {
 	// TC-999-13: every .html page of the export, served by Server.Handler()
 	// over plain HTTP, runs with no violation.
 	t.Run("TC-999-13 every page", func(t *testing.T) {
-		tab := newWalkTab(t, browserCtx, themeSeedJS)
+		tab := newWalkTab(t, browserCtx, themeSeedJS+scriptSettleJS)
 		visited := 0
 		for _, p := range pages {
 			checkConsoleVisit(t, p, plain.URL+"/_next/", tab.visit(t, plain.URL+pageRoute(p), pageProbes))
@@ -204,7 +247,7 @@ func TestConsolePagesPolicy(t *testing.T) {
 	// TC-999-14: the same page with its hashes removed from the policy
 	// records a script-src violation, and its inline script does not run.
 	t.Run("TC-999-14 negative control", func(t *testing.T) {
-		tab := newWalkTab(t, browserCtx, themeSeedJS)
+		tab := newWalkTab(t, browserCtx, themeSeedJS+scriptSettleJS)
 		v := tab.visit(t, stripped.URL+"/", pageProbes)
 		if strings.Contains(v.policy, "'sha256-") {
 			t.Fatalf("the control page still carries hashes: %s", v.policy)
@@ -228,7 +271,7 @@ func TestConsolePagesPolicy(t *testing.T) {
 	// port in the origin, and the plain-HTTP trust page on the bootstrap
 	// listener.
 	t.Run("TC-999-15 TLS at rasputin.local and the trust page", func(t *testing.T) {
-		tab := newWalkTab(t, browserCtx, themeSeedJS)
+		tab := newWalkTab(t, browserCtx, themeSeedJS+scriptSettleJS)
 		for _, route := range []string{"/", "/login", "/metrics"} {
 			checkConsoleVisit(t, "https://"+consoleHost+route, "https://"+consoleHost+"/_next/",
 				tab.visit(t, "https://"+consoleHost+route, pageProbes))

@@ -729,6 +729,9 @@ func (s *DockerComposeSupervisor) Start(ctx context.Context) error {
 		if err := s.writeGrafanaConfig(); err != nil {
 			return err
 		}
+		if err := carryDatasourceUIDs(ctx, filepath.Join(s.cfg.StateDir, grafanaDataDir, "grafana.db")); err != nil {
+			return err
+		}
 	}
 	if s.vmalertEnabled() {
 		if err := s.writeVMAlertConfig(); err != nil {
@@ -1296,6 +1299,18 @@ allow_embedding = true
 content_security_policy = true
 content_security_policy_template = """{{.CSPTemplate}}"""
 
+[plugins]
+# Grafana runs only the plugins bundled in the pinned image. From Grafana 13
+# the default is to download its default plugin set from grafana.com in the
+# background on every start (preinstall, with preinstall_auto_update), and to
+# swap each one in over the bundled copy. That runs plugin code the image
+# digest does not pin, needs grafana.com reachable, and while prometheus is
+# swapped Grafana drops the VictoriaMetrics datasource from what it serves,
+# so panels have no datasource (measured on 13.3.1: bundled prometheus
+# 13.2.5 replaced by a downloaded 13.2.7 about six seconds after start, with
+# /api/plugins/prometheus/settings answering 404 in between).
+preinstall_disabled = true
+
 [users]
 allow_sign_up = false
 auto_assign_org = true
@@ -1340,10 +1355,13 @@ level = warn
 // 2026-06-02 on. Pinning the uid here makes the reference a contract the
 // unit tests can check, instead of a value copied out of some other Grafana.
 //
-// On an existing cluster Grafana matches the provisioned datasource to its
-// stored row by NAME and rewrites the uid in place (same row id; verified on
-// grafana/grafana:11.5.1 — see TestGrafanaDatasourceUID_TransitionFromAutoUID),
-// so nothing needs deleting first.
+// On an existing cluster whose Grafana database still holds a datasource
+// under its derived uid, Grafana 11.5.1 matched the provisioned datasource to
+// the stored row by NAME and rewrote the uid in place. Grafana 13.3.1 refuses
+// to start on that database instead, so the supervisor rewrites the uid in
+// place itself before Grafana starts (carryDatasourceUIDs; same row id,
+// nothing deleted). TestGrafanaDatasourceUID_TransitionFromAutoUID proves the
+// transition against the real pinned image.
 const (
 	vmDatasourceUID   = "rasputin-victoriametrics"
 	lokiDatasourceUID = "rasputin-loki"

@@ -116,6 +116,30 @@ func TestGrafanaIni_ScriptPolicy(t *testing.T) {
 	}
 }
 
+// F-999-16: Grafana runs only the plugins bundled in the pinned image. From
+// 13 its default downloads plugins from grafana.com on every start and swaps
+// prometheus in over the bundled copy, which drops the VictoriaMetrics
+// datasource while it swaps (measured on 13.3.1). Both modes turn that off.
+func TestGrafanaIni_NoPluginPreinstall(t *testing.T) {
+	for name, sup := range map[string]*DockerComposeSupervisor{
+		"socket": socketSup(t, t.TempDir()),
+		"tcp":    tcpSup(t, t.TempDir()),
+	} {
+		ini, err := sup.renderGrafanaIni()
+		if err != nil {
+			t.Fatalf("%s: render: %v", name, err)
+		}
+		_, plugins, ok := strings.Cut(ini, "\n[plugins]\n")
+		if !ok {
+			t.Fatalf("%s: grafana.ini has no [plugins] section\n---\n%s", name, ini)
+		}
+		plugins, _, _ = strings.Cut(plugins, "\n[")
+		if !strings.Contains("\n"+plugins, "\npreinstall_disabled = true\n") {
+			t.Errorf("%s: [plugins] does not set preinstall_disabled = true\n---\n%s", name, plugins)
+		}
+	}
+}
+
 // grafanaTemplateProblems names each way tmpl breaks the issue's acceptance
 // criteria for Grafana's script policy. 'unsafe-inline' is refused in
 // script-src only: the mandated template itself keeps it in style-src.
