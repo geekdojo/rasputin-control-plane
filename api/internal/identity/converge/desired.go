@@ -66,7 +66,18 @@ type Inputs struct {
 	// AppBindings are the app clients' sign-in variants, by client id: nil
 	// until Identity 7.3 registers app clients.
 	AppBindings map[string]flows.Variant
+	// BackchannelLogoutURLs are each rasputin-* client's back-channel logout
+	// URL, by client id (geekdojo/geekdojo-brain#989). A client it does not
+	// name has the attribute held absent.
+	BackchannelLogoutURLs map[string]string
 }
+
+// The client attributes converge owns: the back-channel logout URL, and,
+// while one is set, the session id it requires in every logout token.
+const (
+	AttrBackchannelURL     = "backchannel.logout.url"
+	AttrBackchannelSession = "backchannel.logout.session.required"
+)
 
 // Desired is every field converge owns, with its value. Its JSON is
 // canonical (sorted lists, maps in key order), so Hash changes exactly when a
@@ -91,6 +102,10 @@ type Desired struct {
 	// origin, which the sign-in pages link to (geekdojo/geekdojo-brain#988).
 	// "" holds the attribute absent.
 	ConsoleURL string `json:"consoleUrl"`
+	// ClientAttributes are the client attributes converge owns, by client id
+	// and then attribute: "" holds an attribute absent. Every other
+	// attribute a client carries is kept as read.
+	ClientAttributes map[string]map[string]string `json:"clientAttributes"`
 	// Rules are the sign-in rules (geekdojo/geekdojo-brain#987): the seven
 	// flows, the realm's session, password, brute-force and passkey rules,
 	// the required actions, the profile, roles, scopes and bindings.
@@ -121,9 +136,24 @@ func NewDesired(in Inputs) Desired {
 		d.RedirectURIs[c] = sorted(in.RedirectURIs[c])
 	}
 	d.ConsoleURL = consoleOrigin(in.RedirectURIs["rasputin-console"])
+	d.ClientAttributes = map[string]map[string]string{}
+	for _, c := range RasputinClients {
+		d.ClientAttributes[c] = clientAttributes(in.BackchannelLogoutURLs[c])
+	}
 	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings}
 	d.Rules = flows.Render(d.flowsIn)
 	return d
+}
+
+// clientAttributes are a client's owned attributes for its back-channel
+// logout URL u. Without one the URL is held absent and the session flag is
+// left as the identity service has it (its own default, which only matters
+// once a URL is set).
+func clientAttributes(u string) map[string]string {
+	if u == "" {
+		return map[string]string{AttrBackchannelURL: ""}
+	}
+	return map[string]string{AttrBackchannelURL: u, AttrBackchannelSession: "true"}
 }
 
 // consoleOrigin is the one https origin the console's redirect URIs share,

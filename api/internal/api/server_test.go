@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -76,8 +77,7 @@ type apiFixture struct {
 	handler         http.Handler
 	authSvc         *auth.Service
 	authStore       *auth.Store
-	authSession     *auth.Session
-	authUser        *auth.User
+	sessions        *auth.ConsoleSessions
 	jobsStore       *jobs.Store
 	runner          *jobs.Runner
 	inv             *inventory.Store
@@ -258,9 +258,14 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	setupSvc := setup.NewService(setupStore, probes, "self-node", "test1.local", "test1")
 
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader)
+	if err != nil {
+		t.Fatalf("console sessions: %v", err)
+	}
 	authSvc, err := auth.NewService(authStore, auth.Config{
 		RPDisplayName: "Test", RPID: "localhost",
 		RPOrigins: []string{"http://localhost:3000"},
+		Sessions:  consoleSessions,
 	})
 	if err != nil {
 		t.Fatalf("auth NewService: %v", err)
@@ -333,6 +338,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	f.srv = srv
 	f.handler = srv.Handler()
 	f.authSvc = authSvc
+	f.sessions = consoleSessions
 	f.runner = runner
 	f.verifier = verifier
 	f.bundleDir = bundleDir
@@ -345,35 +351,17 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	return f
 }
 
-// authenticate mints a user + a fresh session and returns the cookie so test
-// requests can satisfy RequireSession.
+// authenticate mints a console session for alice and returns its cookie so
+// test requests can satisfy RequireSession.
 func (f *apiFixture) authenticate(t *testing.T) *http.Cookie {
 	t.Helper()
-	// auth.makeUser is private to auth; instead create a user via the public
-	// store API and then create a session.
-	u := &auth.User{
-		ID:          []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16},
-		Name:        "alice",
-		DisplayName: "Alice",
-		CreatedAt:   time.Now().UTC(),
+	v, err := f.sessions.Create(f.ctx, auth.Principal{Sub: "sub-alice", Name: "alice", Roles: []string{"admin"},
+		Session: auth.SessionRef{SID: "sid-alice"}})
+	if err != nil {
+		t.Fatalf("console session: %v", err)
 	}
-	if err := f.authStore.CreateUser(f.ctx, u); err != nil {
-		t.Fatalf("CreateUser: %v", err)
-	}
-	now := time.Now().UTC()
-	sess := &auth.Session{
-		Token:        "test-cookie-token",
-		UserID:       u.ID,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(time.Hour),
-		LastActiveAt: now,
-	}
-	if err := f.authStore.CreateSession(f.ctx, sess); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	f.authUser = u
-	f.authSession = sess
-	return &http.Cookie{Name: "rasputin-session", Value: sess.Token}
+	t.Cleanup(v.Destroy)
+	return &http.Cookie{Name: auth.SessionCookieName, Value: string(v.Reveal())}
 }
 
 // do performs a request through the server's Handler with the given cookie

@@ -135,6 +135,10 @@ type client struct {
 	DefaultClientScopes       []string          `json:"defaultClientScopes"`
 	OptionalClientScopes      []string          `json:"optionalClientScopes"`
 	Bindings                  map[string]string `json:"authenticationFlowBindingOverrides"`
+	// Attributes are the client's attributes as read. A drifted owned
+	// attribute is written back with the whole map, so none of the others
+	// (the PKCE method, the client certificate's subject) is ever dropped.
+	Attributes map[string]string `json:"attributes"`
 	// switches are the client's boolean switches as read, by name.
 	switches map[string]bool
 }
@@ -382,6 +386,16 @@ func diff(d Desired, o observed) writes {
 		}
 	}
 
+	for _, id := range slices.Sorted(maps.Keys(d.ClientAttributes)) {
+		cl, ok := o.clients[id]
+		if !ok {
+			continue // reported missing by the redirect URIs above
+		}
+		if out, drifted := ownedAttributes(cl.Attributes, d.ClientAttributes[id]); drifted {
+			addClient(cl, "attributes", out)
+		}
+	}
+
 	// Key providers.
 	present := map[string]bool{}
 	for _, k := range o.keys {
@@ -401,6 +415,30 @@ func diff(d Desired, o observed) writes {
 		w.realm = realm
 	}
 	return w
+}
+
+// ownedAttributes is have with each owned attribute set over it (an empty
+// value removes it), and whether any owned one differed. The map returned
+// is a copy, whole: a write sends every attribute the client had, so none
+// is lost whatever the identity service does with one a write leaves out
+// (F-989-03).
+func ownedAttributes(have, owned map[string]string) (map[string]string, bool) {
+	out := make(map[string]string, len(have)+len(owned))
+	maps.Copy(out, have)
+	drifted := false
+	for _, k := range slices.Sorted(maps.Keys(owned)) {
+		v := owned[k]
+		cur, present := have[k]
+		switch {
+		case v == "" && present:
+			delete(out, k)
+			drifted = true
+		case v != "" && cur != v:
+			out[k] = v
+			drifted = true
+		}
+	}
+	return out, drifted
 }
 
 // Run is RunJob outside a job.

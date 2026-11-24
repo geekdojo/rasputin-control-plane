@@ -49,13 +49,16 @@ import (
 var openRoutes = map[string]string{
 	"GET /healthz": "liveness probe; part of the documented install contract (AGENTS.md)",
 
-	"GET /api/auth/status":            "drives the first-run flow before any passkey exists; reports only whether users exist",
-	"POST /api/auth/logout":           "clears the caller's own session cookie; nothing to protect",
-	"POST /api/auth/register/begin":   "first-run registration; once a user exists it requires a session itself (auth/handlers.go)",
-	"POST /api/auth/register/finish":  "completes a ceremony begin already gated; needs the pending cookie begin issued",
-	"POST /api/auth/register/step-up": "continues a ceremony begin already gated: 400 without begin's pending cookie, and 401 unless the session that began it is still signed in (auth/handlers.go)",
-	"POST /api/auth/login/begin":      "the passkey login ceremony — the way a session is obtained",
-	"POST /api/auth/login/finish":     "the passkey login ceremony — the way a session is obtained",
+	"GET /api/auth/status":           "drives the launcher before anyone signs in: firstRun and ready, and the caller's own user; never a count",
+	"POST /api/auth/logout":          "clears the caller's own session cookie; nothing to protect",
+	"POST /api/auth/register/begin":  "first-run registration of the pre-update operator; 401 once one exists (auth/handlers.go)",
+	"POST /api/auth/register/finish": "completes a ceremony begin already gated; needs the ceremony cookie begin issued",
+	"POST /api/auth/login/begin":     "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	"POST /api/auth/login/finish":    "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	// TC-989-27: the console's sign-in through the home door (#989).
+	"GET /api/auth/signin":                    "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record",
+	"GET /api/auth/callback":                  "the home door's return; a session is minted only for a verified ID token matching the pending record",
+	"POST /api/identity/backchannel/{client}": "the identity service's back-channel logout; acts only on a logout token verified against the client's issuer",
 
 	"GET /api/setup/state": "the setup wizard reads step state before any passkey exists; carries no secrets",
 
@@ -503,7 +506,7 @@ func TestObsProxy_StripsPrefixedOwnCookies(t *testing.T) {
 	srv := &Server{obs: obs.NewStatus(sup, sink, nil)}
 	req := httptest.NewRequest(http.MethodGet, "/observability/api/search", nil)
 	req.Header.Set("Cookie", "__Host-rasputin-session=s3cret; grafana_session=g1; __Secure-rasputin-pending=p; rasputin-repair=r")
-	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "alice"}))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"}))
 	w := httptest.NewRecorder()
 	srv.handleObservabilityProxy(w, req)
 	if w.Code != http.StatusOK {

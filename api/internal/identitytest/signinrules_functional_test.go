@@ -18,6 +18,7 @@ package identitytest
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"html"
@@ -516,20 +517,23 @@ func (r *rulesRig) lockSession(t *testing.T) lockSession {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	svc, err := auth.NewService(store, auth.Config{RPDisplayName: "Rasputin", RPID: "localhost", RPOrigins: []string{"https://localhost"}})
+	sessions, err := auth.NewConsoleSessions(store, time.Now, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := auth.NewService(store, auth.Config{RPDisplayName: "Rasputin", RPID: "localhost", RPOrigins: []string{"https://localhost"},
+		Sessions: sessions})
 	if err != nil {
 		t.Fatal(err)
 	}
 	svc.SetControlGate(r.conv.ControlGate, r.env.log)
-	u := &auth.User{ID: []byte("tc06-user-id-001"), Name: "tc06", DisplayName: "TC06", CreatedAt: time.Now()}
-	if err := store.CreateUser(t.Context(), u); err != nil {
+	cookie, err := sessions.Create(t.Context(), auth.Principal{Sub: "tc06-sub", Name: "tc06", Roles: []string{"admin"},
+		Session: auth.SessionRef{SID: "tc06-sid"}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	token := "tc06-session-token"
-	if err := store.CreateSession(t.Context(), &auth.Session{Token: token, UserID: u.ID, CreatedAt: time.Now(),
-		ExpiresAt: time.Now().Add(time.Hour), LastActiveAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
+	t.Cleanup(cookie.Destroy)
+	token := string(cookie.Reveal())
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux := http.NewServeMux()
 	for _, p := range []string{"GET /api/nodes", "POST /api/nodes/{id}/reboot", "GET /ws/bmc/{nodeId}/sol"} {
@@ -540,7 +544,7 @@ func (r *rulesRig) lockSession(t *testing.T) lockSession {
 
 func (l lockSession) send(method, path string, upgrade bool) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, nil)
-	req.AddCookie(&http.Cookie{Name: "rasputin-session", Value: l.token})
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: l.token})
 	if upgrade {
 		req.Header.Set("Connection", "Upgrade")
 		req.Header.Set("Upgrade", "websocket")

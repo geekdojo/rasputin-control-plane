@@ -30,18 +30,18 @@ process. It runs on a laptop in a few minutes and can be run by an agent.
 - **The api's RP ID and origins reach the auth config.** A blank or comma-only
   `RASPUTIN_RP_ORIGINS` gives the derived origins, and a malformed RP ID stops the api at
   start (check 5).
-- **The Secure decision reaches the cookie, with and without an HTTPS listener** (check 6).
-  `RASPUTIN_SECURE_COOKIES` can always force Secure on. A recognised off value
-  (`0|false|no|off`) turns it off only when there is no HTTPS listener. With an HTTPS listener,
-  an off value is refused: the cookie keeps Secure and the api logs one WARN with the refused
-  value. Any unrecognised value forces Secure on, with one WARN.
+- **`RASPUTIN_SECURE_COOKIES` is retired and changes no cookie** (check 6). Since
+  [geekdojo-brain#989](https://github.com/geekdojo/geekdojo-brain/issues/989) every console
+  cookie is a `__Host-` cookie, so it is always `Secure`, with and without an HTTPS listener.
+  The setting is read only to warn: any value earns one WARN naming it retired, and absent earns
+  none (register row R75, which supersedes R01).
 
 ## What it does not prove
 
 - That a well-formed but *wrong* path or RP ID is safe. Those values are honoured, and their
   consumers check them.
-- Secure behind a TLS-terminating reverse proxy in front of a plain-HTTP api. There is no HTTPS
-  listener there, so an off value is honoured by design; the operator forces Secure on.
+- That a browser stores a `__Host-` cookie sent over plain HTTP. It does not, except on
+  `localhost`; that is why a dev stack serves only unauthenticated pages (AGENTS.md).
 - The agent's wiring of its backend selectors on hardware. No check here starts a `rasputin-agent`.
 
 ## Local checks
@@ -94,12 +94,13 @@ go test ./api/cmd/failopenlint/...
 ### 3. FO04 sees every read, inside its resolver (TC-591-24)
 
 This runs the lint on a scratch copy of the tree whose register no longer declares the twelve
-resolvers (R01 and R28–R38), so every read they hold must surface as a finding.
+resolvers (R01, its successor R75, and R28–R38), so every read they hold must surface as a
+finding.
 
 ```bash
 SCRATCH=$(mktemp -d)
 git ls-files -co --exclude-standard | rsync -a --files-from=- ./ "$SCRATCH/tree/"
-awk -F'\t' '!($1 == "R01" || $1 ~ /^R(2[89]|3[0-8])$/)' .github/security-resolvers.tsv \
+awk -F'\t' '!($1 == "R01" || $1 == "R75" || $1 ~ /^R(2[89]|3[0-8])$/)' .github/security-resolvers.tsv \
   > "$SCRATCH/tree/.github/security-resolvers.tsv"
 go run ./api/cmd/failopenlint -root "$SCRATCH/tree" > "$SCRATCH/lint.out" 2>&1
 grep FO04 "$SCRATCH/lint.out"
@@ -119,7 +120,7 @@ line.
 ### 4. The other gates (TC-591-25)
 
 ```bash
-awk -F'\t' '$1 ~ /^R(0[167]|2[89]|3[0-8])$/ {print $1, $3, $5, $6}' .github/security-resolvers.tsv
+awk -F'\t' '$1 ~ /^R(0[167]|2[89]|3[0-8]|75)$/ {print $1, $3, $5, $6}' .github/security-resolvers.tsv
 gofmt -l agent api                           # prints nothing
 go vet ./agent/... ./api/...
 go test -race ./agent/... ./api/...
@@ -129,8 +130,8 @@ scripts/auth-register.sh --gate
 
 **Pass:** rows R28–R38 are present and `covered`; R29–R33 name
 `TestExplicitMockIsAlwaysHonoured`, and R30 also names `TestUCIBackendSelectionEnvOverride`;
-R01 names `TestSecureCookies TestSecureCookies_FailsClosedOnEveryShapeOfInput`; R06 and R07
-do not appear. `gofmt -l` prints nothing, and every other command exits 0.
+R01 and R75 name `TestSecureCookies TestSecureCookies_FailsClosedOnEveryShapeOfInput`; R06
+and R07 do not appear. `gofmt -l` prints nothing, and every other command exits 0.
 
 ### The api under test
 
@@ -209,16 +210,18 @@ stop_api() {
   rm -rf "$DATA"
 }
 
-# pending_cookie SCHEME PORT: the rasputin-pending Set-Cookie from login/begin.
-# The handler sets that cookie on every call, signed in or not.
-pending_cookie() {
-  curl -sik -X POST -H 'Origin: http://localhost:3000' "$1://127.0.0.1:$2/api/auth/login/begin" \
-    | grep -i '^set-cookie: rasputin-pending'
+# ceremony_cookie SCHEME PORT: the __Host-rasputin-ceremony Set-Cookie from
+# register/begin. The api under test has a fresh data dir, so it is at first
+# run and begins the ceremony.
+ceremony_cookie() {
+  curl -sik -X POST -H 'Origin: http://localhost:3000' -H 'Content-Type: application/json' \
+    -d '{"name":"probe","displayName":"probe"}' "$1://127.0.0.1:$2/api/auth/register/begin" \
+    | grep -i '^set-cookie: __Host-rasputin-ceremony'
 }
 
 # cookie_warns: this process's RASPUTIN_SECURE_COOKIES WARN lines.
 cookie_warns() {
-  grep 'level=WARN msg="rasputin-api: RASPUTIN_SECURE_COOKIES is not honoured; session cookies are Secure"' "$LOG"
+  grep 'level=WARN msg="rasputin-api: RASPUTIN_SECURE_COOKIES is retired; console cookies are always __Host- and Secure"' "$LOG"
 }
 ```
 
@@ -262,33 +265,24 @@ rm -rf "$DATA"
 **Pass:** `exit=1`, and the log has `rasputin-api: auth service: … the scheme component must be
 empty`.
 
-### 6. The Secure decision reaches the cookie (TC-591-27)
+### 6. The retired setting changes no cookie (TC-591-27, geekdojo-brain#989)
 
-Six runs, one api each. The first four serve plain HTTP only; the last two add an HTTPS
+Five runs, one api each. The first three serve plain HTTP only; the last two add an HTTPS
 listener on another free loopback port. The api mints its own leaf for that listener at start,
 so no mesh or certificate setup is needed; `curl -k` accepts the self-minted leaf.
 
 **Plain HTTP only.**
 
 ```bash
-for setting in ture on false unset; do
+for setting in ture false unset; do
   if [ "$setting" = unset ]; then start_api; else start_api RASPUTIN_SECURE_COOKIES="$setting"; fi
   wait_for_log "http listening\" addr=127.0.0.1:$HTTP_PORT" && grep -q 'rasputin-api: cluster identity:' "$LOG" || { stop_api; break; }
   echo "== RASPUTIN_SECURE_COOKIES=$setting, plain HTTP"
-  pending_cookie http "$HTTP_PORT"
+  ceremony_cookie http "$HTTP_PORT"
   cookie_warns || echo "(no WARN)"
   stop_api
 done
 ```
-
-**Pass:**
-
-| Setting | `rasputin-pending` cookie | WARN |
-|---|---|---|
-| `ture` | has `Secure` | exactly one, `value=ture reason="not a recognised value (1\|true\|yes\|on\|0\|false\|no\|off)"`, with `fix=` |
-| `on` | has `Secure` | none |
-| `false` | no `Secure` | none |
-| unset | no `Secure` | none |
 
 **With an HTTPS listener.**
 
@@ -302,21 +296,19 @@ for setting in unset false; do
   fi
   wait_for_log "https listening on 127.0.0.1:$HTTPS_PORT" && grep -q 'rasputin-api: cluster identity:' "$LOG" || { stop_api; break; }
   echo "== RASPUTIN_SECURE_COOKIES=$setting, HTTPS listener"
-  pending_cookie https "$HTTPS_PORT"
+  ceremony_cookie https "$HTTPS_PORT"
   cookie_warns || echo "(no WARN)"
   stop_api
 done
 ```
 
-**Pass:**
+**Pass:** in all five runs the `__Host-rasputin-ceremony` cookie has `Secure`, `HttpOnly`,
+`SameSite=Lax` and `Path=/`, and no `Domain`. Every run with a setting logs exactly one WARN,
+with `value=` the setting, `reason="the setting is retired: console cookies are always __Host-
+and Secure"` and `fix=`; the unset runs log none.
 
-| Setting | `rasputin-pending` cookie | WARN |
-|---|---|---|
-| unset | has `Secure` | none |
-| `false` | has `Secure` | exactly one, `value=false reason="an off value is refused while an HTTPS listener is running (RASPUTIN_HTTPS_ADDR is set)"`, with `fix=` |
-
-Before this change the `false` row's cookie had no `Secure`: a recognised off value overrode the
-HTTPS listener.
+Before geekdojo-brain#989 the plain-HTTP `false` and unset runs set the old `rasputin-pending`
+cookie without `Secure`.
 
 ### Cleanup
 

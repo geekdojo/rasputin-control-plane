@@ -170,7 +170,7 @@ export default function AuthedLayout({ children }: { children: React.ReactNode }
           alertsCrit={alertsCrit}
           alertsWarn={alertsWarn}
           tasksRunning={tasksRunning}
-          user={user.displayName}
+          user={user.name}
           onLogout={handleLogout}
         />
       </div>

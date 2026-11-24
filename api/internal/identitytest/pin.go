@@ -32,6 +32,11 @@ package identitytest
 //     (2026-11-12). Chrome for Testing publishes no checksum and no signature,
 //     so the hash proves only that every later download is the bytes first
 //     pinned; Google's stored MD5 for the object matched that download.
+//   - ChromeMacArm64SHA256 is the same for chrome-mac-arm64.zip at the same
+//     version, taken at pin time (2026-11-23) for the console recipe's
+//     screenshots on a Mac (cmd/consoleshots, geekdojo/geekdojo-brain#989):
+//     the linux64 build aborts under Apple silicon's amd64 emulation. Google's
+//     stored MD5 for the object matched that download.
 //   - The password deny list (geekdojo/geekdojo-brain#1145) is SecLists'
 //     Pwdb_top-10000000.txt at DenylistRelease's commit, whose data is
 //     ignis-sec/Pwdb-Public's breach compilation (DenylistOriginRelease, the
@@ -57,6 +62,7 @@ const (
 
 	ChromeForTestingRelease = "googlechromelabs/chrome-for-testing:157.0.8103.78"
 	ChromeLinux64SHA256     = "9223832977a13db3646201b1341c1f9cf08afa3ceae92540116d7b0c062364fb"
+	ChromeMacArm64SHA256    = "bf3b49d0fe62a62397e98641aa736ef813c46014f03ec13d4913442e6966c7fc"
 
 	DenylistRelease             = "danielmiessler/SecLists:12274c98fdebe98c7a7284914436a472ed469aed"
 	DenylistSourcePath          = "Passwords/Common-Credentials/Pwdb_top-10000000.txt"

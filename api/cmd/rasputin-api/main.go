@@ -914,13 +914,19 @@ func main() {
 	// origin https://<cluster-id>.local (ADR-0003) — and the OS image enables
 	// the native HTTPS listener (RASPUTIN_HTTPS_ADDR above) so the passkey
 	// ceremony gets its secure context without any tunnel.
-	secure, ignored, why := secureCookies(httpsAddr)
+	ignored, why := secureCookies()
 	warnSecureCookiesNotHonoured(logger, ignored, why)
+	// The console's sessions (geekdojo/geekdojo-brain#989): rows in this
+	// same database, minted only by a sign-in through the home door.
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, cryptorand.Reader)
+	if err != nil {
+		log.Fatalf("rasputin-api: console sessions: %v", err)
+	}
 	authCfg := auth.Config{
 		RPDisplayName: envOr("RASPUTIN_RP_NAME", "Rasputin"),
 		RPID:          rpIDFromEnv(),
 		RPOrigins:     consoleRPOrigins(ctx, logger, doorTable, doorsOn), // never a sign-in door's origin (#986)
-		SecureCookies: secure,
+		Sessions:      consoleSessions,
 	}
 	// Say what this node believes its identity IS, on startup, verbatim.
 	//
@@ -953,8 +959,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("rasputin-api: auth service: %v", err)
 	}
-	// On every successful login (and first-credential registration), ensure
-	// a matching Headscale user exists. EnsureUser is idempotent + cached,
+	// On every successful console sign-in, ensure a matching Headscale user
+	// exists, named by the account's sign-in name. EnsureUser is idempotent + cached,
 	// so this costs at most one HTTP round-trip on cold start per user;
 	// the mock backend turns it into a single map write. Errors are logged
 	// inside runLoginHook and never block the login response — auth stays
@@ -962,8 +968,8 @@ func main() {
 	// Use meshSvc.Client() (not a captured client) so this picks up the real
 	// Headscale client once the self-hosted bring-up swaps it in; before that
 	// it returns ErrMeshNotReady, which the hook logs and ignores.
-	authSvc.SetLoginHook(func(ctx context.Context, u *auth.User) error {
-		return meshSvc.Client().EnsureUser(ctx, u.Name)
+	authSvc.SetLoginHook(func(ctx context.Context, name string) error {
+		return meshSvc.Client().EnsureUser(ctx, name)
 	})
 	authSvc.Start(ctx)
 	defer authSvc.Stop()
@@ -1273,13 +1279,28 @@ func main() {
 	identityState.register(runner)
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
-		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat, now: time.Now, log: logger})
+		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
+		console: consoleConvergeInputs(doorsOn, consoleHost()), now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
 		os.Exit(1)
 	}
 	identityConv.register(runner)
 	wireControlGate(authSvc, identityConv) // the control lock, under keycloak only (#987)
+	// The console's sign-in through the home door, under keycloak with the
+	// doors on (#989); its role-change sink joins the drain below.
+	var consoleReady auth.Readiness
+	if identityState.monitor != nil {
+		consoleReady = identityState.monitor
+	}
+	consoleSI, err := consoleSignInWiring(ctx, consoleSignInDeps{mode: identityW.mode, doorsOn: doorsOn, table: doorTable,
+		host: consoleHost(), client: identityW.client, session: identityW.session, ready: consoleReady,
+		sessions: consoleSessions, now: time.Now, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: console sign-in", "err", err.Error())
+		os.Exit(1)
+	}
+	consoleSI.install(authSvc)
 	// identity.recover_admin's trigger (#1127): due only once the restored
 	// alert's holder is set below, and then on its fact.
 	adminEntry, adminTrigger, err := identityAdminTrigger(identityW.mode, identityState.monitor, identityW.session, jobStore,
@@ -1778,7 +1799,7 @@ func main() {
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
-	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, identityConv.eventSinks(), logger) // the sign-in history drain, marked for this start (#985)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, consoleSI.adminSinks(identityConv.eventSinks()), logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -2155,7 +2176,7 @@ func main() {
 			throttle: identityState.events.doorThrottle(), version: identityState.events.doorVersion(),
 			bindings:   identityConv.doorBindings(),
 			identityCA: identityCAPEM(identityCA), dataDir: dataDir, upstream: identityW.upstream, themeDir: identityTheme,
-			consoleOrigin: "https://" + clusterHostname(),
+			consoleOrigin: "https://" + consoleHost(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
 			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger,
 		})
@@ -2890,78 +2911,37 @@ func collectorsWired(obsIngestAddr, httpsAddr string) (bool, string) {
 	return true, ""
 }
 
-// secureCookies decides whether the session and pending-auth cookies carry
-// the Secure attribute. It reads RASPUTIN_SECURE_COOKIES itself.
+// secureCookies reads RASPUTIN_SECURE_COOKIES, which is retired
+// (geekdojo/geekdojo-brain#989; security-resolvers rows R01 and R75): every
+// console cookie is now a __Host- cookie, so it is always Secure and no
+// setting can change that. The variable is read only so a value left in an
+// environment file is reported rather than silently ignored.
 //
-// The default is DERIVED from whether this process terminates TLS, rather than
-// read from a standalone env var, because `httpsAddr != ""` is the exact
-// condition under which the cookie actually travels over TLS: it is the same
-// value that starts the HTTPS listener AND demotes the plain-HTTP listener to
-// the bootstrap surface, where everything but the trust page and healthz 302s
-// to https. So whenever the derived value is true, an authenticated request
-// cannot be served over plaintext, and whenever it is false there is no https
-// listener for a Secure cookie to be sent to.
-//
-// It previously read `os.Getenv("RASPUTIN_SECURE_COOKIES") == "1"` — opt-in,
-// defaulting to OFF. That variable was set nowhere in rasputin-control-plane,
-// rasputin-os or rasputin-openwrt-firewall, so the 7-day passkey session
-// cookie shipped without Secure on every appliance, even though the appliance
-// serves https (the OS image's unit sets RASPUTIN_HTTPS_ADDR=:443). The
-// default was the bench value and production had to remember to opt in; a
-// derived value cannot be forgotten the way an env var can.
-//
-// The override exists for what this process cannot observe, and it can only
-// ever make the cookie safer than the derivation says:
-//
-//   - A recognised on value (1|true|yes|on) forces Secure on. That is for TLS
-//     terminated by a reverse proxy in front of a plain-HTTP api.
-//   - A recognised off value (0|false|no|off) turns Secure off ONLY when there
-//     is no HTTPS listener. Whenever one exists the off value is refused:
-//     Secure stays on, and the value comes back in ignored with
-//     reasonOffRefused.
-//   - Any other value forces Secure on, and comes back in ignored with
-//     reasonUnrecognised. Only a recognised off value can turn Secure off.
-//   - Absent or blank means derived.
-//
-// ignored is the trimmed value, with the case the operator typed, whenever
-// the setting was not honoured, and "" otherwise; reason says why. Matching is
-// case-insensitive. main writes one WARN for a non-empty ignored
-// (warnSecureCookiesNotHonoured).
-func secureCookies(httpsAddr string) (secure bool, ignored string, reason string) {
-	derived := httpsAddr != ""
+// ignored is the trimmed value, with the case the operator typed, when one
+// is set, and "" when the variable is absent or blank; reason says why it
+// was not honoured. main writes one WARN for a non-empty ignored
+// (warnSecureCookiesNotHonoured). No value turns anything off.
+func secureCookies() (ignored string, reason string) {
 	raw, _ := os.LookupEnv("RASPUTIN_SECURE_COOKIES")
 	value := strings.TrimSpace(raw)
-	switch strings.ToLower(value) {
-	case "":
-		return derived, "", ""
-	case "1", "true", "yes", "on":
-		return true, "", ""
-	case "0", "false", "no", "off":
-		if derived {
-			return true, value, reasonOffRefused
-		}
-		return false, "", ""
-	default:
-		return true, value, reasonUnrecognised
+	if value == "" {
+		return "", ""
 	}
+	return value, reasonRetired
 }
 
-// The reasons secureCookies gives for not honouring RASPUTIN_SECURE_COOKIES.
-const (
-	reasonUnrecognised = "not a recognised value (1|true|yes|on|0|false|no|off)"
-	reasonOffRefused   = "an off value is refused while an HTTPS listener is running (RASPUTIN_HTTPS_ADDR is set)"
-)
+// reasonRetired is why secureCookies honours no RASPUTIN_SECURE_COOKIES value.
+const reasonRetired = "the setting is retired: console cookies are always __Host- and Secure"
 
-// warnSecureCookiesNotHonoured writes the one WARN entry a RASPUTIN_SECURE_COOKIES
-// value that secureCookies did not honour earns. Nothing is written when
-// ignored is empty. The value is an operator flag, not a secret.
+// warnSecureCookiesNotHonoured writes the one WARN entry a set
+// RASPUTIN_SECURE_COOKIES earns. Nothing is written when ignored is empty.
+// The value is an operator flag, not a secret.
 func warnSecureCookiesNotHonoured(logger *slog.Logger, ignored, reason string) {
 	if ignored == "" {
 		return
 	}
-	logger.Warn("rasputin-api: RASPUTIN_SECURE_COOKIES is not honoured; session cookies are Secure",
-		"value", ignored, "reason", reason,
-		"fix", "unset it to derive from RASPUTIN_HTTPS_ADDR, or set 1|true|yes|on; an off value takes effect only without an HTTPS listener")
+	logger.Warn("rasputin-api: RASPUTIN_SECURE_COOKIES is retired; console cookies are always __Host- and Secure",
+		"value", ignored, "reason", reason, "fix", "remove RASPUTIN_SECURE_COOKIES from the environment; it changes nothing")
 }
 
 // envBoolPtr returns nil when the env var is unset (so the config's own

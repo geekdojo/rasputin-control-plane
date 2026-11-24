@@ -52,10 +52,11 @@ func (s *Server) handleObservabilityProxy(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "observability proxy: misconfigured")
 		return
 	}
-	user, _ := auth.UserFromContext(r.Context())
+	// Grafana's auth proxy is told who the person is by their subject, the
+	// account's stable id, never their sign-in name (geekdojo/geekdojo-brain#989).
 	username := "rasputin-operator"
-	if user != nil && user.Name != "" {
-		username = user.Name
+	if p, ok := auth.PrincipalFrom(r.Context()); ok && p.Sub != "" {
+		username = p.Sub
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	// On Linux Grafana has no TCP listener: it serves on a unix socket and

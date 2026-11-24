@@ -91,7 +91,7 @@ export default function RestorePage() {
       if (cancelled) return;
       try {
         const s = await getStatus();
-        if (s.hasUsers) {
+        if (!s.firstRun) {
           setPhase({ kind: 'restored', report });
           return;
         }

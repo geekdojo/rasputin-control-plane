@@ -2,6 +2,7 @@ package doors
 
 import (
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -119,6 +120,22 @@ func TestNew_AppliesTheClusterIDRule(t *testing.T) {
 	for _, cid := range []string{"ssobench", "sso"} {
 		if _, err := New(cid); err != nil {
 			t.Errorf("New(%q) refused: %v", cid, err)
+		}
+	}
+}
+
+// TC-989-26: SetForwarded writes exactly the door's host, https and its
+// port, replacing whatever the header held.
+func TestDoor_SetForwarded(t *testing.T) {
+	table, err := New("ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := http.Header{"X-Forwarded-Host": {"evil.example", "two"}, "X-Forwarded-Port": {"8443"}}
+	table.Home.SetForwarded(h)
+	for k, v := range map[string]string{"X-Forwarded-Host": "sso-ci.local", "X-Forwarded-Proto": "https", "X-Forwarded-Port": "443"} {
+		if got := h.Values(k); len(got) != 1 || got[0] != v {
+			t.Errorf("%s = %q, want exactly %q", k, got, v)
 		}
 	}
 }

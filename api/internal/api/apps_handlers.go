@@ -751,12 +751,13 @@ func privilegeRefusal(app *apps.App, change apps.PrivilegeChange) string {
 	return change.Refusal()
 }
 
-// userName is the authenticated user's name, for a record of who did
-// something — never the session token, never the WebAuthn handle. "" when the
-// request carries no user, which the session middleware does not let happen.
+// userName is the signed-in person's name, for a record of who did
+// something — never the session cookie, never the subject. "" when the
+// request carries no person, which the session middleware does not let
+// happen.
 func userName(r *http.Request) string {
-	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
-		return u.Name
+	if p, ok := auth.PrincipalFrom(r.Context()); ok {
+		return p.Name
 	}
 	return ""
 }

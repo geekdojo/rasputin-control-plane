@@ -28,32 +28,24 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/logkit"
 )
 
-// Secure is derived from whether this process terminates TLS, because that is
-// the condition under which the cookie can only travel over TLS. The bug this
-// replaces was an opt-in env var that defaulted OFF and was set nowhere, so
-// the appliance — which serves https on :443 — shipped session cookies without
-// Secure. The unset-override row is the one that regressed.
-//
-// The override can force Secure on at any time, and can turn it off only when
-// there is no HTTPS listener (geekdojo/geekdojo-brain#591, D1-B).
+// RASPUTIN_SECURE_COOKIES is retired (geekdojo/geekdojo-brain#989, R75
+// supersedes R01): every console cookie is __Host- and Secure, so no value
+// turns anything off. Absent or blank is silent; any set value is reported.
 func TestSecureCookies(t *testing.T) {
 	for _, tc := range []struct {
-		name      string
-		httpsAddr string
-		set       *string
-		want      bool
+		name    string
+		set     *string
+		ignored string
 	}{
-		{"appliance: https listener, no override", ":443", nil, true},
-		{"dev: no https listener, no override", "", nil, false},
-		{"override forces on behind a TLS-terminating proxy", "", ptr("true"), true},
-		{"override off is honoured with no https listener", "", ptr("false"), false},
-		{"override off is refused with an https listener", ":443", ptr("false"), true},
+		{"absent", nil, ""},
+		{"blank", ptr("  "), ""},
+		{"the old off value", ptr("false"), "false"},
+		{"the old on value", ptr("1"), "1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setSecureCookiesEnv(t, tc.set)
-			if got, _, _ := secureCookies(tc.httpsAddr); got != tc.want {
-				t.Errorf("secureCookies(%q) with %s = %v, want %v",
-					tc.httpsAddr, describeEnv(tc.set), got, tc.want)
+			if got, _ := secureCookies(); got != tc.ignored {
+				t.Errorf("secureCookies() with %s = %q, want %q", describeEnv(tc.set), got, tc.ignored)
 			}
 		})
 	}
@@ -83,98 +75,47 @@ func describeEnv(v *string) string {
 	return "RASPUTIN_SECURE_COOKIES=" + strconv.Quote(*v)
 }
 
-// Fail-closed table test for secureCookies (security-resolvers R01). Every row
-// asserts all three return values, with and without an HTTPS listener.
+// Fail-closed table test for secureCookies (security-resolvers R01 and R75):
+// every shape of input, the recognised on and off values of the setting's
+// past included, returns the retired reason with the operator's value, or
+// nothing at all for absent and blank. No input yields a value that could
+// change a cookie.
 func TestSecureCookies_FailsClosedOnEveryShapeOfInput(t *testing.T) {
-	type want struct {
-		secure          bool
+	type row struct {
+		set             *string
 		ignored, reason string
 	}
-	type row struct {
-		tc    string
-		set   *string
-		https want // secureCookies(":443")
-		plain want // secureCookies("")
-	}
-	var rows []row
-
-	// TC-591-18: absent or blank is derived.
-	for _, v := range []*string{nil, ptr(""), ptr("   ")} {
-		rows = append(rows, row{"TC-591-18", v, want{true, "", ""}, want{false, "", ""}})
-	}
-	// TC-591-19: a recognised off is honoured only with no HTTPS listener.
-	// ignored keeps the operator's case and loses only the padding (F-591-09).
+	rows := []row{{nil, "", ""}, {ptr(""), "", ""}, {ptr("   "), "", ""}}
 	for _, v := range []struct{ set, ignored string }{
 		{"0", "0"}, {"false", "false"}, {"no", "no"}, {"off", "off"}, {"FALSE", "FALSE"}, {" off ", "off"},
+		{"1", "1"}, {"true", "true"}, {"on", "on"}, {"ture", "ture"}, {"Enable", "Enable"}, {" 2 ", "2"},
 	} {
-		rows = append(rows, row{"TC-591-19", ptr(v.set),
-			want{true, v.ignored, reasonOffRefused}, want{false, "", ""}})
+		rows = append(rows, row{ptr(v.set), v.ignored, reasonRetired})
 	}
-	// TC-591-20: a recognised on is honoured both ways.
-	for _, v := range []string{"1", "true", "yes", "on", "TRUE", " on "} {
-		rows = append(rows, row{"TC-591-20", ptr(v), want{true, "", ""}, want{true, "", ""}})
-	}
-	// TC-591-20: an unrecognised value forces Secure on and is reported both
-	// ways, with its case kept (F-591-09).
-	for _, v := range []struct{ set, ignored string }{
-		{"ture", "ture"}, {"2", "2"}, {"enable", "enable"}, {"nope", "nope"}, {" ture ", "ture"}, {"Enable", "Enable"},
-	} {
-		rows = append(rows, row{"TC-591-20", ptr(v.set),
-			want{true, v.ignored, reasonUnrecognised}, want{true, v.ignored, reasonUnrecognised}})
-	}
-
 	for _, r := range rows {
-		for _, c := range []struct {
-			addr string
-			want want
-		}{{":443", r.https}, {"", r.plain}} {
-			t.Run(r.tc+" "+describeEnv(r.set)+" https="+strconv.Quote(c.addr), func(t *testing.T) {
-				setSecureCookiesEnv(t, r.set)
-				secure, ignored, reason := secureCookies(c.addr)
-				got := want{secure, ignored, reason}
-				if got != c.want {
-					t.Errorf("secureCookies(%q) with %s = %+v, want %+v",
-						c.addr, describeEnv(r.set), got, c.want)
-				}
-				// TC-591-21: the three values stay consistent in every row.
-				if ignored != "" && !secure {
-					t.Errorf("ignored %q while Secure is off: a value that was not honoured must leave Secure on", ignored)
-				}
-				if (reason == "") != (ignored == "") {
-					t.Errorf("reason %q and ignored %q disagree on whether the value was honoured", reason, ignored)
-				}
-				if reason != "" && reason != reasonUnrecognised && reason != reasonOffRefused {
-					t.Errorf("reason %q is not one of the two constants", reason)
-				}
-			})
-		}
-	}
-
-	// TC-591-21: the fail-open regressions. On the base SHA each of these gave
-	// false with an HTTPS listener: envBoolPtr turned empty and unrecognised
-	// values into false, and a recognised off overrode the derivation.
-	for _, v := range []string{"", "false", "ture"} {
-		t.Run("TC-591-21 regression "+strconv.Quote(v), func(t *testing.T) {
-			t.Setenv("RASPUTIN_SECURE_COOKIES", v)
-			if secure, _, _ := secureCookies(":443"); !secure {
-				t.Errorf("RASPUTIN_SECURE_COOKIES=%q with an HTTPS listener removed Secure", v)
+		t.Run(describeEnv(r.set), func(t *testing.T) {
+			setSecureCookiesEnv(t, r.set)
+			ignored, reason := secureCookies()
+			if ignored != r.ignored || reason != r.reason {
+				t.Errorf("secureCookies() = (%q, %q), want (%q, %q)", ignored, reason, r.ignored, r.reason)
+			}
+			if (reason == "") != (ignored == "") {
+				t.Errorf("reason %q and ignored %q disagree on whether a value was set", reason, ignored)
 			}
 		})
 	}
-
-	// The refused-off reason names the variable that makes it refused.
-	if !strings.Contains(reasonOffRefused, "RASPUTIN_HTTPS_ADDR") {
-		t.Errorf("reasonOffRefused = %q, must name RASPUTIN_HTTPS_ADDR", reasonOffRefused)
+	if !strings.Contains(reasonRetired, "__Host-") {
+		t.Errorf("reasonRetired = %q, must say the cookies are __Host-", reasonRetired)
 	}
 }
 
-// F-591-06: a value secureCookies did not honour earns exactly one WARN with
-// value, reason and fix; an honoured value earns none.
+// F-989-04: a set value earns exactly one WARN naming the setting retired,
+// with value, reason and fix; an absent one earns none.
 func TestWarnSecureCookiesNotHonoured(t *testing.T) {
-	const msg = "RASPUTIN_SECURE_COOKIES is not honoured"
-	t.Run("not honoured", func(t *testing.T) {
+	const msg = "RASPUTIN_SECURE_COOKIES is retired"
+	t.Run("set", func(t *testing.T) {
 		h := &recordsHandler{}
-		warnSecureCookiesNotHonoured(slog.New(h), "FALSE", reasonOffRefused)
+		warnSecureCookiesNotHonoured(slog.New(h), "FALSE", reasonRetired)
 		recs := h.matching(slog.LevelWarn, msg)
 		if len(recs) != 1 {
 			t.Fatalf("got %d WARN entries, want 1", len(recs))
@@ -184,21 +125,15 @@ func TestWarnSecureCookiesNotHonoured(t *testing.T) {
 			attrs[a.Key] = a.Value.String()
 			return true
 		})
-		if attrs["value"] != "FALSE" {
-			t.Errorf("value = %q, want FALSE", attrs["value"])
-		}
-		if attrs["reason"] != reasonOffRefused {
-			t.Errorf("reason = %q, want reasonOffRefused", attrs["reason"])
-		}
-		if !strings.Contains(attrs["fix"], "RASPUTIN_HTTPS_ADDR") {
-			t.Errorf("fix = %q, must tell the operator what to do", attrs["fix"])
+		if attrs["value"] != "FALSE" || attrs["reason"] != reasonRetired || !strings.Contains(attrs["fix"], "remove") {
+			t.Errorf("attrs = %v", attrs)
 		}
 	})
-	t.Run("honoured", func(t *testing.T) {
+	t.Run("absent", func(t *testing.T) {
 		h := &recordsHandler{}
 		warnSecureCookiesNotHonoured(slog.New(h), "", "")
 		if n := len(h.matching(slog.LevelWarn, msg)); n != 0 {
-			t.Errorf("got %d WARN entries for an honoured value, want 0", n)
+			t.Errorf("got %d WARN entries for an absent value, want 0", n)
 		}
 	})
 }

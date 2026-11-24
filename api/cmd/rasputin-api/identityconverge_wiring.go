@@ -66,8 +66,11 @@ type identityConvergeDeps struct {
 	// stat reads whether it is there (os.Stat).
 	createArmed func(path string, data []byte) error
 	stat        func(path string) (fs.FileInfo, error)
-	now         func() time.Time
-	log         *slog.Logger
+	// console is the console client's redirect and back-channel URLs, set
+	// only while the doors are on (consoleConvergeInputs).
+	console consoleInputs
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 // identityConverge is what identityConvergeWiring built. Every field is
@@ -159,12 +162,14 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 	clock := &clockSyncFact{read: readClockSync, log: d.log}
 	conv, err := converge.New(converge.Deps{
 		Admin: d.session, Settings: settings, Realm: identityRealm, Lock: lock,
-		// RedirectURIs is empty until Identity 4.1's door table passes one
-		// (#983): the baseline's own state, so it fails closed. AppBindings
+		// The console's redirect and back-channel URLs are set only while
+		// the doors are on (geekdojo/geekdojo-brain#989); otherwise both are
+		// empty, the baseline's own state, so it fails closed. AppBindings
 		// is nil until Identity 7.3 registers app clients.
 		Inputs: func(ctx context.Context) (converge.Inputs, error) {
 			name, err := settings.Get(ctx, setup.KeyInstallName)
-			return converge.Inputs{InstallName: name, RedirectURIs: map[string][]string{}, ClockSynced: clock.Synced(ctx)}, err
+			return converge.Inputs{InstallName: name, RedirectURIs: d.console.redirectURIs, BackchannelLogoutURLs: d.console.backchannel,
+				ClockSynced: clock.Synced(ctx)}, err
 		},
 		Now: d.now, Ready: d.monitor.Ready, Log: d.log,
 	})

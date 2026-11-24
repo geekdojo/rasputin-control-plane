@@ -626,3 +626,18 @@ func TestUserEvent_CredentialType(t *testing.T) {
 		t.Error("details changed the event key")
 	}
 }
+
+// TC-989-20 (decoder part): an admin event's resourcePath reaches the sinks
+// as AdminEvent.ResourcePath, decoded from the service's own JSON field name.
+func TestAdminRep_ResourcePathDecoded(t *testing.T) {
+	var rep adminRep
+	raw := `{"id":"e1","time":42,"operationType":"CREATE","resourceType":"CLIENT_ROLE_MAPPING",` +
+		`"resourcePath":"users/0b6e/role-mappings/clients/c-1"}`
+	if err := json.Unmarshal([]byte(raw), &rep); err != nil {
+		t.Fatal(err)
+	}
+	got := rep.event()
+	if got.ResourcePath != "users/0b6e/role-mappings/clients/c-1" || got.ResourceType != "CLIENT_ROLE_MAPPING" {
+		t.Fatalf("decoded %+v", got)
+	}
+}

@@ -554,3 +554,15 @@ func TestDisabled_RefusesWithItsKind(t *testing.T) {
 		}
 	}
 }
+
+// Disabled refuses the code exchange and the key fetch with its kind and
+// sends nothing.
+func TestDisabled_ExchangeAndForwarding(t *testing.T) {
+	d := Disabled{Kind: ErrDisabled}
+	if _, err := d.ExchangeCode(t.Context(), CodeExchange{}); !errors.Is(err, ErrDisabled) {
+		t.Errorf("ExchangeCode: %v", err)
+	}
+	if _, err := d.Forwarding(nil).Get("https://sso-ci.local/realms/rasputin/protocol/openid-connect/certs"); !errors.Is(err, ErrDisabled) {
+		t.Errorf("Forwarding: %v", err)
+	}
+}

@@ -80,10 +80,10 @@ func (s *Server) noBackupGate(ctx context.Context, tile catalog.Tile, acknowledg
 		return nil, noBackupRefusal(tile, volumes, reason), nil
 	}
 	by := ""
-	if u, ok := auth.UserFromContext(ctx); ok && u != nil {
-		// The user's name — what the drawer renders as "acknowledged by
-		// bryce". Never the session token, never the WebAuthn handle.
-		by = u.Name
+	if p, ok := auth.PrincipalFrom(ctx); ok {
+		// The person's name — what the drawer renders as "acknowledged by
+		// bryce". Never the session cookie, never the subject.
+		by = p.Name
 	}
 	return &apps.BackupAck{At: now, By: by}, "", nil
 }

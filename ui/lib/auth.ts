@@ -6,17 +6,22 @@ import type { PasskeyAuthenticator } from './passkey-authenticator';
 
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
+/** The signed-in person (GET /api/auth/me): their account's subject, sign-in name and console roles. */
 export interface CurrentUser {
-  id: string;
+  sub: string;
   name: string;
-  displayName: string;
-  createdAt: string;
-  lastLoginAt?: string;
+  roles: string[];
 }
 
+/**
+ * GET /api/auth/status: whether the cluster has no pre-update operator yet
+ * (firstRun, which offers a restore), whether a sign-in can start now, and
+ * the signed-in person when there is one. It never reports how many
+ * accounts exist.
+ */
 export interface AuthStatus {
-  hasUsers: boolean;
-  userCount: number;
+  firstRun: boolean;
+  ready: boolean;
   user?: CurrentUser;
 }
 
@@ -92,23 +97,6 @@ function unwrapPublicKey(opts: unknown): unknown {
   return (o.publicKey ?? (opts as Record<string, unknown>));
 }
 
-export async function registerPasskey(
-  name: string,
-  displayName?: string,
-): Promise<CurrentUser> {
-  const opts = await jsonFetch<unknown>('/api/auth/register/begin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, displayName: displayName ?? name }),
-  });
-  const credential = await startRegistration({ optionsJSON: unwrapPublicKey(opts) as RegistrationOptions });
-  return jsonFetch<CurrentUser>('/api/auth/register/finish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credential),
-  });
-}
-
 // Adding a passkey while signed in is two steps, each started by its own
 // click (a browser only raises a passkey prompt from a user gesture):
 //
@@ -156,15 +144,3 @@ export async function createNewPasskey(options: RegistrationOptions): Promise<Cu
 }
 
 export type NewPasskeyOptions = RegistrationOptions;
-
-export async function loginWithPasskey(): Promise<CurrentUser> {
-  const opts = await jsonFetch<unknown>('/api/auth/login/begin', {
-    method: 'POST',
-  });
-  const credential = await startAuthentication({ optionsJSON: unwrapPublicKey(opts) as AuthenticationOptions });
-  return jsonFetch<CurrentUser>('/api/auth/login/finish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credential),
-  });
-}

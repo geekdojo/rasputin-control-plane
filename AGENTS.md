@@ -20,7 +20,7 @@ Repo facts an agent should know:
 - The `rasputin-provision` matched-set CLI lives at `api/cmd/rasputin-provision`.
 - `agent/cmd/storageprobe` is a **bench tool**, not part of the OS image: it drives
   `agent/internal/storage` straight against a node's real disks, bypassing NATS and the api's
-  passkey session. Cross-compile and `scp -O` it to a node; `storageprobe help` and the
+  session. Cross-compile and `scp -O` it to a node; `storageprobe help` and the
   package comment are the reference. ⚠️ Its `claim` verb formats a disk, and
   it REFUSES to run when the real block tooling is missing rather than falling back to the mock.
 - Go code: run `gofmt` before pushing; check CI after every push.
@@ -71,23 +71,71 @@ transitives demanding Go 1.24+, and none surfaced locally because dev Go was 1.2
 
 ## Verifying UI changes (authed pages)
 
-Auth is passkey-only (WebAuthn + Touch ID; 7-day DB-backed session cookie, see
-`api/internal/auth/`). A headless/preview browser can therefore **never** log in —
-don't burn time trying, and don't add dev-login endpoints or auth bypasses without
-asking first (proposed and declined 2026-07-08).
+Auth is the cluster's sign-in (geekdojo/geekdojo-brain#989): the console is an
+OIDC client of the home sign-in door, and a sign-in mints an opaque 7-day
+console session (`__Host-rasputin-session`, see `api/internal/auth/`). Authed
+pages and session-gated routes are reached **only through that real sign-in,
+with a synthetic fixture account**: locally with `scripts/identity-on-mac.sh`
+(below), in CI with `TestIdentitySystemd_ConsoleSignIn`. Never Bryce's
+account, never a dev-login endpoint or auth bypass, and never a session
+written into `rasputin.db` by hand. Don't add dev-login endpoints or auth
+bypasses (proposed and declined 2026-07-08).
 
-**Local stack:** UI dev server on :3000 (`npm run dev` in `ui/`) + the api on
-:8080 — run `RASPUTIN_MESH_BACKEND=mock go run ./api/cmd/rasputin-api` from the
-**repo root** so the default `./data` dir resolves; `data/rasputin.db` already
-holds Bryce's account and passkey credential. The api has no secret store
-unless `RASPUTIN_SECRETSTORE_BACKEND` names one; to opt in, see
+**Local stack:** the UI dev server on :3000 (`npm run dev` in `ui/`) and an api
+with no identity service serve the **unauthenticated pages only** (`/login`,
+`/restore`): run `RASPUTIN_MESH_BACKEND=mock go run ./api/cmd/rasputin-api`
+from the **repo root** so the default `./data` dir resolves. Without an
+identity service the launcher says sign-in is not available, and every gated
+route answers 401. The api has no secret store unless
+`RASPUTIN_SECRETSTORE_BACKEND` names one; to opt in, see
 [Local secret store](#local-secret-store) below. Likewise it has no identity
 service unless `RASPUTIN_IDENTITY_BACKEND` names one; see
 [Local identity service](#local-identity-service).
 
+**Authed pages:** start the signed-in stack with `--api-env` for any setting
+the work needs, screenshot the pages, and stop it. `up` builds the UI export
+from your working tree, so the pages it serves hold your change:
+
+```sh
+scripts/identity-on-mac.sh up --api-env RASPUTIN_TRUST_ROOT="$PWD/data/trust/root-ca.pem"
+scripts/identity-on-mac.sh shots / /apps /settings
+scripts/identity-on-mac.sh down
+```
+
+Read the screenshots in `data/identity-on-mac/shots/` with the Read tool. A
+page that lands on `/login` or answers 401 fails `shots`. Hot reload of authed
+pages is not available: the stack serves a built export, so re-run `up` after
+a change. See [Signed-in console on a Mac](#signed-in-console-on-a-mac).
+
+### Signed-in console on a Mac
+
+`scripts/identity-on-mac.sh` runs `TestIdentitySystemd_ConsoleSignIn` in hold
+mode in a container with systemd as PID 1: the api built from this tree, the
+UI export built from this tree, the pinned Keycloak and PostgreSQL as
+`keycloak.service` and `keycloak-db.service`, a synthetic fixture signed in
+through the launcher's route. `up` prints `/api/auth/me` and writes the
+session cookie to `data/identity-on-mac/session.cookie` (0600); the api's
+https listener is `https://ci.local` mapped to `127.0.0.1:9443`.
+
+Prerequisites on a clean Mac:
+
+- **Docker:** [Rancher Desktop](https://rancherdesktop.io/) (choose the
+  `dockerd (moby)` container engine in its first-run dialog) or Docker
+  Desktop, installed and running. `docker info` must answer.
+- **Go**, for `shots` only: install the version in `go.work` from
+  https://go.dev/dl/.
+
+Everything else is fetched and checked by hash on first `up`: the container's
+Go and Node, the identity service and its x64 runtime (which run in a
+`linux/amd64` container on Apple silicon; Keycloak's start there takes about
+three minutes), and the mac-arm64 Chrome for Testing that `shots` uses. The
+identity service's back-channel logout posts to port 443, so that leg is not
+live on the Mac; CI and the bench prove it.
+
 Run `scripts/pki-init.sh` and copy its `root-ca.pem` into `data/trust/` if it
 is not there, and put `RASPUTIN_TRUST_ROOT=$PWD/data/trust/root-ca.pem` in
-front of the local-stack command: as of 2026-09-01 a missing bundle-signing
+front of the local-stack command (or pass it to `identity-on-mac.sh up` with
+`--api-env`, as above): as of 2026-09-01 a missing bundle-signing
 root CA makes the api REFUSE every OS update artifact instead of accepting it
 unverified, so the Updates page's upload and staging paths return 503 until it
 is in place. The api reads its publisher root only through
@@ -228,8 +276,8 @@ one. The startup log names the result as
   `identity service off: not configured`.
 - **`mock`:** logged at WARN as
   `identity service is the mock: every identity call is refused`. The mock
-  serves nothing: every identity call refuses, and nothing in the api or the
-  console consumes identity locally yet.
+  serves nothing: every identity call refuses, so the console cannot sign
+  anyone in.
 - **`mock` on a release build, or any other value** (`Mock`, `KEYCLOAK`, `openbao`, …;
   the match is exact): one ERROR record `identity service off: configuration refused`
   with `configfault=true`, naming the setting and the value. Identity stays
@@ -239,7 +287,9 @@ one. The startup log names the result as
 - **`keycloak`:** the real identity service, over the api's identity-CA client
   leaf on loopback. The pinned Keycloak, PostgreSQL and headless sign-in run on
   Linux x86_64, in CI and through `go test`; see
-  [Testing against the real identity service](docs/testing-identity.md).
+  [Testing against the real identity service](docs/testing-identity.md). On a
+  Mac, `scripts/identity-on-mac.sh` runs the whole signed-in stack; see
+  [Signed-in console on a Mac](#signed-in-console-on-a-mac).
 
 The mock is your opt-in, never a default: put `RASPUTIN_IDENTITY_BACKEND=mock`
 in front of the local-stack command when you start it.

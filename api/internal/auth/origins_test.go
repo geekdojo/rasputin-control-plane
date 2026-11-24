@@ -168,8 +168,7 @@ func TestNewServiceRefusesMalformedOriginsAndNormalizes(t *testing.T) {
 
 func TestRequireSessionChecksOrigin(t *testing.T) {
 	f := newAuthFixture(t) // RPOrigins: http://localhost:3000
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
+	sess := consoleCookie(t, f, Principal{Sub: "alice-sub", Name: "alice"})
 	reached := false
 	h := f.svc.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		reached = true
@@ -197,7 +196,7 @@ func TestRequireSessionChecksOrigin(t *testing.T) {
 			r.Header.Add("Origin", o)
 		}
 		if c.cookie {
-			r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
+			r.AddCookie(sess)
 		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
