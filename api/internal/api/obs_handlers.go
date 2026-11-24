@@ -53,7 +53,10 @@ func (s *Server) handleObsDisable(w http.ResponseWriter, r *http.Request) {
 // construct at boot) rather than the runner's generic unknown-kind error,
 // which reads like a bug rather than a configuration state.
 func (s *Server) submitObsJob(w http.ResponseWriter, r *http.Request, kind string) {
-	job, err := s.runner.Submit(r.Context(), kind, nil, creator(r))
+	job, err := s.runner.SubmitFor(r.Context(), submitter(r), kind, nil, nil)
+	if s.refusedSubmit(w, r, kind, err) {
+		return
+	}
 	if err != nil {
 		log.Printf("api/obs: submit %s: %v", kind, err)
 		writeError(w, http.StatusServiceUnavailable,

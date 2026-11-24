@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/storage"
@@ -79,16 +82,44 @@ func storageTestServer(t *testing.T) (*Server, *storage.Store, *nats.Conn) {
 	}
 
 	nc := storageTestNATS(t)
-	runner := jobs.NewRunner(jobStore, nc)
+	// The runner main.go builds: the real kind table decides every claim
+	// (geekdojo/geekdojo-brain#1001). No backup route acts on an app.
+	policy, err := authz.NewKindPolicy(noAppFacts{})
+	if err != nil {
+		t.Fatalf("NewKindPolicy: %v", err)
+	}
+	runner, err := jobs.NewAuthorizedRunner(jobStore, nc, policy)
+	if err != nil {
+		t.Fatalf("NewAuthorizedRunner: %v", err)
+	}
 	runner.Register(storage.ClaimWorkflow(backupStore, inv, storage.Config{ClusterID: "home1"}))
 	t.Cleanup(runner.Wait)
 
-	return &Server{store: jobStore, runner: runner, backup: backupStore, nc: nc, inv: inv}, backupStore, nc
+	return &Server{store: jobStore, runner: runner, backup: backupStore, nc: nc, inv: inv,
+		log: slog.New(slog.DiscardHandler), newCorrelationID: sequentialIDs()}, backupStore, nc
 }
+
+// noAppFacts is an authz.AppReader that knows no app.
+type noAppFacts struct{}
+
+func (noAppFacts) AppFacts(context.Context, string, string) (authz.AppFacts, error) {
+	return authz.AppFacts{}, authz.ErrNoApp
+}
+
+// storageAdmin is the person the backup routes' tests ask as, the
+// administrator RequireSession would have resolved.
+var storageAdmin = auth.Principal{Sub: "sub-admin", Name: "admin", Roles: []string{"admin"}}
 
 func postClaim(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postClaimAs(t, s, body, storageAdmin)
+}
+
+// postClaimAs is postClaim asked for by p.
+func postClaimAs(t *testing.T, s *Server, body string, p auth.Principal) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/api/backup/targets", strings.NewReader(body))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), p))
 	rec := httptest.NewRecorder()
 	s.handleClaimBackupTarget(rec, req)
 	return rec

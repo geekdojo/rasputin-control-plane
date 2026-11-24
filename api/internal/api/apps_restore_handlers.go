@@ -195,10 +195,10 @@ func (s *Server) handleAppRestore(w http.ResponseWriter, r *http.Request) {
 	spec := storage.RestoreAppSpec{
 		AppID: app.ID, PartUUID: partUUID, GenerationID: genID, KeyID: keyID, SessionID: sessionID, Volumes: req.Volumes,
 	}
-	j, err := s.runner.Submit(r.Context(), storage.RestoreAppJobKind, spec, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), storage.RestoreAppJobKind, spec, nil)
 	if err != nil {
 		s.appRestore.Sessions.Close(sessionID)
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, storage.RestoreAppJobKind, http.StatusBadRequest, err)
 		return
 	}
 	if err := s.appRestore.Sessions.Bind(sessionID, j.ID); err != nil {

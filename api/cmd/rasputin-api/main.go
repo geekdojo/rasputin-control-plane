@@ -30,6 +30,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/appsecret"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmccert"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
@@ -974,7 +975,50 @@ func main() {
 	authSvc.Start(ctx)
 	defer authSvc.Stop()
 
-	runner := jobs.NewRunner(jobStore, busSrv.Conn())
+	// App catalog (ADR-0006). The floor embedded in this build is what a
+	// cluster has before it has ever completed a verified fetch; the poller
+	// (started further down, once the server exists) replaces it with the
+	// newest signed catalog it can verify. Resolution has no third case, so
+	// nothing here merges the two.
+	//
+	// Built HERE, ahead of the runner, because the runner's kind policy
+	// reads an upgrade's target tier from it (geekdojo/geekdojo-brain#1001),
+	// and so ahead of the backup workflow, whose fan-out reads it too: this
+	// store is the catalog /api/catalog serves, and the fan-out must join
+	// installed apps against THAT — not against the tile
+	// set embedded in the binary. On e3bench 2026-09-03 the fan-out was wired
+	// to catalog.MustLoad(), whose tiles carry no `volumes`, while the store
+	// served a verified v17 that classified Vaultwarden's; the run recorded no
+	// app volumes and stamped the archive complete.
+	//
+	// A floor that does not parse is a BUILD defect — every cluster from this
+	// image would inherit it — so it is fatal rather than degraded.
+	catalogFloor, err := floor.Load()
+	if err != nil {
+		log.Fatalf("rasputin-api: %v", err)
+	}
+	catalogStore, err := catalogsync.New(dataDir, catalogVerifier, catalogFloor)
+	if err != nil {
+		log.Fatalf("rasputin-api: catalog store: %v", err)
+	}
+	// Every job is decided by kind before anything exists
+	// (geekdojo/geekdojo-brain#1001): the kind table, reading an app job's
+	// tiers from the apps store and the catalog in effect.
+	tiers, err := apps.NewTierReader(appsStore, catalogStore.GetVersioned)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: app tier reader", "err", err.Error())
+		os.Exit(1)
+	}
+	kindPolicy, err := authz.NewKindPolicy(tiers)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: job kind policy", "err", err.Error())
+		os.Exit(1)
+	}
+	runner, err := jobs.NewAuthorizedRunner(jobStore, busSrv.Conn(), kindPolicy)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: job runner", "err", err.Error())
+		os.Exit(1)
+	}
 	runner.Register(jobs.PingWorkflow())
 	runner.Register(jobs.RebootWorkflow())
 	// Firewall is managed in every mode except LAN-peer, where the existing
@@ -1114,30 +1158,6 @@ func main() {
 			},
 		}},
 	}))
-	// App catalog (ADR-0006). The floor embedded in this build is what a
-	// cluster has before it has ever completed a verified fetch; the poller
-	// (started further down, once the server exists) replaces it with the
-	// newest signed catalog it can verify. Resolution has no third case, so
-	// nothing here merges the two.
-	//
-	// Built HERE, ahead of the backup workflow, because the backup fan-out
-	// reads it: this store is the catalog /api/catalog serves, and the
-	// fan-out must join installed apps against THAT — not against the tile
-	// set embedded in the binary. On e3bench 2026-09-03 the fan-out was wired
-	// to catalog.MustLoad(), whose tiles carry no `volumes`, while the store
-	// served a verified v17 that classified Vaultwarden's; the run recorded no
-	// app volumes and stamped the archive complete.
-	//
-	// A floor that does not parse is a BUILD defect — every cluster from this
-	// image would inherit it — so it is fatal rather than degraded.
-	catalogFloor, err := floor.Load()
-	if err != nil {
-		log.Fatalf("rasputin-api: %v", err)
-	}
-	catalogStore, err := catalogsync.New(dataDir, catalogVerifier, catalogFloor)
-	if err != nil {
-		log.Fatalf("rasputin-api: catalog store: %v", err)
-	}
 	// The app sagas that push a compose to an agent (deploy, revert, edit and
 	// upgrade) register here rather than with the other app sagas above
 	// because app.upgrade's new compose comes from this store and nowhere else.

@@ -410,9 +410,9 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 	// The operator, not a placeholder: destroy_secrets deletes the app's store
 	// entries on their behalf (#783).
-	j, err := s.runner.Submit(r.Context(), "app.delete", apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named}, userName(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "app.delete", apps.DeleteSpec{AppID: app.ID, DeleteVolumes: named}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "app.delete", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -469,9 +469,9 @@ func (s *Server) checkDeleteVolumes(w http.ResponseWriter, r *http.Request, app 
 // POST /api/apps/{id}/deploy
 func (s *Server) handleDeployApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	j, err := s.runner.Submit(r.Context(), "app.deploy", map[string]string{"appId": id}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "app.deploy", map[string]string{"appId": id}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "app.deploy", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -852,17 +852,17 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 		stashedFor = jobID
 		return nil
 	}
-	// The session user, not creator's "user": release_secrets deletes
-	// secrets on this operator's behalf, and the store's audit names them
-	// (geekdojo/geekdojo-brain#783).
-	j, err := s.runner.SubmitPrepared(r.Context(), kind, spec, userName(r), prepare)
+	// The session's person: release_secrets deletes secrets on their
+	// behalf, and the store's audit records their account id
+	// (geekdojo/geekdojo-brain#783, #1001).
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), kind, spec, prepare)
 	if err != nil {
 		// No job will run under that id, so no OnTerminal will discard what
 		// was held for it.
 		if stashedFor != "" {
 			s.composeStash.Discard(stashedFor)
 		}
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, kind, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -871,9 +871,9 @@ func (s *Server) submitComposeJob(w http.ResponseWriter, r *http.Request, kind s
 // POST /api/apps/{id}/stop
 func (s *Server) handleStopApp(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	j, err := s.runner.Submit(r.Context(), "app.stop", map[string]string{"appId": id}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "app.stop", map[string]string{"appId": id}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "app.stop", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

@@ -166,7 +166,7 @@ func revertSpecAppID(raw json.RawMessage) (string, error) {
 //
 // It refuses a nil secrets source, returning the zero Workflow.
 func RevertWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, secrets SecretSource, identity AppIdentity) (jobs.Workflow, error) {
-	const kind = "app.revert"
+	const kind = RevertKind
 	if err := requireSecretSource(kind, secrets); err != nil {
 		return jobs.Workflow{}, err
 	}

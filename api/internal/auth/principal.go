@@ -42,6 +42,13 @@ func (p Principal) Capabilities() authz.Set {
 	return authz.For(authz.Subject{Sub: p.Sub, Roles: p.Roles})
 }
 
+// Submitter is p as a job's submitter: authz.Person over p's Sub and Roles,
+// so the runner decides p's jobs on the same capabilities as Capabilities,
+// and a job p submits records p's account id.
+func (p Principal) Submitter() authz.Submitter {
+	return authz.Person(authz.Subject{Sub: p.Sub, Roles: p.Roles})
+}
+
 type principalKey struct{}
 
 // PrincipalFrom returns the Principal RequireSession attached.

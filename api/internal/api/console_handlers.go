@@ -94,6 +94,9 @@ func (s *Server) handlePutConsoleRootPassword(w http.ResponseWriter, r *http.Req
 	push := req.Push == nil || *req.Push
 	if push {
 		j, jerr := s.submitConsolePush(r, console.PushSpec{Reason: "the console root password was set"})
+		if s.refusedSubmit(w, r, console.PushKind, jerr) {
+			return
+		}
 		if jerr != nil {
 			// The password IS stored; only the fan-out did not start. That
 			// leaves every node short of the password the operator just
@@ -147,14 +150,14 @@ func (s *Server) handlePushConsoleRootPassword(w http.ResponseWriter, r *http.Re
 	}
 	j, err := s.submitConsolePush(r, console.PushSpec{NodeIDs: req.NodeIDs, Reason: "requested from Settings"})
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, console.PushKind, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, consoleSetResponse{HashID: hashID, JobID: j})
 }
 
 func (s *Server) submitConsolePush(r *http.Request, spec console.PushSpec) (string, error) {
-	j, err := s.runner.Submit(r.Context(), console.PushKind, spec, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), console.PushKind, spec, nil)
 	if err != nil {
 		return "", err
 	}

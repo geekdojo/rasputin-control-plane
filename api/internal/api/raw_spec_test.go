@@ -51,8 +51,9 @@ func TestTypedSpecs_StoredAsThePreviousReleaseStoredThem(t *testing.T) {
 		{"firewall.set_active", firewall.SetActiveSpec{Active: true}, `{"active":true}`},
 		{"system.update", proto.SystemUpdateSpec{Version: "2026.08.4"}, `{"version":"2026.08.4"}`},
 		{"node.update", updater.UpdateSpec{NodeID: "n1", BundleSHA256: "ab"}, `{"nodeId":"n1","bundleSha256":"ab"}`},
-		// system.update's child: a map, so its keys are stored sorted, as before.
-		{"node.update.child", map[string]string{"nodeId": "n1", "bundleSha256": "ab"}, `{"bundleSha256":"ab","nodeId":"n1"}`},
+		// system.update's child, node.update with a map spec: its keys are
+		// stored sorted, as before.
+		{"node.update", map[string]string{"nodeId": "n1", "bundleSha256": "ab"}, `{"bundleSha256":"ab","nodeId":"n1"}`},
 		{obs.CollectorDeployKind, obs.CollectorNodeSpec{NodeID: "n1", CollectorKey: "ck", TrustFingerprint: "tf"},
 			`{"nodeId":"n1","collectorKey":"ck","trustFingerprint":"tf"}`},
 	}

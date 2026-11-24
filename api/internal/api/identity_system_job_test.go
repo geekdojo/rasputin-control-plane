@@ -8,9 +8,10 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
 
-// TC-979-03: POST /api/jobs refuses the identity kinds. The two os.identity_*
-// outcome kinds and identity.service_exit are recorded by the api from facts
-// and are never registered workflows, so they answer 400 unknown kind;
+// TC-979-03, TC-1001-06: POST /api/jobs refuses the identity kinds. The two
+// os.identity_* outcome kinds and identity.service_exit are recorded by the
+// api from facts and are never submittable, so they answer 403
+// job_not_submittable;
 // identity.recover is registered System (as identityStateWiring registers it
 // under keycloak), so it answers 403 job_system_only with a correlation id.
 // No job row is created for any of them.
@@ -21,8 +22,9 @@ func TestHandleCreateJob_RefusesTheIdentityKinds(t *testing.T) {
 
 	for _, kind := range []string{"os.identity_db_init", "os.identity_rollback", "identity.service_exit"} {
 		w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"`+kind+`"}`, c)
-		if w.Code != http.StatusBadRequest {
-			t.Errorf("POST %s: %d %s, want 400", kind, w.Code, w.Body.String())
+		var e codedError
+		if w.Code != http.StatusForbidden || json.Unmarshal(w.Body.Bytes(), &e) != nil || e.Code != "job_not_submittable" {
+			t.Errorf("POST %s: %d %s, want 403 job_not_submittable", kind, w.Code, w.Body.String())
 		}
 	}
 	w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"identity.recover"}`, c)

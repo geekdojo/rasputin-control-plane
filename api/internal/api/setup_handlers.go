@@ -80,7 +80,7 @@ func (s *Server) handleSetupMode(w http.ResponseWriter, r *http.Request) {
 	// exists (the SetActive workflow needs exactly one).
 	if state != nil && state.FirewallCapable {
 		spec := firewall.SetActiveSpec{Active: state.Mode != setup.ModeLANPeer}
-		if _, err := s.runner.Submit(r.Context(), "firewall.set_active", spec, creator(r)); err != nil {
+		if _, err := s.runner.Submit(r.Context(), "firewall.set_active", spec, "setup-mode-change"); err != nil {
 			log.Printf("setup: submit firewall.set_active after mode change: %v", err)
 		}
 	}
@@ -114,9 +114,9 @@ func (s *Server) handleSetupMesh(w http.ResponseWriter, r *http.Request) {
 			"RASPUTIN_SELF_NODE_ID is not configured on the api process; cannot enroll without it")
 		return
 	}
-	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", mesh.EnrollSpec{NodeID: selfID}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "mesh.enroll_node", mesh.EnrollSpec{NodeID: selfID}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "mesh.enroll_node", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

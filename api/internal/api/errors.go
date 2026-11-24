@@ -71,6 +71,11 @@ const (
 	// codeJobSystemOnly: POST /api/jobs named a kind only the system starts,
 	// so no job was created (geekdojo/geekdojo-brain#978).
 	codeJobSystemOnly = "job_system_only"
+	// codeJobCheckFailed: a job's submission could not be decided, because a
+	// read the kind table needed failed, so no job was created
+	// (geekdojo/geekdojo-brain#1001). The kind table's own refusals answer
+	// "job_" + authz.KindRefusal.Code.
+	codeJobCheckFailed = "job_check_failed"
 	// codeWebPortInvalid: a custom app's "webPort" is not a whole number from
 	// 1 to 65535 (geekdojo/geekdojo-brain#1089).
 	codeWebPortInvalid = "web_port_invalid"

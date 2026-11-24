@@ -212,9 +212,9 @@ func (s *Server) handleGetFirewallState(w http.ResponseWriter, r *http.Request) 
 
 // POST /api/firewall/apply — kicks off a firewall.apply job and returns it.
 func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "firewall.apply", nil, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "firewall.apply", nil, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "firewall.apply", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -222,9 +222,9 @@ func (s *Server) handleApplyFirewall(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/firewall/reconcile — kicks off a firewall.reconcile job.
 func (s *Server) handleReconcileFirewall(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "firewall.reconcile", nil, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "firewall.reconcile", nil, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "firewall.reconcile", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -399,11 +399,3 @@ func validatePortOrRange(field, v string) error {
 // errNoRowsSentinel keeps the api package free of a direct database/sql
 // dependency in the handler layer; we compare error strings as fallback.
 var errNoRowsSentinel = errors.New("sql: no rows in result set")
-
-// creator returns a stable string identifier for who created a job. Uses
-// the authenticated user's name if available, falls back to "system".
-func creator(r *http.Request) string {
-	// Without importing auth here we'd need a re-exported helper; for v0
-	// fall back to "user" — same default the older job handler uses.
-	return "user"
-}

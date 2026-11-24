@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
@@ -18,7 +19,7 @@ func TestSubmitClaim_StoresTheTypedSpecAndRefusesBeforePersisting(t *testing.T) 
 	})
 	ctx := context.Background()
 	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
-	j, err := SubmitClaim(ctx, h.runner, h.store, baseSpec(), key, "test")
+	j, err := SubmitClaim(ctx, h.runner, h.store, baseSpec(), key, authz.SystemSubmitter("test"))
 	if err != nil {
 		t.Fatalf("SubmitClaim: %v", err)
 	}
@@ -44,7 +45,7 @@ func TestSubmitClaim_StoresTheTypedSpecAndRefusesBeforePersisting(t *testing.T) 
 	refused := baseSpec()
 	refused.Fingerprint = "" // ParseClaimSpec: a claim with no fingerprint names no disk
 	refusedKey := &ArchiveKey{KeyID: "k2", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
-	if j, err := SubmitClaim(ctx, h.runner, h.store, refused, refusedKey, "test"); err == nil || !strings.Contains(err.Error(), "fingerprint is required") {
+	if j, err := SubmitClaim(ctx, h.runner, h.store, refused, refusedKey, authz.SystemSubmitter("test")); err == nil || !strings.Contains(err.Error(), "fingerprint is required") {
 		t.Fatalf("SubmitClaim(no fingerprint) = (%v, %v), want the ParseClaimSpec refusal", j, err)
 	}
 	after, err := h.jobStore.ListJobsByKind(ctx, ClaimJobKind, 10)

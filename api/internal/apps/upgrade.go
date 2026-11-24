@@ -166,7 +166,7 @@ func ResolveUpgrade(app *App, lookup TileLookup) (UpgradeTarget, error) {
 // It refuses a nil secrets source or a DeleteSecretsDeps with a nil field,
 // returning the zero Workflow.
 func UpgradeWorkflow(store *Store, inv *inventory.Store, nc *nats.Conn, rotate LeafRotator, lookup TileLookup, secrets SecretSource, d DeleteSecretsDeps, identity AppIdentity) (jobs.Workflow, error) {
-	const kind = "app.upgrade"
+	const kind = UpgradeKind
 	if err := requireSecretSource(kind, secrets); err != nil {
 		return jobs.Workflow{}, err
 	}

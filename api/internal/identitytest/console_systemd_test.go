@@ -194,6 +194,7 @@ func TestIdentitySystemd_ConsoleSignIn(t *testing.T) {
 		cookie = s.signInBrowser(ctx, pw)
 	}
 	s.checkMe(cookie, sub)
+	s.checkJobRefusals(cookie)
 	s.writeOutputs(cookie)
 	if hold {
 		s.hold(ctx)
@@ -811,6 +812,60 @@ func (s *consoleStack) checkMe(cookie, sub string) {
 		t.Fatal(err)
 	}
 	t.Logf("/api/auth/me: %s", b)
+}
+
+// checkJobRefusals asserts the api main.go built decides jobs by kind
+// (geekdojo/geekdojo-brain#1001, TC-1001-23): the signed-in viewer's power
+// cycle is 403 job_not_permitted, a forged os.identity_rollback is 403
+// job_not_submittable, and GET /api/jobs lists neither kind. Only the wired
+// kind policy answers those codes.
+func (s *consoleStack) checkJobRefusals(cookie string) {
+	t := s.t
+	jar, _ := cookiejar.New(nil)
+	u, _ := url.Parse("https://" + consoleCID + ".local/")
+	jar.SetCookies(u, []*http.Cookie{{Name: auth.SessionCookieName, Value: cookie, Path: "/", Secure: true}})
+	c := s.client(jar)
+	call := func(method, path, body string) (int, []byte) {
+		t.Helper()
+		req, err := http.NewRequest(method, u.String()+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatalf("%s /%s: %v", method, path, err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, b
+	}
+	for _, tc := range []struct{ path, body, code string }{
+		{"api/bmc/ci-node/power/cycle", "", "job_not_permitted"},
+		{"api/jobs", `{"kind":"os.identity_rollback"}`, "job_not_submittable"},
+	} {
+		status, b := call(http.MethodPost, tc.path, tc.body)
+		var e struct {
+			Code string `json:"code"`
+		}
+		if status != http.StatusForbidden || json.Unmarshal(b, &e) != nil || e.Code != tc.code {
+			t.Errorf("POST /%s = %d %s, want 403 %s", tc.path, status, b, tc.code)
+		}
+	}
+	status, b := call(http.MethodGet, "api/jobs?limit=200", "")
+	var listed []struct {
+		Kind string `json:"kind"`
+	}
+	if status != http.StatusOK || json.Unmarshal(b, &listed) != nil {
+		t.Fatalf("GET /api/jobs = %d %s, want 200 and a list", status, b)
+	}
+	for _, j := range listed {
+		if j.Kind == "bmc.power" || j.Kind == "os.identity_rollback" {
+			t.Errorf("GET /api/jobs lists a %s job after the refusals", j.Kind)
+		}
+	}
 }
 
 // writeOutputs writes session.cookie (0600), the api leaf's SPKI hash, and

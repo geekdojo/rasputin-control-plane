@@ -334,8 +334,8 @@ func TestDeleteNode_TC783_61_RevokeFirstDeletesOutliveTheRequest(t *testing.T) {
 	}
 }
 
-// TC-783-55: a compose change records the session user as the job's
-// created_by, for an upgrade, an edit and a revert.
+// TC-783-55, TC-1001-14: a compose change records the session's account id
+// as the job's created_by, for an upgrade, an edit and a revert.
 func TestAppsCompose_TC783_55_RecordsTheOperator(t *testing.T) {
 	f, cookie, _, _ := upgradeFixture(t)
 	seedUpgradeApp(t, f, "cat", "vw", "vaultwarden", "services: {old: {}}\n", 3)
@@ -357,8 +357,8 @@ func TestAppsCompose_TC783_55_RecordsTheOperator(t *testing.T) {
 			}
 			job := decodeBody[jobs.Job](t, w.Body.String())
 			got, err := f.jobsStore.GetJob(f.ctx, job.ID)
-			if err != nil || got == nil || got.Kind != tc.kind || got.CreatedBy != "alice" {
-				t.Errorf("job = %+v, %v; want %s created by alice", got, err, tc.kind)
+			if err != nil || got == nil || got.Kind != tc.kind || got.CreatedBy != "sub-alice" {
+				t.Errorf("job = %+v, %v; want %s created by sub-alice", got, err, tc.kind)
 			}
 		})
 	}

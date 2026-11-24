@@ -16,6 +16,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmccert"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
@@ -32,6 +33,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/updater"
 	"github.com/geekdojo/rasputin-control-plane/proto"
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 	"github.com/nats-io/nats-server/v2/server"
 	"github.com/nats-io/nats.go"
 )
@@ -289,7 +291,27 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	// to ingest a bundle call buildBundleFixture, which installs a real root CA
 	// and re-inits the verifier.
 	verifier := updater.NewVerifier(filepath.Join(dir, "root-ca.pem"))
-	runner := jobs.NewRunner(jobStore, nc)
+	// The runner main.go builds: every submission decided by the real kind
+	// table, over the real tier reader (geekdojo/geekdojo-brain#1001). The
+	// lookup is the server's own verified catalog, read when the policy
+	// asks, as main.go hands it catalogStore.GetVersioned.
+	tiers, err := apps.NewTierReader(appStore, func(id string) (tileschema.Tile, int, bool) {
+		if l := f.srv.tileLookup(); l != nil {
+			return l(id)
+		}
+		return tileschema.Tile{}, 0, false
+	})
+	if err != nil {
+		t.Fatalf("NewTierReader: %v", err)
+	}
+	policy, err := authz.NewKindPolicy(tiers)
+	if err != nil {
+		t.Fatalf("NewKindPolicy: %v", err)
+	}
+	runner, err := jobs.NewAuthorizedRunner(jobStore, nc, policy)
+	if err != nil {
+		t.Fatalf("NewAuthorizedRunner: %v", err)
+	}
 
 	trustDir := dir
 	invSvc := inventory.NewService(invStore, nc, slog.New(slog.DiscardHandler))
@@ -494,12 +516,19 @@ func TestHandleCreateJob_MissingKind(t *testing.T) {
 	}
 }
 
+// A kind the kind table does not know is refused before the runner looks for
+// its workflow (TC-1001-01); a mapped kind with no workflow registered keeps
+// the 400.
 func TestHandleCreateJob_UnknownKind(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"no.such.kind"}`, c)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"job_unknown_kind"`) {
+		t.Errorf("want 403 job_unknown_kind, got %d %s", w.Code, w.Body.String())
+	}
+	w = f.do(t, http.MethodPost, "/api/jobs", `{"kind":"diag.ping"}`, c)
 	if w.Code != http.StatusBadRequest {
-		t.Errorf("want 400, got %d", w.Code)
+		t.Errorf("unregistered diag.ping: want 400, got %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -706,21 +735,25 @@ func TestHandleDeleteApp_NotFound(t *testing.T) {
 	}
 }
 
+// An app that does not exist is refused by the kind table before the
+// runner looks for the workflow (TC-1001-11).
 func TestHandleDeployApp_UnknownKind(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	w := f.do(t, http.MethodPost, "/api/apps/x/deploy", "", c)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("want 400 (unknown workflow), got %d", w.Code)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"job_no_app"`) {
+		t.Errorf("want 403 job_no_app, got %d %s", w.Code, w.Body.String())
 	}
 }
 
+// An app that does not exist is refused by the kind table before the
+// runner looks for the workflow (TC-1001-11).
 func TestHandleStopApp_UnknownKind(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	w := f.do(t, http.MethodPost, "/api/apps/x/stop", "", c)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("want 400 (unknown workflow), got %d", w.Code)
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"code":"job_no_app"`) {
+		t.Errorf("want 403 job_no_app, got %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -2328,13 +2361,19 @@ func TestAtoiOr(t *testing.T) {
 }
 
 // ============================================================================
-// creator
+// subOf (F-1001-08)
 // ============================================================================
 
-func TestCreator(t *testing.T) {
+// subOf is the principal's account id, never the name, and "" for a request
+// that carries no person.
+func TestSubOf(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	if creator(r) == "" {
-		t.Error("want non-empty creator")
+	if got := subOf(r); got != "" {
+		t.Errorf("subOf(no principal) = %q, want empty", got)
+	}
+	r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{Sub: "s-1", Name: "maya"}))
+	if got := subOf(r); got != "s-1" {
+		t.Errorf("subOf = %q, want the sub s-1", got)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -151,14 +152,15 @@ type claimOutcome struct {
 	KeyID       string `json:"keyId,omitempty"`
 }
 
-// SubmitClaim submits a backup.target.claim job for spec.
+// SubmitClaim submits a backup.target.claim job for spec, asked for by by,
+// whom the runner decides on before anything is staged.
 //
 // key, when set, travels beside the spec rather than in it. The caller owns
 // it and destroys it. It is staged under the new job's id before the job is
 // recorded or run, and the persisted spec carries only its id. A submit that
 // fails after staging discards what it staged; a job that ran has its staged
 // key discarded by the workflow's terminal hook.
-func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec ClaimSpec, key *ArchiveKey, createdBy string) (*jobs.Job, error) {
+func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec ClaimSpec, key *ArchiveKey, by authz.Submitter) (*jobs.Job, error) {
 	body, err := claimBody(spec, key)
 	if err != nil {
 		return nil, err
@@ -174,7 +176,7 @@ func SubmitClaim(ctx context.Context, runner *jobs.Runner, store *Store, spec Cl
 		staged = jobID
 		return nil
 	}
-	j, err := runner.SubmitPrepared(ctx, ClaimJobKind, body, createdBy, prepare)
+	j, err := runner.SubmitFor(ctx, by, ClaimJobKind, body, prepare)
 	if err != nil && staged != "" {
 		if derr := store.DiscardStagedClaimKey(ctx, staged); derr != nil {
 			log.Printf("storage: discard staged archive key for unsubmitted job %s: %v", staged, derr)

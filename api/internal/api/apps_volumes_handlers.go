@@ -442,7 +442,7 @@ func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Reque
 	// Destroying data is worth a line in the api log with who asked for it,
 	// whatever the outcome.
 	log.Printf("apps: %s reclaimed orphan volumes on %s: removed=%v refused=%d ok=%v",
-		creator(r), node.ID, ack.Removed, len(ack.Refused), ack.OK)
+		subOf(r), node.ID, ack.Removed, len(ack.Refused), ack.OK)
 	writeJSON(w, http.StatusOK, reclaimResponse{
 		NodeID: node.ID, OK: ack.OK, Detail: ack.Detail, Removed: ack.Removed, Refused: ack.Refused,
 	})
