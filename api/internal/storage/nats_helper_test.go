@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -429,7 +430,7 @@ func (h *harness) submit(t *testing.T, spec ClaimSpec) string {
 // handler does.
 func (h *harness) submitKeyed(t *testing.T, spec ClaimSpec, key *ArchiveKey) string {
 	t.Helper()
-	j, err := SubmitClaim(context.Background(), h.runner, h.store, spec, key, "test")
+	j, err := SubmitClaim(context.Background(), h.runner, h.store, spec, key, authz.SystemSubmitter("test"))
 	if err != nil {
 		t.Fatalf("SubmitClaim: %v", err)
 	}

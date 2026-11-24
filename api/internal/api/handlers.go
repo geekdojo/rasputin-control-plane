@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -30,18 +32,19 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "kind is required")
 		return
 	}
-	// The job records the operator who submitted it: a step acting on their
-	// behalf (app.delete's store deletes) names them (#783).
-	// The runner decides whether an operator may start this kind: a kind
-	// only the system starts is refused before any job exists (#978).
-	j, err := s.runner.SubmitOperatorSpec(r.Context(), req.Kind, req.Spec, userName(r))
+	// The job records the account that submitted it: a step acting on their
+	// behalf (app.delete's store deletes) records them (#783, #1001).
+	// The runner decides whether this person may start this kind: a kind
+	// only the system starts, or one the kind table refuses them, is refused
+	// before any job exists (#978, #1001).
+	j, err := s.runner.SubmitOperatorSpec(r.Context(), req.Kind, req.Spec, submitter(r))
 	if errors.Is(err, jobs.ErrSystemKind) {
 		s.writeCodedError(w, r, http.StatusForbidden, codeJobSystemOnly,
 			"This job runs only when the system starts it.", slog.String("kind", req.Kind))
 		return
 	}
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, req.Kind, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, j)
@@ -160,9 +163,63 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeSubmitError answers a refused job submit with status.
-func writeSubmitError(w http.ResponseWriter, status int, err error) {
+// submitter is the request's person as a job's submitter, or the zero
+// Submitter, which the runner refuses, when the request carries no person.
+// Every job a request submits for its person passes exactly this
+// (specargs_test.go pins it), so no handler picks its own submitter.
+func submitter(r *http.Request) authz.Submitter {
+	if p, ok := auth.PrincipalFrom(r.Context()); ok {
+		return p.Submitter()
+	}
+	return authz.Submitter{}
+}
+
+// subOf is the request's person's account id, for a record or log line of
+// who asked, or "" when the request carries no person. Never the name.
+func subOf(r *http.Request) string {
+	if p, ok := auth.PrincipalFrom(r.Context()); ok {
+		return p.Sub
+	}
+	return ""
+}
+
+// writeSubmitError answers a refused job submit for kind: the kind table's
+// answer when refusedSubmit has one, else status with the error.
+func (s *Server) writeSubmitError(w http.ResponseWriter, r *http.Request, kind string, status int, err error) {
+	if s.refusedSubmit(w, r, kind, err) {
+		return
+	}
 	writeError(w, status, err.Error())
+}
+
+// refusedSubmit answers err when the runner's authorization produced it, and
+// reports whether it did. A *authz.KindRefusal is 403 with "job_" + its code
+// and its sentence, under a WARN refusal record carrying the kind and never
+// the spec, the target or the person. A check that could not finish
+// (authz.ErrCheckFailed) or a runner that runs only the system's jobs
+// (jobs.ErrNotSystem) is 500 job_check_failed, under one ERROR record.
+//
+// CodeQL reports go/log-injection at that ERROR record, since kind can be the
+// requester's own text; the register (.github/codeql-register.tsv) records it
+// as a false positive. s.log is logkit.New's, whose slog.TextHandler quotes
+// and escapes every value, so no kind can forge a record. The verdict holds
+// while the logger injected into NewServer is logkit.New's.
+func (s *Server) refusedSubmit(w http.ResponseWriter, r *http.Request, kind string, err error) bool {
+	var kr *authz.KindRefusal
+	switch {
+	case errors.As(err, &kr):
+		s.writeCodedError(w, r, http.StatusForbidden, "job_"+kr.Code, kr.Sentence, slog.String("kind", kind))
+		return true
+	case errors.Is(err, authz.ErrCheckFailed), errors.Is(err, jobs.ErrNotSystem):
+		id := s.newCorrelationID()
+		s.log.LogAttrs(r.Context(), slog.LevelError, "api: job check failed",
+			slog.String("correlation_id", id), slog.String("route", r.Pattern),
+			slog.String("kind", kind), slog.String("err", err.Error()))
+		writeCodedBody(w, http.StatusInternalServerError, codeJobCheckFailed,
+			"The job couldn't be checked, so it wasn't started.", id)
+		return true
+	}
+	return false
 }
 
 func atoiOr(s string, def int) int {

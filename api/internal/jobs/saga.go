@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 	"github.com/nats-io/nats.go"
@@ -29,9 +30,10 @@ type StepCtx struct {
 	// have a nil map.
 	PriorResults map[string]json.RawMessage
 	// CreatedBy is the job's submitter as the server recorded it: the
-	// operator's user name for a job an endpoint submitted on their session,
-	// or the subsystem's name for an internal one. A step that acts on the
-	// operator's behalf names them with it (geekdojo/geekdojo-brain#783).
+	// account id for a job an endpoint submitted on a person's session, or
+	// the subsystem's name for an internal one. A step that acts on the
+	// person's behalf records them by it (geekdojo/geekdojo-brain#783,
+	// #1001).
 	CreatedBy string
 	// Log appends a log line both to the persistent job_events table and to
 	// the live NATS event stream so the UI sees it in real time.
@@ -150,8 +152,12 @@ func ValidateWorkflow(w Workflow) error {
 // Runner is the saga executor. One Runner per api process; workflows are
 // registered at startup and looked up at Submit time.
 type Runner struct {
-	store     *Store
-	nc        *nats.Conn
+	store *Store
+	nc    *nats.Conn
+	// az decides every submission by kind before anything exists. nil is
+	// the system-only runner NewRunner builds: it runs the system's
+	// submissions and refuses everyone else's with ErrNotSystem.
+	az        Authorizer
 	mu        sync.RWMutex
 	workflows map[string]Workflow
 	wg        sync.WaitGroup
@@ -185,7 +191,21 @@ const (
 // retry N. Exported so callers / tests can wrap it.
 func DefaultBackoff(attempt int) time.Duration { return time.Duration(attempt) * time.Second }
 
-// NewRunner constructs a Runner bound to a Store and NATS connection.
+// Authorizer decides whether by may submit a job of kind with spec, the
+// bytes the job will record: nil, a refusal, or an error when the check
+// cannot finish. *authz.KindPolicy implements it.
+type Authorizer interface {
+	Authorize(ctx context.Context, kind string, spec []byte, by authz.Submitter) error
+}
+
+// ErrNotSystem is a system-only runner's refusal of a submitter that is not
+// the system: a runner built without an Authorizer cannot decide a person's
+// submission, so it refuses it (ERR-CLOSED).
+var ErrNotSystem = errors.New("jobs: this runner runs only the system's jobs")
+
+// NewRunner constructs the system-only Runner bound to a Store and NATS
+// connection: it runs every system submission and refuses every other
+// submitter with ErrNotSystem. The api's runner is NewAuthorizedRunner's.
 func NewRunner(store *Store, nc *nats.Conn) *Runner {
 	return &Runner{
 		store:     store,
@@ -193,6 +213,18 @@ func NewRunner(store *Store, nc *nats.Conn) *Runner {
 		workflows: make(map[string]Workflow),
 		backoff:   DefaultBackoff,
 	}
+}
+
+// NewAuthorizedRunner is NewRunner with az deciding every submission, the
+// system's included, before a job id, a prepare call, a row or a step
+// exists. It refuses a nil az.
+func NewAuthorizedRunner(store *Store, nc *nats.Conn, az Authorizer) (*Runner, error) {
+	if az == nil {
+		return nil, errors.New("jobs: NewAuthorizedRunner: the authorizer is nil")
+	}
+	r := NewRunner(store, nc)
+	r.az = az
+	return r, nil
 }
 
 // SetBackoff overrides the retry-delay function. Intended for tests that
@@ -248,8 +280,19 @@ var ErrSecretInSpec = errors.New("jobs: a job spec cannot carry a secret.Value")
 // specless kind. A pre-marshalled json.RawMessage, *json.RawMessage or []byte
 // is refused with ErrRawSpec, and a spec whose type can carry a secret.Value
 // with ErrSecretInSpec, both before anything is persisted (see encodeSpec).
+//
+// It is the system path: the job is the subsystem createdBy's. A job a
+// person asked for goes through SubmitFor.
 func (r *Runner) Submit(ctx context.Context, kind string, spec any, createdBy string) (*Job, error) {
-	return r.submit(ctx, kind, spec, createdBy, "", nil)
+	return r.submit(ctx, authz.SystemSubmitter(createdBy), kind, spec, "", nil)
+}
+
+// SubmitFor is SubmitPrepared for the submitter by, who the runner's
+// Authorizer decides on before anything exists. prepare may be nil. It is
+// the person path: an endpoint passes the request's submitter, never one it
+// built (specargs_test.go pins this).
+func (r *Runner) SubmitFor(ctx context.Context, by authz.Submitter, kind string, spec any, prepare func(jobID string) error) (*Job, error) {
+	return r.submit(ctx, by, kind, spec, "", prepare)
 }
 
 // SubmitPrepared is Submit with a prepare callback that runs with the job's id
@@ -267,7 +310,7 @@ func (r *Runner) Submit(ctx context.Context, kind string, spec any, createdBy st
 // OnTerminal hook will not fire for it: whatever prepare stored is the caller's
 // to discard.
 func (r *Runner) SubmitPrepared(ctx context.Context, kind string, spec any, createdBy string, prepare func(jobID string) error) (*Job, error) {
-	return r.submit(ctx, kind, spec, createdBy, "", prepare)
+	return r.submit(ctx, authz.SystemSubmitter(createdBy), kind, spec, "", prepare)
 }
 
 // SubmitChild creates a new Job whose parent_id is set to parentID. The
@@ -278,7 +321,7 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, created
 	if parentID == "" {
 		return nil, errors.New("SubmitChild requires a parentID; call Submit for a root job")
 	}
-	return r.submit(ctx, kind, spec, createdBy, parentID, nil)
+	return r.submit(ctx, authz.SystemSubmitter(createdBy), kind, spec, parentID, nil)
 }
 
 // SubmitRawSpec is Submit for a spec that is raw JSON by nature: the body of
@@ -288,44 +331,64 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, created
 // It is the only way a pre-marshalled spec reaches the ledger. Every other
 // caller passes its typed spec to Submit, which refuses raw bytes with
 // ErrRawSpec, so a secret cannot be marshalled past the secret.Value refusal.
-// Its callers are pinned to Runner.SubmitOperatorSpec (the operator's
-// POST /api/jobs, which refuses a System kind first) and Scheduler.fire by a
-// type-checked test (specargs_test.go).
+// It submits as the system, so its only caller is Scheduler.fire, pinned by a
+// type-checked test (specargs_test.go); a person's POST /api/jobs goes through
+// Runner.SubmitOperatorSpec, which creates the row itself as that person.
 func (r *Runner) SubmitRawSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
 	if len(spec) == 0 {
 		spec = json.RawMessage("{}")
 	}
-	return r.create(ctx, kind, spec, createdBy, "", nil)
+	return r.create(ctx, authz.SystemSubmitter(createdBy), kind, spec, "", nil)
 }
 
 // ErrSystemKind is SubmitOperatorSpec's refusal of a kind whose Workflow is
 // System.
 var ErrSystemKind = errors.New("jobs: this kind runs only when the system starts it")
 
-// SubmitOperatorSpec is SubmitRawSpec for a job an operator asked for: the
-// body of POST /api/jobs. The runner owns the kinds, so it decides here, in
-// one call, whether an operator may start this one: a System kind is refused
-// with ErrSystemKind before any job row exists (SEC-AUTHZ). Every other kind
-// takes SubmitRawSpec's path unchanged. Its one caller is pinned to
-// Server.handleCreateJob (specargs_test.go).
-func (r *Runner) SubmitOperatorSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
+// SubmitOperatorSpec is SubmitRawSpec for a job a person asked for: the
+// body of POST /api/jobs, submitted by by. The runner owns the kinds, so it
+// decides here whether by may start this one: a System kind is refused with
+// ErrSystemKind before any job row exists, and every other kind is decided
+// by the runner's Authorizer (SEC-AUTHZ). An empty spec is "{}". Its one
+// caller is pinned to Server.handleCreateJob (specargs_test.go).
+func (r *Runner) SubmitOperatorSpec(ctx context.Context, kind string, spec json.RawMessage, by authz.Submitter) (*Job, error) {
 	if wf, ok := r.workflowFor(kind); ok && wf.System {
 		return nil, fmt.Errorf("%w: job kind %q", ErrSystemKind, kind)
 	}
-	return r.SubmitRawSpec(ctx, kind, spec, createdBy)
+	if len(spec) == 0 {
+		spec = json.RawMessage("{}")
+	}
+	return r.create(ctx, by, kind, spec, "", nil)
 }
 
-func (r *Runner) submit(ctx context.Context, kind string, spec any, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
+func (r *Runner) submit(ctx context.Context, by authz.Submitter, kind string, spec any, parentID string, prepare func(jobID string) error) (*Job, error) {
 	raw, err := encodeSpec(kind, spec)
 	if err != nil {
 		return nil, err
 	}
-	return r.create(ctx, kind, raw, createdBy, parentID, prepare)
+	return r.create(ctx, by, kind, raw, parentID, prepare)
 }
 
-// create records a job with its encoded spec and starts it: the path that
-// submit and SubmitRawSpec share once the spec is bytes.
-func (r *Runner) create(ctx context.Context, kind string, raw json.RawMessage, createdBy, parentID string, prepare func(jobID string) error) (*Job, error) {
+// authorize decides by's submission of kind with raw: the Authorizer when
+// the runner has one, else the system alone.
+func (r *Runner) authorize(ctx context.Context, by authz.Submitter, kind string, raw json.RawMessage) error {
+	if r.az == nil {
+		if by.IsSystem() {
+			return nil
+		}
+		return fmt.Errorf("%w: job kind %q", ErrNotSystem, kind)
+	}
+	return r.az.Authorize(ctx, kind, raw, by)
+}
+
+// create authorizes, then records a job with its encoded spec and starts it:
+// the path that submit, SubmitRawSpec and SubmitOperatorSpec share once the
+// spec is bytes. A refusal returns before the id is minted, so no prepare
+// call, row, step or event exists for it.
+func (r *Runner) create(ctx context.Context, by authz.Submitter, kind string, raw json.RawMessage, parentID string, prepare func(jobID string) error) (*Job, error) {
+	if err := r.authorize(ctx, by, kind, raw); err != nil {
+		return nil, err
+	}
 	r.mu.RLock()
 	wf, ok := r.workflows[kind]
 	r.mu.RUnlock()
@@ -337,7 +400,7 @@ func (r *Runner) create(ctx context.Context, kind string, raw json.RawMessage, c
 		Kind:      kind,
 		Spec:      raw,
 		Status:    StatusQueued,
-		CreatedBy: createdBy,
+		CreatedBy: by.CreatedBy(),
 		CreatedAt: time.Now().UTC(),
 	}
 	if parentID != "" {

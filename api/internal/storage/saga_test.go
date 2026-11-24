@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -743,7 +744,7 @@ func TestClaimSaga_RefusesAHalfSuppliedArchiveKey(t *testing.T) {
 	})
 	spec := baseSpec()
 	_, err := SubmitClaim(context.Background(), h.runner, h.store, spec,
-		&ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("only-one")}, "test")
+		&ArchiveKey{KeyID: "k", WrappedByPassphrase: wrapping("only-one")}, authz.SystemSubmitter("test"))
 	if err == nil || !strings.Contains(err.Error(), "wrappedByRecoveryCode") {
 		t.Fatalf("SubmitClaim error = %v, want it to name what is missing", err)
 	}
@@ -958,7 +959,7 @@ func TestSubmitClaim_DiscardsTheStagedKeyWhenTheJobIsNotRecorded(t *testing.T) {
 	_ = h.jobStore.Close() // CreateJob fails; the prepare callback has already run
 	spec := baseSpec()
 	key := &ArchiveKey{KeyID: "k", PublicKey: markerPublicKey, WrappedByPassphrase: wrapping("a"), WrappedByRecoveryCode: wrapping("b")}
-	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, key, "test"); err == nil {
+	if _, err := SubmitClaim(ctx, h.runner, h.store, spec, key, authz.SystemSubmitter("test")); err == nil {
 		t.Fatal("want the submit to fail with the job store closed")
 	}
 	if left, err := h.store.StagedClaimKeyJobs(ctx); err != nil || len(left) != 0 {

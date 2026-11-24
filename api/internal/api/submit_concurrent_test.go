@@ -17,7 +17,7 @@ func TestConcurrentSubmits_NoQuiesce(t *testing.T) {
 	f := newAPIFixture(t)
 	c := f.authenticate(t)
 	noop := []jobs.WorkflowStep{{Name: "noop", Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil }}}
-	f.runner.Register(jobs.Workflow{Kind: "probe", Steps: noop})
+	f.runner.Register(jobs.Workflow{Kind: "diag.ping", Steps: noop})
 
 	const n = 16
 	type result struct {
@@ -30,7 +30,7 @@ func TestConcurrentSubmits_NoQuiesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"probe","spec":{}}`, c)
+			w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"diag.ping","spec":{}}`, c)
 			results <- result{w.Code, w.Header().Get("Retry-After")}
 		}()
 	}

@@ -566,9 +566,9 @@ func (s *Server) handleDeleteMeshRoute(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/mesh/apply
 func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "mesh.apply", nil, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "mesh.apply", nil, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "mesh.apply", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -576,9 +576,9 @@ func (s *Server) handleMeshApply(w http.ResponseWriter, r *http.Request) {
 
 // POST /api/mesh/reconcile
 func (s *Server) handleMeshReconcile(w http.ResponseWriter, r *http.Request) {
-	j, err := s.runner.Submit(r.Context(), "mesh.reconcile", nil, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "mesh.reconcile", nil, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "mesh.reconcile", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -619,9 +619,9 @@ func (s *Server) handleMeshEnrollNode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "node not found")
 		return
 	}
-	j, err := s.runner.Submit(r.Context(), "mesh.enroll_node", mesh.EnrollSpec{NodeID: nodeID, AdvertiseRoutes: req.AdvertiseRoutes}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "mesh.enroll_node", mesh.EnrollSpec{NodeID: nodeID, AdvertiseRoutes: req.AdvertiseRoutes}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "mesh.enroll_node", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

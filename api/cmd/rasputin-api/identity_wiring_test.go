@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/recoveradmin"
@@ -267,7 +268,7 @@ func TestWireIdentity_KeycloakAndLeafReload(t *testing.T) {
 	}
 	r := jobs.NewRunner(openJobStore(t), nil)
 	w.register(r)
-	if _, err := r.SubmitOperatorSpec(t.Context(), recoveradmin.Kind, nil, "operator"); !errors.Is(err, jobs.ErrSystemKind) {
+	if _, err := r.SubmitOperatorSpec(t.Context(), recoveradmin.Kind, nil, authz.Person(authz.Subject{Sub: "s-admin", Roles: []string{"admin"}})); !errors.Is(err, jobs.ErrSystemKind) {
 		t.Errorf("an operator submit of %s = %v, want ErrSystemKind (registered as a system job)", recoveradmin.Kind, err)
 	}
 
@@ -345,11 +346,18 @@ func TestWireIdentity_UpgradeFromThePreviousRelease(t *testing.T) {
 		t.Errorf("sweep after the upgrade failed %v:\n%s", rep.Failed, rec.Text())
 	}
 
-	r := jobs.NewRunner(openJobStore(t), nil)
+	policy, err := authz.NewKindPolicy(noAppReader{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := jobs.NewAuthorizedRunner(openJobStore(t), nil, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	r.Register(jobs.Workflow{Kind: "diag.ping", Steps: []jobs.WorkflowStep{{Name: "noop",
 		Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil }}}})
 	w.register(r)
-	if j, err := r.SubmitOperatorSpec(t.Context(), "diag.ping", nil, "operator"); err != nil || j == nil {
+	if j, err := r.SubmitOperatorSpec(t.Context(), "diag.ping", nil, authz.Person(authz.Subject{Sub: "s-admin", Roles: []string{"admin"}})); err != nil || j == nil {
 		t.Errorf("an operator job of an existing kind = %v, %v; want it created", j, err)
 	}
 	r.Wait()
@@ -683,4 +691,11 @@ func TestStartEvents_NoDoorsNoThrottle(t *testing.T) {
 	if st.events.throttle.Load() != nil || st.events.drainer.Load() == nil {
 		t.Error("with no door table: a throttle was built, or no drainer")
 	}
+}
+
+// noAppReader is an authz.AppReader that knows no app.
+type noAppReader struct{}
+
+func (noAppReader) AppFacts(context.Context, string, string) (authz.AppFacts, error) {
+	return authz.AppFacts{}, authz.ErrNoApp
 }

@@ -146,9 +146,9 @@ func (s *Server) handleStartBackupRun(w http.ResponseWriter, r *http.Request) {
 			"a backup is already running (job "+running[0].JobID+"). Only one runs at a time — two archives staged at once is how a backup fills the disk it is protecting")
 		return
 	}
-	j, err := s.runner.Submit(r.Context(), storage.RunJobKind, storage.RunSpec{Reason: storage.ReasonManual}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), storage.RunJobKind, storage.RunSpec{Reason: storage.ReasonManual}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, storage.RunJobKind, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, j)

@@ -182,9 +182,9 @@ func (s *Server) handleBMCSetConfig(w http.ResponseWriter, r *http.Request) {
 		Config:     req.Config,
 		ConfigHash: s.bmc.ConfigHash(req.Kind, req.Config, cred),
 	}
-	j, err := s.runner.Submit(r.Context(), "bmc.configure", spec, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "bmc.configure", spec, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "bmc.configure", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -381,9 +381,9 @@ func (s *Server) handleBMCPower(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "unsupported verb")
 		return
 	}
-	j, err := s.runner.Submit(r.Context(), "bmc.power", bmc.Spec{TargetNodeID: nodeID, Verb: verb}, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "bmc.power", bmc.Spec{TargetNodeID: nodeID, Verb: verb}, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "bmc.power", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

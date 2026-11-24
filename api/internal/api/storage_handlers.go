@@ -329,9 +329,9 @@ func (s *Server) handleClaimBackupTarget(w http.ResponseWriter, r *http.Request)
 	}
 	// The archive key is staged with the job and the spec refers to it by id,
 	// so the wrapped key never enters the job ledger.
-	j, err := storage.SubmitClaim(r.Context(), s.runner, s.backup, spec, key, creator(r))
+	j, err := storage.SubmitClaim(r.Context(), s.runner, s.backup, spec, key, submitter(r))
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, storage.ClaimJobKind, http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, j)

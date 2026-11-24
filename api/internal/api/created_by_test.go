@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,8 +53,8 @@ func jobCreatedBy(t *testing.T, f *apiFixture, body string) string {
 	return got.CreatedBy
 }
 
-// TC-783-17: DELETE /api/apps/{id} records the session's user as the job's
-// creator, not the "user" placeholder.
+// TC-783-17, TC-1001-14: DELETE /api/apps/{id} records the session's account
+// id as the job's creator, never the name.
 func TestDeleteApp_TC783_17_RecordsTheOperator(t *testing.T) {
 	f, cookie, _ := volumesFixture(t)
 	seedVolumesApp(t, f, volULIDLive, "immich")
@@ -62,25 +63,29 @@ func TestDeleteApp_TC783_17_RecordsTheOperator(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("delete: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
-	if got := jobCreatedBy(t, f, w.Body.String()); got != "alice" {
-		t.Errorf("app.delete created_by = %q, want alice", got)
+	if got := jobCreatedBy(t, f, w.Body.String()); got != "sub-alice" {
+		t.Errorf("app.delete created_by = %q, want the sub sub-alice", got)
 	}
 	f.runner.Wait()
 }
 
-// F-783-03: POST /api/jobs records the session's user as the job's creator.
+// F-783-03, TC-1001-14: POST /api/jobs records the session's account id as
+// the job's creator, never the preferred_username.
 func TestCreateJob_F783_03_RecordsTheOperator(t *testing.T) {
 	f := newAPIFixture(t)
 	cookie := f.authenticate(t)
-	f.runner.Register(jobs.Workflow{Kind: "test.createdby", Steps: []jobs.WorkflowStep{{
+	f.runner.Register(jobs.Workflow{Kind: "diag.ping", Steps: []jobs.WorkflowStep{{
 		Name: "a", Timeout: time.Second, Do: func(*jobs.StepCtx) (json.RawMessage, error) { return nil, nil },
 	}}})
-	w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"test.createdby","spec":{}}`, cookie)
+	w := f.do(t, http.MethodPost, "/api/jobs", `{"kind":"diag.ping","spec":{}}`, cookie)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("POST /api/jobs: want 201, got %d (%s)", w.Code, w.Body.String())
 	}
-	if got := jobCreatedBy(t, f, w.Body.String()); got != "alice" {
-		t.Errorf("created_by = %q, want alice", got)
+	if got := jobCreatedBy(t, f, w.Body.String()); got != "sub-alice" {
+		t.Errorf("created_by = %q, want the sub sub-alice", got)
+	}
+	if strings.Contains(w.Body.String(), `"alice"`) {
+		t.Errorf("the response names the person: %s", w.Body.String())
 	}
 	f.runner.Wait()
 }

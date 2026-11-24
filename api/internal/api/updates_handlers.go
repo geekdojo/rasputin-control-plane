@@ -159,7 +159,7 @@ func (s *Server) handleUploadBundle(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, msg)
 				return
 			}
-			bundle, err = s.ingestSignedArtifact(r.Context(), part, creator(r), sigDER, meta)
+			bundle, err = s.ingestSignedArtifact(r.Context(), part, subOf(r), sigDER, meta)
 			_ = part.Close()
 			if err != nil {
 				writeError(w, ingestStatus(err), err.Error())
@@ -608,9 +608,9 @@ func (s *Server) handleCreateSystemUpdate(w http.ResponseWriter, r *http.Request
 	// two overrides for one tier — need the plan and are enforced there, where
 	// the failure is a job that never touches a node rather than a 400 that
 	// duplicates the planner's knowledge of the fleet.
-	j, err := s.runner.Submit(r.Context(), "system.update", req, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "system.update", req, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "system.update", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)
@@ -695,9 +695,9 @@ func (s *Server) handleCreateUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	j, err := s.runner.Submit(r.Context(), "node.update", req, creator(r))
+	j, err := s.runner.SubmitFor(r.Context(), submitter(r), "node.update", req, nil)
 	if err != nil {
-		writeSubmitError(w, http.StatusBadRequest, err)
+		s.writeSubmitError(w, r, "node.update", http.StatusBadRequest, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, j)

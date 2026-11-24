@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -441,8 +440,9 @@ func (s *Server) handleReclaimOrphanVolumes(w http.ResponseWriter, r *http.Reque
 	}
 	// Destroying data is worth a line in the api log with who asked for it,
 	// whatever the outcome.
-	log.Printf("apps: %s reclaimed orphan volumes on %s: removed=%v refused=%d ok=%v",
-		creator(r), node.ID, ack.Removed, len(ack.Refused), ack.OK)
+	s.log.InfoContext(r.Context(), "apps: orphan volumes reclaimed",
+		"sub", subOf(r), "node_id", node.ID, "removed", ack.Removed,
+		"refused", len(ack.Refused), "ok", ack.OK)
 	writeJSON(w, http.StatusOK, reclaimResponse{
 		NodeID: node.ID, OK: ack.OK, Detail: ack.Detail, Removed: ack.Removed, Refused: ack.Refused,
 	})

@@ -458,13 +458,16 @@ func TestTrigger_StillRefusedAlert(t *testing.T) {
 }
 
 // TC-1127-14: nothing but the job, its trigger and the trigger's wiring names
-// the kind, so no other code path can submit it.
+// the kind, so no other code path can submit it. The job kind table
+// (authz/kinds.go, geekdojo/geekdojo-brain#1001) names it too, as the rule
+// that refuses it to every submitter but the system; it submits nothing.
 func TestKind_NamedOnlyByTheJobAndItsTrigger(t *testing.T) {
 	root := filepath.Join("..", "..", "..")
 	if _, err := os.Stat(filepath.Join(root, "cmd", "rasputin-api", "main.go")); err != nil {
 		t.Fatalf("%s is not the api module root: %v", root, err)
 	}
 	allowed := []string{"recoveradmin.go", "trigger.go", "recoveradmin_trigger_wiring.go"}
+	kindTable := filepath.Join(root, "internal", "authz", "kinds.go")
 	var scanned int
 	var found []string
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -482,7 +485,7 @@ func TestKind_NamedOnlyByTheJobAndItsTrigger(t *testing.T) {
 		s := string(b)
 		if strings.Contains(s, "recoveradmin.Kind") || strings.Contains(s, `"identity.recover_admin"`) {
 			found = append(found, path)
-			if !slices.Contains(allowed, filepath.Base(path)) {
+			if !slices.Contains(allowed, filepath.Base(path)) && path != kindTable {
 				t.Errorf("%s names identity.recover_admin's kind", path)
 			}
 		}
