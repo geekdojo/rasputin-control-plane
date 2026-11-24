@@ -32,6 +32,16 @@ package identitytest
 //     (2026-11-12). Chrome for Testing publishes no checksum and no signature,
 //     so the hash proves only that every later download is the bytes first
 //     pinned; Google's stored MD5 for the object matched that download.
+//   - The password deny list (geekdojo/geekdojo-brain#1145) is SecLists'
+//     Pwdb_top-10000000.txt at DenylistRelease's commit, whose data is
+//     ignis-sec/Pwdb-Public's breach compilation (DenylistOriginRelease, the
+//     repository's last commit). Neither publishes a signature or a
+//     checksum, so DenylistSourceSHA256 and the two LICENSE hashes are the
+//     sha256 of the files raw.githubusercontent.com served for those
+//     commits on 2026-11-23, and prove only that every later download is
+//     those bytes. scripts/fetch-denylist.sh downloads them, cuts the list
+//     to the realm's minimum length, and the release ships the cut and both
+//     MIT notices.
 //
 // A bump changes a release and its hash together and re-runs the same
 // verification for the new release (docs/testing-identity.md).
@@ -47,4 +57,11 @@ const (
 
 	ChromeForTestingRelease = "googlechromelabs/chrome-for-testing:157.0.8103.78"
 	ChromeLinux64SHA256     = "9223832977a13db3646201b1341c1f9cf08afa3ceae92540116d7b0c062364fb"
+
+	DenylistRelease             = "danielmiessler/SecLists:12274c98fdebe98c7a7284914436a472ed469aed"
+	DenylistSourcePath          = "Passwords/Common-Credentials/Pwdb_top-10000000.txt"
+	DenylistSourceSHA256        = "18dc49ca32b62455a61e3398f4ab9f93eb700ff142fa0d4b9fd11a727f3b80e4"
+	DenylistLicenceSHA256       = "3dbdc93d5f8829de0941744841730a09c106d0732e5ae0e98ca1d77be7ded66c"
+	DenylistOriginRelease       = "ignis-sec/Pwdb-Public:9b53917431ed5cd57cd6cbec8c3a19cf9a5cd8dd"
+	DenylistOriginLicenceSHA256 = "4088d581cba171b1aa6f880ad3fb5327e2d6de415621cf8b80685ac506c0cae1"
 )

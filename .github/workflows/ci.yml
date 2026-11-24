@@ -12,6 +12,8 @@ name: ci
 #              runs to pack the secrets store's policy text, and for
 #              scripts/pack-identity.sh, which packs identity/ and checks the
 #              realm baseline against its drift lock, and for
+#              scripts/fetch-denylist.sh, which fetches the pinned password
+#              deny list the pack carries, and for
 #              scripts/tileschema-contract.sh, which this file's backend job
 #              and tileschema-tag.yml run.
 #
@@ -150,6 +152,16 @@ jobs:
       # in scripts/lib/release-lib.sh (geekdojo/geekdojo-brain#980).
       - name: identity packing tests
         run: ./scripts/test-pack-identity.sh
+      # scripts/fetch-denylist.sh, which build-release.sh and
+      # install-identity.sh run to fetch the pinned password deny list, and
+      # the pinned download it shares with the installers (fetch_pinned in
+      # scripts/lib/release-lib.sh): a source or notice off its pin refused,
+      # kept downloads reused and a bad one left in place, the cut at the
+      # realm's length(N) into the realm's DenylistFile, each refusal writing
+      # nothing; and git keeping no list by hand (geekdojo/geekdojo-brain#1145).
+      # A curl stub serves the fixtures; no network.
+      - name: deny list fetch tests
+        run: ./scripts/test-fetch-denylist.sh
       # scripts/tileschema-contract.sh: the contract version, the CI gate on
       # it, and the tagger tileschema-tag.yml runs (geekdojo/geekdojo-brain#897).
       - name: tileschema contract script tests

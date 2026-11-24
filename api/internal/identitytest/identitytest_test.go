@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -89,7 +90,7 @@ func writeExec(t *testing.T, path, body string) {
 }
 
 // installed lays out a fake install: keycloak/bin/kc.sh running kcBody,
-// jre/bin/java, a docker CLI and chrome-linux64/chrome.
+// jre/bin/java, a docker CLI, chrome-linux64/chrome and a deny list.
 func installed(t *testing.T, kcBody string) (Config, *fakeRunner) {
 	t.Helper()
 	home := t.TempDir()
@@ -100,11 +101,18 @@ func installed(t *testing.T, kcBody string) (Config, *fakeRunner) {
 	writeExec(t, filepath.Join(home, "jre", "bin", "java"), "exit 0\n")
 	writeExec(t, filepath.Join(home, "bin", "docker"), "exit 0\n")
 	writeExec(t, filepath.Join(home, "chrome-linux64", "chrome"), "exit 0\n")
+	if err := os.MkdirAll(filepath.Join(home, "password-blacklists"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "password-blacklists", flows.DenylistFile), []byte("correcthorsebatterystaple\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	r := goodRunner()
 	return Config{
 		KeycloakHome: filepath.Join(home, "keycloak"),
 		JavaHome:     filepath.Join(home, "jre"),
 		ChromePath:   filepath.Join(home, "chrome-linux64", "chrome"),
+		DenylistDir:  filepath.Join(home, "password-blacklists"),
 		DockerBin:    filepath.Join(home, "bin", "docker"),
 		TempParent:   t.TempDir(),
 		Logger:       slog.New(slog.DiscardHandler),
@@ -292,6 +300,7 @@ func TestNew_RefusesIncompleteConfig(t *testing.T) {
 		"Rand":         func(c *Config) { c.Rand = nil },
 		"Run":          func(c *Config) { c.Run = nil },
 		"Procs":        func(c *Config) { c.Procs = nil },
+		"DenylistDir":  func(c *Config) { c.DenylistDir = "" },
 	}
 	for field, clear := range fields {
 		cfg, r := installed(t, "exit 0\n")
@@ -834,4 +843,74 @@ func TestThemeDir_DependencyHandling(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TC-1145-21: an identity home without a usable deny list is refused by New,
+// naming the list, and through Package.Env it fails the caller with or
+// without the switch, never skipping: the realm's password policy names the
+// list, so converge cannot apply it without one. With the list, the Env's
+// Keycloak home holds a byte-equal copy at data/password-blacklists/, 0600
+// in a 0700 directory.
+func TestDenylist_MissingListFailsAndIsStaged(t *testing.T) {
+	for name, breakIt := range map[string]func(t *testing.T, dir string){
+		"no list":      func(t *testing.T, dir string) { _ = os.Remove(filepath.Join(dir, flows.DenylistFile)) },
+		"no directory": func(t *testing.T, dir string) { _ = os.RemoveAll(dir) },
+		"an empty list": func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, flows.DenylistFile), nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"a directory in its place": func(t *testing.T, dir string) {
+			p := filepath.Join(dir, flows.DenylistFile)
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(p, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg, r := installed(t, "exit 0\n")
+			breakIt(t, cfg.DenylistDir)
+			list := filepath.Join(cfg.DenylistDir, flows.DenylistFile)
+			if h, err := New(cfg); h != nil || err == nil || !strings.Contains(err.Error(), list) {
+				t.Fatalf("New = %v, %v; want an error naming %s", h, err, list)
+			}
+			if r.count() != 0 {
+				t.Errorf("New called the runner: %v", r.calls)
+			}
+			for _, sw := range []string{functest.Required, ""} {
+				t.Setenv(SwitchEnv, sw)
+				p := NewPackage(func() (Config, error) { return cfg, nil })
+				tb := &recTB{ctx: t.Context()}
+				if p.Env(tb) != nil || len(tb.fatals) != 1 || len(tb.skips) != 0 || !strings.Contains(tb.fatals[0], "password deny list") {
+					t.Errorf("switch=%q: fatals %q skips %q; want one failure naming the deny list", sw, tb.fatals, tb.skips)
+				}
+			}
+			assertEmpty(t, cfg.TempParent)
+		})
+	}
+	t.Run("staged into the Keycloak home", func(t *testing.T) {
+		cfg, _ := installed(t, "exit 0\n")
+		h, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e := &Env{h: h, root: t.TempDir()}
+		home, err := e.makeKeycloakHome()
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := os.ReadFile(filepath.Join(cfg.DenylistDir, flows.DenylistFile))
+		got, err := os.ReadFile(denylistPath(home))
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatalf("the staged list = %q, %v; want %q", got, err, want)
+		}
+		for path, mode := range map[string]os.FileMode{filepath.Dir(denylistPath(home)): 0o700, denylistPath(home): 0o600} {
+			if info, err := os.Lstat(path); err != nil || info.Mode().Perm() != mode {
+				t.Errorf("%s: %v, %v; want mode %o", path, info, err, mode)
+			}
+		}
+	})
 }

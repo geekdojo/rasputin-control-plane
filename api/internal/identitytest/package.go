@@ -207,7 +207,8 @@ func (p *Package) Run(m M) int {
 
 // ConfigFromEnv is the identity tests' composition root: the only place the
 // environment is read. It reads HomeEnv (layout keycloak/, jre/,
-// chrome-linux64/chrome) and ThemeEnv, and builds the logger (text to
+// chrome-linux64/chrome, password-blacklists/) and ThemeEnv, and builds the
+// logger (text to
 // stderr, at the level -test.v would want: INFO), the clock, crypto/rand,
 // execrun's runner and the /proc scan. An unset HomeEnv is a missing
 // dependency.
@@ -224,6 +225,7 @@ func ConfigFromEnv() (Config, error) {
 		KeycloakHome: filepath.Join(home, "keycloak"),
 		JavaHome:     filepath.Join(home, "jre"),
 		ChromePath:   filepath.Join(home, "chrome-linux64", "chrome"),
+		DenylistDir:  filepath.Join(home, "password-blacklists"),
 		DockerBin:    docker,
 		TempParent:   os.TempDir(), // each Env makes, and removes, its own root here
 		Logger:       slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo})),

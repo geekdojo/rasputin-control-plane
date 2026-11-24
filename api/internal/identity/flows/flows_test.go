@@ -231,6 +231,8 @@ func TestFlow_ConfigAliasesUnique(t *testing.T) {
 // TC-987-25: the realm rules: each lifetime equals its constant, the
 // credential actions' max_auth_age the 5-minute one, and the brute-force,
 // password, remember-me, offline, WebAuthn and browser-flow fields.
+// TC-1145-08: the password policy names the deny list, exactly, and the
+// golden file differs from #987's in that one field only.
 func TestRealmRules(t *testing.T) {
 	in := Inputs{InstallName: "Home"}
 	r := RealmRules(in)
@@ -240,7 +242,7 @@ func TestRealmRules(t *testing.T) {
 		"accessCodeLifespanLogin": 1800, "accessCodeLifespanUserAction": 1800, "accessCodeLifespan": 60, "accessTokenLifespan": 300,
 		"rememberMe": false, "offlineSessionMaxLifespanEnabled": false,
 		"bruteForceProtected": true, "failureFactor": 100, "maxDeltaTimeSeconds": 43200, "quickLoginCheckMilliSeconds": 0,
-		"permanentLockout": false, "passwordPolicy": "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined)",
+		"permanentLockout": false, "passwordPolicy": "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined) and passwordBlacklist(rasputin-common-passwords.txt)",
 		"webAuthnPolicyUserVerificationRequirement": "required", "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
 		"webAuthnPolicyPasswordlessResidentKey": "required", "webAuthnPolicyPasswordlessPasskeysEnabled": true,
 		"webAuthnPolicyExtraOrigins": []string{}, "webAuthnPolicyPasswordlessExtraOrigins": []string{},

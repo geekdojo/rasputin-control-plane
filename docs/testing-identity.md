@@ -27,8 +27,8 @@ into `main` the self-test must run and pass. It cannot pass by skipping.
 
 ## The switch
 
-`RASPUTIN_IDENTITY_HOME` names the install directory: `keycloak/`, `jre/` and
-`chrome-linux64/chrome`, the layout `install-identity.sh` writes. `RASPUTIN_IDENTITY_FUNCTIONAL`
+`RASPUTIN_IDENTITY_HOME` names the install directory: `keycloak/`, `jre/`,
+`chrome-linux64/chrome` and `password-blacklists/`, the layout `install-identity.sh` writes. `RASPUTIN_IDENTITY_FUNCTIONAL`
 decides what happens when a dependency is missing. With everything present the tests always
 run.
 
@@ -319,6 +319,12 @@ so any change to it downloads afresh. A bump changes a release and its hash toge
   sha256 of that download. The pin then proves only that every later download is those bytes.
 - **Headscale** is not pinned here: the harness runs whatever `mesh-images.json` pins, through
   the product's supervisor.
+- **The password deny list** (geekdojo/geekdojo-brain#1145). SecLists and Pwdb-Public publish no
+  checksum and no signature. Download the file at `DenylistSourcePath` and both `LICENSE` files
+  from `raw.githubusercontent.com` at the new commits, read the licences, and pin the sha256 of
+  each download with the commit, in one change. Re-verify capability row T171 at the new commit
+  (valid UTF-8, LF only, one password per line) and run `scripts/test-fetch-denylist.sh` and the
+  sign-in rules. `scripts/fetch-denylist.sh` keeps the downloads in the CI cache with the rest.
 
 Then run the self-test as above.
 
@@ -366,6 +372,8 @@ Then run the self-test as above.
 | TC-1127-16 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-16 (CI) |
 | TC-1127-17 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-17 (CI) |
 | TC-1127-18 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-18 (CI) |
+| TC-1145-14 to TC-1145-20 | `TestSignInRules_AgainstPinnedKeycloak`, subtests TC-1145-14 to TC-1145-20 (CI) |
+| TC-1145-21 | `TestDenylist_MissingListFailsAndIsStaged` |
 
 ## Converge, migrations and the features check
 
@@ -591,6 +599,25 @@ What it proves at the pin (capability rows T130 to T136):
 - K-ACR, K-PROFILE and K-DEFAULT-ACTION (TC-987-21 to TC-987-23).
 - The upgrade path: a baseline realm with the previous release's stored hash converges with no
   critical alert and no ERROR, and a second run writes nothing (TC-987-17).
+
+The password deny list (geekdojo/geekdojo-brain#1145, TC-1145-14 to TC-1145-20, capability rows
+T170 and T171). `install-identity.sh` runs `scripts/fetch-denylist.sh`, which writes the pinned
+list, cut to the realm's `length(N)`, to `password-blacklists/`; each Env copies it into its own
+Keycloak `data/password-blacklists/`, as rasputin-os stages it on a node, and `identitytest.New`
+refuses a home without it (TC-1145-21). The test runs two cases before the rig's first converge,
+because Keycloak keeps a loaded list for the life of its process:
+
+- With the staged list hidden, a converger refuses with `errWrite` and one ERROR
+  `identity.converge.failed` naming `realm.passwordPolicy`; every realm field the rules own reads
+  back as before, no hash is stored, and an existing account still signs in. With the list back,
+  the rig's first converge applies the policy and stores the hash (TC-1145-14).
+- An account whose password is on the list, set before the policy, still signs in afterwards
+  (TC-1145-19).
+
+Then a listed password is refused with "That password is too common. Choose another." at account
+creation (TC-1145-15), at UPDATE_PASSWORD at each door (TC-1145-16), after an administrator's
+temporary password at each door (TC-1145-17), and by the Admin API reset with an ASCII and a
+non-ASCII entry (TC-1145-18); and a second converge changes nothing (TC-1145-20).
 
 What it does not prove:
 

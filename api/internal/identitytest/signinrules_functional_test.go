@@ -6,29 +6,41 @@ package identitytest
 // through both doors by the Go door client and, for the passkey cases, the
 // pinned Chrome's virtual authenticator.
 //
+// And the password deny list (geekdojo/geekdojo-brain#1145; TC-1145-14 to
+// TC-1145-20): a missing list refused by the realm PUT with nothing stored,
+// before the rig's first converge, then a listed password refused at every
+// path that sets one at this SHA.
+//
 // It starts an Env of its own, closed with proof in its cleanup. It skips
 // without RASPUTIN_IDENTITY_HOME or RASPUTIN_IDENTITY_THEME and fails instead
 // under RASPUTIN_IDENTITY_FUNCTIONAL=required, as CI's backend job sets it.
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
+	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 func TestSignInRules_AgainstPinnedKeycloak(t *testing.T) {
@@ -51,6 +63,15 @@ func TestSignInRules_AgainstPinnedKeycloak(t *testing.T) {
 	})
 	importBaseline(t, env)
 	r := newRulesRig(t, env)
+	// Before the rig's first converge: Keycloak caches a list it has loaded for
+	// the life of the process, so the missing-list case runs in a process that
+	// has never loaded it, and the upgrade case needs a password set before the
+	// policy applies. setUpRules is the restored list's converge.
+	t.Run("TC-1145-14 a missing list fails visibly and changes nothing", func(t *testing.T) { r.tc1145missing(t) })
+	// TC-1145-19's given, on this test's t so its password outlives a subtest.
+	listedBefore := r.tc1145given19(t)
+	r.setUpRules(t)
+	t.Run("TC-1145-14 the list restored: converge applies the policy", func(t *testing.T) { r.tc1145restored(t) })
 	r.browser = func(t *testing.T) context.Context {
 		ctx, _ := p.Browser(t)
 		return ctx
@@ -78,6 +99,12 @@ func TestSignInRules_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-987-15 the per-account backstop", func(t *testing.T) { r.tc15(t) })
 	t.Run("TC-987-16 a stricter client whose binding was removed is paused", func(t *testing.T) { r.tc16(t) })
 	t.Run("TC-987-18 the password policy, sessions and email", func(t *testing.T) { r.tc18(t) })
+	t.Run("TC-1145-15 account creation at the home door", func(t *testing.T) { r.tc1145registration(t) })
+	t.Run("TC-1145-16 a password change at each door", func(t *testing.T) { r.tc1145change(t) })
+	t.Run("TC-1145-17 an administrator's temporary password, then the change at each door", func(t *testing.T) { r.tc1145temporary(t) })
+	t.Run("TC-1145-18 the Admin API reset, ASCII and non-ASCII", func(t *testing.T) { r.tc1145reset(t) })
+	t.Run("TC-1145-19 a listed password set before the policy still signs in", func(t *testing.T) { r.tc1145upgrade(t, listedBefore) })
+	t.Run("TC-1145-20 converge is stable with the deny list", func(t *testing.T) { r.tc1145stable(t) })
 	t.Run("TC-987-19 the passkey relying-party name", func(t *testing.T) { r.tc19(t) })
 	t.Run("TC-987-21 K-ACR", func(t *testing.T) { r.tc21(t) })
 	t.Run("TC-987-22 K-PROFILE", func(t *testing.T) { r.tc22(t) })
@@ -923,8 +950,10 @@ func (r *rulesRig) tc18(t *testing.T) {
 		status, _, _ := r.admin(t).do(http.MethodPut, "/users/"+a.id+"/reset-password", map[string]any{"type": "password", "value": pw, "temporary": false})
 		return status
 	}
+	// "quokka-tangelo7" is 15 characters and not on the deny list (measured);
+	// y×15 is on it (F-1145-12), so it would test the list, not the length.
 	for pw, ok := range map[string]bool{
-		strings.Repeat("x", 14): false, strings.Repeat("y", 15): true, strings.Repeat("z", 129): false,
+		strings.Repeat("x", 14): false, "quokka-tangelo7": true, strings.Repeat("z", 129): false,
 		"tc18-policy" + strings.Repeat("-", 5): true, a.name + "-pad-pad": true,
 	} {
 		if got := set(pw) == http.StatusNoContent; got != ok {
@@ -1165,5 +1194,299 @@ func (r *rulesRig) tc23(t *testing.T) {
 	api.must(http.StatusNoContent, http.MethodPut, path, ra)
 	if !slices.Contains(actions, any(flows.ActionRecoveryCodes)) {
 		t.Errorf("requiredActions = %v, want %s", actions, flows.ActionRecoveryCodes)
+	}
+}
+
+// ---- the password deny list (geekdojo/geekdojo-brain#1145) -----------------
+
+// denylistSentence is the theme's invalidPasswordBlacklistedMessage.
+const denylistSentence = "That password is too common. Choose another."
+
+// errWriteSentence is converge's errWrite, the sentence a failed write
+// returns.
+const errWriteSentence = "A sign-in setting could not be written back to Rasputin's."
+
+// listed returns two entries of the staged list, the packed file: the first
+// lowercase ASCII letters-and-digits line of 15 to 128 bytes, and the first
+// non-ASCII line of 15 to 128 UTF-16 units that is valid UTF-8, lowercase,
+// unpadded and holds no replacement character, so neither the length rule
+// nor a case or whitespace rule can be what refuses it.
+func (r *rulesRig) listed(t *testing.T) (ascii, nonASCII secret.Value) {
+	t.Helper()
+	f, err := os.Open(denylistPath(r.env.kcHome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	var a, n string
+	sc := bufio.NewScanner(f)
+	for sc.Scan() && (a == "" || n == "") {
+		line := sc.Text()
+		units := len(utf16.Encode([]rune(line)))
+		ok := utf8.ValidString(line) && line == strings.ToLower(line) && line == strings.TrimSpace(line) &&
+			!strings.ContainsRune(line, utf8.RuneError) && units >= 15 && units <= 128
+		switch {
+		case !ok:
+		case a == "" && strings.Trim(line, "abcdefghijklmnopqrstuvwxyz0123456789") == "":
+			a = line
+		case n == "" && utf8.RuneCountInString(line) != len(line):
+			n = line
+		}
+	}
+	if err := sc.Err(); err != nil || a == "" || n == "" {
+		t.Fatalf("the staged list gave no usable ASCII or non-ASCII entry (%v)", err)
+	}
+	return secret.New([]byte(a)), secret.New([]byte(n))
+}
+
+// shows reports whether the page carries the sentence.
+func shows(a doorAnswer, sentence string) bool {
+	return strings.Contains(html.UnescapeString(string(a.body)), sentence)
+}
+
+// TC-1145-14 (T170): before any converge, in a Keycloak that has never
+// loaded the list, the staged list is hidden and a converger runs over the
+// rig's session with a recorder of its own. It returns errWrite and logs one
+// ERROR identity.converge.failed whose fields name realm.passwordPolicy; every
+// realm field the rules own reads back as before, no hash is stored, and an
+// existing account still signs in at the home door. The list is put back
+// before the case ends; the rig's own first converge is the restored run.
+func (r *rulesRig) tc1145missing(t *testing.T) {
+	staged := denylistPath(r.env.kcHome)
+	aside := staged + ".aside"
+	if err := os.Rename(staged, aside); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Rename(aside, staged); err != nil {
+			t.Fatalf("put the list back: %v", err)
+		}
+	}()
+	api := r.admin(t)
+	before := realmRep(t, api)
+	if before["passwordPolicy"] == flows.PasswordPolicy {
+		t.Fatal("given: the realm already holds the deny-list policy")
+	}
+	a := r.account(t, "tc1145-14-existing", nil)
+	// Given: the console's redirect URI as converge will set it. The imported
+	// baseline has none, so before the first converge the home door's
+	// authorization request is refused for its redirect, not for any reason
+	// this case is about.
+	id, console := api.clientRep(baselineConsole)
+	console["redirectUris"] = r.inputs().RedirectURIs[baselineConsole]
+	api.must(http.StatusNoContent, http.MethodPut, "/clients/"+id, console)
+	log, rec := logkittest.New()
+	settings := &memSettings{m: map[string]string{}}
+	conv, err := converge.New(converge.Deps{
+		Admin: r.session, Settings: settings, Realm: baselineRealm, Lock: r.lock,
+		Inputs: func(context.Context) (converge.Inputs, error) { return r.inputs(), nil },
+		Now:    time.Now, Ready: func(context.Context) error { return nil }, Log: log,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fields, err := conv.Run(t.Context()); err == nil || err.Error() != errWriteSentence {
+		t.Errorf("converge with the list missing = %v, %v; want errWrite %q", fields, err, errWriteSentence)
+	}
+	if errs := rec.AtLevel(slog.LevelError); len(errs) != 1 {
+		t.Errorf("%d ERROR records, want one:\n%s", len(errs), rec.Text())
+	} else {
+		ev, _ := logkittest.Attr(errs[0], "event")
+		fields, _ := logkittest.Attr(errs[0], "fields")
+		if ev != "identity.converge.failed" || !strings.Contains(fields, "realm.passwordPolicy") {
+			t.Errorf("the ERROR is event %q with fields %q; want identity.converge.failed naming realm.passwordPolicy", ev, fields)
+		}
+	}
+	after := realmRep(t, api)
+	for k := range flows.RealmRules(flows.Inputs{}) {
+		if !flows.SameJSON(before[k], after[k]) {
+			t.Errorf("the refused realm PUT stored %s: %v, then %v", k, before[k], after[k])
+		}
+	}
+	if got, _ := settings.Get(t.Context(), converge.HashKey); got != "" {
+		t.Errorf("a failed converge stored the hash %q", got)
+	}
+	r.fresh(t).signIn(r.homeConsole(), a.name, a.pw).code(t)
+}
+
+// TC-1145-14, its second half: with the list back, the rig's first converge
+// succeeded, the policy reads back as flows.PasswordPolicy and the hash is
+// stored.
+func (r *rulesRig) tc1145restored(t *testing.T) {
+	if got := realmRep(t, r.admin(t))["passwordPolicy"]; got != flows.PasswordPolicy {
+		t.Errorf("passwordPolicy = %v, want %q", got, flows.PasswordPolicy)
+	}
+	want := converge.NewDesired(r.inputs()).Hash()
+	if got, _ := r.settings.Get(t.Context(), converge.HashKey); got != want {
+		t.Errorf("the stored hash = %q, want %q", got, want)
+	}
+}
+
+// tc1145given19 is TC-1145-19's given: an account whose password is a
+// listed entry, set while the realm has no deny list.
+func (r *rulesRig) tc1145given19(t *testing.T) account {
+	ascii, _ := r.listed(t)
+	return r.accountWith(t, "tc1145-19-upgraded", ascii, nil)
+}
+
+// TC-1145-19: once converge applied the policy, the account whose listed
+// password was set before signs in with it at the home door and is not
+// sent to a password change: existing passwords are not re-checked.
+func (r *rulesRig) tc1145upgrade(t *testing.T, a account) {
+	if a.id == "" {
+		t.Fatal("given: no account was created before the policy")
+	}
+	r.fresh(t).signIn(r.homeConsole(), a.name, a.pw).code(t)
+}
+
+// TC-1145-15: account creation at the home door (prompt=create) with a
+// listed password shows the sentence and creates no account; with an
+// unlisted one it creates the account.
+func (r *rulesRig) tc1145registration(t *testing.T) {
+	listed, _ := r.listed(t)
+	unlisted, err := randomSecret(r.env.h.cfg.Rand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlisted.Destroy()
+	register := func(name, ip string, pw secret.Value) doorAnswer {
+		g := r.client(t, ip)
+		a := g.follow(r.homeAuth(baselineConsole, map[string]string{"prompt": "create"}))
+		if a.pageID() != "login-register" {
+			t.Fatalf("prompt=create opened %q", a.pageID())
+		}
+		return r.post(t, g, a, "kc-register-form", map[string]string{
+			"username": name, "email": name + "@rules.invalid", "firstName": "Listed",
+			"password": string(pw.Reveal()), "password-confirm": string(pw.Reveal()),
+		})
+	}
+	accounts := func(name string) int {
+		_, out := r.admin(t).must(http.StatusOK, http.MethodGet, "/users?exact=true&username="+name, nil)
+		var users []map[string]any
+		if err := json.Unmarshal(out, &users); err != nil {
+			t.Fatal(err)
+		}
+		return len(users)
+	}
+	got := register("tc1145-15-listed", "127.0.0.43", listed)
+	if got.loc != nil && got.loc.Query().Get("code") != "" {
+		t.Error("a listed password registered")
+	}
+	if !shows(got, denylistSentence) {
+		t.Errorf("the refusal page %q (%d) does not say %q", got.pageID(), got.status, denylistSentence)
+	}
+	if n := accounts("tc1145-15-listed"); n != 0 {
+		t.Errorf("a listed password created %d accounts", n)
+	}
+	register("tc1145-15-unlisted", "127.0.0.44", unlisted).code(t)
+	if n := accounts("tc1145-15-unlisted"); n != 1 {
+		t.Errorf("an unlisted password created %d accounts, want 1", n)
+	}
+}
+
+// changeAtDoor runs an UPDATE_PASSWORD page reached by signing a in with
+// current at the door: a listed password is refused with the sentence and
+// current still signs in; an unlisted one is accepted and then signs in.
+func (r *rulesRig) changeAtDoor(t *testing.T, d doorCase, a account, current secret.Value) {
+	t.Helper()
+	listed, _ := r.listed(t)
+	g := r.fresh(t)
+	page := g.signIn(d.auth(), a.name, current)
+	if page.pageID() != "login-login-update-password" {
+		t.Fatalf("%s: signing in opened %q (%q), want the password change", d.name, page.pageID(), errorText(page))
+	}
+	got := r.post(t, g, page, "kc-passwd-update-form", map[string]string{
+		"password-new": string(listed.Reveal()), "password-confirm": string(listed.Reveal())})
+	if got.loc != nil && got.loc.Query().Get("code") != "" {
+		t.Fatalf("%s: a listed password was accepted", d.name)
+	}
+	if got.pageID() != "login-login-update-password" || !shows(got, denylistSentence) {
+		t.Errorf("%s: the refusal is page %q (%d), want the password change saying %q", d.name, got.pageID(), got.status, denylistSentence)
+	}
+	if p := r.fresh(t).signIn(d.auth(), a.name, current); p.pageID() != "login-login-update-password" {
+		t.Errorf("%s: after the refusal the old password reached %q, want it still accepted", d.name, p.pageID())
+	}
+	next, err := randomSecret(r.env.h.cfg.Rand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Destroy()
+	r.post(t, g, got, "kc-passwd-update-form", map[string]string{
+		"password-new": string(next.Reveal()), "password-confirm": string(next.Reveal())}).code(t)
+	r.fresh(t).signIn(d.auth(), a.name, next).code(t)
+}
+
+// TC-1145-16: UPDATE_PASSWORD at each door.
+func (r *rulesRig) tc1145change(t *testing.T) {
+	for _, d := range r.bothDoors() {
+		a := r.account(t, "tc1145-16-"+strings.Fields(d.name)[0], nil)
+		r.requireActions(t, a, flows.ActionUpdatePassword)
+		r.changeAtDoor(t, d, a, a.pw)
+	}
+}
+
+// TC-1145-17: an administrator sets an unlisted temporary password through
+// the Admin API (temporary=true, D15); signing in with it at each door
+// leads to UPDATE_PASSWORD, which refuses a listed password and accepts an
+// unlisted one.
+func (r *rulesRig) tc1145temporary(t *testing.T) {
+	for _, d := range r.bothDoors() {
+		a := r.account(t, "tc1145-17-"+strings.Fields(d.name)[0], nil)
+		temp, err := randomSecret(r.env.h.cfg.Rand)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.admin(t).must(http.StatusNoContent, http.MethodPut, "/users/"+a.id+"/reset-password",
+			map[string]any{"type": "password", "value": string(temp.Reveal()), "temporary": true})
+		r.changeAtDoor(t, d, a, temp)
+		temp.Destroy()
+	}
+}
+
+// TC-1145-18 (T171): the Admin API reset refuses a listed ASCII entry and a
+// listed non-ASCII entry, and the old password still signs in after each;
+// an unlisted 15-character password is then accepted with 204, so the list,
+// not the length rule, is what refused.
+//
+// The refusal answers 500 unknown_error at this pin, not 400 with
+// invalidPasswordBlacklistedMessage: Keycloak logs "Could not update
+// password ... Reason: invalidPasswordBlacklistedMessage", then
+// AdminRoot.getMessages finds no admin theme (the build disables the admin
+// console) and the error response itself fails. Every password-policy
+// refusal through the Admin API does the same, the length rules included
+// (measured 2026-11-23). The credential is unchanged either way.
+func (r *rulesRig) tc1145reset(t *testing.T) {
+	ascii, nonASCII := r.listed(t)
+	a := r.account(t, "tc1145-18-reset", nil)
+	set := func(pw string) (int, []byte) {
+		status, _, body := r.admin(t).do(http.MethodPut, "/users/"+a.id+"/reset-password",
+			map[string]any{"type": "password", "value": pw, "temporary": false})
+		return status, body
+	}
+	for what, pw := range map[string]secret.Value{"ASCII": ascii, "non-ASCII": nonASCII} {
+		if status, body := set(string(pw.Reveal())); status < http.StatusBadRequest {
+			t.Errorf("a listed %s entry answered %d %.300s; want a refusal", what, status, body)
+		}
+		r.fresh(t).signIn(r.homeConsole(), a.name, a.pw).code(t)
+	}
+	if status, body := set("quokka-tangelo7"); status != http.StatusNoContent {
+		t.Errorf("an unlisted 15-character password answered %d %.300s; want 204", status, body)
+	}
+}
+
+// TC-1145-20: with the policy converged, a run with no input change repairs
+// nothing and logs no drift, and passwordPolicy reads back byte-equal.
+func (r *rulesRig) tc1145stable(t *testing.T) {
+	mark := len(r.rec.Records())
+	if fields, err := r.conv.Run(t.Context()); err != nil || len(fields) != 0 {
+		t.Errorf("a run with no input change: %v, %v; want nothing written", fields, err)
+	}
+	for _, rec := range r.rec.Records()[mark:] {
+		if ev, _ := logkittest.Attr(rec, "event"); ev == "identity.converge.drift" {
+			t.Errorf("the run logged drift: %s", rec.Message)
+		}
+	}
+	if got := realmRep(t, r.admin(t))["passwordPolicy"]; got != flows.PasswordPolicy {
+		t.Errorf("passwordPolicy = %v, want %q", got, flows.PasswordPolicy)
 	}
 }

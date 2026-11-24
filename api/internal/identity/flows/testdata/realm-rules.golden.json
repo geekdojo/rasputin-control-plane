@@ -15,7 +15,7 @@
   "offlineSessionIdleTimeout": 2592000,
   "offlineSessionMaxLifespanEnabled": false,
   "otpPolicyPeriod": 30,
-  "passwordPolicy": "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined)",
+  "passwordPolicy": "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined) and passwordBlacklist(rasputin-common-passwords.txt)",
   "permanentLockout": false,
   "quickLoginCheckMilliSeconds": 0,
   "registrationEmailAsUsername": false,

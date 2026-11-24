@@ -37,7 +37,7 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 pin="$repo_root/api/internal/secretstoretest/pin.go"
 
 # shellcheck source=SCRIPTDIR/lib/release-lib.sh
-. "$repo_root/scripts/lib/release-lib.sh"   # pin_const: the anchored pin.go reader
+. "$repo_root/scripts/lib/release-lib.sh"   # pin_const, fetch_pinned
 
 release="$(pin_const "$pin" OpenBaoRelease)"
 sha256="$(pin_const "$pin" OpenBaoLinuxAMD64SHA256)"
@@ -71,14 +71,7 @@ else
   trap 'rm -rf "$work"' EXIT
 fi
 
-if [ -f "$work/$tarball" ]; then
-  echo "install-openbao: using the kept $work/$tarball"
-else
-  echo "install-openbao: downloading $url"
-  curl -fsSL -o "$work/$tarball.part" "$url"
-  mv "$work/$tarball.part" "$work/$tarball"
-fi
-(cd "$work" && echo "${sha256}  ${tarball}" | sha256sum -c -)
+fetch_pinned "$work" "$tarball" "$url" "$sha256" install-openbao || exit 1
 
 mkdir -p "$dest"
 tar -xzf "$work/$tarball" -C "$dest" bao

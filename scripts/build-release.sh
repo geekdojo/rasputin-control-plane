@@ -20,11 +20,13 @@
 #          and openbao-policy/*.hcl to /usr/share/rasputin/openbao-policy, where
 #          the secrets store's self-init reads its fixed policies:
 #          geekdojo/geekdojo-brain#804; identity/ holds realm-baseline.json,
-#          keycloak-build.conf, pins.json and theme/ (the built sign-in theme),
-#          installed under
+#          keycloak-build.conf, pins.json, theme/ (the built sign-in theme),
+#          password-blacklists/ and licenses/ (the pinned password deny list
+#          and its notices, geekdojo/geekdojo-brain#1145), installed under
 #          /usr/share/rasputin/identity: geekdojo/geekdojo-brain#980)
 #
-# Requires: go, node/npm (for the UI build), jq (pins.json).
+# Requires: go, node/npm (for the UI build), jq (pins.json), curl (the deny
+# list).
 #
 # The .hash files are in Buildroot's format (`sha256  <hex>  <file>`) so the
 # OS repo can drop them next to the package .mk for download verification.
@@ -91,16 +93,24 @@ cp -R "$ROOT/ui/out" "$DIST/ui"
 # pack-identity.sh. The pack fails closed unless the built theme's
 # login/theme.properties and the door proxy's resource-allowlist.json made it
 # into identity/.
+#
+# The password deny list the realm's policy names (geekdojo/geekdojo-brain#1145):
+# fetched from the pinned third-party source and cut to the realm's minimum
+# length by fetch-denylist.sh, never kept in this repository, then packed with
+# its licence notices. Both scripts refuse a list that is missing, empty or
+# does not match its pin, so no api tarball ships a policy without its list.
 echo ">> building the sign-in theme"
 node "$ROOT/ui/identity-theme/build.mjs" "$DIST/identity-theme"
-"$ROOT/scripts/pack-identity.sh" "$ROOT/identity" "$ROOT/api/internal/identitytest/pin.go" "$DIST/identity" "$DIST/identity-theme"
+echo ">> fetching the password deny list"
+"$ROOT/scripts/fetch-denylist.sh" "$DIST/denylist"
+"$ROOT/scripts/pack-identity.sh" "$ROOT/identity" "$ROOT/api/internal/identitytest/pin.go" "$DIST/identity" "$DIST/denylist" "$DIST/identity-theme"
 for f in login/theme.properties resource-allowlist.json; do
 	if [ ! -f "$DIST/identity/theme/$f" ]; then
 		echo "the packed identity theme has no $f, so no api tarball is built without the sign-in pages" >&2
 		exit 1
 	fi
 done
-rm -rf "$DIST/identity-theme"
+rm -rf "$DIST/identity-theme" "$DIST/denylist"
 
 # -trimpath for reproducibility; -s -w to strip debug info (smaller image).
 # -tags release compiles in artifactsig.ReleaseBuild() = true: a release binary

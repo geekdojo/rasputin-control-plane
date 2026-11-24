@@ -66,7 +66,11 @@ var rulesAppBindings = map[string]flows.Variant{
 
 type rulesRig struct {
 	*doorRig
-	conv     *converge.Converger
+	conv *converge.Converger
+	// session and lock are the converger's Admin API session and realm
+	// lock, for a second converger over the same realm (TC-1145-14).
+	session  *idclient.Session
+	lock     *sync.Mutex
 	marks    *markers.Writer
 	settings *memSettings
 	rec      *logkittest.Recorder
@@ -156,6 +160,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.session, r.lock = session, &sync.Mutex{}
 	table, err := doors.New(DoorClusterID)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +172,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 			"rasputin-account":    {callbackOn(table.App.Host)}, "rasputin-reset-app": {callbackOn(table.App.Host)},
 		}}
 	r.conv, err = converge.New(converge.Deps{
-		Admin: session, Settings: r.settings, Realm: baselineRealm, Lock: &sync.Mutex{},
+		Admin: session, Settings: r.settings, Realm: baselineRealm, Lock: r.lock,
 		Inputs: func(context.Context) (converge.Inputs, error) { return r.inputs(), nil },
 		Now:    time.Now, Ready: func(context.Context) error { return nil }, Log: log,
 	})
@@ -250,13 +255,14 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 	vdone := make(chan struct{})
 	go func() { r.version.Run(ctx); close(vdone) }()
 	t.Cleanup(func() { cancel(); <-done; <-vdone })
-	r.setUpRules(t)
+	r.setUpClients(t)
 	return r
 }
 
-// setUpRules opens registration and creates the test app clients, then
-// converges the rules.
-func (r *rulesRig) setUpRules(t *testing.T) {
+// setUpClients opens registration and creates the test app clients. The
+// rig's first converge is setUpRules, which the test calls after the cases
+// that need the realm before any converge (TC-1145-14, TC-1145-19).
+func (r *rulesRig) setUpClients(t *testing.T) {
 	t.Helper()
 	api := r.admin(t)
 	_, out := api.must(http.StatusOK, http.MethodGet, "", nil)
@@ -272,6 +278,11 @@ func (r *rulesRig) setUpRules(t *testing.T) {
 			"attributes": map[string]string{"pkce.code.challenge.method": "S256"},
 		})
 	}
+}
+
+// setUpRules converges the rules: the rig's first converge.
+func (r *rulesRig) setUpRules(t *testing.T) {
+	t.Helper()
 	if _, err := r.conv.Run(t.Context()); err != nil {
 		t.Fatalf("converge the rules: %v", err)
 	}
@@ -295,6 +306,13 @@ func (r *rulesRig) account(t *testing.T, name string, attrs map[string][]string)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return r.accountWith(t, name, pw, attrs)
+}
+
+// accountWith creates an account with the password pw, a name and an
+// email, and the given attributes.
+func (r *rulesRig) accountWith(t *testing.T, name string, pw secret.Value, attrs map[string][]string) account {
+	t.Helper()
 	t.Cleanup(pw.Destroy)
 	body := map[string]any{
 		"username": name, "enabled": true, "email": name + "@rules.invalid", "emailVerified": true, "firstName": "Rules",
