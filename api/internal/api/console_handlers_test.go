@@ -374,3 +374,52 @@ func TestConsoleRootPassword_PutWhosePushDidNotStartIsAnError(t *testing.T) {
 		t.Errorf("ERROR error = %q, want the pushError %q", got, resp.PushError)
 	}
 }
+
+// F-1001-16 (geekdojo/geekdojo-brain#1001): a person who may set the password
+// but may not run console.root_push (no nodes capability) still gets the 200
+// the save earned, with the refusal's sentence as the push error, one WARN
+// and the INFO change record; the password is stored and no job row exists.
+func TestConsoleRootPassword_PutWhosePushIsRefusedKeepsTheSave(t *testing.T) {
+	f := newAPIFixture(t)
+	f.runner.Register(jobs.Workflow{Kind: console.PushKind})
+	viewer := f.authenticateAs(t, "sub-vic", "vic", "viewer")
+
+	w := f.do(t, http.MethodPut, "/api/console/root-password", `{"password":"`+testConsolePassword+`"}`, viewer)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT: %d %s, want 200", w.Code, w.Body.String())
+	}
+	resp := decodeConsoleSet(t, w.Body.Bytes())
+	const sentence = "You don't have permission to run this job."
+	if resp.HashID == "" || resp.JobID != "" || resp.PushError != sentence {
+		t.Fatalf("response = %+v, want a hashId, no jobId and pushError %q", resp, sentence)
+	}
+	g := f.do(t, http.MethodGet, "/api/console/root-password", "", f.authenticate(t))
+	if st := decodeConsoleStatus(t, g.Body.Bytes()); !st.Set || st.HashID != resp.HashID {
+		t.Fatalf("after the refused push the status is %+v, want the stored password %s", st, resp.HashID)
+	}
+	if got := f.rows(t, console.PushKind); len(got) != 0 {
+		t.Errorf("%d %s rows, want none", len(got), console.PushKind)
+	}
+	warns := f.records(slog.LevelWarn, "console: the console root password was stored but the person may not run the job that applies it")
+	if len(warns) != 1 {
+		t.Fatalf("%d refusal WARN records, want 1:\n%s", len(warns), allLogText(f))
+	}
+	for key, want := range map[string]string{"hash_id": resp.HashID, "kind": console.PushKind, "code": "not_permitted"} {
+		if got, _ := recAttr(warns[0], key); got != want {
+			t.Errorf("WARN %s = %q, want %q", key, got, want)
+		}
+	}
+	if n := len(f.records(slog.LevelError, "console: the console root password was stored but the job that applies it did not start")); n != 0 {
+		t.Errorf("%d ERROR records for a refusal, want none", n)
+	}
+	info := f.records(slog.LevelInfo, "console: console root password set")
+	if len(info) != 1 {
+		t.Fatalf("%d INFO change records, want 1:\n%s", len(info), allLogText(f))
+	}
+	if got, _ := recAttr(info[0], "hash_id"); got != resp.HashID {
+		t.Errorf("INFO hash_id = %q, want %q", got, resp.HashID)
+	}
+	if text := allLogText(f); strings.Contains(text, "sub-vic") || strings.Contains(text, testConsolePassword) {
+		t.Errorf("the server log carries the person or the password:\n%s", text)
+	}
+}

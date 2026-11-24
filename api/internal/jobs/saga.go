@@ -331,9 +331,9 @@ func (r *Runner) SubmitChild(ctx context.Context, kind string, spec any, created
 // It is the only way a pre-marshalled spec reaches the ledger. Every other
 // caller passes its typed spec to Submit, which refuses raw bytes with
 // ErrRawSpec, so a secret cannot be marshalled past the secret.Value refusal.
-// Its callers are pinned to Runner.SubmitOperatorSpec (the operator's
-// POST /api/jobs, which refuses a System kind first) and Scheduler.fire by a
-// type-checked test (specargs_test.go).
+// It submits as the system, so its only caller is Scheduler.fire, pinned by a
+// type-checked test (specargs_test.go); a person's POST /api/jobs goes through
+// Runner.SubmitOperatorSpec, which creates the row itself as that person.
 func (r *Runner) SubmitRawSpec(ctx context.Context, kind string, spec json.RawMessage, createdBy string) (*Job, error) {
 	if len(spec) == 0 {
 		spec = json.RawMessage("{}")

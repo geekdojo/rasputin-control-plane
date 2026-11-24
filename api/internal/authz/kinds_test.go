@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/geekdojo/rasputin-control-plane/tileschema"
 )
 
 // fakeApps is an AppReader over a fixed map, which records each read.
@@ -180,6 +182,14 @@ func TestAuthorize_TC1001_09_Tiers(t *testing.T) {
 	}
 	if got, refusal := appNeed(AppFacts{Custom: true, Tiers: []string{""}}); got != AppsHost || refusal != nil {
 		t.Errorf("appNeed(custom, '') = %v, %v; want apps.host", got, refusal)
+	}
+	// The host-trusting boundary itself (F-1001-19): a host-trusting tile
+	// needs apps.host, the tier below it does not.
+	if got, refusal := appNeed(AppFacts{Tiers: []string{tileschema.TierHostTrusting}}); got != AppsHost || refusal != nil {
+		t.Errorf("appNeed(host-trusting) = %v, %v; want apps.host", got, refusal)
+	}
+	if got, refusal := appNeed(AppFacts{Tiers: []string{tileschema.TierRoutine, tileschema.TierElevated}}); got != Apps || refusal != nil {
+		t.Errorf("appNeed(routine, elevated) = %v, %v; want apps", got, refusal)
 	}
 }
 

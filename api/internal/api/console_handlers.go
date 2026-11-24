@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 )
 
@@ -94,17 +95,27 @@ func (s *Server) handlePutConsoleRootPassword(w http.ResponseWriter, r *http.Req
 	push := req.Push == nil || *req.Push
 	if push {
 		j, jerr := s.submitConsolePush(r, console.PushSpec{Reason: "the console root password was set"})
-		if s.refusedSubmit(w, r, console.PushKind, jerr) {
+		var kr *authz.KindRefusal
+		switch {
+		case errors.As(jerr, &kr):
+			// The password IS stored, so this is not a 403: the person may
+			// set it but may not run the job that applies it to the nodes.
+			// The save stands and the push error says why it did not start
+			// (geekdojo/geekdojo-brain#1001, F-1001-16). A refusal is the
+			// policy working, so WARN, carrying the code and never the person.
+			resp.PushError = kr.Sentence
+			s.log.WarnContext(r.Context(), "console: the console root password was stored but the person may not run the job that applies it",
+				"hash_id", hashID, "kind", console.PushKind, "code", kr.Code)
+		case s.refusedSubmit(w, r, console.PushKind, jerr):
 			return
-		}
-		if jerr != nil {
+		case jerr != nil:
 			// The password IS stored; only the fan-out did not start. That
 			// leaves every node short of the password the operator just
 			// chose, so it is an ERROR, not a warning (#597).
 			resp.PushError = jerr.Error()
 			s.log.ErrorContext(r.Context(), "console: the console root password was stored but the job that applies it did not start",
 				"hash_id", hashID, "error", jerr.Error())
-		} else {
+		default:
 			resp.JobID = j
 		}
 	}
