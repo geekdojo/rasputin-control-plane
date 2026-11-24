@@ -27,15 +27,18 @@ implicit in the section above.
   mutation-testing sweeps that raise their own findings. Comments from these workflows are
   authored by `claude[bot]`. Which of them run in a given repository is visible in
   `.github/workflows/`.
-- **This feedback is advisory and holds no merge rights.** No automation can approve or merge
-  a pull request. The maintainer reads the findings, decides what to act on, and performs
-  every merge.
+- **Automation merges only its own reviewed pull requests, never with admin override.** It
+  never merges an outside contribution. These workflows hold no merge rights of their own; a
+  blocking finding from them must be addressed before an agent merges.
 
 ## Human accountability
 
-- Every AI-assisted change is reviewed by the maintainer before it lands, and the maintainer
-  merges every pull request personally; CI (build, tests, vulnerability scanning where
-  configured) gates pushes.
+- The maintainer approves the plan for every change before any code is written. An AI agent
+  writes the change; a separate AI agent, one that did not write it, reviews it adversarially
+  against the plan and the project's written standards, and CI (build, tests, vulnerability
+  scanning where configured) must pass. Once both pass, the agent merges its own pull request.
+  The maintainer reviews and merges every outside contribution, and keeps release cuts and
+  site publishing.
 - The maintainer takes full responsibility for all published code — AI assistance does not
   dilute that accountability.
 - AI-assisted code is reviewed with attention to licensing: nothing knowingly reproducing
