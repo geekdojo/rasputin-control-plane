@@ -15,7 +15,16 @@
 <header class="rasp-card-header"><h1 id="kc-page-title">{{.Heading}}</h1></header>
 <div id="kc-feedback" class="rasp-alert{{if .Error}} rasp-alert-error{{end}}" role="alert"><span class="rasp-alert-text">{{.Sentence}}</span></div>
 {{if .Name}}<p class="rasp-hint">{{.Name}}</p>{{end}}
+{{if .Keep}}<p class="rasp-hint" id="rasputin-breach-hint">{{.Hint}}</p>
+<form id="rasputin-keep-form" method="post" action="{{.Keep}}">
+{{range .Fields}}<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+{{end}}<input type="hidden" name="{{.KeepField}}" value="keep">
 <div class="rasp-buttons">
+<a class="rasp-btn rasp-btn-block" id="rasputin-choose-another" href="{{.Choose}}">Choose a different password</a>
+<button class="rasp-link" id="rasputin-keep" type="submit">Keep this password</button>
+</div>
+</form>
+{{end}}<div class="rasp-buttons">
 {{if .TryAgain}}<a class="rasp-btn rasp-btn-block" id="rasputin-try-again" href="{{.TryAgain}}">TRY AGAIN</a>{{end}}
 {{if .Back}}<a class="rasp-link" id="rasputin-back" href="{{.Back}}">{{.BackText}}</a>{{end}}
 </div>

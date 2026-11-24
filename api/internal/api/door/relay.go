@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breachcheck"
 )
 
 // clientCertHeaders are the client-certificate headers a proxy in front of
@@ -90,11 +91,14 @@ func (h *Handler) upstreamFailed(w http.ResponseWriter, r *http.Request, err err
 	h.render(w, http.StatusBadGateway, h.notReadyPage(r, st))
 }
 
-// errorClass is a transport error's class.
+// errorClass is a transport error's class, or "answer" for a breach-check
+// answer the checker could not read.
 func errorClass(err error) string {
 	var opErr *net.OpError
 	var certErr *tls.CertificateVerificationError
 	switch {
+	case errors.Is(err, breachcheck.ErrUnexpectedAnswer):
+		return "answer"
 	case errors.Is(err, context.Canceled):
 		return "canceled"
 	case errors.Is(err, context.DeadlineExceeded):

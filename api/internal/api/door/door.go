@@ -88,7 +88,10 @@ type Config struct {
 	Dirty       Dirty
 	// IDs mints one correlation id per request.
 	IDs func() string
-	Log *slog.Logger
+	// Breach is the breached-password check a new password is asked of
+	// before it is relayed (breach.go).
+	Breach Breach
+	Log    *slog.Logger
 }
 
 // Handler is one door.
@@ -135,6 +138,8 @@ func New(cfg Config) (*Handler, error) {
 		missing = "Dirty"
 	case cfg.IDs == nil:
 		missing = "IDs"
+	case cfg.Breach == nil:
+		missing = "Breach"
 	case cfg.Log == nil:
 		missing = "Log"
 	}
@@ -184,6 +189,7 @@ type Shared struct {
 	InstallName   func(ctx context.Context) (string, error)
 	Dirty         Dirty
 	IDs           func() string
+	Breach        Breach
 	Log           *slog.Logger
 }
 
@@ -192,7 +198,7 @@ func Build(table doors.Table, s Shared) (home, app *Handler, err error) {
 	cfg := func(d doors.Door, k Kind) Config {
 		return Config{Door: d, Kind: k, ConsoleOrigin: s.ConsoleOrigin, Policy: s.Policy, Throttle: s.Throttle,
 			Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets, Version: s.Version,
-			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Log: s.Log}
+			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, Log: s.Log}
 	}
 	if home, err = New(cfg(table.Home, Home)); err != nil {
 		return nil, nil, err
@@ -220,6 +226,10 @@ type reqState struct {
 	refused    string
 	errorClass string
 	level      slog.Level
+	// breach is the breach check's outcome on a post that sets a password,
+	// and breachErrorClass its error's class when it could not finish.
+	breach           string
+	breachErrorClass string
 }
 
 type stateKey struct{}
@@ -272,7 +282,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // logRequest writes the request's one record: its door, pattern, status and
-// correlation id, and a refusal's reason. Never the URL, its query, a
+// correlation id, a refusal's reason, and the breach check's outcome. Never the URL, its query, a
 // cookie, the address or a user (LOG-SECRETS).
 func (h *Handler) logRequest(ctx context.Context, st *reqState, sw *statusWriter) {
 	attrs := []slog.Attr{
@@ -287,6 +297,7 @@ func (h *Handler) logRequest(ctx context.Context, st *reqState, sw *statusWriter
 			level = slog.LevelInfo
 		}
 	}
+	attrs, level, msg = breachRecord(st, attrs, level, msg)
 	if st.errorClass != "" {
 		attrs = append(attrs, slog.String("error_class", st.errorClass))
 		msg, level = "sign-in door upstream failed", slog.LevelWarn
@@ -334,6 +345,9 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 		d := h.cfg.Policy.Check(r.Context(), parse(r, h.cfg.Kind, rt.Kind))
 		if !d.Allow {
 			h.refuse(w, r, st, d)
+			return
+		}
+		if h.warned(w, r, rt, st) {
 			return
 		}
 		h.relay(w, r, rt, d)

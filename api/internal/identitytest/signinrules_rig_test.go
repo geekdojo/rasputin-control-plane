@@ -85,6 +85,9 @@ type rulesRig struct {
 	// browser is the pinned Chrome's context for a subtest; it skips (or,
 	// under required, fails) the subtest when the browser is missing.
 	browser func(t *testing.T) context.Context
+	// breach is the local stand-in for the breached-password range API the
+	// doors' checker asks (TC-1145-38 to TC-1145-40).
+	breach *rangeStub
 }
 
 // rulesApps are the rig's app clients at the app door.
@@ -147,6 +150,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 	r := &rulesRig{
 		doorRig:  &doorRig{env: env, sink: &eventSink{}, passes: newPassWatch(), actions: &doorActions{}, cookiesIn: map[string][]string{}},
 		settings: &memSettings{m: map[string]string{}}, upstream: map[string]int{}, otp: &totpCodes{used: map[string]bool{}},
+		breach: newRangeStub(t),
 	}
 	log, rec := logkittest.New()
 	r.rec = rec
@@ -228,7 +232,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: recordingTransport{inner: relay, r: r},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return rulesInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Log: log,
+		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Breach: r.breach.checker(t), Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)

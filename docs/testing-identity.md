@@ -374,6 +374,7 @@ Then run the self-test as above.
 | TC-1127-18 | `TestRecoverAdminTrigger_AgainstPinnedKeycloak`, subtest TC-1127-18 (CI) |
 | TC-1145-14 to TC-1145-20 | `TestSignInRules_AgainstPinnedKeycloak`, subtests TC-1145-14 to TC-1145-20 (CI) |
 | TC-1145-21 | `TestDenylist_MissingListFailsAndIsStaged` |
+| TC-1145-38 to TC-1145-40 | `TestSignInRules_AgainstPinnedKeycloak`, subtests TC-1145-38 to TC-1145-40 (CI) |
 
 ## Converge, migrations and the features check
 
@@ -618,6 +619,28 @@ Then a listed password is refused with "That password is too common. Choose anot
 creation (TC-1145-15), at UPDATE_PASSWORD at each door (TC-1145-16), after an administrator's
 temporary password at each door (TC-1145-17), and by the Admin API reset with an ASCII and a
 non-ASCII entry (TC-1145-18); and a second converge changes nothing (TC-1145-20).
+
+The breached-password warning (geekdojo/geekdojo-brain#1145, PR 2, TC-1145-38 to TC-1145-40,
+capability rows T172 and T173). The rig's doors ask a real `breachcheck.Checker` pointed at a
+local TLS stand-in for the range API, which lists one synthetic phrase; CI never calls the live
+API, and the deny-list cases above are unchanged because the stand-in lists nothing else.
+
+- At account creation at the home door, the phrase gets the door's warning page and no account
+  exists; the stand-in saw only `GET /range/<5 hex>` with `Add-Padding: true`. The page's own
+  choose-another link re-renders `login-register`, and its own Keep form, submitted as rendered,
+  creates the account, which stores no `rasputin-keep-password` attribute (TC-1145-38).
+- At UPDATE_PASSWORD after an administrator's temporary password, at each door, the phrase gets
+  the warning and changes nothing; choose-another re-renders the change, where another password
+  is accepted; in another account, Keep sets the phrase, which then signs in with no warning
+  (TC-1145-39).
+- With the stand-in closed, the phrase is set at UPDATE_PASSWORD with no warning, and the door
+  logs one WARN `breach_check=unavailable` with `breach_error_class=connect`; no log holds the
+  phrase, its hash or its suffix (TC-1145-40). This is the fail-open of `EXCEPTIONS.md` EX-1.
+
+They prove the pinned Keycloak's field names, its re-render on a GET without `session_code`, and
+the re-post with the unconsumed `session_code`. They do not prove the live range API, real DNS
+or the image's CA roots, which the bench case proves (TC-1145-41, in the
+`rasputin-identity-test` skill).
 
 What it does not prove:
 
