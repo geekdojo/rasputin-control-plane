@@ -135,9 +135,6 @@ if [ "$browser" = 1 ]; then
 fi
 "$repo_root/scripts/fetch-denylist.sh" "$dest" "$keep"
 
-echo "install-identity: kc.sh --config-file=$build_conf build"
-JAVA_HOME="$dest/jre" "$dest/keycloak/bin/kc.sh" --config-file="$build_conf" build
-
 docker pull "$pg_image"
 docker pull "$hs_image"
 
