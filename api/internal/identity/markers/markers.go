@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
@@ -229,7 +230,7 @@ func (w *Writer) privileged(ctx context.Context, userID string, attrs map[string
 		return false, err
 	}
 	for _, r := range roles {
-		if r.Name == "admin" || r.Name == "operator" {
+		if authz.Privileged(r.Name) {
 			return true, nil
 		}
 	}

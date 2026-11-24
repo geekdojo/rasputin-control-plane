@@ -37,14 +37,19 @@ func (s *Service) RegisterRoutes(mux RouteRegistrar) {
 
 // ----- status / me / logout -----------------------------------------------
 
-// meView is the signed-in person as the console reads it.
+// meView is the signed-in person as the console reads it. Capabilities is
+// what the session may do (authz.Set.List: a fixed order, never null); it
+// reports and decides nothing.
 type meView struct {
-	Sub   string   `json:"sub"`
-	Name  string   `json:"name"`
-	Roles []string `json:"roles"`
+	Sub          string   `json:"sub"`
+	Name         string   `json:"name"`
+	Roles        []string `json:"roles"`
+	Capabilities []string `json:"capabilities"`
 }
 
-func viewOf(p Principal) meView { return meView{Sub: p.Sub, Name: p.Name, Roles: nonNil(p.Roles)} }
+func viewOf(p Principal) meView {
+	return meView{Sub: p.Sub, Name: p.Name, Roles: nonNil(p.Roles), Capabilities: p.Capabilities().List()}
+}
 
 // GET /api/auth/status — open. firstRun drives the restore page (no
 // pre-update operator exists); ready says whether a sign-in can start now;

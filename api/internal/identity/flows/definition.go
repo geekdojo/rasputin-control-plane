@@ -1,5 +1,7 @@
 package flows
 
+import "github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+
 // Requirement is an execution's requirement, as Keycloak names it.
 type Requirement string
 
@@ -36,9 +38,8 @@ const (
 	appAdminPattern           = "^admin$"
 	networkAccessPattern      = "^(gear-read|gear-admin)$"
 	networkAdminPattern       = "^gear-admin$"
-	consoleRoleAdmin          = "admin"
-	consoleRoleOperator       = "operator"
-	consoleRoleViewer         = "viewer"
+	consoleRoleAdmin          = string(authz.Admin)
+	consoleRoleOperator       = string(authz.Operator)
 	subFlowNotExecutedSetting = "not-executed"
 )
 
