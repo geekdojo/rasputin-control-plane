@@ -27,9 +27,9 @@ implicit in the section above.
   mutation-testing sweeps that raise their own findings. Comments from these workflows are
   authored by `claude[bot]`. Which of them run in a given repository is visible in
   `.github/workflows/`.
-- **This feedback is advisory and holds no merge rights.** Automation merges only its own
-  reviewed pull requests, never with admin override, and only once no blocking finding from
-  these workflows is left unaddressed. It never merges an outside contribution.
+- **Automation merges only its own reviewed pull requests, never with admin override.** It
+  never merges an outside contribution. These workflows hold no merge rights of their own; a
+  blocking finding from them must be addressed before an agent merges.
 
 ## Human accountability
 
