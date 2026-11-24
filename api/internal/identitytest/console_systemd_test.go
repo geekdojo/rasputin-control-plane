@@ -539,7 +539,8 @@ func (s *consoleStack) awaitReady(ctx context.Context, admin *idclient.Session) 
 }
 
 // fixture makes the synthetic fixture account with a password and the
-// console's admin role, and returns its subject.
+// console's viewer role, and returns its subject. Not admin or operator:
+// the sign-in rules refuse a password alone for those (TC-987-01).
 func (s *consoleStack) fixture(t *testing.T, admin *idclient.Session) string {
 	t.Helper()
 	pw, err := randomSecret(s.cfg.Rand)
@@ -564,7 +565,7 @@ func (s *consoleStack) fixture(t *testing.T, admin *idclient.Session) string {
 		t.Fatalf("the console client: %v", err)
 	}
 	var role map[string]any
-	if _, err := admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/clients/"+clients[0].ID+"/roles/admin", nil, &role); err != nil {
+	if _, err := admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/clients/"+clients[0].ID+"/roles/viewer", nil, &role); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users/"+id+"/role-mappings/clients/"+clients[0].ID, []any{role}, nil); err != nil {
@@ -692,8 +693,8 @@ func (s *consoleStack) checkMe(cookie, sub string) {
 		Name  string   `json:"name"`
 		Roles []string `json:"roles"`
 	}
-	if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &me) != nil || me.Sub != sub || !slices.Contains(me.Roles, "admin") {
-		t.Fatalf("/api/auth/me = %d %s, want 200 with the fixture's subject %s and role admin", resp.StatusCode, b, sub)
+	if resp.StatusCode != http.StatusOK || json.Unmarshal(b, &me) != nil || me.Sub != sub || !slices.Contains(me.Roles, "viewer") {
+		t.Fatalf("/api/auth/me = %d %s, want 200 with the fixture's subject %s and role viewer", resp.StatusCode, b, sub)
 	}
 	if err := os.WriteFile(filepath.Join(s.out, "me.json"), b, 0o600); err != nil {
 		t.Fatal(err)

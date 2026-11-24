@@ -354,7 +354,8 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	return r
 }
 
-// fixture is a synthetic account with a password and a console role.
+// fixture is a synthetic account with a password and a console role, and
+// its id.
 func (r *consoleRig) fixture(t *testing.T, name, role string) (string, secret.Value) {
 	t.Helper()
 	id, pw := r.user(t, name)
@@ -474,13 +475,25 @@ func TestConsole_AgainstPinnedKeycloak(t *testing.T) {
 	if browserCtx == nil {
 		return
 	}
-	id, pw := r.fixture(t, "console-fixture", "admin")
+	// viewer: the sign-in rules refuse a password alone for admin and
+	// operator (TC-987-01), and these cases sign in with a password.
+	id, pw := r.fixture(t, "console-fixture", "viewer")
+	// An app-door user too, for TS-20's app-door sign-in (TC-987-02's
+	// household account).
+	api := r.admin(t)
+	_, out := api.must(http.StatusOK, http.MethodGet, "/users/"+id, nil)
+	var rep map[string]any
+	if err := json.Unmarshal(out, &rep); err != nil {
+		t.Fatal(err)
+	}
+	rep["attributes"] = map[string][]string{"rasputin_app_role": {"user"}}
+	api.must(http.StatusNoContent, http.MethodPut, "/users/"+id, rep)
 
 	t.Run("TC-989-37 converge writes the console's address", func(t *testing.T) { r.tc37(t) })
 	t.Run("TC-989-32 SO-18 the cross-site return", func(t *testing.T) { r.tc32(t, browserCtx, "console-fixture", pw) })
 	t.Run("TC-989-36 TS-20 one subject, and an app-door code refused", func(t *testing.T) { r.tc36(t, "console-fixture", pw) })
-	t.Run("TC-989-33 IA-F7 a role change ends the session", func(t *testing.T) { r.tc33(t, id, "console-fixture", pw) })
-	t.Run("TC-989-34 IA-F7 the back-channel logout", func(t *testing.T) { r.tc34(t, id, "console-fixture", pw) })
+	t.Run("TC-989-33 IA-F7 a role change ends the session", func(t *testing.T) { r.tc33(t) })
+	t.Run("TC-989-34 IA-F7 the back-channel logout", func(t *testing.T) { r.tc34(t) })
 	t.Run("TC-989-35 IA-F7 no token in rasputin.db", func(t *testing.T) { r.tc35(t) })
 	t.Run("TC-989-38 T161 the upstream shapes", func(t *testing.T) { r.tc38(t) })
 	t.Run("TC-989-39 the sentinel scan", func(t *testing.T) { r.tc39(t, pw) })
@@ -637,15 +650,17 @@ func (r *consoleRig) tc36(t *testing.T, name string, pw secret.Value) {
 
 // TC-989-33 (IA-F7): a role mapping added through the api's own Admin API
 // session reaches the role-change sink through the drain, and the
-// fixture's next gated request answers 401.
-func (r *consoleRig) tc33(t *testing.T, id, name string, pw secret.Value) {
-	c := r.signInGo(t, "127.0.0.46", name, pw)
+// fixture's next gated request answers 401. A fixture of its own: the
+// role it gains (operator) makes a password alone refused afterwards.
+func (r *consoleRig) tc33(t *testing.T) {
+	id, pw := r.fixture(t, "console-fixture-role", "viewer")
+	c := r.signInGo(t, "127.0.0.46", "console-fixture-role", pw)
 	if got := gated(t, c); got != http.StatusOK {
 		t.Fatalf("a gated route before the change: %d", got)
 	}
 	cid, _ := r.admin(t).clientRep(baselineConsole)
 	var role map[string]any
-	if _, err := r.session.Admin(t.Context(), http.MethodGet, "/admin/realms/"+baselineRealm+"/clients/"+cid+"/roles/viewer", nil, &role); err != nil {
+	if _, err := r.session.Admin(t.Context(), http.MethodGet, "/admin/realms/"+baselineRealm+"/clients/"+cid+"/roles/operator", nil, &role); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := r.session.Admin(t.Context(), http.MethodPost, "/admin/realms/"+baselineRealm+"/users/"+id+"/role-mappings/clients/"+cid, []any{role}, nil); err != nil {
@@ -663,8 +678,9 @@ func (r *consoleRig) tc33(t *testing.T, id, name string, pw secret.Value) {
 // TC-989-34 (issue TC-04): an Admin API logout of the user makes the real
 // identity service post a logout token to the back-channel route; the
 // sid's row is gone and the next request answers 401.
-func (r *consoleRig) tc34(t *testing.T, id, name string, pw secret.Value) {
-	c := r.signInGo(t, "127.0.0.47", name, pw)
+func (r *consoleRig) tc34(t *testing.T) {
+	id, pw := r.fixture(t, "console-fixture-logout", "viewer")
+	c := r.signInGo(t, "127.0.0.47", "console-fixture-logout", pw)
 	if got := gated(t, c); got != http.StatusOK {
 		t.Fatalf("a gated route before the logout: %d", got)
 	}
