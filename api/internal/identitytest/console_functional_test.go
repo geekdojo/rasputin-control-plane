@@ -38,6 +38,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -545,6 +546,9 @@ func (r *consoleRig) tc32(t *testing.T, browserCtx context.Context, name string,
 	if got := signIn(tb, name, pw); got != consoleLoginPage {
 		t.Fatalf("the sign-in returned to %q, want the console's launcher", got)
 	}
+	if q := evalT[string](tb, `location.search`); q != "" {
+		t.Fatalf("the sign-in came back with %q; the api logged: %s", q, r.signinEvents())
+	}
 	r.mu.Lock()
 	cookies := append([]string(nil), r.callbackCookies[before:]...)
 	r.mu.Unlock()
@@ -583,10 +587,36 @@ func (r *consoleRig) tc32(t *testing.T, browserCtx context.Context, name string,
 	if !session {
 		t.Fatal("the browser holds no console session")
 	}
-	status := evalT[float64](tb, `fetch('/api/auth/me', {credentials: 'same-origin'}).then((r) => r.status)`)
-	if status != http.StatusOK {
+	if status := fetchStatus(tb, "/api/auth/me"); status != http.StatusOK {
 		t.Errorf("/api/auth/me in the browser answered %v, want 200", status)
 	}
+}
+
+// fetchStatus is the status the page's own fetch of path answers.
+func fetchStatus(tb *tab, path string) int {
+	tb.t.Helper()
+	ctx, cancel := context.WithTimeout(tb.ctx, stepTimeout)
+	defer cancel()
+	v, err := chromedp.Run(ctx, chromedp.Evaluate[float64](`fetch(`+strconv.Quote(path)+`, {credentials: 'same-origin'}).then((r) => r.status)`,
+		chromedp.EvalAwaitPromise))
+	if err != nil {
+		tb.t.Fatalf("fetch %s in the page: %v", path, err)
+	}
+	return int(v)
+}
+
+// signinEvents are the api's sign-in records, for a failure message: the
+// event and its reason, never a value.
+func (r *consoleRig) signinEvents() string {
+	var out []string
+	for _, rec := range r.apiRec.Records() {
+		ev, _ := logkittest.Attr(rec, "event")
+		if strings.HasPrefix(ev, "signin.") {
+			reason, _ := logkittest.Attr(rec, "reason")
+			out = append(out, ev+" "+reason)
+		}
+	}
+	return strings.Join(out, "; ")
 }
 
 // cookieNames are the names in a Cookie header.

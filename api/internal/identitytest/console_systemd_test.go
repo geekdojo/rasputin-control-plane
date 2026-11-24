@@ -637,8 +637,7 @@ func (s *consoleStack) signInBrowser(ctx context.Context, pw secret.Value) strin
 		t.Fatalf("SIGN IN led to %q", got)
 	}
 	signIn(tb, consoleFixture, pw)
-	status := evalT[float64](tb, `fetch('/api/auth/me', {credentials: 'same-origin'}).then((r) => r.status)`)
-	if status != http.StatusOK {
+	if status := fetchStatus(tb, "/api/auth/me"); status != http.StatusOK {
 		t.Fatalf("/api/auth/me in the browser answered %v after the sign-in", status)
 	}
 	tb.navigate("https://" + consoleCID + ".local/")
