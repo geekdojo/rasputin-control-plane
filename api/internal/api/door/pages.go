@@ -30,6 +30,7 @@ const (
 	pageNotReady = "not-ready"
 	pageRefusal  = "refusal"
 	pageInfo     = "info"
+	pageWarning  = "warning"
 )
 
 // The not-ready sentence (signin-origin.md §5.1), with the install name, and
@@ -53,7 +54,19 @@ type page struct {
 	BackText      string
 	CorrelationID string
 	Error         bool
+	// The warning page's (breach.go): its hint, the choose-another link, and
+	// the Keep form's action, marker and echoed fields.
+	Hint      string
+	Choose    string
+	Keep      string
+	KeepField string
+	Fields    []hiddenField
 }
+
+// hiddenField is one posted field the Keep form echoes. Its value is a
+// plain string, never a secret.Value, which html/template would render as
+// its redaction marker.
+type hiddenField struct{ Name, Value string }
 
 // render writes p with status, under the door page's headers.
 func (h *Handler) render(w http.ResponseWriter, status int, p page) {

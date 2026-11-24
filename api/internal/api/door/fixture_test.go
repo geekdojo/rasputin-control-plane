@@ -19,6 +19,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // upReq is one request the fake identity service received.
@@ -185,6 +186,29 @@ type fixture struct {
 	nameErr   error
 	ids       atomic.Int64
 	policySvc *policy.Service
+	breach    *fakeBreach
+}
+
+// fakeBreach is the breach check: it answers listed and err, and records
+// each password it was asked about.
+type fakeBreach struct {
+	mu     sync.Mutex
+	listed bool
+	err    error
+	got    []string
+}
+
+func (b *fakeBreach) Listed(_ context.Context, pw secret.Value) (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.got = append(b.got, string(pw.Reveal()))
+	return b.listed, b.err
+}
+
+func (b *fakeBreach) calls() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.got...)
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -201,7 +225,7 @@ func newFixture(t *testing.T) *fixture {
 			Tailnet:     []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")},
 			Nodes:       []netip.Addr{netip.MustParseAddr("192.0.2.50")},
 		}},
-		waiting: &fakeWaiting{}, dirty: &countDirty{}, name: "Hoodoo Home",
+		waiting: &fakeWaiting{}, dirty: &countDirty{}, name: "Hoodoo Home", breach: &fakeBreach{},
 	}
 	f.th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: func() time.Time { return f.now }})
 	if err != nil {
@@ -273,6 +297,7 @@ func (f *fixture) shared(t *testing.T) Shared {
 		InstallName: func(context.Context) (string, error) { return f.name, f.nameErr },
 		Dirty:       f.dirty,
 		IDs:         func() string { return "corr-" + strconv.FormatInt(f.ids.Add(1), 10) },
+		Breach:      f.breach,
 		Log:         log,
 	}
 }

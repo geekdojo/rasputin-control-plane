@@ -110,6 +110,9 @@ func TestSignInRules_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-987-21 K-ACR", func(t *testing.T) { r.tc21(t) })
 	t.Run("TC-987-22 K-PROFILE", func(t *testing.T) { r.tc22(t) })
 	t.Run("TC-987-23 K-DEFAULT-ACTION", func(t *testing.T) { r.tc23(t) })
+	t.Run("TC-1145-38 the breached-password warning at account creation", func(t *testing.T) { r.tc1145breachRegistration(t) })
+	t.Run("TC-1145-39 the breached-password warning at the password change, each door", func(t *testing.T) { r.tc1145breachUpdate(t) })
+	t.Run("TC-1145-40 offline, the breach check fails open", func(t *testing.T) { r.tc1145breachOffline(t) })
 	t.Run("TC-987-20 the recovery-codes page completes after 6 minutes", func(t *testing.T) { r.tc20finish(t, page20) })
 }
 

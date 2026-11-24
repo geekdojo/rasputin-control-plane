@@ -16,6 +16,7 @@ import (
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breachcheck"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
@@ -41,6 +42,14 @@ const (
 	// far outside normal bounds, so it cannot hold the sign-in history drain's
 	// floor (apipkg.SitesConfig.RequestLifetime).
 	doorRequestLifetime = 60 * time.Second
+	// hibpRangeBase is the breached-password list's range endpoint: only the
+	// first 5 hex characters of a new password's SHA-1 are sent to it
+	// (geekdojo/geekdojo-brain#1145).
+	hibpRangeBase = "https://api.pwnedpasswords.com/range"
+	// breachCheckCallLifetime bounds the one range request a password post
+	// makes. It decides no state: when it is reached, the post is relayed
+	// without the warning (EXCEPTIONS.md EX-1).
+	breachCheckCallLifetime = 5 * time.Second
 )
 
 // doorMountDeps are mountDoors' collaborators.
@@ -119,11 +128,19 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	base, err := url.Parse(hibpRangeBase)
+	if err != nil {
+		return nil, nil, fmt.Errorf("the breach check's endpoint: %w", err)
+	}
+	breach, err := breachcheck.New(breachcheck.Config{Client: &http.Client{}, Base: base, CallTimeout: breachCheckCallLifetime})
+	if err != nil {
+		return nil, nil, err
+	}
 	return door.Build(d.table, door.Shared{
 		ConsoleOrigin: d.consoleOrigin, Policy: pol, Throttle: d.throttle,
 		Transport: idclient.NewTransport(tlsCfg), Upstream: d.upstream,
 		Theme: allow, Assets: os.DirFS(filepath.Join(d.themeDir, "login", "resources")),
-		Version: d.version, InstallName: d.installName, Dirty: d.dirty, IDs: d.ids, Log: d.log,
+		Version: d.version, InstallName: d.installName, Dirty: d.dirty, IDs: d.ids, Breach: breach, Log: d.log,
 	})
 }
 

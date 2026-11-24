@@ -257,6 +257,7 @@ func (r *sitesRig) buildDoors(log *slog.Logger) (http.Handler, http.Handler) {
 		},
 		InstallName: func(context.Context) (string, error) { return "CI", nil },
 		IDs:         func() string { return "door-" + strconv.FormatInt(r.ids.Add(1), 10) },
+		Breach:      struct{ door.Breach }{}, // never called: no case here posts a new password
 	})
 	if err != nil {
 		t.Fatal(err)

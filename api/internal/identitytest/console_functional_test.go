@@ -307,7 +307,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return consoleInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Log: log,
+		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
