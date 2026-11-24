@@ -6,6 +6,11 @@
 #
 # Usage: scripts/install-identity.sh <dest-dir> [<download-dir>]
 #
+# It also runs scripts/fetch-denylist.sh, which writes the password deny list
+# the realm's policy names to <dest-dir>/password-blacklists/ and its notices
+# to <dest-dir>/licenses/ (geekdojo/geekdojo-brain#1145), keeping its downloads
+# in <download-dir> too.
+#
 # Downloads the Keycloak distribution (Maven Central), the Temurin JRE
 # (Adoptium) and Chrome for Testing that api/internal/identitytest/pin.go pins,
 # checks each against its pinned sha256, and extracts them to
@@ -43,7 +48,7 @@ mesh_images="$repo_root/api/internal/mesh/mesh-images.json"
 build_conf="$repo_root/identity/keycloak-build.conf"
 
 # shellcheck source=SCRIPTDIR/lib/release-lib.sh
-. "$repo_root/scripts/lib/release-lib.sh"   # pin_const: the anchored pin.go reader
+. "$repo_root/scripts/lib/release-lib.sh"   # pin_const, fetch_pinned
 
 need() {
   local v
@@ -99,18 +104,7 @@ fi
 # fetch FILE URL SHA256: use the kept FILE or download it, then check it
 # against the pin. A file that fails is left where it is and refused.
 fetch() {
-  local file="$1" url="$2" sum="$3"
-  if [ -f "$work/$file" ]; then
-    echo "install-identity: using the kept $work/$file"
-  else
-    echo "install-identity: downloading $url"
-    curl -fsSL --retry 2 -o "$work/$file.part" "$url"
-    mv "$work/$file.part" "$work/$file"
-  fi
-  if ! (cd "$work" && echo "${sum}  ${file}" | sha256sum -c -); then
-    echo "install-identity: $work/$file does not match the pinned sha256 $sum; refusing it (it is left in place, not replaced)" >&2
-    exit 1
-  fi
+  fetch_pinned "$work" "$1" "$2" "$3" install-identity || exit 1
 }
 
 fetch "$kc_file" "$kc_url" "$kc_sha256"
@@ -123,6 +117,7 @@ mkdir -p "$dest/keycloak" "$dest/jre"
 tar -xzf "$work/$kc_file" -C "$dest/keycloak" --strip-components=1
 tar -xzf "$work/$jre_file" -C "$dest/jre" --strip-components=1
 unzip -q "$work/$cft_file" -d "$dest"
+"$repo_root/scripts/fetch-denylist.sh" "$dest" "$keep"
 
 echo "install-identity: kc.sh --config-file=$build_conf build"
 JAVA_HOME="$dest/jre" "$dest/keycloak/bin/kc.sh" --config-file="$build_conf" build

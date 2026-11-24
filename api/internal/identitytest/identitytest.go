@@ -49,6 +49,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/atrest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/adminguard"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -134,6 +135,11 @@ type Config struct {
 	Run CmdRunner
 	// Procs lists live processes for the teardown proof.
 	Procs ProcLister
+	// DenylistDir holds the password deny list the realm's policy names,
+	// flows.DenylistFile, as scripts/fetch-denylist.sh writes it. Each Env
+	// copies it into its Keycloak data directory's password-blacklists/,
+	// where rasputin-os stages it on a node (geekdojo/geekdojo-brain#1145).
+	DenylistDir string
 	// ThemeDir is the built Rasputin login theme (ui/identity-theme's
 	// build output), linked as the Env's themes/rasputin, the path Identity
 	// 2.3 links on a node. "" runs Keycloak without it; a test that renders
@@ -165,9 +171,10 @@ type Harness struct {
 	cfg Config
 }
 
-// New checks cfg and returns a Harness. Its one I/O is checking a set
-// ThemeDir: a directory holding login/theme.properties, so a broken theme
-// fails before anything starts.
+// New checks cfg and returns a Harness. Its I/O is checking the deny list,
+// a non-empty regular file DenylistDir/flows.DenylistFile, and a set
+// ThemeDir, a directory holding login/theme.properties, so a missing list or
+// a broken theme fails before anything starts.
 func New(cfg Config) (*Harness, error) {
 	missing := ""
 	switch {
@@ -191,9 +198,14 @@ func New(cfg Config) (*Harness, error) {
 		missing = "Run is nil"
 	case cfg.Procs == nil:
 		missing = "Procs is nil"
+	case cfg.DenylistDir == "":
+		missing = "DenylistDir is empty"
 	}
 	if missing != "" {
 		return nil, errors.New("identitytest: Config." + missing)
+	}
+	if err := checkDenylist(cfg.DenylistDir); err != nil {
+		return nil, err
 	}
 	if cfg.ThemeDir != "" {
 		if err := checkThemeDir(cfg.ThemeDir); err != nil {
@@ -201,6 +213,18 @@ func New(cfg Config) (*Harness, error) {
 		}
 	}
 	return &Harness{cfg: cfg}, nil
+}
+
+// checkDenylist refuses a DenylistDir without a non-empty regular
+// flows.DenylistFile, naming the path: the realm's policy names that list,
+// and converge cannot apply it without one.
+func checkDenylist(dir string) error {
+	list := filepath.Join(dir, flows.DenylistFile)
+	info, err := os.Stat(list)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+		return fmt.Errorf("identitytest: the password deny list %s is missing or empty, so the realm's password policy cannot be applied (scripts/install-identity.sh)", list)
+	}
+	return nil
 }
 
 // checkThemeDir refuses a theme that is not a directory holding
@@ -234,6 +258,9 @@ type Env struct {
 
 	password   secret.Value // the realm user's
 	dbPassword secret.Value
+
+	// kcHome is the Env's own Keycloak home, once Start has made it.
+	kcHome string
 
 	pgID   string // the PostgreSQL container id, once it exists
 	kc     *proctest.Proc
@@ -417,6 +444,7 @@ func (e *Env) start(ctx context.Context, version, jvm string) error {
 	if err != nil {
 		return err
 	}
+	e.kcHome = home
 	confPath := filepath.Join(e.root, "keycloak.conf")
 	hostname := frontURL
 	if cfg.DoorMode {
@@ -602,7 +630,9 @@ func (e *Env) makeTLS() error {
 // it, and data/ is this Env's own, so two packages can run Keycloak at once.
 // Keycloak writes only under data/ (#958), which is why linking lib/ is safe.
 // With a ThemeDir, themes/ is a directory of its own: each entry of the
-// dist's themes/ links into it, and themes/rasputin links to ThemeDir.
+// dist's themes/ links into it, and themes/rasputin links to ThemeDir. The
+// deny list is copied into data/password-blacklists/, Keycloak's default
+// list directory, at 0600 in a 0700 directory, as rasputin-os stages it.
 func (e *Env) makeKeycloakHome() (string, error) {
 	src := e.h.cfg.KeycloakHome
 	home := filepath.Join(e.root, "kc")
@@ -644,7 +674,28 @@ func (e *Env) makeKeycloakHome() (string, error) {
 			return "", fmt.Errorf("identitytest: keycloak home: %w", err)
 		}
 	}
+	if err := stageDenylist(e.h.cfg.DenylistDir, home); err != nil {
+		return "", fmt.Errorf("identitytest: keycloak home: the password deny list: %w", err)
+	}
 	return home, nil
+}
+
+// stageDenylist copies dir's flows.DenylistFile into home's
+// data/password-blacklists/.
+func stageDenylist(dir, home string) error {
+	b, err := os.ReadFile(filepath.Join(dir, flows.DenylistFile))
+	if err != nil {
+		return err
+	}
+	if err := atrest.EnsureSecretDir(filepath.Join(home, "data", "password-blacklists")); err != nil {
+		return err
+	}
+	return atrest.WriteSecretFile(denylistPath(home), b)
+}
+
+// denylistPath is the staged list's path in a Keycloak home.
+func denylistPath(home string) string {
+	return filepath.Join(home, "data", "password-blacklists", flows.DenylistFile)
 }
 
 // linkThemes makes dst a directory, links each entry of the dist's src into

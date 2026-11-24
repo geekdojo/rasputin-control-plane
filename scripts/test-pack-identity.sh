@@ -2,11 +2,13 @@
 #
 # test-pack-identity.sh — tests for scripts/pack-identity.sh, the realm
 # baseline it ships, and scripts/lib/release-lib.sh
-# (geekdojo/geekdojo-brain#980, TC-980-01 to TC-980-18).
+# (geekdojo/geekdojo-brain#980, TC-980-01 to TC-980-18), and the password deny
+# list the pack carries (geekdojo/geekdojo-brain#1145, TC-1145-06).
 #
 # Run:  ./scripts/test-pack-identity.sh
 #
-# Packs the real identity/ and pin.go and checks the four entries; checks every
+# Packs the real identity/ and pin.go, with a fixture deny list in
+# fetch-denylist.sh's layout, and checks the six entries; checks every
 # refusal exits with a sentence and creates nothing; checks the baseline's
 # cluster-independent settings with jq, each assertion also failing on a
 # negative fixture where the test case names one. Needs jq. No network.
@@ -23,6 +25,16 @@ BASE="$SRC/realm-baseline.json"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf -- "$tmp"' EXIT
+
+# DENY — a fixture in fetch-denylist.sh's output layout; the list's name is
+# the one realm.go gives the realm's policy.
+LIST="$(pin_const "$root/api/internal/identity/flows/realm.go" DenylistFile)"
+[ -n "$LIST" ] || { echo "FAIL realm.go has no DenylistFile constant"; exit 1; }
+DENY="$tmp/deny"
+mkdir -p "$DENY/password-blacklists" "$DENY/licenses"
+printf 'correcthorsebatterystaple\npasswordpassword123\n' >"$DENY/password-blacklists/$LIST"
+printf 'MIT License (SecLists)\n' >"$DENY/licenses/SecLists-LICENSE"
+printf 'MIT License (Pwdb-Public)\n' >"$DENY/licenses/Pwdb-Public-LICENSE"
 
 failures=0
 ok() { printf 'ok   %s\n' "$1"; }
@@ -67,12 +79,12 @@ rejects() {
 	if jq -e "$3" "$2" >/dev/null 2>&1; then fail "$1: the negative fixture passed" "jq: $3"; else ok "$1"; fi
 }
 
-# --- TC-980-01: the real identity/ packs to exactly the four entries ----------
-out="$("$PACK" "$SRC" "$PIN" "$tmp/real/identity" 2>&1)" && rc=0 || rc=$?
+# --- TC-980-01: the real identity/ packs to exactly the six entries -----------
+out="$("$PACK" "$SRC" "$PIN" "$tmp/real/identity" "$DENY" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" = 0 ]; then ok "TC-980-01 packing the real identity/ exits 0"; else fail "TC-980-01 packing the real identity/ exits 0 (got $rc)" "$out"; fi
 got="$(cd "$tmp/real/identity" && ls -1A | tr '\n' ' ')"
-want="keycloak-build.conf pins.json realm-baseline.json theme "
-if [ "$got" = "$want" ]; then ok "TC-980-01 identity/ holds exactly: $want"; else fail "TC-980-01 identity/ holds exactly the four entries" "got: $got"; fi
+want="keycloak-build.conf licenses password-blacklists pins.json realm-baseline.json theme "
+if [ "$got" = "$want" ]; then ok "TC-980-01 identity/ holds exactly: $want"; else fail "TC-980-01 identity/ holds exactly the six entries" "got: $got"; fi
 if [ -d "$tmp/real/identity/theme" ] && [ -z "$(ls -A "$tmp/real/identity/theme")" ]; then ok "TC-980-01 theme/ is an empty directory"; else fail "TC-980-01 theme/ is an empty directory"; fi
 for n in realm-baseline.json keycloak-build.conf; do
 	if cmp -s "$SRC/$n" "$tmp/real/identity/$n"; then ok "TC-980-01 $n is byte-equal"; else fail "TC-980-01 $n is byte-equal"; fi
@@ -86,13 +98,13 @@ else fail "TC-980-01 the real lock matches the real baseline" "record the baseli
 mkdir -p "$tmp/theme/login/resources/css"
 printf 'body{}\n' >"$tmp/theme/login/resources/css/a.css"
 printf 'parent=base\n' >"$tmp/theme/login/theme.properties"
-out="$("$PACK" "$SRC" "$PIN" "$tmp/out" "$tmp/theme" 2>&1)" && rc=0 || rc=$?
+out="$("$PACK" "$SRC" "$PIN" "$tmp/out" "$DENY" "$tmp/theme" 2>&1)" && rc=0 || rc=$?
 if [ "$rc" = 0 ] && diff -r "$tmp/theme" "$tmp/out/theme" >/dev/null; then ok "TC-980-02 a nested THEME tree is copied byte-equal into theme/"
 else fail "TC-980-02 a nested THEME tree is copied byte-equal into theme/ (exit $rc)" "$out"; fi
 rm -rf "$tmp/out"
 printf 'x' >"$tmp/theme-file"
-refused "TC-980-02 THEME naming a regular file" 1 "The theme $tmp/theme-file is not a directory" "$SRC" "$PIN" "$tmp/out" "$tmp/theme-file"
-refused "TC-980-02 THEME naming a missing path" 1 "The theme $tmp/no-theme is not a directory" "$SRC" "$PIN" "$tmp/out" "$tmp/no-theme"
+refused "TC-980-02 THEME naming a regular file" 1 "The theme $tmp/theme-file is not a directory" "$SRC" "$PIN" "$tmp/out" "$DENY" "$tmp/theme-file"
+refused "TC-980-02 THEME naming a missing path" 1 "The theme $tmp/no-theme is not a directory" "$SRC" "$PIN" "$tmp/out" "$DENY" "$tmp/no-theme"
 
 # --- TC-980-03: pins.json content -----------------------------------------------
 cat >"$tmp/pin.go" <<'EOF'
@@ -106,7 +118,7 @@ const (
 	JRELinuxX64SHA256 = "bbbb"
 )
 EOF
-out="$("$PACK" "$SRC" "$tmp/pin.go" "$tmp/out" 2>&1)" && rc=0 || rc=$?
+out="$("$PACK" "$SRC" "$tmp/pin.go" "$tmp/out" "$DENY" 2>&1)" && rc=0 || rc=$?
 want='{"jre":{"linux_x64_sha256":"bbbb","release":"9.0.1+2"},"keycloak":{"release":"1.2.3","sha256":"aaaa"}}'
 got="$(jq -cS . "$tmp/out/pins.json" 2>&1 || true)"
 if [ "$rc" = 0 ] && [ "$got" = "$want" ]; then ok "TC-980-03 a fixture pin.go gives exactly $want"; else fail "TC-980-03 a fixture pin.go gives the exact pins.json (exit $rc)" "got: $got $out"; fi
@@ -118,73 +130,75 @@ if [ "$got" = "26.8.2" ]; then ok "TC-980-03 the real pin.go gives keycloak.rele
 # --- TC-980-04: a missing pin fails closed --------------------------------------
 for c in KCDistSHA256 KeycloakRelease JRERelease JRELinuxX64SHA256; do
 	grep -v "^[[:space:]]*${c}[[:space:]]" "$tmp/pin.go" >"$tmp/pin-no-$c.go"
-	refused "TC-980-04 pin.go without $c" 1 "The pin file $tmp/pin-no-$c.go has no $c constant" "$SRC" "$tmp/pin-no-$c.go" "$tmp/out"
+	refused "TC-980-04 pin.go without $c" 1 "The pin file $tmp/pin-no-$c.go has no $c constant" "$SRC" "$tmp/pin-no-$c.go" "$tmp/out" "$DENY"
 done
-refused "TC-980-04 a PIN path that does not exist" 1 "The pin file $tmp/none.go does not exist" "$SRC" "$tmp/none.go" "$tmp/out"
+refused "TC-980-04 a PIN path that does not exist" 1 "The pin file $tmp/none.go does not exist" "$SRC" "$tmp/none.go" "$tmp/out" "$DENY"
 
 # --- TC-980-05: the build-option allowlist ---------------------------------------
 s="$(fixture bad-key)"
 echo 'featurs-disabled=account' >>"$s/keycloak-build.conf"
-refused "TC-980-05 an unknown key featurs-disabled" 1 "sets featurs-disabled, which is not an allowed Keycloak build option; Keycloak ignores an unknown key silently" "$s" "$PIN" "$tmp/out"
+refused "TC-980-05 an unknown key featurs-disabled" 1 "sets featurs-disabled, which is not an allowed Keycloak build option; Keycloak ignores an unknown key silently" "$s" "$PIN" "$tmp/out" "$DENY"
 for k in db transaction-xa-enabled health-enabled metrics-enabled event-metrics-user-enabled https-client-auth vault features-disabled; do
 	s="$(fixture "key-$k")"
 	grep "^$k=" "$SRC/keycloak-build.conf" >"$s/keycloak-build.conf"
-	packs "TC-980-05 the allowed key $k alone" "$s" "$PIN" "$tmp/out"
+	packs "TC-980-05 the allowed key $k alone" "$s" "$PIN" "$tmp/out" "$DENY"
 done
 
 # --- TC-980-06: conf syntax ----------------------------------------------------------
 s="$(fixture syntax)"
 printf 'db=postgres\nvault=file\ndb postgres\n' >"$s/keycloak-build.conf"
-refused "TC-980-06 a line without = at line 3" 1 "keycloak-build.conf line 3 is not blank, a # comment or key=value" "$s" "$PIN" "$tmp/out"
+refused "TC-980-06 a line without = at line 3" 1 "keycloak-build.conf line 3 is not blank, a # comment or key=value" "$s" "$PIN" "$tmp/out" "$DENY"
 s="$(fixture comments)"
 printf '# build options\ndb=postgres\n\n  # indented comment\n   \nvault=file\n' >"$s/keycloak-build.conf"
-packs "TC-980-06 blank lines and # comments between valid lines" "$s" "$PIN" "$tmp/out"
+packs "TC-980-06 blank lines and # comments between valid lines" "$s" "$PIN" "$tmp/out" "$DENY"
 
 # --- TC-980-07: missing inputs ----------------------------------------------------------
 for f in realm-baseline.json keycloak-build.conf; do
 	s="$(fixture "missing-$f")"
 	rm "$s/$f"
-	refused "TC-980-07 SRC without $f" 1 "so the api tarball would ship without the identity service's $f." "$s" "$PIN" "$tmp/out"
+	refused "TC-980-07 SRC without $f" 1 "so the api tarball would ship without the identity service's $f." "$s" "$PIN" "$tmp/out" "$DENY"
 done
 
 # --- TC-980-08: usage ---------------------------------------------------------------------
 refused "TC-980-08 no arguments" 2 "Usage: "
 refused "TC-980-08 one argument" 2 "Usage: " "$SRC"
 refused "TC-980-08 two arguments" 2 "Usage: " "$SRC" "$PIN"
-refused "TC-980-08 five arguments" 2 "Usage: " "$SRC" "$PIN" "$tmp/out" "$tmp/theme" extra
-refused "TC-980-08 an empty SRC" 2 "Usage: " "" "$PIN" "$tmp/out"
-refused "TC-980-08 an empty PIN" 2 "Usage: " "$SRC" "" "$tmp/out"
-refused "TC-980-08 an empty DEST" 2 "Usage: " "$SRC" "$PIN" ""
-refused "TC-980-08 an empty THEME" 2 "Usage: " "$SRC" "$PIN" "$tmp/out" ""
+refused "TC-1145-06 three arguments (no DENYLIST)" 2 "Usage: " "$SRC" "$PIN" "$tmp/out"
+refused "TC-980-08 six arguments" 2 "Usage: " "$SRC" "$PIN" "$tmp/out" "$DENY" "$tmp/theme" extra
+refused "TC-980-08 an empty SRC" 2 "Usage: " "" "$PIN" "$tmp/out" "$DENY"
+refused "TC-980-08 an empty PIN" 2 "Usage: " "$SRC" "" "$tmp/out" "$DENY"
+refused "TC-980-08 an empty DEST" 2 "Usage: " "$SRC" "$PIN" "" "$DENY"
+refused "TC-1145-06 an empty DENYLIST" 2 "Usage: " "$SRC" "$PIN" "$tmp/out" ""
+refused "TC-980-08 an empty THEME" 2 "Usage: " "$SRC" "$PIN" "$tmp/out" "$DENY" ""
 
 # --- TC-980-09: before arming --------------------------------------------------------------
 old="$(sha256_of "$BASE")"
 s="$(fixture pre-arm)"
 printf 'armed-at=none\nsha256=%s\n' "$old" >"$s/realm-baseline.lock"
-packs "TC-980-09 the unedited baseline with armed-at=none" "$s" "$PIN" "$tmp/out"
+packs "TC-980-09 the unedited baseline with armed-at=none" "$s" "$PIN" "$tmp/out" "$DENY"
 printf ' ' >>"$s/realm-baseline.json"
-refused "TC-980-09 an edited baseline with armed-at=none" 1 "the baseline is not armed yet, so record the new hash in realm-baseline.lock in the same change." "$s" "$PIN" "$tmp/out"
+refused "TC-980-09 an edited baseline with armed-at=none" 1 "the baseline is not armed yet, so record the new hash in realm-baseline.lock in the same change." "$s" "$PIN" "$tmp/out" "$DENY"
 printf 'armed-at=none\nsha256=%s\n' "$(sha256_of "$s/realm-baseline.json")" >"$s/realm-baseline.lock"
-packs "TC-980-09 the edited baseline with its new hash locked" "$s" "$PIN" "$tmp/out"
+packs "TC-980-09 the edited baseline with its new hash locked" "$s" "$PIN" "$tmp/out" "$DENY"
 
 # --- TC-980-10: after arming ----------------------------------------------------------------
 s="$(fixture armed)"
 printf 'armed-at=v0.0.0\nsha256=%s\n' "$old" >"$s/realm-baseline.lock"
-packs "TC-980-10 the unedited baseline with armed-at=v0.0.0" "$s" "$PIN" "$tmp/out"
+packs "TC-980-10 the unedited baseline with armed-at=v0.0.0" "$s" "$PIN" "$tmp/out" "$DENY"
 printf ' ' >>"$s/realm-baseline.json"
-refused "TC-980-10 an edited baseline frozen at v0.0.0" 1 "the baseline was frozen at v0.0.0, so restore the file and change the realm through a migration (Identity 3.5), and never edit the lock." "$s" "$PIN" "$tmp/out"
+refused "TC-980-10 an edited baseline frozen at v0.0.0" 1 "the baseline was frozen at v0.0.0, so restore the file and change the realm through a migration (Identity 3.5), and never edit the lock." "$s" "$PIN" "$tmp/out" "$DENY"
 
 # --- TC-980-11: the lock fails closed ------------------------------------------------------
 s="$(fixture lock-missing)"; rm "$s/realm-baseline.lock"
-refused "TC-980-11 a missing lock" 1 "The baseline lock $s/realm-baseline.lock is missing" "$s" "$PIN" "$tmp/out"
+refused "TC-980-11 a missing lock" 1 "The baseline lock $s/realm-baseline.lock is missing" "$s" "$PIN" "$tmp/out" "$DENY"
 s="$(fixture lock-empty)"; : >"$s/realm-baseline.lock"
-refused "TC-980-11 an empty lock" 1 "The baseline lock $s/realm-baseline.lock is empty" "$s" "$PIN" "$tmp/out"
+refused "TC-980-11 an empty lock" 1 "The baseline lock $s/realm-baseline.lock is empty" "$s" "$PIN" "$tmp/out" "$DENY"
 s="$(fixture lock-no-sha)"; printf 'armed-at=none\n' >"$s/realm-baseline.lock"
-refused "TC-980-11 a lock with no sha256= line" 1 "holds 0 sha256= lines, want exactly one" "$s" "$PIN" "$tmp/out"
+refused "TC-980-11 a lock with no sha256= line" 1 "holds 0 sha256= lines, want exactly one" "$s" "$PIN" "$tmp/out" "$DENY"
 s="$(fixture lock-bad-sha)"; printf 'armed-at=none\nsha256=%s\n' "$(printf '%s' "$old" | tr 'a-f' 'A-F')" >"$s/realm-baseline.lock"
-refused "TC-980-11 a lock with a non-hex sha256" 1 "has a sha256 that is not 64 lowercase hex characters" "$s" "$PIN" "$tmp/out"
+refused "TC-980-11 a lock with a non-hex sha256" 1 "has a sha256 that is not 64 lowercase hex characters" "$s" "$PIN" "$tmp/out" "$DENY"
 s="$(fixture lock-no-armed)"; printf 'sha256=%s\n' "$old" >"$s/realm-baseline.lock"
-refused "TC-980-11 a lock with no armed-at= line" 1 "holds 0 armed-at= lines, want exactly one" "$s" "$PIN" "$tmp/out"
+refused "TC-980-11 a lock with no armed-at= line" 1 "holds 0 armed-at= lines, want exactly one" "$s" "$PIN" "$tmp/out" "$DENY"
 
 # --- TC-980-12: the realm settings ----------------------------------------------------------
 holds "TC-980-12 realm is rasputin" "$BASE" '.realm == "rasputin"'
@@ -302,6 +316,26 @@ holds "TC-980-17 each declared flow is top-level with no executions" "$BASE" \
 holds "TC-980-17 no realm flow binding names a skeleton" "$BASE" \
 	'[.authenticationFlows[].alias] as $a | ([.browserFlow, .registrationFlow, .directGrantFlow, .resetCredentialsFlow, .clientAuthenticationFlow, .firstBrokerLoginFlow] - [null]) as $b
 	 | ($b - $a) == $b'
+
+# --- TC-1145-06: the deny list and its notices -----------------------------------------------------
+for f in "password-blacklists/$LIST" licenses/SecLists-LICENSE licenses/Pwdb-Public-LICENSE; do
+	if cmp -s "$DENY/$f" "$tmp/real/identity/$f"; then ok "TC-1145-06 $f is byte-equal to the input"; else fail "TC-1145-06 $f is byte-equal to the input"; fi
+	if [ -n "$(find "$tmp/real/identity/$f" -perm 0644)" ]; then ok "TC-1145-06 $f is 0644"; else fail "TC-1145-06 $f is 0644"; fi
+done
+got="$(cd "$tmp/real/identity" && ls -1A password-blacklists licenses | tr '\n' ' ')"
+if [ "$got" = "licenses: Pwdb-Public-LICENSE SecLists-LICENSE  password-blacklists: $LIST " ]; then ok "TC-1145-06 the two directories hold the list and the two notices alone"
+else fail "TC-1145-06 the two directories hold the list and the two notices alone" "got: $got"; fi
+# A missing directory, a missing or empty list, and a missing notice: refused,
+# DEST not created.
+refused "TC-1145-06 a DENYLIST that does not exist" 1 "The deny list directory $tmp/no-deny does not exist" "$SRC" "$PIN" "$tmp/out" "$tmp/no-deny"
+rm -rf "$tmp/d1"; cp -R "$DENY" "$tmp/d1"; rm "$tmp/d1/password-blacklists/$LIST"
+refused "TC-1145-06 a DENYLIST without the list" 1 "The password deny list $tmp/d1/password-blacklists/$LIST is missing or empty" "$SRC" "$PIN" "$tmp/out" "$tmp/d1"
+rm -rf "$tmp/d2"; cp -R "$DENY" "$tmp/d2"; : >"$tmp/d2/password-blacklists/$LIST"
+refused "TC-1145-06 an empty list" 1 "The password deny list $tmp/d2/password-blacklists/$LIST is missing or empty" "$SRC" "$PIN" "$tmp/out" "$tmp/d2"
+for n in SecLists-LICENSE Pwdb-Public-LICENSE; do
+	rm -rf "$tmp/d3"; cp -R "$DENY" "$tmp/d3"; rm "$tmp/d3/licenses/$n"
+	refused "TC-1145-06 a DENYLIST without $n" 1 "licence notice $tmp/d3/licenses/$n is missing" "$SRC" "$PIN" "$tmp/out" "$tmp/d3"
+done
 
 # --- TC-980-18: release-lib.sh --------------------------------------------------------------------------
 printf 'const (\n\tName = "v"\n\tNameX = "w"\n\t// Name = "x"\n)\n' >"$tmp/lib-a.go"

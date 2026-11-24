@@ -177,6 +177,10 @@ jobs:
       # realm-baseline.json and keycloak-build.conf byte-equal to the repo's, a
       # pins.json naming the Keycloak release pin.go pins, and the theme/ slot;
       # no agent tarball carries it (geekdojo/geekdojo-brain#980, TC-980-19).
+      # The password deny list the realm's policy names, byte-equal to a fresh
+      # fetch-denylist.sh run from the pinned source, and both licence
+      # notices; and no list kept in the repository
+      # (geekdojo/geekdojo-brain#1145, TC-1145-07).
       # The pin is read through scripts/lib/release-lib.sh, the one reader.
       # Runs before the publish step on every path, dry runs included.
       - name: api tarballs carry the identity release
@@ -188,6 +192,12 @@ jobs:
           kc="${kc##*:}"
           [ -n "$kc" ] || { echo "::error::cannot read KeycloakRelease from api/internal/identitytest/pin.go."; exit 1; }
           [ ! -e dist/identity ] || { echo "::error::dist/identity was left behind; build-release.sh packs it into the api tarballs and removes it."; exit 1; }
+          list="$(pin_const api/internal/identity/flows/realm.go DenylistFile)"
+          [ -n "$list" ] || { echo "::error::cannot read DenylistFile from api/internal/identity/flows/realm.go."; exit 1; }
+          kept="$(git ls-files | grep -E '(^|/)password-blacklists/' || true)"
+          [ -z "$kept" ] || { echo "::error::the repository keeps a deny list by hand: $kept"; exit 1; }
+          deny=$(mktemp -d)
+          scripts/fetch-denylist.sh "$deny"
           n=0
           for t in dist/rasputin-api-*.tar.gz; do
             [ -f "$t" ] || continue
@@ -207,6 +217,13 @@ jobs:
               || { echo "::error::$t identity/pins.json names Keycloak $got, but pin.go pins $kc."; exit 1; }
             [ -d "$x/identity/theme" ] \
               || { echo "::error::$t holds no identity/theme/ slot."; exit 1; }
+            cmp -s "$deny/password-blacklists/$list" "$x/identity/password-blacklists/$list" \
+              || { echo "::error::$t identity/password-blacklists/$list is missing or differs from fetch-denylist.sh's output from the pinned source."; exit 1; }
+            echo "  identity/password-blacklists/$list sha256=$(sha256_of "$x/identity/password-blacklists/$list")"
+            for f in SecLists-LICENSE Pwdb-Public-LICENSE; do
+              cmp -s "$deny/licenses/$f" "$x/identity/licenses/$f" \
+                || { echo "::error::$t identity/licenses/$f is missing or differs from the pinned notice."; exit 1; }
+            done
             # The built sign-in theme (geekdojo/geekdojo-brain#988, TC-988-29).
             for f in login/theme.properties resource-allowlist.json; do
               [ -f "$x/identity/theme/$f" ] \
@@ -225,7 +242,8 @@ jobs:
             rm -f "$l"
           done
           [ "$a" -eq 2 ] || { echo "::error::found $a agent tarballs in dist/, want 2 (amd64 and arm64)."; exit 1; }
-          echo "every api tarball carries identity/ (baseline and build options byte-equal to $src, pins.json at Keycloak $kc, the built theme/); no agent tarball does"
+          rm -rf "$deny"
+          echo "every api tarball carries identity/ (baseline and build options byte-equal to $src, pins.json at Keycloak $kc, the built theme/, password-blacklists/$list equal to the pinned source's cut, both licence notices); no agent tarball does; git keeps no deny list"
 
       # Tag push → publish a GitHub Release with the tarballs + checksums.
       # rasputin-os fetches these from

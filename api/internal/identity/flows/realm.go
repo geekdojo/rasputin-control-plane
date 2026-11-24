@@ -52,10 +52,21 @@ const (
 // an account (the backstop; the per-source throttle is Identity 4.3's).
 const failureFactor = 100
 
-// PasswordPolicy is the realm's password policy: 15 to 128 characters, not
-// the username, not the email. It has no deny list (no list exists in the
-// platform; the 2026-11-23 decision, F-987-07).
-const PasswordPolicy = "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined)"
+// The realm's password policy and the deny list it names
+// (geekdojo/geekdojo-brain#1145). scripts/fetch-denylist.sh reads both lines
+// with anchored seds, so each name stays on a line of its own and the
+// policy's length(N) stays first: the list is cut to the passwords of at
+// least N bytes, which the length rule does not already refuse.
+const (
+	// DenylistFile is the list's name in Keycloak's
+	// <data>/password-blacklists/, where rasputin-os stages the copy the api
+	// tarball ships (identity/password-blacklists/).
+	DenylistFile = "rasputin-common-passwords.txt"
+	// PasswordPolicy is the realm's password policy: 15 to 128 characters,
+	// not the username, not the email, and not on the deny list, a pinned
+	// third-party list of common and breached passwords.
+	PasswordPolicy = "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined) and passwordBlacklist(" + DenylistFile + ")"
+)
 
 func seconds(d time.Duration) int { return int(d / time.Second) }
 

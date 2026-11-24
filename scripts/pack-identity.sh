@@ -3,18 +3,23 @@
 # pack-identity.sh — build the identity service's release directory for the
 # api tarball (geekdojo/geekdojo-brain#980; platform.md §2.5, §4).
 #
-# Usage: scripts/pack-identity.sh SRC PIN DEST [THEME]
+# Usage: scripts/pack-identity.sh SRC PIN DEST DENYLIST [THEME]
 #
-#   SRC    the repository's identity/ directory: realm-baseline.json,
-#          realm-baseline.lock and keycloak-build.conf
-#   PIN    api/internal/identitytest/pin.go, the one pin
-#   DEST   the directory to create, <dist>/identity
-#   THEME  optional: a built theme tree, copied into DEST/theme/ (Identity 4.6)
+#   SRC       the repository's identity/ directory: realm-baseline.json,
+#             realm-baseline.lock and keycloak-build.conf
+#   PIN       api/internal/identitytest/pin.go, the one pin
+#   DEST      the directory to create, <dist>/identity
+#   DENYLIST  scripts/fetch-denylist.sh's output directory: the password deny
+#             list in password-blacklists/ and its notices in licenses/
+#             (geekdojo/geekdojo-brain#1145)
+#   THEME     optional: a built theme tree, copied into DEST/theme/ (Identity 4.6)
 #
 # DEST receives realm-baseline.json and keycloak-build.conf byte for byte at
 # mode 0644, a pins.json generated from PIN (never committed, so it cannot lag a
-# bump), and theme/, empty unless THEME is given. The lock is checked, not
-# shipped. rasputin-os installs DEST under /usr/share/rasputin/identity/.
+# bump), password-blacklists/<DenylistFile> and licenses/ at 0644, and theme/,
+# empty unless THEME is given. The lock is checked, not shipped. rasputin-os
+# installs DEST under /usr/share/rasputin/identity/, and stages the deny list
+# into the identity service's data directory on every start.
 #
 # Everything is checked before DEST is created:
 #   - each keycloak-build.conf line is blank, a # comment, or key=value with
@@ -27,6 +32,9 @@
 #     "nothing to compare";
 #   - PIN holds KeycloakRelease, KCDistSHA256, JRERelease and
 #     JRELinuxX64SHA256;
+#   - DENYLIST holds a non-empty password-blacklists/<DenylistFile>, the name
+#     read from api/internal/identity/flows/realm.go, and both notices, so no
+#     tarball ships a realm policy naming a list it does not carry;
 #   - THEME, when given, is a directory.
 #
 # Exit status: 0 packed; 1 an input is missing or refused, or a copy failed;
@@ -37,11 +45,11 @@ here="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=SCRIPTDIR/lib/release-lib.sh
 . "$here/lib/release-lib.sh"
 
-if [ "$#" -lt 3 ] || [ "$#" -gt 4 ] || [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || { [ "$#" -eq 4 ] && [ -z "$4" ]; }; then
-	echo "Usage: $0 SRC PIN DEST [THEME], where SRC is the identity/ directory, PIN is identitytest/pin.go, DEST is the directory to create and THEME a built theme tree." >&2
+if [ "$#" -lt 4 ] || [ "$#" -gt 5 ] || [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ] || { [ "$#" -eq 5 ] && [ -z "$5" ]; }; then
+	echo "Usage: $0 SRC PIN DEST DENYLIST [THEME], where SRC is the identity/ directory, PIN is identitytest/pin.go, DEST is the directory to create, DENYLIST is fetch-denylist.sh's output and THEME a built theme tree." >&2
 	exit 2
 fi
-src=$1 pin=$2 dest=$3 theme=${4:-}
+src=$1 pin=$2 dest=$3 denylist=$4 theme=${5:-}
 
 baseline="$src/realm-baseline.json"
 conf="$src/keycloak-build.conf"
@@ -123,6 +131,29 @@ kc_sha256="$(read_pin KCDistSHA256)"
 jre_release="$(read_pin JRERelease)"
 jre_sha256="$(read_pin JRELinuxX64SHA256)"
 
+# The deny list the realm's policy names (geekdojo/geekdojo-brain#1145).
+realm_go="$here/../api/internal/identity/flows/realm.go"
+list_name="$(pin_const "$realm_go" DenylistFile)"
+if [ -z "$list_name" ]; then
+	echo "$realm_go has no DenylistFile constant, so the password deny list cannot be packed." >&2
+	exit 1
+fi
+if [ ! -d "$denylist" ]; then
+	echo "The deny list directory $denylist does not exist, so the api tarball would ship a password policy naming a list it does not carry." >&2
+	exit 1
+fi
+list="$denylist/password-blacklists/$list_name"
+if [ ! -f "$list" ] || [ ! -s "$list" ]; then
+	echo "The password deny list $list is missing or empty, so the api tarball would ship a password policy naming a list it does not carry." >&2
+	exit 1
+fi
+for f in SecLists-LICENSE Pwdb-Public-LICENSE; do
+	if [ ! -f "$denylist/licenses/$f" ]; then
+		echo "The deny list's licence notice $denylist/licenses/$f is missing, so the list cannot ship." >&2
+		exit 1
+	fi
+done
+
 if [ -n "$theme" ] && [ ! -d "$theme" ]; then
 	echo "The theme $theme is not a directory, so it cannot fill the identity theme slot." >&2
 	exit 1
@@ -132,6 +163,15 @@ mkdir -p "$dest/theme"
 for f in "$baseline" "$conf"; do
 	if ! install -m 0644 "$f" "$dest/$(basename "$f")"; then
 		echo "The identity file $f could not be copied into $dest." >&2
+		exit 1
+	fi
+done
+mkdir -p "$dest/password-blacklists" "$dest/licenses"
+for f in "$list" "$denylist/licenses/SecLists-LICENSE" "$denylist/licenses/Pwdb-Public-LICENSE"; do
+	to="$dest/licenses"
+	[ "$f" = "$list" ] && to="$dest/password-blacklists"
+	if ! install -m 0644 "$f" "$to/$(basename "$f")"; then
+		echo "The deny list file $f could not be copied into $dest." >&2
 		exit 1
 	fi
 done
@@ -146,4 +186,4 @@ if [ -n "$theme" ]; then
 		exit 1
 	fi
 fi
-echo "   identity: realm-baseline.json, keycloak-build.conf, pins.json (Keycloak ${kc_release##*:}, JRE ${jre_release##*:}), theme/${theme:+ from $theme}"
+echo "   identity: realm-baseline.json, keycloak-build.conf, pins.json (Keycloak ${kc_release##*:}, JRE ${jre_release##*:}), password-blacklists/$list_name, licenses/, theme/${theme:+ from $theme}"
