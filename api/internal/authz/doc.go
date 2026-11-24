@@ -14,11 +14,18 @@
 // correlation id. A designation sentence names a person, so it goes to the
 // administrator's response only, never to a log.
 //
+// Every console route carries a route rule at registration
+// (geekdojo/geekdojo-brain#1002, api/internal/api/routeclass.go): view,
+// control under one capability, self, or a Job route's floor
+// (Set.PermitsKindRoute), which the router decides through Permits before the
+// handler runs.
+//
 // The control lock's view, control and self classifier is
 // api/internal/auth/controllock.go (isControl, selfPrefix, viewSockets). It
-// still decides by method and path, because no route carries a Requirement
-// yet. Once every route is annotated (geekdojo/geekdojo-brain#1002),
-// isControl becomes "the route's Requirement class is ClassControl", so
-// Accounts reads (AccountsRead) are refused under the control lock too, and
-// viewSockets and selfPrefix give way to the route annotations.
+// still decides by method and path, not by the route's rule. Re-keying
+// isControl to "the route's Requirement class is ClassControl", so that
+// Accounts reads (AccountsRead) are refused under the control lock too and
+// viewSockets and selfPrefix give way to the route rules, is owned by
+// geekdojo/geekdojo-brain#1020 (Identity 6.2), the first issue that registers
+// an Accounts read.
 package authz

@@ -17,7 +17,7 @@ import (
 //
 // Flow per request:
 //
-//  1. Session middleware (existing reqd wrapper) already validated the
+//  1. The session gate (Server.gate, classed view) already validated the
 //     cookie before this handler runs.
 //  2. We pull the authenticated user out of the request context and
 //     forward it as X-Webauth-User — Grafana's auth.proxy.enabled = true

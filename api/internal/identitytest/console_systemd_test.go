@@ -814,11 +814,14 @@ func (s *consoleStack) checkMe(cookie, sub string) {
 	t.Logf("/api/auth/me: %s", b)
 }
 
-// checkJobRefusals asserts the api main.go built decides jobs by kind
-// (geekdojo/geekdojo-brain#1001, TC-1001-23): the signed-in viewer's power
-// cycle is 403 job_not_permitted, a forged os.identity_rollback is 403
-// job_not_submittable, and GET /api/jobs lists neither kind. Only the wired
-// kind policy answers those codes.
+// checkJobRefusals asserts the api main.go built decides routes and jobs on
+// the roles a real ID token carried (geekdojo/geekdojo-brain#1001,
+// TC-1001-23; #1002, TC-1002-22): the signed-in viewer reads GET /api/nodes,
+// is refused GET /api/mesh/keys (403 route_not_permitted) and the power cycle
+// (403 job_not_permitted), both by the router's route classes, and a forged
+// os.identity_rollback is 403 job_not_submittable, which only the runner's
+// wired kind policy answers, since POST /api/jobs passes the router on Self.
+// GET /api/jobs lists neither kind.
 func (s *consoleStack) checkJobRefusals(cookie string) {
 	t := s.t
 	jar, _ := cookiejar.New(nil)
@@ -842,16 +845,20 @@ func (s *consoleStack) checkJobRefusals(cookie string) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, b
 	}
-	for _, tc := range []struct{ path, body, code string }{
-		{"api/bmc/ci-node/power/cycle", "", "job_not_permitted"},
-		{"api/jobs", `{"kind":"os.identity_rollback"}`, "job_not_submittable"},
+	if status, b := call(http.MethodGet, "api/nodes", ""); status != http.StatusOK {
+		t.Errorf("GET /api/nodes = %d %s, want 200 for a viewer", status, b)
+	}
+	for _, tc := range []struct{ method, path, body, code string }{
+		{http.MethodGet, "api/mesh/keys", "", "route_not_permitted"},
+		{http.MethodPost, "api/bmc/ci-node/power/cycle", "", "job_not_permitted"},
+		{http.MethodPost, "api/jobs", `{"kind":"os.identity_rollback"}`, "job_not_submittable"},
 	} {
-		status, b := call(http.MethodPost, tc.path, tc.body)
+		status, b := call(tc.method, tc.path, tc.body)
 		var e struct {
 			Code string `json:"code"`
 		}
 		if status != http.StatusForbidden || json.Unmarshal(b, &e) != nil || e.Code != tc.code {
-			t.Errorf("POST /%s = %d %s, want 403 %s", tc.path, status, b, tc.code)
+			t.Errorf("%s /%s = %d %s, want 403 %s", tc.method, tc.path, status, b, tc.code)
 		}
 	}
 	status, b := call(http.MethodGet, "api/jobs?limit=200", "")
