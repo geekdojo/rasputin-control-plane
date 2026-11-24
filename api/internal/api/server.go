@@ -13,6 +13,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
@@ -134,6 +135,10 @@ type Server struct {
 	// the listener was never wired, and the handlers refuse everything:
 	// fail closed.
 	nodeGate *ingestConns
+	// repair is the break-glass service (SetRepair,
+	// geekdojo/geekdojo-brain#321); nil keeps the repair routes at 401 and
+	// 503.
+	repair repairService
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -354,6 +359,12 @@ func (s *Server) routes() *routeMux {
 	// the moment an operator exists. See restore_handlers.go.
 	mux.HandleFunc("GET /api/restore/candidates", s.handleListRestoreCandidates)
 	mux.HandleFunc("POST /api/restore", s.handleRestore)
+	// Break-glass (geekdojo/geekdojo-brain#321; repair_handlers.go): the
+	// repair code is the authentication of its redemption, and the ways to
+	// make one carry no secret. Both are open by necessity: sign-in is what
+	// is broken.
+	mux.HandleFunc("POST /api/auth/break-glass", s.handleBreakGlass)
+	mux.HandleFunc("GET /api/repair/ways", s.handleRepairWays)
 
 	// Authenticated. Every session route is registered through gate with its
 	// class (routeclass.go, geekdojo/geekdojo-brain#1002): view, control
@@ -362,6 +373,13 @@ func (s *Server) routes() *routeMux {
 	// routes_matrix_test.go holds the table every class here is checked
 	// against.
 	gate := func(pattern string, rule routeRule, h http.HandlerFunc) { s.gate(mux, pattern, rule, h) }
+
+	// The break-glass repair session's routes (geekdojo/geekdojo-brain#321):
+	// its own session, and what it may do. Every route below them refuses
+	// it.
+	gate("GET /api/repair/state", repairNeeds(), s.handleRepairState)
+	gate("POST /api/repair/end", repairNeeds(), s.handleRepairEnd)
+	gate("POST /api/repair/restart", repairJob(breakglass.RestartKind), s.handleRepairRestart)
 
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
 	gate("GET /api/jobs", needs(authz.NeedView()), s.handleListJobs)

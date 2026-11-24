@@ -115,37 +115,84 @@ type consoleStack struct {
 	pair    *systemdPair
 	// fixturePassword is the synthetic fixture's password.
 	fixturePassword secret.Value
+	// httpsHost is the address the api's https listener binds, 127.0.0.1;
+	// empty is every address (consoleStackOpts.allAddrs).
+	httpsHost string
+	// apiBin is the api binary under test.
+	apiBin string
 }
 
 func TestIdentitySystemd_ConsoleSignIn(t *testing.T) {
+	s, ctx, admin := startConsoleStack(t, consoleStackOpts{})
+	if s == nil {
+		return
+	}
+	hold := os.Getenv(ConsoleRigEnv) == "hold"
+	sub := s.fixture(t, admin)
+	s.awaitGrantDrained(ctx, admin, sub)
+	pw := s.fixturePassword
+	defer pw.Destroy()
+
+	var cookie string
+	if hold {
+		cookie = s.signInGo(ctx, pw)
+	} else {
+		cookie = s.signInBrowser(ctx, pw)
+	}
+	s.checkMe(cookie, sub)
+	s.checkJobRefusals(cookie)
+	s.writeOutputs(cookie)
+	if hold {
+		s.hold(ctx)
+	}
+}
+
+// consoleStackOpts are a console stack's settings.
+type consoleStackOpts struct {
+	// allAddrs serves the api's https listener on every address of the
+	// runner (":<port>"), not 127.0.0.1 alone, so it also answers at the
+	// runner's primary address, the break-glass LAN origin
+	// (geekdojo/geekdojo-brain#321, F-321-03).
+	allAddrs bool
+}
+
+// startConsoleStack starts the api built from this tree and the pinned
+// identity service under the runner's systemd, and waits until the api is
+// ready to sign in. It returns a nil stack when a prerequisite is missing,
+// having skipped, or failed under RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required.
+func startConsoleStack(t *testing.T, opts consoleStackOpts) (*consoleStack, context.Context, *idclient.Session) {
+	t.Helper()
 	cfg, ok := systemdPreflight(t)
 	if !ok {
-		return
+		return nil, nil, nil
 	}
 	theme, uiDir, apiBin := os.Getenv(ThemeEnv), os.Getenv(UIDirEnv), os.Getenv(APIBinEnv)
 	switch {
 	case theme == "" || checkThemeDir(theme) != nil:
 		functest.SkipOrFail(t, systemdSwitchEnv, "the console stack test needs the built sign-in theme in %s (node ui/identity-theme/build.mjs)", ThemeEnv)
-		return
+		return nil, nil, nil
 	case uiDir == "":
 		functest.SkipOrFail(t, systemdSwitchEnv, "the console stack test needs the UI export in %s (npm run build in ui/)", UIDirEnv)
-		return
+		return nil, nil, nil
 	case apiBin == "" || !executable(apiBin):
 		functest.SkipOrFail(t, systemdSwitchEnv, "the console stack test needs a rasputin-api binary in %s (go build ./api/cmd/rasputin-api)", APIBinEnv)
-		return
+		return nil, nil, nil
 	}
 	if _, err := os.Stat(filepath.Join(uiDir, "index.html")); err != nil {
 		functest.SkipOrFail(t, systemdSwitchEnv, "%s holds no UI export: %v", UIDirEnv, err)
-		return
+		return nil, nil, nil
 	}
 	for _, p := range append(append([]string(nil), applianceDirs...), applianceUnits...) {
 		if _, err := os.Lstat(p); err == nil {
 			t.Fatalf("refusing to run: %s exists, so this may be an appliance", p)
 		}
 	}
-	hold := os.Getenv(ConsoleRigEnv) == "hold"
 	cfg.ThemeDir = theme
-	s := &consoleStack{t: t, cfg: cfg, port: cmpOr(os.Getenv(ConsolePortEnv), "443"), out: cmpOr(os.Getenv(ConsoleOutEnv), t.TempDir())}
+	s := &consoleStack{t: t, cfg: cfg, port: cmpOr(os.Getenv(ConsolePortEnv), "443"), out: cmpOr(os.Getenv(ConsoleOutEnv), t.TempDir()),
+		httpsHost: "127.0.0.1", apiBin: apiBin}
+	if opts.allAddrs {
+		s.httpsHost = ""
+	}
 	s.work = cmpOr(os.Getenv(ConsoleWorkEnv), filepath.Join(s.out, "work"))
 	if err := atrest.EnsureSecretDir(s.work); err != nil {
 		t.Fatal(err)
@@ -182,23 +229,7 @@ func TestIdentitySystemd_ConsoleSignIn(t *testing.T) {
 
 	admin := s.adminSession(t)
 	s.awaitReady(ctx, admin)
-	sub := s.fixture(t, admin)
-	s.awaitGrantDrained(ctx, admin, sub)
-	pw := s.fixturePassword
-	defer pw.Destroy()
-
-	var cookie string
-	if hold {
-		cookie = s.signInGo(ctx, pw)
-	} else {
-		cookie = s.signInBrowser(ctx, pw)
-	}
-	s.checkMe(cookie, sub)
-	s.checkJobRefusals(cookie)
-	s.writeOutputs(cookie)
-	if hold {
-		s.hold(ctx)
-	}
+	return s, ctx, admin
 }
 
 func cmpOr(a, b string) string {
@@ -257,7 +288,7 @@ func (s *consoleStack) startAPI(bin string) {
 		"RASPUTIN_DATA_DIR=" + s.dataDir,
 		"RASPUTIN_CLUSTER_ID=" + consoleCID,
 		"RASPUTIN_HTTP_ADDR=127.0.0.1:0",
-		"RASPUTIN_HTTPS_ADDR=127.0.0.1:" + s.port,
+		"RASPUTIN_HTTPS_ADDR=" + s.httpsHost + ":" + s.port,
 		"RASPUTIN_NATS_HOST=127.0.0.1", "RASPUTIN_NATS_PORT=-1",
 		"RASPUTIN_OBS_INGEST_ADDR=127.0.0.1:0",
 		"RASPUTIN_MESH_BACKEND=mock", "RASPUTIN_DNS=off",
@@ -495,6 +526,11 @@ func (s *consoleStack) adminSession(t *testing.T) *idclient.Session {
 // trusting only the api's controlplane CA. Names are not checked: the
 // leaves are the api's own, and the CA is this run's.
 func (s *consoleStack) client(jar http.CookieJar) *http.Client {
+	return s.clientAt("127.0.0.1:"+s.port, jar)
+}
+
+// clientAt is client dialing addr for every name.
+func (s *consoleStack) clientAt(addr string, jar http.CookieJar) *http.Client {
 	pool := x509.NewCertPool()
 	if b, err := os.ReadFile(filepath.Join(s.dataDir, "trust", "mesh-ca.pem")); err == nil {
 		pool.AppendCertsFromPEM(b)
@@ -514,7 +550,7 @@ func (s *consoleStack) client(jar http.CookieJar) *http.Client {
 	tr := &http.Transport{
 		Proxy: nil,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, "127.0.0.1:"+s.port)
+			return dialer.DialContext(ctx, network, addr)
 		},
 		// The chain is checked against this run's CA by VerifyConnection.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true, VerifyConnection: verify}, // #nosec G402 -- verified against the run's CA

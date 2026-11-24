@@ -8,6 +8,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/proto"
@@ -163,13 +164,17 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// submitter is the request's person as a job's submitter, or the zero
-// Submitter, which the runner refuses, when the request carries no person.
-// Every job a request submits for its person passes exactly this
-// (specargs_test.go pins it), so no handler picks its own submitter.
+// submitter is the request's person as a job's submitter, its break-glass
+// repair session's (geekdojo/geekdojo-brain#321) when it carries no person,
+// or the zero Submitter, which the runner refuses, when it carries neither.
+// Every job a request submits passes exactly this (specargs_test.go pins
+// it), so no handler picks its own submitter.
 func submitter(r *http.Request) authz.Submitter {
 	if p, ok := auth.PrincipalFrom(r.Context()); ok {
 		return p.Submitter()
+	}
+	if sess, ok := breakglass.SessionFrom(r.Context()); ok {
+		return sess.Submitter()
 	}
 	return authz.Submitter{}
 }

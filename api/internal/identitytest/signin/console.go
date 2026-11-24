@@ -24,6 +24,12 @@ type Console struct {
 	Transport http.RoundTripper
 	// Logger receives one DEBUG record per page. Nothing secret is logged.
 	Logger *slog.Logger
+	// Steps, when set, answers every page after the sign-in form that is not
+	// an error (an authenticator app's enrolment, its code, recovery codes):
+	// the id of the page's form to post, and the fields to set on it. Unset,
+	// such a page is an *UnexpectedPageError (geekdojo/geekdojo-brain#321's
+	// administrator fixture signs in with a second step).
+	Steps func(page Page, body []byte) (formID string, fields map[string]string, err error)
 }
 
 // ConsoleRefusedError is the console sending the sign-in back to its
@@ -97,6 +103,12 @@ func ConsoleSignIn(ctx context.Context, c Console, user string, password secret.
 			f.pages = append(f.pages, page.ID)
 			f.themes = append(f.themes, page.Theme)
 			c.Logger.Debug("sign-in page", "page_id", page.ID, "status", resp.StatusCode)
+			if c.Steps != nil && page.ID != "login-login" && page.ID != "login-error" {
+				if req, err = stepRequest(ctx, resp.Request.URL, page, body, c.Steps); err != nil {
+					return nil, f.pages, err
+				}
+				continue
+			}
 			if req, err = f.next(ctx, resp.Request.URL, page, user, password); err != nil {
 				return nil, f.pages, err
 			}
@@ -105,4 +117,35 @@ func ConsoleSignIn(ctx context.Context, c Console, user string, password secret.
 		}
 	}
 	return nil, f.pages, fmt.Errorf("signin: the console sign-in did not return to the launcher within %d hops", maxHops)
+}
+
+// stepRequest is the POST of the form steps names on page, with the page's
+// own fields and the ones steps sets.
+func stepRequest(ctx context.Context, at *url.URL, page Page, body []byte,
+	steps func(Page, []byte) (string, map[string]string, error)) (*http.Request, error) {
+	id, set, err := steps(page, body)
+	if err != nil {
+		return nil, fmt.Errorf("signin: the page %s: %w", page.ID, err)
+	}
+	form, ok := page.Form(id)
+	if !ok {
+		return nil, fmt.Errorf("signin: the page %s has no form %s", page.ID, id)
+	}
+	action, err := at.Parse(form.Action)
+	if err != nil {
+		return nil, fmt.Errorf("signin: the form %s's action: %w", id, err)
+	}
+	v := url.Values{}
+	for k, val := range form.Fields {
+		v.Set(k, val)
+	}
+	for k, val := range set {
+		v.Set(k, val)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, action.String(), strings.NewReader(v.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("signin: the form %s's request: %w", id, err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req, nil
 }

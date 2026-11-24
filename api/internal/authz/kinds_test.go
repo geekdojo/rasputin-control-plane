@@ -447,3 +447,14 @@ func TestKindRefusal_Sentences(t *testing.T) {
 		}
 	}
 }
+
+// Capabilities is what a Submitter holds: a repair session Repair alone, the
+// zero Submitter nothing (geekdojo/geekdojo-brain#321).
+func TestSubmitterCapabilities(t *testing.T) {
+	if c := RepairSession().Capabilities(); !c.Has(Repair) || c.Has(View) || c.Has(IAM) {
+		t.Errorf("repair session holds %v", c.List())
+	}
+	if c := (Submitter{}).Capabilities(); len(c.List()) != 0 {
+		t.Errorf("the zero Submitter holds %v", c.List())
+	}
+}

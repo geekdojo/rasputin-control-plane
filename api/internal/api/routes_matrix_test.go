@@ -16,6 +16,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
@@ -58,6 +59,10 @@ var idorProbes = map[string]func(t *testing.T){}
 // literally (TC-1002-04, F-1002-04): view, control:<capability>, self,
 // job:<kinds>, or anyjob.
 var wantClass = map[string]string{
+	// geekdojo/geekdojo-brain#321: the break-glass repair session's routes.
+	"GET /api/repair/state":                  "repair:control:repair",
+	"POST /api/repair/end":                   "repair:control:repair",
+	"POST /api/repair/restart":               "repair:job:identity.restart",
 	"POST /api/jobs":                         "anyjob",
 	"GET /api/jobs":                          "view",
 	"GET /api/jobs/{id}":                     "view",
@@ -312,7 +317,8 @@ func mentions(problems []string, pattern string) bool {
 }
 
 // TC-1002-02: an unclassified route is reported; the real routes() has none,
-// and a rule is recorded for all 112 gated patterns.
+// and a rule is recorded for all 115 gated patterns (112, and #321's three
+// repair routes).
 func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	f := routeFixture(t)
 	m := synthMux(t, f, map[string]*routeRule{"POST /api/new-thing": nil, "GET /api/nodes": rulePtr(needs(authz.NeedView()))})
@@ -323,8 +329,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 112 {
-		t.Errorf("%d rules recorded, want 112", n)
+	if n := len(real.rules); n != 115 {
+		t.Errorf("%d rules recorded, want 115", n)
 	}
 }
 
@@ -484,7 +490,9 @@ func wantOutcome(t *testing.T, label string, caps authz.Set) (bool, string) {
 // table entry, both ways. Then every probe goes out for every role: where
 // the table refuses, Handler() answers 403 with the right code and a
 // correlation id; where it permits, the recorded rule registered through
-// gate over a stub reaches the stub.
+// gate over a stub reaches the stub. A repair route answers every console
+// role 401; a repair session reaches the repair routes alone, and every
+// other route answers it 403 repair_only (geekdojo/geekdojo-brain#321).
 func TestRouteClasses_TC1002_04_PerRoleMatrix(t *testing.T) {
 	f := routeFixture(t)
 	real := f.srv.routes()
@@ -525,11 +533,20 @@ func TestRouteClasses_TC1002_04_PerRoleMatrix(t *testing.T) {
 		cookie := f.authenticateAs(t, sub, "name-"+role.name, role.roles...)
 		caps := authz.For(authz.Subject{Sub: sub, Roles: role.roles})
 		for _, pr := range enumerateRoutes(t, gated) {
-			permit, code := wantOutcome(t, wantClass[pr.pattern], caps)
 			what := fmt.Sprintf("%s %s %s", role.name, pr.method, pr.path)
 			req := newProbeRequest(pr)
 			req.AddCookie(cookie)
 			w := httptest.NewRecorder()
+			if strings.HasPrefix(wantClass[pr.pattern], "repair:") {
+				// A console session is never a repair session (#321).
+				f.handler.ServeHTTP(w, req)
+				if w.Code != http.StatusUnauthorized {
+					t.Errorf("%s: %d, want 401 on a repair route", what, w.Code)
+				}
+				refused++
+				continue
+			}
+			permit, code := wantOutcome(t, wantClass[pr.pattern], caps)
 			if !permit {
 				f.handler.ServeHTTP(w, req)
 				wantRefused(t, what, w, code)
@@ -543,6 +560,42 @@ func TestRouteClasses_TC1002_04_PerRoleMatrix(t *testing.T) {
 			}
 			passed++
 		}
+	}
+	// The repair-session row (geekdojo/geekdojo-brain#321): a live repair
+	// session reaches exactly the repair routes, through the gate, and every
+	// console route answers 403 repair_only.
+	rr := &repairRig{f: f}
+	rr.svc = newRepairService(t, rr, nil)
+	f.srv.SetRepair(rr.svc)
+	repair := rr.open(t, repairHost)
+	repairCaps := breakglass.Session{}.Capabilities()
+	repairRoutes := 0
+	for _, pr := range enumerateRoutes(t, gated) {
+		what := fmt.Sprintf("repair session %s %s", pr.method, pr.path)
+		req := newProbeRequest(pr)
+		req.Host = repairHost
+		req.AddCookie(repair)
+		w := httptest.NewRecorder()
+		label, isRepair := strings.CutPrefix(wantClass[pr.pattern], "repair:")
+		if !isRepair {
+			f.handler.ServeHTTP(w, req)
+			wantRefused(t, what, w, codeRepairOnly)
+			refused++
+			continue
+		}
+		if permit, _ := wantOutcome(t, label, repairCaps); !permit {
+			t.Errorf("%s: the table refuses a repair session its own route", what)
+		}
+		before := reached[pr.pattern]
+		stubs.ServeHTTP(w, req)
+		if w.Code != http.StatusTeapot || reached[pr.pattern] != before+1 {
+			t.Errorf("%s: %d through the gate, want the stub reached", what, w.Code)
+		}
+		passed++
+		repairRoutes++
+	}
+	if repairRoutes != 3 {
+		t.Errorf("the repair session reached %d repair routes, want 3", repairRoutes)
 	}
 	if refused == 0 || passed == 0 {
 		t.Fatalf("%d refused and %d passed cells; the matrix is vacuous", refused, passed)

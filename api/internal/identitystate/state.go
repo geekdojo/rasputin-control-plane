@@ -67,6 +67,10 @@ func (s State) critical() bool {
 	return true
 }
 
+// Sentence is the state's §5.1 sentence, for a page that shows the state in
+// plain words (the break-glass repair page, geekdojo/geekdojo-brain#321).
+func (s State) Sentence() string { return s.sentence() }
+
 // sentence is the state's §5.1 sentence: the alert's title, and the start of
 // NotReadyError's text. It never names a vendor.
 func (s State) sentence() string {

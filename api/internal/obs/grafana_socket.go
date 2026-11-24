@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
+
+	"github.com/geekdojo/rasputin-control-plane/api/internal/privsock"
 )
 
 // Grafana's listener, and why it is a unix socket.
@@ -41,57 +42,27 @@ import (
 // that was loosened, replaced or re-owned between starts is caught rather
 // than inherited.
 //
-// The checks, in order:
-//
-//   - the path exists and is a real directory, never a symlink — a symlink
-//     would let anything that could create it redirect the socket;
-//   - it is owned by the uid that must own it (grafanaSocketOwnerUID);
-//   - its mode is 0700, re-tightened if it had been loosened.
+// The checks are privsock.PrepareDir's: the path is absolute, a real
+// directory and never a symlink (a symlink would let anything that could
+// create it redirect the socket), owned by the uid that must own it
+// (grafanaSocketOwnerUID), and 0700, re-tightened if it had been loosened.
 func (s *DockerComposeSupervisor) prepareGrafanaSocketDir() error {
 	dir := s.cfg.GrafanaSocketDir
 	if dir == "" {
 		return errors.New("obs supervisor: GrafanaSocketDir empty")
 	}
-	if !filepath.IsAbs(dir) {
-		return fmt.Errorf("obs supervisor: GrafanaSocketDir %q must be absolute", dir)
+	loosened, err := privsock.PrepareDir(dir, s.grafanaSocketOwnerUID())
+	if loosened {
+		log.Printf("obs supervisor: grafana socket dir %s was not 0700; re-tightening to 0700", dir)
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("obs supervisor: mkdir grafana socket dir %s: %w", dir, err)
-	}
-	// Lstat, not Stat: Stat follows a symlink and would report the target's
-	// mode and owner while Grafana bound the socket somewhere else.
-	fi, err := os.Lstat(dir)
 	if err != nil {
-		return fmt.Errorf("obs supervisor: stat grafana socket dir %s: %w", dir, err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("obs supervisor: grafana socket dir %s is a symlink", dir)
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("obs supervisor: grafana socket dir %s is not a directory", dir)
-	}
-	want := s.grafanaSocketOwnerUID()
-	uid, err := fileUID(fi)
-	if err != nil {
-		return fmt.Errorf("obs supervisor: grafana socket dir %s: %w", dir, err)
-	}
-	if uid != want {
-		if err := os.Chown(dir, want, -1); err != nil {
-			return fmt.Errorf("obs supervisor: chown grafana socket dir %s to uid %d: %w",
-				dir, want, err)
-		}
-	}
-	if perm := fi.Mode().Perm(); perm != 0o700 {
-		log.Printf("obs supervisor: grafana socket dir %s was %#o; re-tightening to 0700",
-			dir, perm)
-	}
-	// Unconditional: MkdirAll applies the process umask, so even a freshly
-	// created directory is not guaranteed to be 0700.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return fmt.Errorf("obs supervisor: chmod grafana socket dir %s: %w", dir, err)
+		return fmt.Errorf("obs supervisor: grafana socket dir: %w", err)
 	}
 	return nil
 }
+
+// fileUID is the uid that owns a file (privsock.FileUID).
+var fileUID = privsock.FileUID
 
 // checkGrafanaSocket warns if the socket Grafana bound is not 0600 owned by
 // the expected uid. It is a tripwire, not a gate: the 0700 directory is the
