@@ -22,6 +22,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -148,6 +149,7 @@ func newMountFixture(t *testing.T) *mountFixture {
 		identityCA: ca.CertPEM, dataDir: dir, upstream: upURL, themeDir: theme, consoleOrigin: "https://ci.local",
 		installName: func(context.Context) (string, error) { return "CI", nil },
 		dirty:       events.NewSignal(time.Now), now: time.Now, ids: func() string { return "corr" }, log: log,
+		removed: removednames.Unavailable{Err: errors.New("no list in this fixture")},
 	}}
 }
 

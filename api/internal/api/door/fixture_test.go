@@ -233,7 +233,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.policySvc, err = policy.New(policy.Deps{Table: table, Readiness: f.ready, Throttle: f.th, AppClients: f.apps,
 		Actions: f.actions, Network: f.network, Waiting: f.waiting, Now: func() time.Time { return f.now },
-		Bindings: noneBound{}})
+		Bindings: noneBound{}, Removed: noneRemoved{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,3 +415,8 @@ func (f *fixture) wantForwarded(w *httptest.ResponseRecorder, before int, what s
 		f.t.Errorf("%s: %d upstream requests, want %d; answered %d %.200q", what, n, before+1, w.Code, w.Body.String())
 	}
 }
+
+// noneRemoved is a removed-name list holding no name: every check admits.
+type noneRemoved struct{}
+
+func (noneRemoved) Removed(context.Context, string, string) (bool, error) { return false, nil }

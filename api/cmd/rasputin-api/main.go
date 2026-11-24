@@ -1282,6 +1282,15 @@ func main() {
 	// identity.recover_admin (#978), under keycloak only: a System job, so
 	// POST /api/jobs refuses it. Only its trigger submits it (#1127).
 	identityW.register(runner)
+	// identity.revoke, the app-access grant and the removed-name list
+	// (#991), under keycloak only: a System job, so POST /api/jobs refuses it.
+	acct, err := wireAccounts(ctx, accountsDeps{mode: identityW.mode, admin: identityW.session, dbPath: dbPath, mac: mac,
+		console: consoleSessions, moved: authStore, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: accounts", "err", err.Error())
+		os.Exit(1)
+	}
+	acct.register(runner)
 	// The identity service's state, its identity:<state> alert and
 	// identity.recover, the pair's restart after a full disk
 	// (geekdojo/geekdojo-brain#979), under keycloak only. Nothing on the
@@ -2040,7 +2049,7 @@ func main() {
 	// The identity service's state alert (#979) and the admin client's
 	// still-refused alert (#1127), under keycloak only. Setting the restored
 	// alert's holder is the fact identity.recover_admin's trigger waits on.
-	identityState.wireAlerts(alertsSvc, adminTrigger, identityConv.alerts)
+	identityState.wireAlerts(alertsSvc, adminTrigger, identityConv.alerts, acct.alerts)
 	raiseRestored := restoredFunc(alertsSvc.RaiseIdentityAdminRestored)
 	adminRestored.Store(&raiseRestored)
 	// The OS outcome records' crit alert (#833), which replaces the generic
@@ -2198,7 +2207,7 @@ func main() {
 			identityCA: identityCAPEM(identityCA), dataDir: dataDir, upstream: identityW.upstream, themeDir: identityTheme,
 			consoleOrigin: "https://" + consoleHost(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
-			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger,
+			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger, removed: acct.removed,
 		})
 		if doorM != nil {
 			doorM.setDoors(homeDoor, appDoorH, identityState.events.doorThrottle())

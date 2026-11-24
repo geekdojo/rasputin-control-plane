@@ -61,6 +61,13 @@ type Waiting interface {
 	Full(ctx context.Context) (bool, error)
 }
 
+// RemovedNames answers whether a sign-in name or an email belonged to a
+// deleted account that held app access (*removednames.Store, Identity 4.9).
+// An error means the list can't be read, which pauses sign-up.
+type RemovedNames interface {
+	Removed(ctx context.Context, name, email string) (bool, error)
+}
+
 // Throttler is the per-source throttle Check consults last.
 type Throttler interface {
 	Admit(door Kind, addr netip.Addr, now time.Time) Admission
@@ -83,7 +90,9 @@ type Deps struct {
 	Actions    Actions
 	Network    Network
 	Waiting    Waiting
-	Now        func() time.Time
+	// Removed is the removed-name list registration checks.
+	Removed RemovedNames
+	Now     func() time.Time
 	// Bindings pauses clients bound stricter than the realm default while
 	// the rules differ. Nil fails closed: every client outside the door
 	// table is paused (ERR-CLOSED).
@@ -111,6 +120,8 @@ func New(d Deps) (*Service, error) {
 		missing = "Network"
 	case d.Waiting == nil:
 		missing = "Waiting"
+	case d.Removed == nil:
+		missing = "Removed"
 	case d.Now == nil:
 		missing = "Now"
 	}
@@ -163,6 +174,9 @@ type Decision struct {
 const (
 	ReasonAdminAccount = "admin_account"
 	ReasonUnreadable   = "unreadable"
+	// ReasonRegistrationPaused is sign-up paused because the removed-name
+	// list can't be read.
+	ReasonRegistrationPaused = "registration_paused"
 )
 
 // The sentences (ERR-MESSAGE).
@@ -183,8 +197,14 @@ const (
 	sentenceRegisterSource  = "Accounts can only be created from a device on your home network."
 	sentenceRegisterFull    = "Too many accounts are waiting for access. Ask an administrator to give access to the ones waiting, then try again."
 	sentenceRegisterUnknown = "Creating an account isn't available right now. Ask whoever runs this cluster to add you."
-	sentenceBusy            = "Another sign-in from this device is still being checked. Try again in a moment."
-	sentenceClientPaused    = "Signing in to this app is paused because its sign-in settings changed. An administrator can see why in Rasputin's alerts."
+	sentenceRegisterPaused  = "Sign-up is paused: Rasputin can't check removed names right now."
+	sentenceRemovedName     = "That sign-in name belonged to a removed account and can't be used again."
+	// sentenceEmailTaken is the identity service's own taken-email
+	// sentence (the theme's emailExistsMessage), so a removed address reads
+	// as any address in use.
+	sentenceEmailTaken   = "That email is already used. Use a different email, or ask an administrator."
+	sentenceBusy         = "Another sign-in from this device is still being checked. Try again in a moment."
+	sentenceClientPaused = "Signing in to this app is paused because its sign-in settings changed. An administrator can see why in Rasputin's alerts."
 )
 
 // ReasonClientPaused is a paused client's refusal reason.
@@ -436,6 +456,46 @@ func (s *Service) registration(ctx context.Context, r Request, client string) (D
 		return back(refuse(http.StatusForbidden, "registration_unknown", sentenceRegisterUnknown))
 	case full:
 		return back(refuse(http.StatusForbidden, "registration_full", sentenceRegisterFull))
+	}
+	if d, ok := s.removedName(ctx, r); !ok {
+		return back(d)
+	}
+	return Decision{}, true
+}
+
+// removedName refuses a registration post whose sign-in name or email
+// belonged to a removed account, and every account-creation request while
+// the list can't be read. A request with no name or email still reads the
+// list, so the form doesn't open while sign-up is paused.
+func (s *Service) removedName(ctx context.Context, r Request) (Decision, bool) {
+	var names, emails []string
+	if r.Route == RouteRegistration && r.Method == http.MethodPost {
+		names, emails = r.Guard.Form["username"], r.Guard.Form["email"]
+	}
+	paused := refuse(http.StatusForbidden, ReasonRegistrationPaused, sentenceRegisterPaused)
+	if len(names) == 0 && len(emails) == 0 {
+		if _, err := s.d.Removed.Removed(ctx, "", ""); err != nil {
+			return paused, false
+		}
+		return Decision{}, true
+	}
+	for _, n := range names {
+		found, err := s.d.Removed.Removed(ctx, n, "")
+		switch {
+		case err != nil:
+			return paused, false
+		case found:
+			return refuse(http.StatusForbidden, "registration_removed_name", sentenceRemovedName), false
+		}
+	}
+	for _, e := range emails {
+		found, err := s.d.Removed.Removed(ctx, "", e)
+		switch {
+		case err != nil:
+			return paused, false
+		case found:
+			return refuse(http.StatusForbidden, "registration_removed_email", sentenceEmailTaken), false
+		}
 	}
 	return Decision{}, true
 }

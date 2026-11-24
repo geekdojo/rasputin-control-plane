@@ -16,7 +16,7 @@ func (okReady) Ready(context.Context) error { return nil }
 func TestNew_RefusesMissing(t *testing.T) {
 	th, _ := newThrottle(t)
 	good := Deps{Table: table(t), Readiness: okReady{}, Throttle: th, AppClients: NoAppClients{}, Actions: NoActionsIssued{},
-		Network: RegistrationClosed{}, Waiting: RegistrationClosed{}, Now: time.Now}
+		Network: RegistrationClosed{}, Waiting: RegistrationClosed{}, Removed: noneRemoved{}, Now: time.Now}
 	if _, err := New(good); err != nil {
 		t.Fatal(err)
 	}
@@ -25,6 +25,7 @@ func TestNew_RefusesMissing(t *testing.T) {
 		"Throttle": func(d *Deps) { d.Throttle = nil }, "AppClients": func(d *Deps) { d.AppClients = nil },
 		"Actions": func(d *Deps) { d.Actions = nil }, "Network": func(d *Deps) { d.Network = nil },
 		"Waiting": func(d *Deps) { d.Waiting = nil }, "Now": func(d *Deps) { d.Now = nil },
+		"Removed": func(d *Deps) { d.Removed = nil },
 	} {
 		d := good
 		mut(&d)

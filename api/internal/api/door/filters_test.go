@@ -233,7 +233,7 @@ func TestDoor_Registration(t *testing.T) {
 	f.network.err = nil
 
 	closed, err := policy.New(policy.Deps{Table: f.table, Readiness: f.ready, Throttle: f.th, AppClients: policy.NoAppClients{},
-		Actions: policy.NoActionsIssued{}, Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{}, Now: func() time.Time { return f.now }})
+		Actions: policy.NoActionsIssued{}, Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{}, Removed: noneRemoved{}, Now: func() time.Time { return f.now }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -231,7 +231,7 @@ func (r *sitesRig) buildDoors(log *slog.Logger) (http.Handler, http.Handler) {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: r.table, Readiness: sitesReady{}, Throttle: th, AppClients: policy.NoAppClients{},
-		Actions: policy.NoActionsIssued{}, Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{}, Now: time.Now})
+		Actions: policy.NoActionsIssued{}, Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{}, Removed: sitesRemoved{}, Now: time.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -761,3 +761,8 @@ func TestNewSites_RefusesMissingCollaborators(t *testing.T) {
 		t.Errorf("nil doors with both hosts: %v", err)
 	}
 }
+
+// sitesRemoved is a removed-name list holding no name.
+type sitesRemoved struct{}
+
+func (sitesRemoved) Removed(context.Context, string, string) (bool, error) { return false, nil }
