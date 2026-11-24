@@ -125,7 +125,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 	}
 	srv := &Server{obs: obs.NewStatus(sup, sink, nil)}
 	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r = r.WithContext(auth.WithUser(r.Context(), &auth.User{Name: "alice"}))
+		r = r.WithContext(auth.WithPrincipal(r.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"}))
 		srv.handleObservabilityProxy(w, r)
 	}))
 	defer front.Close()
@@ -288,8 +288,8 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 
 		// Identity: the proxy's header wins over the client's `admin`.
 		code, _, body = get(t, "/observability/api/user")
-		if code != http.StatusOK || !strings.Contains(body, `"login":"alice"`) {
-			t.Errorf("/api/user = %d %s; want the session user alice", code, body)
+		if code != http.StatusOK || !strings.Contains(body, `"login":"sub-alice"`) {
+			t.Errorf("/api/user = %d %s; want the session's subject sub-alice", code, body)
 		}
 
 		code, _, body = get(t, "/observability/api/dashboards/uid/"+dashUID)

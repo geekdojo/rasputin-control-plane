@@ -197,7 +197,8 @@ func (e adminRep) key() string {
 }
 
 func (e adminRep) event() AdminEvent {
-	return AdminEvent{ID: e.key(), Time: time.UnixMilli(e.Time), OperationType: e.OperationType, ResourceType: e.ResourceType}
+	return AdminEvent{ID: e.key(), Time: time.UnixMilli(e.Time), OperationType: e.OperationType, ResourceType: e.ResourceType,
+		ResourcePath: e.ResourcePath}
 }
 
 // synthetic is the key of an event stored with no id: a hash of its fields,

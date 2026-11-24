@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,10 +15,12 @@ import (
 // is built with a synthetic Config so cookie behavior is exercised without a
 // real RP.
 type authFixture struct {
-	ctx   context.Context
-	dir   string
-	store *Store
-	svc   *Service
+	ctx      context.Context
+	dir      string
+	store    *Store
+	svc      *Service
+	clock    *testClock
+	sessions *ConsoleSessions
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -29,15 +32,21 @@ func newAuthFixture(t *testing.T) *authFixture {
 		t.Fatalf("OpenStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
+	clock := newTestClock()
+	sessions, err := NewConsoleSessions(store, clock.Now, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc, err := NewService(store, Config{
 		RPDisplayName: "Rasputin Test",
 		RPID:          "localhost",
 		RPOrigins:     []string{"http://localhost:3000"},
+		Sessions:      sessions,
 	})
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &authFixture{ctx: ctx, dir: dir, store: store, svc: svc}
+	return &authFixture{ctx: ctx, dir: dir, store: store, svc: svc, clock: clock, sessions: sessions}
 }
 
 // mintUser creates and persists a User with a synthetic 16-byte id. Returns

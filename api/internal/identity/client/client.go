@@ -250,8 +250,18 @@ func appendQueryEscaped(b, s []byte) []byte {
 // token posts form to the token endpoint at path and reads the access token.
 // form is zeroed before it returns.
 func (c *Client) token(ctx context.Context, path string, form []byte) (secret.Value, *Error) {
+	return c.tokenField(ctx, path, form, "access_token", nil)
+}
+
+// tokenField posts form to the token endpoint at path, with forward writing
+// any extra request headers, and reads the answer's field (access_token or
+// id_token). form is zeroed before it returns. A 400 or 401 naming
+// invalid_client or unauthorized_client is ErrDenied, a 5xx ErrUnreachable,
+// and any other refusal ErrProtocol carrying its OAuth error code
+// (invalid_grant for a spent or forged code).
+func (c *Client) tokenField(ctx context.Context, path string, form []byte, field string, forward func(http.Header)) (secret.Value, *Error) {
 	const op = "token"
-	status, body, e := c.round(ctx, op, c.base, http.MethodPost, path, nil, form, "application/x-www-form-urlencoded")
+	status, body, _, e := c.roundLocation(ctx, op, c.base, http.MethodPost, path, nil, form, "application/x-www-form-urlencoded", forward)
 	if e != nil {
 		return secret.Value{}, e
 	}
@@ -273,16 +283,18 @@ func (c *Client) token(ctx context.Context, path string, form []byte) (secret.Va
 		}
 		return fail(ErrProtocol, errors.New("unexpected status"), eb.Error)
 	}
-	var tb struct {
-		AccessToken json.RawMessage `json:"access_token"`
-	}
+	var tb map[string]json.RawMessage
 	if err := decodeJSON(body, &tb); err != nil {
 		return fail(ErrProtocol, err, "")
 	}
-	defer clear(tb.AccessToken)
-	tok, err := decodeString(tb.AccessToken)
+	defer func() {
+		for _, v := range tb {
+			clear(v)
+		}
+	}()
+	tok, err := decodeString(tb[field])
 	if err != nil {
-		return fail(ErrProtocol, errors.New("the answer carries no access token"), "")
+		return fail(ErrProtocol, errors.New("the answer carries no "+strings.ReplaceAll(field, "_", " ")), "")
 	}
 	return tok, nil
 }
@@ -301,7 +313,7 @@ func (c *Client) admin(ctx context.Context, token secret.Value, method, path str
 		}
 		reqBody, contentType = b, "application/json"
 	}
-	status, body, location, e := c.roundLocation(ctx, op, c.base, method, path, &token, reqBody, contentType)
+	status, body, location, e := c.roundLocation(ctx, op, c.base, method, path, &token, reqBody, contentType, nil)
 	if e != nil {
 		return Response{}, e
 	}
@@ -370,15 +382,16 @@ func (c *Client) health(ctx context.Context, op string) (HealthReport, *Error) {
 
 // round is roundLocation without the Location header.
 func (c *Client) round(ctx context.Context, op, base, method, path string, token *secret.Value, reqBody []byte, contentType string) (int, []byte, *Error) {
-	status, body, _, e := c.roundLocation(ctx, op, base, method, path, token, reqBody, contentType)
+	status, body, _, e := c.roundLocation(ctx, op, base, method, path, token, reqBody, contentType, nil)
 	return status, body, e
 }
 
 // roundLocation sends one request and returns the status, the whole body,
 // which the caller clears, and the Location header. token, when not nil, is
 // set only in Authorization: Bearer, never in the URL, the body or a log.
-// reqBody is zeroed before it returns.
-func (c *Client) roundLocation(ctx context.Context, op, base, method, path string, token *secret.Value, reqBody []byte, contentType string) (int, []byte, string, *Error) {
+// forward, when not nil, writes extra request headers (a door's forwarded
+// headers). reqBody is zeroed before it returns.
+func (c *Client) roundLocation(ctx context.Context, op, base, method, path string, token *secret.Value, reqBody []byte, contentType string, forward func(http.Header)) (int, []byte, string, *Error) {
 	fail := func(kind, cause error) *Error { return &Error{Op: op, Path: path, Kind: kind, Err: cause} }
 	// The body is a *bytes.Reader, which net/http knows is in memory, so it
 	// sends the headers and the body in one write. Any other reader makes it
@@ -399,6 +412,9 @@ func (c *Client) roundLocation(ctx context.Context, op, base, method, path strin
 		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Accept", "application/json")
+	if forward != nil {
+		forward(req.Header)
+	}
 	if token != nil {
 		req.Header.Set("Authorization", "Bearer "+string(token.Reveal()))
 	}

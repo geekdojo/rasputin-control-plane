@@ -6,23 +6,29 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/secret"
+
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 )
 
-// Config drives the WebAuthn relying-party setup and cookie behavior.
+// Config drives the WebAuthn relying-party setup of the pre-update passkey
+// ceremony and names the console's session store. Every console cookie is a
+// __Host- cookie (cookies.go), so no setting governs its Secure flag or
+// domain (geekdojo/geekdojo-brain#989 retired RASPUTIN_SECURE_COOKIES).
 type Config struct {
 	RPDisplayName string   // "Rasputin"
 	RPID          string   // effective domain — "localhost" in dev
 	RPOrigins     []string // allowed browser origins
-	CookieDomain  string   // optional explicit cookie domain
-	SecureCookies bool     // set Secure flag on cookies (production HTTPS)
+	// Sessions is the console session store. Without one no request
+	// resolves to a person: every gated route answers 401.
+	Sessions *ConsoleSessions
 }
 
 // Service is the auth layer: WebAuthn server + session manager + middleware.
@@ -43,61 +49,40 @@ type Service struct {
 	// control is the control lock's gate (controllock.go).
 	control controlGate
 
+	// sessions is the console session store (Config.Sessions).
+	sessions *ConsoleSessions
+	// signIn is the console's sign-in, installed by SetSignIn only when the
+	// identity service and the doors are on; nil means sign-in is
+	// unavailable.
+	signInMu sync.RWMutex
+	signIn   *SignIn
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// LoginHook runs after a successful login or first-credential registration,
-// before the session cookie is written. The hook receives the authenticated
-// User and a request-scoped context. It is invoked synchronously so callers
-// that depend on side-effects (e.g. mesh.EnsureUser provisioning a Headscale
-// user) can rely on the side-effect having occurred when /api/auth/me
-// returns. Errors are logged but never block the login response — auth
-// remains usable when downstream subsystems are unhealthy.
+// LoginHook runs after a successful console sign-in, before the session
+// cookie is written, with the account's preferred_username. It is invoked
+// synchronously so callers that depend on its side effects (mesh.EnsureUser
+// provisioning a Headscale user) can rely on them having happened when
+// /api/auth/me returns. Its error is logged and never blocks the sign-in:
+// auth stays usable when downstream subsystems are unhealthy.
 //
 // auth does not import mesh; the wiring lives in cmd/main, which is where
 // both subsystems already meet.
-type LoginHook func(ctx context.Context, user *User) error
+type LoginHook func(ctx context.Context, name string) error
 
 type pendingAuth struct {
-	kind    string // "register" or "login"
+	kind    string // "register"
 	user    *User
 	session *webauthn.SessionData
 	expires time.Time
-	// basis records what authorized a registration ceremony at begin, so
-	// finish re-checks that same fact rather than trusting that it still
-	// holds. Unset for login.
-	basis registerBasis
-	// stepUp is the assertion challenge a signed-in registration must
-	// answer with one of the user's existing passkeys. It is bound to this
-	// ceremony and spent by the first register/step-up call (nil after).
-	stepUp *webauthn.SessionData
-	// stepUpVerified is set when that assertion verified; register/finish
-	// refuses a signed-in registration without it.
-	stepUpVerified bool
-	// authenticator is the kind of authenticator the operator picked at
-	// register/begin. A signed-in ceremony does not mint its creation
-	// options until register/step-up, so the choice has to survive the gap;
-	// it is an option on the new credential, not an authorization fact,
-	// which is why it sits here and not in basis.
-	authenticator authenticatorChoice
-}
-
-// registerBasis is the fact a registration ceremony was begun on.
-type registerBasis struct {
-	// firstRun: no operator existed at begin. Finish commits only if that
-	// is still true (Store.CreateFirstUser's conditional insert).
-	firstRun bool
-	// byUserID: the ID of the signed-in user who began the ceremony, whose
-	// own account the new passkey is added to. Finish requires a verified
-	// step-up and a live session for that same user.
-	byUserID []byte
 }
 
 const (
-	sessionCookie   = "rasputin-session"
-	pendingCookie   = "rasputin-pending"
+	// sessionLifetime bounds a console session (register rows E3 and C72)
+	// and a legacy one.
 	sessionLifetime = 7 * 24 * time.Hour
 	// pendingLifetime bounds an unfinished WebAuthn ceremony. A ceremony is
 	// consumed at finish, but one the browser abandons produces no fact the
@@ -143,12 +128,30 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		return nil, fmt.Errorf("auth: webauthn config: %w", err)
 	}
 	return &Service{
-		store:   store,
-		web:     w,
-		cfg:     cfg,
-		origins: origins,
-		pending: make(map[string]*pendingAuth),
+		store:    store,
+		web:      w,
+		cfg:      cfg,
+		origins:  origins,
+		pending:  make(map[string]*pendingAuth),
+		sessions: cfg.Sessions,
 	}, nil
+}
+
+// SetSignIn installs the console's sign-in. The composition root builds it
+// only when the identity service is keycloak and the doors are on; until it
+// is installed, /api/auth/signin answers unavailable and status says
+// ready:false. Safe to call before or after Start.
+func (s *Service) SetSignIn(si *SignIn) {
+	s.signInMu.Lock()
+	defer s.signInMu.Unlock()
+	s.signIn = si
+}
+
+// signin is the installed sign-in, or nil.
+func (s *Service) signin() *SignIn {
+	s.signInMu.RLock()
+	defer s.signInMu.RUnlock()
+	return s.signIn
 }
 
 // Origins returns the browser-origin allowlist every origin decision in the
@@ -166,17 +169,20 @@ func (s *Service) SetLoginHook(h LoginHook) {
 }
 
 // runLoginHook invokes the installed hook with a request-scoped context.
-// Errors are logged at the auth boundary so handlers don't have to think
+// Its error is logged at the auth boundary so handlers don't have to think
 // about it. No-op when no hook is installed.
-func (s *Service) runLoginHook(ctx context.Context, u *User) {
+func (s *Service) runLoginHook(ctx context.Context, name string) {
 	s.hookMu.RLock()
 	hook := s.loginHook
 	s.hookMu.RUnlock()
 	if hook == nil {
 		return
 	}
-	if err := hook(ctx, u); err != nil {
-		log.Printf("auth: login hook for %q: %v (login proceeds)", u.Name, err)
+	if err := hook(ctx, name); err != nil {
+		if si := s.signin(); si != nil {
+			si.log.LogAttrs(ctx, slog.LevelWarn, "The sign-in's follow-up step failed; the sign-in proceeds.",
+				slog.String("event", "signin.hook_failed"), slog.String("err", err.Error()))
+		}
 	}
 }
 
@@ -205,9 +211,24 @@ func (s *Service) janitor() {
 		case <-s.ctx.Done():
 			return
 		case now := <-t.C:
-			s.cleanupPending(now)
-			_ = s.store.DeleteExpiredSessions(s.ctx, now.UTC())
+			s.sweep(s.ctx, now)
 		}
+	}
+}
+
+// sweep is one janitor pass: expired pre-update ceremonies and legacy
+// session rows (so #745's plaintext rows are gone within sessionLifetime,
+// and nothing writes new ones), expired console sessions and expired
+// pending sign-ins. Each is a tidy-up of state its own reader already
+// refuses once expired, so a failed delete changes no decision.
+func (s *Service) sweep(ctx context.Context, now time.Time) {
+	s.cleanupPending(now)
+	_ = s.store.DeleteExpiredSessions(ctx, now.UTC())
+	if s.sessions != nil {
+		_ = s.sessions.DeleteExpired(ctx)
+	}
+	if si := s.signin(); si != nil {
+		si.prune()
 	}
 }
 
@@ -294,154 +315,57 @@ func (s *Service) takePending(token string) *pendingAuth {
 	return p
 }
 
-// takeStepUp spends the step-up challenge of the ceremony under token and
-// returns it with the ceremony. The challenge is removed before it is
-// verified, so it can be answered at most once. Returns nil if there is no
-// live registration awaiting a step-up.
-func (s *Service) takeStepUp(token string) (*pendingAuth, *webauthn.SessionData) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.pending[token]
-	if !ok || p.kind != "register" || p.stepUp == nil {
-		return nil, nil
-	}
-	if time.Now().After(p.expires) {
-		delete(s.pending, token)
-		return nil, nil
-	}
-	challenge := p.stepUp
-	p.stepUp = nil
-	return p, challenge
-}
-
-// completeStepUp records a verified step-up and the creation challenge it
-// unlocked, if the ceremony is still the one under token (not finished,
-// dropped or evicted meanwhile).
-func (s *Service) completeStepUp(token string, p *pendingAuth, target *User, creation *webauthn.SessionData) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if cur, ok := s.pending[token]; !ok || cur != p {
-		return false
-	}
-	p.user = target
-	p.session = creation
-	p.stepUpVerified = true
-	return true
-}
-
-func (s *Service) dropPending(token string) {
-	s.mu.Lock()
-	delete(s.pending, token)
-	s.mu.Unlock()
-}
-
 // ----- cookies ------------------------------------------------------------
 
-func (s *Service) setSessionCookie(w http.ResponseWriter, token string, expires time.Time) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    token,
-		Path:     "/",
-		Domain:   s.cfg.CookieDomain,
-		Expires:  expires,
-		HttpOnly: true,
-		Secure:   s.cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-	})
+// setCeremonyCookie names a pre-update passkey ceremony in flight.
+func (s *Service) setCeremonyCookie(w http.ResponseWriter, token string) {
+	setCookie(w, ceremonyCookieName, token, pendingLifetime)
 }
 
-func (s *Service) clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookie,
-		Value:    "",
-		Path:     "/",
-		Domain:   s.cfg.CookieDomain,
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   s.cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
+func (s *Service) clearCeremonyCookie(w http.ResponseWriter) { clearCookie(w, ceremonyCookieName) }
 
-func (s *Service) setPendingCookie(w http.ResponseWriter, token string) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     pendingCookie,
-		Value:    token,
-		Path:     "/",
-		Domain:   s.cfg.CookieDomain,
-		MaxAge:   int(pendingLifetime.Seconds()),
-		HttpOnly: true,
-		Secure:   s.cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-	})
-}
-
-func (s *Service) clearPendingCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{
-		Name:     pendingCookie,
-		Value:    "",
-		Path:     "/",
-		Domain:   s.cfg.CookieDomain,
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   s.cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-	})
+// setSessionCookie writes the console session's cookie.
+func setSessionCookie(w http.ResponseWriter, cookie secret.Value) {
+	setCookie(w, SessionCookieName, string(cookie.Reveal()), sessionLifetime)
 }
 
 // ----- session resolve / context ------------------------------------------
 
-type ctxKey int
+// sessionOutcome is what resolve found on a request.
+type sessionOutcome int
 
 const (
-	ctxUser ctxKey = iota
-	ctxSession
+	sessionNone sessionOutcome = iota
+	sessionFound
+	sessionDuplicate
 )
 
-// UserFromContext returns the authenticated User attached by RequireSession.
-func UserFromContext(ctx context.Context) (*User, bool) {
-	u, ok := ctx.Value(ctxUser).(*User)
-	return u, ok
+// resolve reads the request's console session cookie and resolves it. A
+// legacy rasputin-session cookie is never read: the legacy sessions table no
+// longer authenticates anything (geekdojo/geekdojo-brain#989).
+func (s *Service) resolve(r *http.Request) (Principal, secret.Value, sessionOutcome, error) {
+	c, err := oneCookie(r, SessionCookieName)
+	switch {
+	case errors.Is(err, errDuplicateCookie):
+		return Principal{}, secret.Value{}, sessionDuplicate, nil
+	case err != nil, s.sessions == nil:
+		return Principal{}, secret.Value{}, sessionNone, nil
+	}
+	cookie := secret.New([]byte(c.Value))
+	p, ok, err := s.sessions.Resolve(r.Context(), cookie)
+	if err != nil || !ok {
+		cookie.Destroy()
+		return Principal{}, secret.Value{}, sessionNone, err
+	}
+	return p, cookie, sessionFound, nil
 }
 
-// WithUser returns a derived context carrying user as if RequireSession
-// had been called. Intended for tests that need to drive a handler
-// directly without going through the cookie middleware — production
-// code MUST go through RequireSession instead.
-func WithUser(ctx context.Context, user *User) context.Context {
-	return context.WithValue(ctx, ctxUser, user)
-}
-
-func (s *Service) resolveSession(r *http.Request) (*Session, *User, error) {
-	cookie, err := r.Cookie(sessionCookie)
-	if err != nil {
-		return nil, nil, nil
-	}
-	sess, err := s.store.GetSession(r.Context(), cookie.Value)
-	if err != nil {
-		return nil, nil, err
-	}
-	if sess == nil {
-		return nil, nil, nil
-	}
-	if time.Now().UTC().After(sess.ExpiresAt) {
-		_ = s.store.DeleteSession(r.Context(), sess.Token)
-		return nil, nil, nil
-	}
-	user, err := s.store.GetUserByID(r.Context(), sess.UserID)
-	if err != nil {
-		return nil, nil, err
-	}
-	if user == nil {
-		return nil, nil, nil
-	}
-	return sess, user, nil
-}
-
-// RequireSession wraps an http.Handler so it returns 401 unless a valid
-// session cookie is present, 403 when the request carries an Origin that
-// is not on the allowlist, and 423 when it uses a control capability while
-// the control lock's gate refuses (controllock.go).
+// RequireSession wraps an http.Handler so it answers 403 when the request
+// carries an Origin that is not on the allowlist, 400 when it carries the
+// session cookie twice, 401 unless it carries a live console session, and
+// 423 when it uses a control capability while the control lock's gate
+// refuses (controllock.go). Otherwise the handler runs with the Principal in
+// its context, and the session is touched.
 //
 // The Origin check covers what the other layers do not: WebSocket upgrades
 // are GETs, which http.CrossOriginProtection lets through, and the WebSocket
@@ -456,29 +380,26 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 			_, _ = w.Write([]byte(`{"error":"origin not allowed"}`))
 			return
 		}
-		sess, user, err := s.resolveSession(r)
-		if err != nil {
+		p, cookie, outcome, err := s.resolve(r)
+		switch {
+		case err != nil:
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
-		}
-		if sess == nil || user == nil {
+		case outcome == sessionDuplicate:
+			writeDuplicateCookie(w, SessionCookieName)
+			return
+		case outcome != sessionFound:
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"auth required"}`))
 			return
 		}
+		defer cookie.Destroy()
 		if s.controlLocked(w, r) {
 			return
 		}
-		ctx := context.WithValue(r.Context(), ctxUser, user)
-		ctx = context.WithValue(ctx, ctxSession, sess)
-		next.ServeHTTP(w, r.WithContext(ctx))
-		// touch session async; best-effort
-		go func(token string) {
-			bg, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-			_ = s.store.TouchSession(bg, token, time.Now().UTC())
-		}(sess.Token)
+		_ = s.sessions.Touch(r.Context(), cookie) // last-active is display only; a failed write changes no decision
+		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 	})
 }
 
@@ -525,25 +446,6 @@ func validUserName(s string) bool {
 		}
 	}
 	return !strings.HasPrefix(s, "-") && !strings.HasPrefix(s, ".")
-}
-
-func (s *Service) createSession(ctx context.Context, userID []byte) (*Session, error) {
-	token, err := randomToken(32)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now().UTC()
-	sess := &Session{
-		Token:        token,
-		UserID:       userID,
-		CreatedAt:    now,
-		ExpiresAt:    now.Add(sessionLifetime),
-		LastActiveAt: now,
-	}
-	if err := s.store.CreateSession(ctx, sess); err != nil {
-		return nil, err
-	}
-	return sess, nil
 }
 
 // ownCookiePrefix starts the name of every cookie the api sets, once an

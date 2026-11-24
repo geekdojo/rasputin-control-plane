@@ -3,9 +3,9 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -171,7 +171,7 @@ func TestPending_StoreAndTake(t *testing.T) {
 
 func TestPending_ExpiredTakeReturnsNil(t *testing.T) {
 	f := newAuthFixture(t)
-	tok, err := f.svc.storePending(&pendingAuth{kind: "login"})
+	tok, err := f.svc.storePending(&pendingAuth{kind: "register"})
 	if err != nil {
 		t.Fatalf("storePending: %v", err)
 	}
@@ -208,189 +208,8 @@ func TestService_CleanupPending(t *testing.T) {
 }
 
 // ============================================================================
-// createSession
+// RequireSession / RequireSessionFunc
 // ============================================================================
-
-func TestCreateSession_PersistsAndReturnsToken(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess, err := f.svc.createSession(f.ctx, u.ID)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-	if len(sess.Token) != 64 {
-		t.Errorf("token len: want 64 hex, got %d", len(sess.Token))
-	}
-	got, err := f.store.GetSession(f.ctx, sess.Token)
-	if err != nil || got == nil {
-		t.Fatalf("session not persisted: err=%v got=%+v", err, got)
-	}
-	if sess.ExpiresAt.Sub(sess.CreatedAt) != sessionLifetime {
-		t.Errorf("expiry: want %v, got %v", sessionLifetime, sess.ExpiresAt.Sub(sess.CreatedAt))
-	}
-}
-
-// ============================================================================
-// Cookie helpers
-// ============================================================================
-
-// Every cookie this service emits must honour SecureCookies — all four, not
-// just the session one. The pending cookie carries the in-flight WebAuthn
-// ceremony, so it leaking over plaintext is not meaningfully better.
-//
-// Guards the regression in geekdojo/geekdojo-brain#143: SecureCookies came
-// from an opt-in env var that defaulted off and was set in no deployment, so
-// appliances served the 7-day passkey session cookie without Secure.
-func TestCookiesHonourSecureFlag(t *testing.T) {
-	for _, secure := range []bool{true, false} {
-		t.Run(map[bool]string{true: "secure", false: "insecure"}[secure], func(t *testing.T) {
-			f := newAuthFixture(t)
-			f.svc.cfg.SecureCookies = secure
-
-			emit := map[string]func(w *httptest.ResponseRecorder){
-				"setSessionCookie":   func(w *httptest.ResponseRecorder) { f.svc.setSessionCookie(w, "tok", time.Now().Add(time.Hour)) },
-				"clearSessionCookie": func(w *httptest.ResponseRecorder) { f.svc.clearSessionCookie(w) },
-				"setPendingCookie":   func(w *httptest.ResponseRecorder) { f.svc.setPendingCookie(w, "tok") },
-				"clearPendingCookie": func(w *httptest.ResponseRecorder) { f.svc.clearPendingCookie(w) },
-			}
-			for name, fn := range emit {
-				w := httptest.NewRecorder()
-				fn(w)
-				got := w.Result().Cookies()
-				if len(got) != 1 {
-					t.Fatalf("%s: want 1 cookie, got %d", name, len(got))
-				}
-				if got[0].Secure != secure {
-					t.Errorf("%s: Secure = %v, want %v", name, got[0].Secure, secure)
-				}
-				// HttpOnly is unconditional and must not regress alongside.
-				if !got[0].HttpOnly {
-					t.Errorf("%s: cookie should always be HttpOnly", name)
-				}
-			}
-		})
-	}
-}
-
-func TestSetClearSessionCookie(t *testing.T) {
-	f := newAuthFixture(t)
-	w := httptest.NewRecorder()
-	f.svc.setSessionCookie(w, "tok123", time.Now().Add(time.Hour))
-	got := w.Result().Cookies()
-	if len(got) != 1 {
-		t.Fatalf("want 1 cookie, got %d", len(got))
-	}
-	if got[0].Name != sessionCookie || got[0].Value != "tok123" {
-		t.Errorf("unexpected cookie: %+v", got[0])
-	}
-	if !got[0].HttpOnly {
-		t.Error("session cookie should be HttpOnly")
-	}
-
-	// Clear: yields a cookie with MaxAge<0.
-	w2 := httptest.NewRecorder()
-	f.svc.clearSessionCookie(w2)
-	clr := w2.Result().Cookies()
-	if len(clr) != 1 || clr[0].MaxAge >= 0 {
-		t.Errorf("clear cookie: %+v", clr)
-	}
-}
-
-func TestSetClearPendingCookie(t *testing.T) {
-	f := newAuthFixture(t)
-	w := httptest.NewRecorder()
-	f.svc.setPendingCookie(w, "ptok")
-	got := w.Result().Cookies()
-	if len(got) != 1 || got[0].Name != pendingCookie {
-		t.Fatalf("setPendingCookie: %+v", got)
-	}
-	if got[0].MaxAge != int(pendingLifetime.Seconds()) {
-		t.Errorf("MaxAge: want %d got %d", int(pendingLifetime.Seconds()), got[0].MaxAge)
-	}
-
-	w2 := httptest.NewRecorder()
-	f.svc.clearPendingCookie(w2)
-	clr := w2.Result().Cookies()
-	if len(clr) != 1 || clr[0].MaxAge >= 0 {
-		t.Errorf("clearPendingCookie: %+v", clr)
-	}
-}
-
-// ============================================================================
-// resolveSession / RequireSession / RequireSessionFunc
-// ============================================================================
-
-func freshSession(t *testing.T, f *authFixture, u *User) *Session {
-	t.Helper()
-	sess, err := f.svc.createSession(f.ctx, u.ID)
-	if err != nil {
-		t.Fatalf("createSession: %v", err)
-	}
-	return sess
-}
-
-func TestResolveSession_NoCookieReturnsNothing(t *testing.T) {
-	f := newAuthFixture(t)
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	sess, user, err := f.svc.resolveSession(r)
-	if err != nil {
-		t.Fatalf("resolveSession: %v", err)
-	}
-	if sess != nil || user != nil {
-		t.Errorf("want nil session/user, got %+v/%+v", sess, user)
-	}
-}
-
-func TestResolveSession_ValidCookie(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-
-	gotSess, gotUser, err := f.svc.resolveSession(r)
-	if err != nil {
-		t.Fatalf("resolveSession: %v", err)
-	}
-	if gotSess == nil || gotSess.Token != sess.Token {
-		t.Errorf("want session %q, got %+v", sess.Token, gotSess)
-	}
-	if gotUser == nil || gotUser.Name != "alice" {
-		t.Errorf("want alice, got %+v", gotUser)
-	}
-}
-
-func TestResolveSession_ExpiredCookieIsCleanedUp(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-
-	// Insert an already-expired session row directly.
-	now := time.Now().UTC()
-	expired := &Session{
-		Token:        "expired-tok",
-		UserID:       u.ID,
-		CreatedAt:    now.Add(-2 * time.Hour),
-		ExpiresAt:    now.Add(-time.Hour),
-		LastActiveAt: now.Add(-time.Hour),
-	}
-	if err := f.store.CreateSession(f.ctx, expired); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: "expired-tok"})
-
-	sess, user, err := f.svc.resolveSession(r)
-	if err != nil {
-		t.Fatalf("resolveSession: %v", err)
-	}
-	if sess != nil || user != nil {
-		t.Errorf("expired session resolved as live: %+v / %+v", sess, user)
-	}
-	// And the expired row should have been deleted.
-	if got, _ := f.store.GetSession(f.ctx, "expired-tok"); got != nil {
-		t.Error("expired session row was not cleaned up")
-	}
-}
 
 func TestRequireSession_MissingCookieReturns401(t *testing.T) {
 	f := newAuthFixture(t)
@@ -399,56 +218,6 @@ func TestRequireSession_MissingCookieReturns401(t *testing.T) {
 	}))
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("want 401, got %d", w.Code)
-	}
-}
-
-func TestRequireSession_ValidCookiePasses(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-
-	var gotName string
-	handler := f.svc.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, ok := UserFromContext(r.Context())
-		if ok {
-			gotName = got.Name
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("want 200, got %d", w.Code)
-	}
-	if gotName != "alice" {
-		t.Errorf("expected user in context, got %q", gotName)
-	}
-}
-
-func TestRequireSession_ExpiredCookieReturns401(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	expired := &Session{
-		Token:        "x",
-		UserID:       u.ID,
-		CreatedAt:    time.Now().Add(-2 * time.Hour),
-		ExpiresAt:    time.Now().Add(-time.Hour),
-		LastActiveAt: time.Now().Add(-time.Hour),
-	}
-	if err := f.store.CreateSession(f.ctx, expired); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	handler := f.svc.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Error("downstream handler should not run")
-	}))
-	r := httptest.NewRequest(http.MethodGet, "/", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: "x"})
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, r)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("want 401, got %d", w.Code)
 	}
@@ -469,157 +238,6 @@ func TestRequireSessionFunc_DelegatesToRequireSession(t *testing.T) {
 	}
 	if called {
 		t.Error("wrapped handler should not have been invoked")
-	}
-}
-
-// ============================================================================
-// UserFromContext
-// ============================================================================
-
-func TestUserFromContext_NoValue(t *testing.T) {
-	if _, ok := UserFromContext(context.Background()); ok {
-		t.Error("want ok=false on empty ctx")
-	}
-}
-
-func TestUserFromContext_HasValue(t *testing.T) {
-	u := &User{Name: "alice"}
-	ctx := context.WithValue(context.Background(), ctxUser, u)
-	got, ok := UserFromContext(ctx)
-	if !ok || got.Name != "alice" {
-		t.Errorf("UserFromContext: ok=%v user=%+v", ok, got)
-	}
-}
-
-// ============================================================================
-// Handlers: status / me / logout
-// ============================================================================
-
-func TestHandleStatus_EmptyDB(t *testing.T) {
-	f := newAuthFixture(t)
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d (body=%s)", w.Code, w.Body.String())
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json: %v", err)
-	}
-	if resp["hasUsers"] != false {
-		t.Errorf("hasUsers: want false, got %v", resp["hasUsers"])
-	}
-	if resp["userCount"].(float64) != 0 {
-		t.Errorf("userCount: want 0, got %v", resp["userCount"])
-	}
-}
-
-func TestHandleStatus_WithUsersAndSession(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/status", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", w.Code)
-	}
-	var resp map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json: %v", err)
-	}
-	if resp["hasUsers"] != true {
-		t.Errorf("hasUsers: want true, got %v", resp["hasUsers"])
-	}
-	if resp["user"] == nil {
-		t.Error("expected user in response")
-	}
-}
-
-func TestHandleMe_Unauthenticated(t *testing.T) {
-	f := newAuthFixture(t)
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusUnauthorized {
-		t.Errorf("want 401, got %d", w.Code)
-	}
-}
-
-func TestHandleMe_Authenticated(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Fatalf("want 200, got %d", w.Code)
-	}
-	var resp publicUserView
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("json: %v", err)
-	}
-	if resp.Name != "alice" {
-		t.Errorf("name: want alice, got %q", resp.Name)
-	}
-}
-
-func TestHandleLogout_DeletesSessionAndClearsCookie(t *testing.T) {
-	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	sess := freshSession(t, f, u)
-
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
-	r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("want 200, got %d", w.Code)
-	}
-	// Cookie cleared in response.
-	cleared := false
-	for _, c := range w.Result().Cookies() {
-		if c.Name == sessionCookie && c.MaxAge < 0 {
-			cleared = true
-		}
-	}
-	if !cleared {
-		t.Error("expected cleared session cookie")
-	}
-	// Session row gone.
-	if got, _ := f.store.GetSession(f.ctx, sess.Token); got != nil {
-		t.Error("session row not deleted on logout")
-	}
-}
-
-func TestHandleLogout_NoCookieStillOK(t *testing.T) {
-	f := newAuthFixture(t)
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("want 200 even without session, got %d", w.Code)
 	}
 }
 
@@ -669,7 +287,7 @@ func TestHandleRegisterBegin_FirstUserAllowed(t *testing.T) {
 	// Pending cookie was set.
 	gotPending := false
 	for _, c := range w.Result().Cookies() {
-		if c.Name == pendingCookie {
+		if c.Name == ceremonyCookieName {
 			gotPending = true
 		}
 	}
@@ -845,7 +463,7 @@ func TestHandleRegisterBegin_UnknownAuthenticatorRefused(t *testing.T) {
 			t.Errorf("authenticator %q: want 400, got %d %s", v, w.Code, w.Body.String())
 		}
 		for _, c := range w.Result().Cookies() {
-			if c.Name == pendingCookie {
+			if c.Name == ceremonyCookieName {
 				t.Errorf("authenticator %q: a refused begin started a ceremony", v)
 			}
 		}
@@ -877,39 +495,6 @@ func TestHandleRegisterFinish_MissingPendingCookie(t *testing.T) {
 	mux.ServeHTTP(w, r)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("want 400, got %d", w.Code)
-	}
-}
-
-func TestHandleLoginFinish_MissingPendingCookie(t *testing.T) {
-	f := newAuthFixture(t)
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/login/finish", strings.NewReader("{}"))
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusBadRequest {
-		t.Errorf("want 400, got %d", w.Code)
-	}
-}
-
-func TestHandleLoginBegin_PendingCookieSet(t *testing.T) {
-	f := newAuthFixture(t)
-	mux := http.NewServeMux()
-	f.svc.RegisterRoutes(mux)
-	r := httptest.NewRequest(http.MethodPost, "/api/auth/login/begin", nil)
-	w := httptest.NewRecorder()
-	mux.ServeHTTP(w, r)
-	if w.Code != http.StatusOK {
-		t.Errorf("want 200, got %d", w.Code)
-	}
-	gotPending := false
-	for _, c := range w.Result().Cookies() {
-		if c.Name == pendingCookie {
-			gotPending = true
-		}
-	}
-	if !gotPending {
-		t.Error("expected pending cookie")
 	}
 }
 
@@ -948,38 +533,25 @@ func TestStart_Stop_NoPanic(t *testing.T) {
 }
 
 // ============================================================================
-// httpError
-// ============================================================================
-
-func TestHTTPError_ErrorString(t *testing.T) {
-	if got := httpError("boom").Error(); got != "boom" {
-		t.Errorf("want %q, got %q", "boom", got)
-	}
-}
-
-// ============================================================================
 // LoginHook
 // ============================================================================
 
 func TestSetLoginHook_NoHookIsNoop(t *testing.T) {
 	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
 	// Should not panic, should not block; with no hook installed there's
 	// no observable effect, so the test asserts the negative (returns).
-	f.svc.runLoginHook(context.Background(), u)
+	f.svc.runLoginHook(context.Background(), "alice")
 }
 
 func TestSetLoginHook_FiresWithUserAndContext(t *testing.T) {
 	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-
 	type call struct {
-		user *User
+		name string
 		ctx  context.Context
 	}
 	got := make(chan call, 1)
-	f.svc.SetLoginHook(func(ctx context.Context, u *User) error {
-		got <- call{user: u, ctx: ctx}
+	f.svc.SetLoginHook(func(ctx context.Context, name string) error {
+		got <- call{name: name, ctx: ctx}
 		return nil
 	})
 
@@ -987,12 +559,12 @@ func TestSetLoginHook_FiresWithUserAndContext(t *testing.T) {
 	// caller's context (not a fresh background one).
 	type k int
 	ctx := context.WithValue(context.Background(), k(0), "marker")
-	f.svc.runLoginHook(ctx, u)
+	f.svc.runLoginHook(ctx, "alice")
 
 	select {
 	case c := <-got:
-		if c.user != u {
-			t.Errorf("hook user: got %p want %p", c.user, u)
+		if c.name != "alice" {
+			t.Errorf("hook name: got %q want alice", c.name)
 		}
 		if c.ctx.Value(k(0)) != "marker" {
 			t.Errorf("hook did not receive caller context value")
@@ -1004,24 +576,20 @@ func TestSetLoginHook_FiresWithUserAndContext(t *testing.T) {
 
 func TestSetLoginHook_ErrorDoesNotPropagate(t *testing.T) {
 	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-	f.svc.SetLoginHook(func(ctx context.Context, u *User) error {
-		return httpError("downstream-down")
+	f.svc.SetLoginHook(func(ctx context.Context, _ string) error {
+		return errors.New("downstream-down")
 	})
 	// runLoginHook returns nothing; the panic that this guards against is
-	// the most important assertion. We also rely on it logging — covered
-	// by manual inspection rather than capturing stderr (brittle).
-	f.svc.runLoginHook(context.Background(), u)
+	// the most important assertion.
+	f.svc.runLoginHook(context.Background(), "alice")
 }
 
 func TestSetLoginHook_Replaceable(t *testing.T) {
 	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
-
 	var aCount, bCount int
-	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { aCount++; return nil })
-	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { bCount++; return nil })
-	f.svc.runLoginHook(context.Background(), u)
+	f.svc.SetLoginHook(func(ctx context.Context, _ string) error { aCount++; return nil })
+	f.svc.SetLoginHook(func(ctx context.Context, _ string) error { bCount++; return nil })
+	f.svc.runLoginHook(context.Background(), "alice")
 	if aCount != 0 {
 		t.Errorf("replaced hook should not fire; aCount=%d", aCount)
 	}
@@ -1032,32 +600,11 @@ func TestSetLoginHook_Replaceable(t *testing.T) {
 
 func TestSetLoginHook_NilUninstalls(t *testing.T) {
 	f := newAuthFixture(t)
-	u := f.mintUser(t, "alice")
 	var fired bool
-	f.svc.SetLoginHook(func(ctx context.Context, u *User) error { fired = true; return nil })
+	f.svc.SetLoginHook(func(ctx context.Context, _ string) error { fired = true; return nil })
 	f.svc.SetLoginHook(nil)
-	f.svc.runLoginHook(context.Background(), u)
+	f.svc.runLoginHook(context.Background(), "alice")
 	if fired {
 		t.Error("nil SetLoginHook did not uninstall")
-	}
-}
-
-// Login + register handlers must call runLoginHook so a downstream
-// EnsureUser side-effect is observable when the response returns. We
-// can't exercise the full WebAuthn flow in a unit test (real attestation
-// data), but we CAN assert the source contains both call sites — a
-// regression where someone deletes one of those calls would silently
-// break per-IAM-user Headscale provisioning. This catches that.
-func TestLoginHook_HandlerCallSitesIntact(t *testing.T) {
-	src, err := os.ReadFile("handlers.go")
-	if err != nil {
-		t.Fatalf("read handlers.go: %v", err)
-	}
-	body := string(src)
-	if !strings.Contains(body, "s.runLoginHook(r.Context(), p.user)") {
-		t.Error("handleRegisterFinish missing runLoginHook call")
-	}
-	if !strings.Contains(body, "s.runLoginHook(ctx, user)") {
-		t.Error("handleLoginFinish missing runLoginHook call")
 	}
 }

@@ -20,7 +20,7 @@ type Store struct {
 }
 
 func OpenStore(ctx context.Context, path string) (*Store, error) {
-	db, err := dbutil.Open(ctx, path, schema, "auth")
+	db, err := dbutil.Open(ctx, path, schema+consoleSessionsSchema, "auth")
 	if err != nil {
 		return nil, err
 	}

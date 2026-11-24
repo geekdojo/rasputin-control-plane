@@ -4,7 +4,7 @@
 # database image, the mesh coordinator image and the browser for the identity
 # functional tests (docs/testing-identity.md).
 #
-# Usage: scripts/install-identity.sh <dest-dir> [<download-dir>]
+# Usage: scripts/install-identity.sh [--no-browser] <dest-dir> [<download-dir>]
 #
 # It also runs scripts/fetch-denylist.sh, which writes the password deny list
 # the realm's policy names to <dest-dir>/password-blacklists/ and its notices
@@ -24,6 +24,13 @@
 # Linux x86_64 only: the pins are the x64 tarballs' and the linux64 zip's
 # hashes. Anything else is refused before any download.
 #
+# --no-browser skips Chrome for Testing and also admits Linux aarch64: the
+# console recipe on a Mac (scripts/identity-on-mac.sh,
+# geekdojo/geekdojo-brain#989), whose arm64 container has no x86-64 loader.
+# There the x64 JRE runs only inside a linux/amd64 container on the pinned
+# PostgreSQL image, so this script runs kc.sh build and --version that way;
+# the screenshots use a native browser the recipe installs itself.
+#
 # The Keycloak and JRE hashes in pin.go come only from signature-verified
 # downloads, and Chrome for Testing's from the first download (it publishes no
 # checksum); see the comment there. This script checks bytes against those
@@ -35,8 +42,13 @@
 # and one that fails it is refused, never replaced.
 set -euo pipefail
 
+browser=1
+if [ "${1:-}" = "--no-browser" ]; then
+  browser=0
+  shift
+fi
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || [ -z "$1" ]; then
-  echo "usage: $0 <dest-dir> [<download-dir>]" >&2
+  echo "usage: $0 [--no-browser] <dest-dir> [<download-dir>]" >&2
   exit 2
 fi
 dest="$1"
@@ -70,8 +82,8 @@ cft_sha256="$(need ChromeLinux64SHA256)"
 
 os="$(uname -s)"
 arch="$(uname -m)"
-if [ "$os" != "Linux" ] || [ "$arch" != "x86_64" ]; then
-  echo "install-identity: this is $os $arch; only Linux x86_64 is accepted (the pins are the x64 and linux64 downloads)" >&2
+if [ "$os" != "Linux" ] || { [ "$arch" != "x86_64" ] && { [ "$browser" = 1 ] || [ "$arch" != "aarch64" ]; }; }; then
+  echo "install-identity: this is $os $arch; only Linux x86_64 is accepted (the pins are the x64 and linux64 downloads), and Linux aarch64 with --no-browser" >&2
   exit 1
 fi
 
@@ -109,14 +121,18 @@ fetch() {
 
 fetch "$kc_file" "$kc_url" "$kc_sha256"
 fetch "$jre_file" "$jre_url" "$jre_sha256"
-fetch "$cft_file" "$cft_url" "$cft_sha256"
+if [ "$browser" = 1 ]; then
+  fetch "$cft_file" "$cft_url" "$cft_sha256"
+fi
 
 mkdir -p "$dest"
 rm -rf "$dest/keycloak" "$dest/jre" "$dest/chrome-linux64"
 mkdir -p "$dest/keycloak" "$dest/jre"
 tar -xzf "$work/$kc_file" -C "$dest/keycloak" --strip-components=1
 tar -xzf "$work/$jre_file" -C "$dest/jre" --strip-components=1
-unzip -q "$work/$cft_file" -d "$dest"
+if [ "$browser" = 1 ]; then
+  unzip -q "$work/$cft_file" -d "$dest"
+fi
 "$repo_root/scripts/fetch-denylist.sh" "$dest" "$keep"
 
 echo "install-identity: kc.sh --config-file=$build_conf build"
@@ -125,5 +141,25 @@ JAVA_HOME="$dest/jre" "$dest/keycloak/bin/kc.sh" --config-file="$build_conf" bui
 docker pull "$pg_image"
 docker pull "$hs_image"
 
-JAVA_HOME="$dest/jre" "$dest/keycloak/bin/kc.sh" --version
-"$dest/chrome-linux64/chrome" --version
+# kc JAVA_HOME ARGS...: kc.sh on the x64 JRE, natively on x86_64 and in a
+# linux/amd64 container on the pinned PostgreSQL image elsewhere.
+kc() {
+  if [ "$arch" = "x86_64" ]; then
+    JAVA_HOME="$dest/jre" "$dest/keycloak/bin/kc.sh" "$@"
+  else
+    local abs_dest abs_conf
+    abs_dest="$(cd "$dest" && pwd)"
+    abs_conf="$(cd "$(dirname "$build_conf")" && pwd)"
+    docker run --rm --platform linux/amd64 -e JAVA_HOME="$abs_dest/jre" \
+      -v "$abs_dest:$abs_dest" -v "$abs_conf:$abs_conf:ro" \
+      --entrypoint "$abs_dest/keycloak/bin/kc.sh" "$pg_image" "$@"
+  fi
+}
+
+echo "install-identity: kc.sh --config-file=$build_conf build"
+kc --config-file="$build_conf" build
+
+kc --version
+if [ "$browser" = 1 ]; then
+  "$dest/chrome-linux64/chrome" --version
+fi

@@ -2,22 +2,22 @@
 
 <!-- AGENTS.md is canonical, shared by Claude Code and Codex; Claude Code does not read it natively, so this file imports it. Add only Claude-specific notes here. -->
 
-## Verifying authed UI pages in a browser
+## Verifying authed UI pages
 
-Start the local stack described under "Verifying UI changes (authed pages)" in
-`AGENTS.md`, then:
+Authed pages are verified from screenshots: start the signed-in stack and
+take them as `AGENTS.md` describes ("Verifying UI changes (authed pages)"),
 
-1. **Verify through Bryce's real Chrome** (claude-in-chrome MCP tools) — not the in-app
-   preview browser, which can't hold the passkey session. **Open your own tab** with
-   `tabs_create` and navigate *that* tab to `localhost:3000/...`; never navigate, click in
-   or close one of his existing tabs, and close your tab when done. A new tab shares his
-   Chrome's 7-day session, so the dev loop stays fully autonomous while it's valid.
-   Screenshot/zoom for proof.
-2. **Session expired?** Open `localhost:3000/login` in your own tab in his Chrome, click "Sign in
-   with passkey" to raise the prompt, then ask Bryce for one Touch ID and wait for
-   his confirmation. One tap buys another 7 days.
-3. **Deployed UI** (`rasputin.local`) can be verified the same way — his Chrome
-   keeps a session with the real controlplane too. Remember mutations there hit a
-   real cluster.
+```sh
+scripts/identity-on-mac.sh up
+scripts/identity-on-mac.sh shots /path /other-path
+scripts/identity-on-mac.sh down
+```
 
-Unauthenticated pages (`/login`, `/setup`) work fine in the preview browser directly.
+then read each `data/identity-on-mac/shots/*.png` with the Read tool. The
+stack signs a synthetic fixture account in through the real sign-in; never
+Bryce's account.
+
+Claude in Chrome is for unauthenticated pages only (`/login`, `/restore`,
+`/setup` on the local stack): open your own tab with `tabs_create`, never
+navigate, click in or close one of Bryce's tabs, and close yours when done.
+An agent never signs in through it. Never use the in-app preview browser.

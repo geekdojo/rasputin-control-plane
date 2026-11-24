@@ -86,6 +86,15 @@ func TestRenderKeycloakConf_DoorMode(t *testing.T) {
 	if strings.Contains(conf, "\nhostname=") {
 		t.Error("door mode keycloak.conf sets a hostname")
 	}
+	// TC-989-34's precondition: the back-channel logout's outgoing TLS
+	// trusts the test CA in door mode only.
+	withCA := string(renderKeycloakConf(kcPaths{TrustFile: "/ca.pem"}, kcPorts{}, "", pw))
+	if !strings.Contains(withCA, "truststore-paths=/ca.pem\n") {
+		t.Error("door mode keycloak.conf does not trust the CA for outgoing calls")
+	}
+	if strings.Contains(string(renderKeycloakConf(kcPaths{TrustFile: "/ca.pem"}, kcPorts{}, "https://x", pw)), "truststore-paths=") {
+		t.Error("the front's keycloak.conf trusts the CA for outgoing calls")
+	}
 	if !strings.Contains(string(renderKeycloakConf(kcPaths{}, kcPorts{}, "https://x", pw)), "hostname=https://x\n") {
 		t.Error("the front's keycloak.conf lost its hostname")
 	}

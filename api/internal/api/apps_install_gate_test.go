@@ -130,8 +130,10 @@ func TestInstallGate_AcknowledgedInstallProceedsAndIsRecorded(t *testing.T) {
 	if created.BackupAck == nil {
 		t.Fatalf("created app carries no backupAck: %s", w.Body.String())
 	}
+	// TC-989-30: "installed by" is the person's name (Principal.Name), never
+	// their subject, which only the Grafana leg carries.
 	if created.BackupAck.By != "alice" {
-		t.Errorf("backupAck.by = %q, want the authenticated user's name", created.BackupAck.By)
+		t.Errorf("backupAck.by = %q, want the signed-in person's name, not the subject sub-alice", created.BackupAck.By)
 	}
 	if time.Since(created.BackupAck.At) > time.Minute {
 		t.Errorf("backupAck.at = %s, want the install time", created.BackupAck.At)

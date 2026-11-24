@@ -18,11 +18,8 @@
 //   • Operator SSH key — the one key the Add-node wizard prefills, so it goes
 //     into nodes enrolled from now on. It never changes an already-enrolled
 //     node (geekdojo/geekdojo-brain#246).
-//   • Passkeys — add another passkey to the signed-in account. The operator
-//     picks where it should live (this device, a phone or tablet, a security
-//     key), confirms with a passkey they already have, then creates the new
-//     one (lib/auth.ts confirmExistingPasskey / createNewPasskey).
-//     Shown unless SHOW_PASSKEY_MANAGEMENT below is turned off.
+//   • Passkeys — hidden (SHOW_PASSKEY_MANAGEMENT below): passkeys are managed
+//     at the sign-in page's "Your account" (geekdojo/geekdojo-brain#319).
 // The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
@@ -57,17 +54,16 @@ import { confirmExistingPasskey, createNewPasskey, type NewPasskeyOptions } from
 import { PASSKEY_AUTHENTICATORS, type PasskeyAuthenticatorChoice } from '../../../lib/passkey-authenticator';
 import type { BMCBackendInfo, BMCConfigView, DeploymentMode, DNSForwarding, Node, ObsStatus, SetupState } from '../../../lib/types';
 
-// Whether Settings shows the Passkeys section. On — adding a passkey can now
-// offer a phone or a security key rather than only the authenticator on this
-// machine (geekdojo/geekdojo-brain#586), which is what the section needed to
-// lead somewhere.
+// Whether Settings shows the Passkeys section. Off since the console signs
+// people in through the cluster's sign-in page (geekdojo/geekdojo-brain#989):
+// the section adds a passkey to the pre-update account, which no longer signs
+// anyone in, so the api refuses it. Passkeys are managed from "Your account"
+// at the sign-in page, which geekdojo/geekdojo-brain#319 builds; that item
+// removes this section with the register routes.
 //
-// It stays a flag rather than becoming unconditional so the section can be
-// taken off an operator's Settings page in one line if the flow misbehaves on
-// hardware, without reverting the feature. Deliberately only the render is
-// gated: PasskeysSection, lib/auth.ts and the
-// /api/auth/register/{begin,step-up,finish} routes are untouched by it.
-const SHOW_PASSKEY_MANAGEMENT = true;
+// Deliberately only the render is gated: PasskeysSection and lib/auth.ts stay
+// until #319 removes them.
+const SHOW_PASSKEY_MANAGEMENT = false;
 
 export default function SettingsPage() {
   const { theme, setTheme } = useTheme();

@@ -1,11 +1,12 @@
 package auth
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/geekdojo/rasputin-control-plane/secret"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -24,78 +25,144 @@ func (s *Service) RegisterRoutes(mux RouteRegistrar) {
 	mux.HandleFunc("GET /api/auth/status", s.handleStatus)
 	mux.HandleFunc("GET /api/auth/me", s.handleMe)
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
+	mux.HandleFunc("GET /api/auth/signin", s.handleSignin)
+	mux.HandleFunc("GET /api/auth/callback", s.handleCallback)
+	mux.HandleFunc("POST /api/identity/backchannel/{client}", s.handleBackchannel)
 	mux.HandleFunc("POST /api/auth/register/begin", s.handleRegisterBegin)
 	mux.HandleFunc("POST /api/auth/register/step-up", s.handleRegisterStepUp)
 	mux.HandleFunc("POST /api/auth/register/finish", s.handleRegisterFinish)
-	mux.HandleFunc("POST /api/auth/login/begin", s.handleLoginBegin)
-	mux.HandleFunc("POST /api/auth/login/finish", s.handleLoginFinish)
+	mux.HandleFunc("POST /api/auth/login/begin", s.handleLoginGone)
+	mux.HandleFunc("POST /api/auth/login/finish", s.handleLoginGone)
 }
 
 // ----- status / me / logout -----------------------------------------------
 
-// GET /api/auth/status — open. Reports whether any users exist (drives the
-// first-run flow) and the current user if logged in. An error reading
-// FirstRun is a 500, never hasUsers=false.
+// meView is the signed-in person as the console reads it.
+type meView struct {
+	Sub   string   `json:"sub"`
+	Name  string   `json:"name"`
+	Roles []string `json:"roles"`
+}
+
+func viewOf(p Principal) meView { return meView{Sub: p.Sub, Name: p.Name, Roles: nonNil(p.Roles)} }
+
+// GET /api/auth/status — open. firstRun drives the restore page (no
+// pre-update operator exists); ready says whether a sign-in can start now;
+// user is the signed-in person, only with a live console session. It never
+// reports how many accounts exist. An error reading firstRun is a 500.
 func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	firstRun, err := s.FirstRun(r.Context())
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	n, err := s.store.CountUsers(r.Context())
+	si := s.signin()
+	resp := map[string]any{"firstRun": firstRun, "ready": si != nil && si.Ready(r.Context())}
+	p, cookie, outcome, err := s.resolve(r)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp := map[string]any{"hasUsers": !firstRun, "userCount": n}
-	if _, user, _ := s.resolveSession(r); user != nil {
-		resp["user"] = publicUser(user)
+	if outcome == sessionFound {
+		cookie.Destroy()
+		resp["user"] = viewOf(p)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// GET /api/auth/me — open, but returns 401 if not authenticated.
+// GET /api/auth/me — open, but 401 without a console session.
 func (s *Service) handleMe(w http.ResponseWriter, r *http.Request) {
-	_, user, err := s.resolveSession(r)
-	if err != nil {
+	p, cookie, outcome, err := s.resolve(r)
+	switch {
+	case err != nil:
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-	if user == nil {
+	case outcome == sessionDuplicate:
+		writeDuplicateCookie(w, SessionCookieName)
+		return
+	case outcome != sessionFound:
 		writeErr(w, http.StatusUnauthorized, "auth required")
 		return
 	}
-	writeJSON(w, http.StatusOK, publicUser(user))
+	cookie.Destroy()
+	writeJSON(w, http.StatusOK, viewOf(p))
 }
 
-// POST /api/auth/logout — invalidates the current session.
+// POST /api/auth/logout — ends the console session, clears its cookie, then
+// ends the identity session it was signed in under. It answers 200 even
+// when that last step fails (SignIn.EndSession logs it).
 func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie(sessionCookie); err == nil {
-		_ = s.store.DeleteSession(r.Context(), cookie.Value)
+	sid := ""
+	if c, err := oneCookie(r, SessionCookieName); err == nil && s.sessions != nil {
+		cookie := secret.New([]byte(c.Value))
+		sid, err = s.sessions.Delete(r.Context(), cookie)
+		cookie.Destroy()
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "The session could not be ended.")
+			return
+		}
 	}
-	s.clearSessionCookie(w)
+	clearCookie(w, SessionCookieName)
+	if si := s.signin(); si != nil && sid != "" {
+		si.EndSession(r.Context(), sid)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// GET /api/auth/signin — open. Starts a sign-in at the home door, or sends
+// the browser back to the launcher when sign-in is not installed.
+func (s *Service) handleSignin(w http.ResponseWriter, r *http.Request) {
+	si := s.signin()
+	if si == nil {
+		http.Redirect(w, r, signinUnavailable, http.StatusSeeOther)
+		return
+	}
+	si.Begin(w, r)
+}
+
+// GET /api/auth/callback — open. The home door's return: SignIn.Complete
+// decides, and this writes its answer. The pending cookie is cleared
+// whatever the outcome.
+func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
+	si := s.signin()
+	if si == nil {
+		http.Redirect(w, r, signinUnavailable, http.StatusSeeOther)
+		return
+	}
+	key := ""
+	switch c, err := oneCookie(r, pendingCookieName); {
+	case errors.Is(err, errDuplicateCookie):
+		writeDuplicateCookie(w, pendingCookieName)
+		return
+	case err == nil:
+		key = c.Value
+	}
+	clearCookie(w, pendingCookieName)
+	res := si.Complete(r.Context(), CallbackInput{PendingKey: key, Query: r.URL.Query()})
+	if res.Status == http.StatusInternalServerError {
+		writeErr(w, http.StatusInternalServerError, "The sign-in could not be completed.")
+		return
+	}
+	if res.Cookie.Len() > 0 {
+		s.runLoginHook(r.Context(), res.Name)
+		setSessionCookie(w, res.Cookie)
+		res.Cookie.Destroy()
+	}
+	http.Redirect(w, r, res.Location, http.StatusSeeOther)
 }
 
 // ----- registration -------------------------------------------------------
 //
-// Two ways in, recorded in the ceremony's basis and re-checked at finish:
-//
-//   - First run (no users exist). register/begin returns creation options
-//     directly; register/finish commits only if no operator exists by then.
-//
-//   - Signed in. Adds a passkey to the signed-in user's OWN account, and
-//     nothing else: creating another user while signed in is refused (403;
-//     user creation belongs to the role model). A session alone does not
-//     add a passkey. register/begin returns a step-up assertion challenge
-//     for the signed-in user's own passkeys; register/step-up verifies it (single use: the challenge is
-//     consumed on the first attempt, pass or fail) and only then issues the
-//     creation options; register/finish refuses unless that step-up verified
-//     for THIS ceremony and the same user's session is still live.
-//
-// The step-up assertion uses the same user-verification setting as sign-in
-// (the relying party's; login passes no override), so it is no stronger and
-// no weaker than signing in.
+// One way in: first run (no pre-update operator exists). register/begin
+// returns creation options; register/finish commits only if no operator
+// exists by then, and opens no session: a console session comes only from a
+// sign-in through the home door (geekdojo/geekdojo-brain#989). Adding a
+// passkey to a signed-in account needed a pre-update session, which no longer
+// signs anyone in, so it is refused; passkeys are managed at the sign-in
+// service (#319). Identity 4.8 removes these routes.
+
+// signedInPasskeyGone is the 401 every signed-in passkey ceremony gets.
+const signedInPasskeyGone = "Passkeys are managed from your account at the sign-in service, not here."
 
 // POST /api/auth/register/begin
 // Body: { "name": "alice", "displayName": "Alice", "authenticator": "platform" }
@@ -104,13 +171,8 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 // picked in the UI — see authenticatorChoice. Absent or empty means "whatever
 // the browser offers", which is what the first-run wizard sends.
 //
-// First run: creates the first operator; returns creation options.
-//
-// Signed in: adds a passkey to the signed-in user's own account. The name
-// must be empty or the user's own; any other name is an attempt to create
-// another user and is refused with 403. The response is
-// { "stepUp": <assertion options> } and the ceremony continues at
-// register/step-up.
+// First run: creates the first operator; returns creation options. Past
+// first run: 401.
 func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name          string `json:"name"`
@@ -132,55 +194,11 @@ func (s *Service) handleRegisterBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if firstRun {
-		s.beginFirstRunRegistration(w, r, req.Name, req.DisplayName, choice)
+	if !firstRun {
+		writeErr(w, http.StatusUnauthorized, signedInPasskeyGone)
 		return
 	}
-
-	_, by, err := s.resolveSession(r)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if by == nil {
-		writeErr(w, http.StatusUnauthorized,
-			"sign in to add a passkey")
-		return
-	}
-
-	if req.Name != "" && req.Name != by.Name {
-		writeErr(w, http.StatusForbidden,
-			"signed in, you can only add a passkey to your own account; creating another user is not supported here")
-		return
-	}
-	// The choice rides the ceremony: the creation options are not minted
-	// until register/step-up, which has no request body of its own to carry
-	// it (it carries the assertion).
-	p := &pendingAuth{
-		kind:          "register",
-		basis:         registerBasis{byUserID: by.ID},
-		authenticator: choice,
-	}
-
-	if len(by.WebAuthnCredentials()) == 0 {
-		writeErr(w, http.StatusConflict,
-			"this account has no passkey to confirm with")
-		return
-	}
-	// No login options: the same user-verification setting as sign-in.
-	assertion, stepUp, err := s.web.BeginLogin(by)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	p.stepUp = stepUp
-	token, err := s.storePending(p)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.setPendingCookie(w, token)
-	writeJSON(w, http.StatusOK, map[string]any{"stepUp": assertion})
+	s.beginFirstRunRegistration(w, r, req.Name, req.DisplayName, choice)
 }
 
 func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Request, name, displayName string, choice authenticatorChoice) {
@@ -198,13 +216,12 @@ func (s *Service) beginFirstRunRegistration(w http.ResponseWriter, r *http.Reque
 		kind:    "register",
 		user:    user,
 		session: sessionData,
-		basis:   registerBasis{firstRun: true},
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.setPendingCookie(w, token)
+	s.setCeremonyCookie(w, token)
 	writeJSON(w, http.StatusOK, options)
 }
 
@@ -309,96 +326,23 @@ func (s *Service) beginCreation(user *User, choice authenticatorChoice) (*protoc
 	return s.web.BeginRegistration(user, opts...)
 }
 
-// POST /api/auth/register/step-up
-// Body: the assertion response for the challenge register/begin returned.
-// Verifies it against the signed-in user's own passkeys and, on success,
-// returns the creation options for the new passkey.
-func (s *Service) handleRegisterStepUp(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(pendingCookie)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "missing pending cookie")
-		return
-	}
-	token := cookie.Value
-	p, challenge := s.takeStepUp(token)
-	if p == nil {
-		writeErr(w, http.StatusBadRequest, "no registration awaiting confirmation")
-		return
-	}
-	// Any failure below ends the ceremony: its challenge is already spent.
-	fail := func(status int, msg string) {
-		s.dropPending(token)
-		s.clearPendingCookie(w)
-		writeErr(w, status, msg)
-	}
-
-	_, by, err := s.resolveSession(r)
-	if err != nil {
-		fail(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if by == nil || !bytes.Equal(by.ID, p.basis.byUserID) {
-		fail(http.StatusUnauthorized, "the session that began this registration is no longer signed in")
-		return
-	}
-	cred, err := s.web.FinishLogin(by, *challenge, r)
-	if err != nil {
-		fail(http.StatusUnauthorized, "confirming with an existing passkey failed: "+err.Error())
-		return
-	}
-	if err := s.store.UpdateCredentialAfterLogin(r.Context(), cred, time.Now().UTC()); err != nil {
-		fail(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	target := by
-	options, creation, err := s.beginCreation(target, p.authenticator)
-	if err != nil {
-		fail(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if !s.completeStepUp(token, p, target, creation) {
-		fail(http.StatusBadRequest, "no registration awaiting confirmation")
-		return
-	}
-	writeJSON(w, http.StatusOK, options)
+// POST /api/auth/register/step-up — refused: it confirmed a signed-in
+// account's existing passkey, and no pre-update session signs anyone in.
+func (s *Service) handleRegisterStepUp(w http.ResponseWriter, _ *http.Request) {
+	writeErr(w, http.StatusUnauthorized, signedInPasskeyGone)
 }
 
 // POST /api/auth/register/finish
 // Body: the PublicKeyCredential attestation response from the browser.
 func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(pendingCookie)
+	cookie, err := r.Cookie(ceremonyCookieName)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "missing pending cookie")
 		return
 	}
 	p := s.takePending(cookie.Value)
-	s.clearPendingCookie(w)
-	if p == nil || p.kind != "register" {
-		writeErr(w, http.StatusBadRequest, "no pending registration")
-		return
-	}
-
-	if !p.basis.firstRun {
-		// A signed-in registration needs its own step-up to have verified,
-		// and the user who began it still signed in.
-		if !p.stepUpVerified {
-			writeErr(w, http.StatusForbidden,
-				"confirm with an existing passkey before adding a new one")
-			return
-		}
-		_, by, err := s.resolveSession(r)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if by == nil || len(p.basis.byUserID) == 0 || !bytes.Equal(by.ID, p.basis.byUserID) {
-			writeErr(w, http.StatusUnauthorized,
-				"the session that began this registration is no longer signed in")
-			return
-		}
-	}
-	if p.user == nil || p.session == nil {
+	s.clearCeremonyCookie(w)
+	if p == nil || p.kind != "register" || p.user == nil || p.session == nil {
 		writeErr(w, http.StatusBadRequest, "no pending registration")
 		return
 	}
@@ -411,18 +355,8 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	dbCred := fromWebAuthn(cred, p.user.ID)
 	dbCred.CreatedAt = time.Now().UTC()
 
-	if !p.basis.firstRun {
-		// A new passkey on the signed-in account: the session carries on.
-		if err := s.store.CreateCredential(r.Context(), dbCred); err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		writeJSON(w, http.StatusOK, publicUser(p.user))
-		return
-	}
-
-	// First run: user and credential commit in one transaction, and only if
-	// no operator exists now, checked in the same statement as the insert.
+	// User and credential commit in one transaction, and only if no operator
+	// exists now, checked in the same statement as the insert.
 	if err := s.store.CreateFirstUser(r.Context(), p.user, dbCred); err != nil {
 		if errors.Is(err, ErrNotFirstRun) {
 			writeErr(w, http.StatusForbidden, err.Error())
@@ -431,98 +365,21 @@ func (s *Service) handleRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	sess, err := s.createSession(r.Context(), p.user.ID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	_ = s.store.UpdateLastLogin(r.Context(), p.user.ID, sess.CreatedAt)
-	s.runLoginHook(r.Context(), p.user)
-	s.setSessionCookie(w, sess.Token, sess.ExpiresAt)
+	// No session is opened: a console session comes only from a sign-in
+	// through the home door (geekdojo/geekdojo-brain#989).
 	writeJSON(w, http.StatusOK, publicUser(p.user))
 }
 
-// ----- login (discoverable / usernameless) --------------------------------
+// ----- login (pre-update passkeys) -----------------------------------------
 
-// POST /api/auth/login/begin — open, returns CredentialAssertion options.
-func (s *Service) handleLoginBegin(w http.ResponseWriter, r *http.Request) {
-	options, sessionData, err := s.web.BeginDiscoverableLogin()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	token, err := s.storePending(&pendingAuth{
-		kind:    "login",
-		session: sessionData,
-	})
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	s.setPendingCookie(w, token)
-	writeJSON(w, http.StatusOK, options)
-}
+// loginGoneSentence is the 410 the pre-update passkey sign-in answers.
+const loginGoneSentence = "Passkey sign-in on this page has been replaced. Sign in from the sign-in page instead."
 
-// POST /api/auth/login/finish — body is the assertion response.
-func (s *Service) handleLoginFinish(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(pendingCookie)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "missing pending cookie")
-		return
-	}
-	p := s.takePending(cookie.Value)
-	s.clearPendingCookie(w)
-	if p == nil || p.kind != "login" {
-		writeErr(w, http.StatusBadRequest, "no pending login")
-		return
-	}
-
-	ctx := r.Context()
-	cred, err := s.web.FinishDiscoverableLogin(
-		func(rawID, userHandle []byte) (webauthn.User, error) {
-			u, err := s.store.GetUserByID(ctx, userHandle)
-			if err != nil {
-				return nil, err
-			}
-			if u == nil {
-				return nil, errAuthFailed
-			}
-			return u, nil
-		},
-		*p.session,
-		r,
-	)
-	if err != nil {
-		writeErr(w, http.StatusUnauthorized, err.Error())
-		return
-	}
-
-	now := time.Now().UTC()
-	if err := s.store.UpdateCredentialAfterLogin(ctx, cred, now); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	// We need the user (UserHandle == userID) for the session.
-	userID, err := s.store.UserHandleForCredential(ctx, cred.ID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	user, err := s.store.GetUserByID(ctx, userID)
-	if err != nil || user == nil {
-		writeErr(w, http.StatusInternalServerError, "post-login: user not found")
-		return
-	}
-	sess, err := s.createSession(ctx, user.ID)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	_ = s.store.UpdateLastLogin(ctx, user.ID, sess.CreatedAt)
-	s.runLoginHook(ctx, user)
-	s.setSessionCookie(w, sess.Token, sess.ExpiresAt)
-	writeJSON(w, http.StatusOK, publicUser(user))
+// POST /api/auth/login/begin and /api/auth/login/finish — gone: the console
+// signs in only through the home door (geekdojo/geekdojo-brain#989). They do
+// no ceremony work and set no cookie, until Identity 4.8 removes them.
+func (s *Service) handleLoginGone(w http.ResponseWriter, _ *http.Request) {
+	writeErr(w, http.StatusGone, loginGoneSentence)
 }
 
 // ----- helpers ------------------------------------------------------------
@@ -555,11 +412,8 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
-var errAuthFailed = httpError("authentication failed")
-
-type httpError string
-
-func (e httpError) Error() string { return string(e) }
+// errNilDep is a constructor's refusal of a missing collaborator.
+func errNilDep(fn string) error { return errors.New("auth: " + fn + ": a collaborator is nil") }
 
 // bytesToHex avoids importing encoding/hex twice; uses the same hex.EncodeToString
 // path via the standard library.

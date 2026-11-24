@@ -34,11 +34,11 @@ func lockMux(svc *Service) *http.ServeMux {
 // allowing, or none set, everything passes.
 func TestControlLock(t *testing.T) {
 	f := newAuthFixture(t)
-	sess := freshSession(t, f, f.mintUser(t, "alice"))
+	sess := consoleCookie(t, f, Principal{Sub: "alice-sub", Name: "alice", Roles: []string{"admin"}})
 	mux := lockMux(f.svc)
 	send := func(method, path string, upgrade bool) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, nil)
-		r.AddCookie(&http.Cookie{Name: sessionCookie, Value: sess.Token})
+		r.AddCookie(sess)
 		if upgrade {
 			r.Header.Set("Connection", "Upgrade")
 			r.Header.Set("Upgrade", "websocket")

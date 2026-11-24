@@ -425,6 +425,8 @@ jobs:
       # a negative control that proves a violation is recorded.
       # RASPUTIN_CONSOLE_FUNCTIONAL=required turns a missing export or browser
       # into a failure; the step above runs the same test, where it skips.
+      # The same export is the UI the console stack test's api serves
+      # (TestIdentitySystemd_ConsoleSignIn, geekdojo/geekdojo-brain#989).
       - name: build the console export
         working-directory: ui
         run: |
@@ -449,17 +451,23 @@ jobs:
       # step above runs the same tests unprivileged, where they skip. A test
       # binary run directly has no default timeout, so -test.timeout gives it
       # go test's own 10m: the tests' waits end before it with an error that
-      # names the fact they waited for, and their cleanup still runs.
+      # names the fact they waited for, and their cleanup still runs. The
+      # console stack test (#989) starts the real api and waits on its
+      # converge, so the bound is 20m.
       - name: test (identity under real systemd, root)
         run: |
           go test -c -race -o "$RUNNER_TEMP/identitytest.test" ./api/internal/identitytest
+          go build -o "$RUNNER_TEMP/rasputin-api" ./api/cmd/rasputin-api
           cd api/internal/identitytest
           sudo env \
             PATH="$PATH" \
             RASPUTIN_IDENTITY_HOME="$RUNNER_TEMP/identity" \
             RASPUTIN_IDENTITY_FUNCTIONAL=required \
             RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required \
-            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestIdentitySystemd_'
+            RASPUTIN_IDENTITY_THEME="$RUNNER_TEMP/identity-theme" \
+            RASPUTIN_UI_DIR="$GITHUB_WORKSPACE/ui/out" \
+            RASPUTIN_API_BIN="$RUNNER_TEMP/rasputin-api" \
+            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=20m -test.run '^TestIdentitySystemd_'
 
       # CI SO-19 (geekdojo/geekdojo-brain#995): the home sign-in name's mDNS
       # responder in two network namespaces joined by a veth pair, beside a

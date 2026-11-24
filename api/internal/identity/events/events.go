@@ -48,12 +48,17 @@ type UserEvent struct {
 	CredentialType string
 }
 
-// AdminEvent is one stored admin event. It has no sink until #323.
+// AdminEvent is one stored admin event.
 type AdminEvent struct {
 	ID            string
 	Time          time.Time
 	OperationType string
 	ResourceType  string
+	// ResourcePath is the path of the resource the event changed, under the
+	// realm (users/<id>/role-mappings/clients/<client>, for one). The
+	// console's role-change sink reads the user id out of it
+	// (geekdojo/geekdojo-brain#989).
+	ResourcePath string
 }
 
 // UserSink takes each new user event once, oldest first.

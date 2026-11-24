@@ -29,13 +29,30 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
    the release pipeline's leaf carries, so a bundle built against it verifies
    under exactly the rule the fleet enforces.
 
-2. **Start the api**:
+2. **Start the api** through the signed-in console recipe
+   ([geekdojo-brain#989](https://github.com/geekdojo/geekdojo-brain/issues/989)): it runs the
+   api built from this tree in a container with the real sign-in, and signs a synthetic
+   fixture account in, so step 4 has a session. Docker (Rancher Desktop or Docker Desktop)
+   must be running. From the repo root:
 
    ```sh
-   RASPUTIN_PUBLIC_BASE_URL=http://localhost:8080 \
-   RASPUTIN_BUS_AUTH=off \
-   ./api/rasputin-api
+   scripts/identity-on-mac.sh up \
+     --api-env RASPUTIN_HTTP_ADDR=127.0.0.1:8080 \
+     --api-env RASPUTIN_NATS_PORT=4222 \
+     --api-env RASPUTIN_PUBLIC_BASE_URL=http://localhost:8080 \
+     --api-env RASPUTIN_BUS_AUTH=off \
+     --api-env RASPUTIN_TRUST_ROOT="$PWD/data/trust/root-ca.pem"
    ```
+
+   - Each `--api-env` is one setting for the api. The first two put its HTTP listener and
+     bus on fixed loopback ports, which the agent and the test script on the Mac reach at
+     `127.0.0.1` (the container shares the docker host's network, and Docker forwards its
+     loopback ports to the Mac).
+   - `RASPUTIN_TRUST_ROOT` is step 1's root; the repo is mounted at the same path in the
+     container, so the same path works there.
+   - The api's data directory is `data/identity-on-mac/work/api-data`; its bus pin, which
+     step 3 reads, is in `data/identity-on-mac/work/api-data/bus/agent.pin`.
+   - `scripts/identity-on-mac.sh down` stops and removes everything `up` started.
 
    - `RASPUTIN_BUS_AUTH=off` lets the agent in step 3 join the bus without a join token.
      The bus normally refuses every connection that has no token bound to the node id it
@@ -79,7 +96,7 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
 
    ```sh
    RASPUTIN_NODE_ID=node-dev \
-   RASPUTIN_BUS_PIN="$(cat data/bus/agent.pin)" \
+   RASPUTIN_BUS_PIN="$(cat data/identity-on-mac/work/api-data/bus/agent.pin)" \
    RASPUTIN_UPDATE_BACKEND=mock \
    RASPUTIN_BOOT_ID=laptop-boot-1 \
    ./agent/rasputin-agent
@@ -89,8 +106,8 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
      `node-dev`.
    - `RASPUTIN_BUS_PIN` is the pin of the api's bus key. The bus accepts only TLS, and an
      agent with no pin refuses to start: it exits with a `FATAL` line naming the variable.
-     The api writes its pin to `data/bus/agent.pin` on every start, so that file is where
-     to read it on a laptop.
+     The api writes its pin to `bus/agent.pin` in its data directory on every start, so
+     that file is where to read it.
    - `RASPUTIN_UPDATE_BACKEND=mock` replaces RAUC with a file-backed slot model. Its state
      lives in `./agent-state/node-dev/state.json`, relative to the directory you start the
      agent from, so always start it from the same directory.
@@ -99,30 +116,25 @@ When the LattePanda Mu N100 + Pi 5 hardware lands, the same three scenarios run 
      `/proc/sys/kernel/random/boot_id`, which does not change while the laptop stays up and
      does not exist at all on macOS. See the next section for why this value matters.
 
-4. **Authenticate** so the test script has a session cookie. A passkey sign-in cannot run
-   headless, so the test harness inserts a session row straight into `./data/rasputin.db`.
-   Run this from the repo root; the api does not need a restart:
+4. **Authenticate** so the test script has a session cookie. Step 2 already signed the
+   synthetic fixture in through the real sign-in and wrote its console session cookie to
+   `data/identity-on-mac/session.cookie`. Write it as the test script's cookie jar, from the
+   repo root:
 
    ```sh
-   TOKEN=$(openssl rand -hex 32)
-   HASH=$(printf '%s' "$TOKEN" | shasum -a 256 | cut -d ' ' -f 1)
-   NOW=$(( $(date +%s) * 1000 ))
-   sqlite3 ./data/rasputin.db "INSERT INTO sessions (token, token_hash, user_id, created_at, expires_at, last_active_at) SELECT '$TOKEN', '$HASH', id, $NOW, $NOW + 86400000, $NOW FROM users ORDER BY created_at LIMIT 1"
-   printf 'rasputin-session=%s\n' "$TOKEN"
+   (umask 077 && printf 'localhost\tFALSE\t/\tTRUE\t0\t__Host-rasputin-session\t%s\n' \
+     "$(cat data/identity-on-mac/session.cookie)" > cookies.txt)
    ```
 
-   - `TOKEN` is the session cookie value: 32 random bytes, hex-encoded, the same shape the
-     api mints. `openssl` and `shasum` ship with macOS; on Linux use `sha256sum` in place of
-     `shasum -a 256`.
-   - `HASH` is the token's sha256 in hex. The api stores sessions hashed (the `token_hash`
-     column) and looks them up by hash first. It still writes and accepts the plaintext
-     `token` column while an A/B rollback could return to an api that only reads that
-     column, so the row carries both.
-   - The `SELECT ... FROM users` picks the first registered user, so the database must
-     already hold an account (sign in once with a passkey through the UI).
-   - `86400000` is one day in milliseconds; the row expires after that.
-   - The last line prints the `Cookie` header value for `curl -H "Cookie: ..."` or the test
-     script's `./cookies.txt`.
+   - The line is curl's cookie-jar format: the host, whether subdomains match, the path,
+     whether it is HTTPS-only, the expiry (0 is a session cookie), the name and the value.
+     `umask 077` makes the file mode 0600: it is a sign-in.
+   - `__Host-rasputin-session` is the console's session cookie. A `__Host-` cookie must be
+     HTTPS-only, so the fourth field is `TRUE`; curl still sends it to `http://localhost`,
+     which it treats as a secure origin, and the api reads it there as on its https
+     listener.
+   - The session lasts until `down`, a sign-out, or 7 days. Nothing is written into the api's
+     database by hand: the session row is the one the real sign-in made.
 
 ## The mock does not reboot: restart the agent with a new boot id
 
@@ -158,7 +170,7 @@ answering. Setting a new `RASPUTIN_BOOT_ID` on restart is what stands in for the
 
    ```sh
    RASPUTIN_NODE_ID=node-dev \
-   RASPUTIN_BUS_PIN="$(cat data/bus/agent.pin)" \
+   RASPUTIN_BUS_PIN="$(cat data/identity-on-mac/work/api-data/bus/agent.pin)" \
    RASPUTIN_UPDATE_BACKEND=mock \
    RASPUTIN_BOOT_ID=laptop-boot-2 \
    ./agent/rasputin-agent

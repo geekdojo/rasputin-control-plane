@@ -2,6 +2,7 @@ package identitytest
 
 import (
 	"bytes"
+	"cmp"
 	_ "embed"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,11 @@ type kcPaths struct {
 	CertFile, KeyFile string // Keycloak's server leaf
 	TrustFile         string // the test CA PEM: the only issuer a client leaf may have
 	VaultDir          string // the file vault the build options enable; empty
+	// OutboundTrust, when set, is what door mode trusts for the service's
+	// own outgoing calls instead of TrustFile: a comma-separated list, as
+	// truststore-paths takes it (the console stack test's identity and
+	// controlplane CAs, geekdojo/geekdojo-brain#989).
+	OutboundTrust string
 }
 
 // kcPorts are the ports keycloak.conf names. HTTPS and Mgmt are 0 in the
@@ -32,8 +38,9 @@ type kcPorts struct {
 // harness's values. With hostname "" it is door mode, as rasputin-os's
 // keycloak.conf runs behind the sign-in doors (geekdojo/geekdojo-brain#985):
 // no hostname, so every address follows the forwarded headers the door
-// writes, trusted only from loopback. The caller clears the returned bytes,
-// which hold the database password.
+// writes, trusted only from loopback, and the test CA trusted for the
+// service's own outgoing calls. The caller clears the returned bytes, which
+// hold the database password.
 func renderKeycloakConf(p kcPaths, ports kcPorts, hostname string, dbPassword secret.Value) []byte {
 	var b bytes.Buffer
 	line := func(k, v string) { b.WriteString(k + "=" + v + "\n") }
@@ -52,6 +59,12 @@ func renderKeycloakConf(p kcPaths, ports kcPorts, hostname string, dbPassword se
 		line("hostname-backchannel-dynamic", "false")
 		line("proxy-headers", "xforwarded")
 		line("proxy-trusted-addresses", "127.0.0.1/32")
+		// The test CA as the outgoing trust too, as rasputin-os's
+		// keycloak.conf names the api's CA: the back-channel logout posts to
+		// the console's own https listener (geekdojo/geekdojo-brain#989).
+		if out := cmp.Or(p.OutboundTrust, p.TrustFile); out != "" {
+			line("truststore-paths", out)
+		}
 	}
 	line("cache", "local")
 	line("vault-dir", p.VaultDir)

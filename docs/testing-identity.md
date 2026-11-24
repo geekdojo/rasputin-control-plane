@@ -625,3 +625,39 @@ What it does not prove:
   console sign-in through Keycloak (4.7) or SAML at the door (9.x);
 - how real devices show the relying-party name;
 - the bench (IDT-02, in the `rasputin-identity-test` skill).
+
+## The console's sign-in through the home door
+
+[geekdojo-brain#989](https://github.com/geekdojo/geekdojo-brain/issues/989) makes the
+console an OIDC client, `rasputin-console`, of the home sign-in door. Two tests run it against
+the pinned identity service.
+
+- **`TestConsole_AgainstPinnedKeycloak`** (`console_functional_test.go`, TC-989-32 to
+  TC-989-39), in the backend job's identity step. The repo's realm baseline is imported and
+  converged by the real converger with the console's redirect URI and back-channel URL; both
+  doors serve through the api's dispatcher; on `ci.local` the api's own auth service serves
+  the launcher's route, the callback, the session gate and the back-channel route, and the
+  sign-in history drain delivers admin events to the role-change sink. It proves the
+  cross-site return with `Lax` cookies in the pinned Chrome, a role change and a back-channel
+  logout each ending the session, no token in `rasputin.db`, one subject across both doors,
+  `rasputin.console-url` written by converge, the upstream shapes capability row T161 relies
+  on, and a sentinel scan of every log and the database. The console's own pages are two stub
+  pages here; the UI is the next test's.
+- **`TestIdentitySystemd_ConsoleSignIn`** (`console_systemd_test.go`, TC-989-40), in the
+  root step with the other real-systemd tests. It runs the real `rasputin-api` built from the
+  tree (`RASPUTIN_API_BIN`), serving the UI export (`RASPUTIN_UI_DIR`) and the built theme
+  (`RASPUTIN_IDENTITY_THEME`), in keycloak mode with the doors on, against the pinned Keycloak
+  and PostgreSQL as `keycloak.service` and `keycloak-db.service` on the api's own PKI. A
+  synthetic fixture made through the Admin API with the api's `rasputin-admin` leaf signs in
+  in the pinned Chrome from `https://ci.local/login`; `/api/auth/me` answers 200 with its
+  subject and role, and the signed-in `/` is screenshotted. It refuses to run where
+  `/usr/share/rasputin`, `/var/lib/rasputin` or a `keycloak.service` unit exists.
+
+On a Mac, `scripts/identity-on-mac.sh` runs the second test in hold mode
+(`RASPUTIN_CONSOLE_RIG=hold`) in a container with systemd as PID 1, signs the fixture in with
+the Go headless client, and leaves the stack up for `shots`; see "Signed-in console on a Mac"
+in `AGENTS.md`. The back-channel leg is not live there (the api listens on 9443, and the
+identity service posts to 443).
+
+What neither proves: the appliance's own exchange and its sandboxed back-channel POST
+(the bench, `rasputin-identity-test`), and Safari, Firefox and Edge on the cross-site return.

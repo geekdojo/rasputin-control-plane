@@ -2,6 +2,7 @@ package idclient
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -31,4 +32,20 @@ func (d Disabled) Ready(context.Context) error {
 // Health refuses with Kind.
 func (d Disabled) Health(context.Context) (HealthReport, error) {
 	return HealthReport{}, &Error{Op: "health", Kind: d.Kind}
+}
+
+// ExchangeCode refuses with Kind.
+func (d Disabled) ExchangeCode(context.Context, CodeExchange) (secret.Value, error) {
+	return secret.Value{}, &Error{Op: "token", Kind: d.Kind}
+}
+
+// Forwarding is a client that refuses every request with Kind.
+func (d Disabled) Forwarding(func(http.Header)) *http.Client {
+	return &http.Client{Transport: refusingTransport{kind: d.Kind}}
+}
+
+type refusingTransport struct{ kind error }
+
+func (t refusingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return nil, &Error{Op: "keys", Path: r.URL.Path, Kind: t.kind}
 }

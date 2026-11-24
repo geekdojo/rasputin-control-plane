@@ -9,7 +9,9 @@ package doors
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
@@ -81,6 +83,17 @@ func (d Door) LeafSpec() tlsca.LeafSpec {
 		DNSNames:      []string{d.Host},
 		ExactDNSNames: true,
 	}
+}
+
+// SetForwarded writes the headers the identity service builds the door's
+// addresses from: X-Forwarded-Host, -Proto and -Port. The door's relay and
+// the api's own calls that must see the door's issuer (the console's code
+// exchange and key fetch, geekdojo/geekdojo-brain#989) both write them here,
+// so the two can never disagree.
+func (d Door) SetForwarded(h http.Header) {
+	h.Set("X-Forwarded-Host", d.Host)
+	h.Set("X-Forwarded-Proto", "https")
+	h.Set("X-Forwarded-Port", strconv.Itoa(d.Port))
 }
 
 // Table names both doors.

@@ -36,8 +36,8 @@ func (f *fakeSupGrafana) GrafanaBaseURL() string                   { return f.gr
 func (f *fakeSupGrafana) GrafanaTransport() http.RoundTripper      { return f.grafanaTransport }
 
 // TestObsProxy_ForwardsUserHeader confirms the proxy strips any
-// client-supplied X-Webauth-* and replaces it with the authenticated
-// user's name. The stub upstream records the headers it received.
+// client-supplied X-Webauth-* and replaces it with the signed-in person's
+// subject. The stub upstream records the headers it received.
 func TestObsProxy_ForwardsUserHeader(t *testing.T) {
 	var lastUser atomic.Value // string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -55,7 +55,7 @@ func TestObsProxy_ForwardsUserHeader(t *testing.T) {
 	// Spoof a different X-Webauth-User on the way in to prove the
 	// proxy clears it.
 	req.Header.Set("X-Webauth-User", "attacker")
-	ctx := auth.WithUser(req.Context(), &auth.User{Name: "alice"})
+	ctx := auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"})
 	req = req.WithContext(ctx)
 
 	w := httptest.NewRecorder()
@@ -67,9 +67,10 @@ func TestObsProxy_ForwardsUserHeader(t *testing.T) {
 	if got := w.Body.String(); !strings.Contains(got, "grafana-pong") {
 		t.Errorf("body lost upstream content: %s", got)
 	}
+	// TC-989-30 (F-989-05): Grafana is told the subject, never the name.
 	got, _ := lastUser.Load().(string)
-	if got != "alice" {
-		t.Errorf("X-Webauth-User = %q, want alice (proxy must overwrite client header)", got)
+	if got != "sub-alice" {
+		t.Errorf("X-Webauth-User = %q, want the subject sub-alice (proxy must overwrite client header)", got)
 	}
 }
 
@@ -83,7 +84,7 @@ func TestObsProxy_ServiceUnavailableWhenGrafanaOff(t *testing.T) {
 	srv := &Server{obs: obs.NewStatus(sup, sink, nil)}
 
 	req := httptest.NewRequest(http.MethodGet, "/observability/", nil)
-	ctx := auth.WithUser(req.Context(), &auth.User{Name: "alice"})
+	ctx := auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"})
 	req = req.WithContext(ctx)
 	w := httptest.NewRecorder()
 	srv.handleObservabilityProxy(w, req)
@@ -140,7 +141,7 @@ func TestObsProxy_ReachesGrafanaOverUnixSocket(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/observability/api/search", nil)
 	req.Header.Set("X-Webauth-User", "attacker")
-	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "alice"}))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"}))
 	w := httptest.NewRecorder()
 	srv.handleObservabilityProxy(w, req)
 
@@ -152,14 +153,14 @@ func TestObsProxy_ReachesGrafanaOverUnixSocket(t *testing.T) {
 	}
 	// The strip still applies — the socket is who may call, the strip is
 	// who they may claim to be.
-	if got, _ := lastUser.Load().(string); got != "alice" {
-		t.Errorf("X-Webauth-User = %q, want alice", got)
+	if got, _ := lastUser.Load().(string); got != "sub-alice" {
+		t.Errorf("X-Webauth-User = %q, want the subject sub-alice", got)
 	}
 }
 
 // TestObsProxy_StripsRasputinCookies confirms Grafana never receives the
-// api's own cookies — the session and the pending WebAuthn ceremony — while
-// any other cookie (Grafana's own) still reaches it.
+// api's own cookies — the legacy session and pending names among them —
+// while any other cookie (Grafana's own) still reaches it.
 func TestObsProxy_StripsRasputinCookies(t *testing.T) {
 	var got atomic.Value // []string
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +175,7 @@ func TestObsProxy_StripsRasputinCookies(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/observability/api/search", nil)
 	req.Header.Set("Cookie", "rasputin-session=s3cret; grafana_session=g1; rasputin-pending=p3nding")
-	req = req.WithContext(auth.WithUser(req.Context(), &auth.User{Name: "alice"}))
+	req = req.WithContext(auth.WithPrincipal(req.Context(), auth.Principal{Sub: "sub-alice", Name: "alice"}))
 	w := httptest.NewRecorder()
 	srv.handleObservabilityProxy(w, req)
 	if w.Code != http.StatusOK {

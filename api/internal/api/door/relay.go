@@ -9,11 +9,9 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/netip"
-	"strconv"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
-	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 )
 
 // clientCertHeaders are the client-certificate headers a proxy in front of
@@ -52,9 +50,7 @@ func (h *Handler) rewrite(pr *httputil.ProxyRequest) {
 	for _, k := range clientCertHeaders {
 		out.Del(k)
 	}
-	out.Set("X-Forwarded-Host", h.cfg.Door.Host)
-	out.Set("X-Forwarded-Proto", "https")
-	out.Set("X-Forwarded-Port", strconv.Itoa(doors.Port))
+	h.cfg.Door.SetForwarded(out)
 	if ap, err := netip.ParseAddrPort(pr.In.RemoteAddr); err == nil {
 		out.Set("X-Forwarded-For", ap.Addr().Unmap().String())
 	}

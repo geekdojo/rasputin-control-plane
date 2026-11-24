@@ -162,6 +162,11 @@ type systemdPair struct {
 	dbPassword secret.Value
 	mounted    bool
 	units      []string // unit files written, for the cleanup
+	// noTmpfs runs the database on its container's own storage, with no
+	// tmpfs and no bind mount: the console recipe's form on a Mac, where the
+	// container runs beside this one and sees none of its mounts
+	// (geekdojo/geekdojo-brain#989).
+	noTmpfs bool
 }
 
 // newPair makes the pair's names and root, and registers the cleanup, which
@@ -212,13 +217,15 @@ func (p *systemdPair) writeUnit(ctx context.Context, name, body string) error {
 // parent is: the image's entrypoint makes PGDATA under it and gives it to the
 // postgres user, which must be able to reach it.
 func (p *systemdPair) StartDB(ctx context.Context, sizeMiB, startLimitBurst int) error {
-	if err := os.MkdirAll(p.PGData, 0o755); err != nil {
-		return fmt.Errorf("pgdata dir: %w", err)
+	if !p.noTmpfs {
+		if err := os.MkdirAll(p.PGData, 0o755); err != nil {
+			return fmt.Errorf("pgdata dir: %w", err)
+		}
+		if out, err := p.run(ctx, "mount", "-t", "tmpfs", "-o", "size="+strconv.Itoa(sizeMiB)+"m,mode=0755", "tmpfs", p.PGData); err != nil {
+			return fmt.Errorf("mount the tmpfs: %w: %s", err, out)
+		}
+		p.mounted = true
 	}
-	if out, err := p.run(ctx, "mount", "-t", "tmpfs", "-o", "size="+strconv.Itoa(sizeMiB)+"m,mode=0755", "tmpfs", p.PGData); err != nil {
-		return fmt.Errorf("mount the tmpfs: %w: %s", err, out)
-	}
-	p.mounted = true
 	pw, err := randomSecret(p.cfg.Rand)
 	if err != nil {
 		return fmt.Errorf("database password: %w", err)
@@ -240,10 +247,12 @@ func (p *systemdPair) StartDB(ctx context.Context, sizeMiB, startLimitBurst int)
 	if startLimitBurst > 0 {
 		limit = "StartLimitBurst=" + strconv.Itoa(startLimitBurst) + "\nStartLimitIntervalSec=infinity\n"
 	}
+	run := []string{p.cfg.DockerBin, "run", "--rm", "--label", p.label(), "-p", "127.0.0.1:" + strconv.Itoa(p.DBPort) + ":5432"}
+	if !p.noTmpfs {
+		run = append(run, "-v", p.PGData+":/var/lib/postgresql")
+	}
 	unit := "[Unit]\nDescription=identitytest database " + p.tag + "\n" + limit + "\n[Service]\nRestart=always\n" +
-		"ExecStart=" + strings.Join([]string{p.cfg.DockerBin, "run", "--rm", "--label", p.label(),
-		"-p", "127.0.0.1:" + strconv.Itoa(p.DBPort) + ":5432", "-v", p.PGData + ":/var/lib/postgresql",
-		"--env-file", envFile, PostgresImage}, " ") + "\n"
+		"ExecStart=" + strings.Join(append(run, "--env-file", envFile, PostgresImage), " ") + "\n"
 	if err := p.writeUnit(ctx, p.DBUnit, unit); err != nil {
 		return err
 	}

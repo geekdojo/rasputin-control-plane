@@ -15,6 +15,7 @@ package bustls_test
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -152,7 +153,10 @@ type apiProc struct {
 	// natsPort is the bus port given in advance; zero means the OS picks it
 	// and busPort reads it from the log.
 	natsPort int
-	cookie   *http.Cookie
+	// cookies are the session cookies every request carries: the console
+	// session the current api reads and the legacy one the floor api
+	// reads; each ignores the other's.
+	cookies []*http.Cookie
 
 	mu      sync.Mutex
 	lines   []string
@@ -420,7 +424,7 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 		pin = key.Pin()
 	}
 	if o.noSeed {
-		return runAPI(t, o, dataDir, sessToken), pin
+		return runAPI(t, o, dataDir, sessToken, ""), pin
 	}
 	if o.badCert {
 		if err := os.MkdirAll(filepath.Join(busDir, bustls.CertFileName), 0o700); err != nil {
@@ -450,8 +454,19 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 	if err := authStore.CreateSession(ctx, sess); err != nil {
 		t.Fatal(err)
 	}
+	// The current api reads only a console session (geekdojo/geekdojo-brain#989).
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	console, err := consoleSessions.Create(ctx, auth.Principal{Sub: "bustls-functional-sub", Name: "operator",
+		Roles: []string{"admin"}, Session: auth.SessionRef{SID: "bustls-functional-sid"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(console.Destroy)
 	_ = authStore.Close()
-	return runAPI(t, o, dataDir, sessToken), pin
+	return runAPI(t, o, dataDir, sessToken, string(console.Reveal())), pin
 }
 
 // runAPI starts the api binary on dataDir and waits for its HTTP listener,
@@ -461,7 +476,7 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 // and the bus on -1 (any free port), or on o.natsPort when one is given; the
 // test reads the ports back from its log. The floor api cannot report a port
 // it picked, so it alone gets ports chosen in advance, in one draw.
-func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
+func runAPI(t *testing.T, o apiOpts, dataDir, sessToken, consoleToken string) *apiProc {
 	t.Helper()
 	natsPort := o.natsPort
 	httpAddr, ingestAddr := "127.0.0.1:0", "127.0.0.1:0"
@@ -480,7 +495,7 @@ func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 		dataDir:  dataDir,
 		floor:    o.bin != "",
 		natsPort: natsPort,
-		cookie:   &http.Cookie{Name: "rasputin-session", Value: sessToken},
+		cookies:  []*http.Cookie{{Name: "rasputin-session", Value: sessToken}, {Name: auth.SessionCookieName, Value: consoleToken}},
 		exited:   make(chan struct{}),
 	}
 	bin := o.bin
@@ -500,7 +515,6 @@ func runAPI(t *testing.T, o apiOpts, dataDir, sessToken string) *apiProc {
 		"RASPUTIN_SELF_NODE_ID=cp1",
 		"RASPUTIN_MESH_BACKEND=mock",
 		"RASPUTIN_DNS=off",
-		"RASPUTIN_SECURE_COOKIES=false",
 		"RASPUTIN_UI_DIR=" + filepath.Join(dataDir, "no-ui"),
 		"RASPUTIN_CP_AUTHORIZED_KEYS=" + filepath.Join(dataDir, "no-authorized-keys"),
 		"RASPUTIN_RELEASE_API_BASE=" + dead,
@@ -559,7 +573,9 @@ func (a *apiProc) do(method, path, body string) (*http.Response, []byte, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	req.AddCookie(a.cookie)
+	for _, c := range a.cookies {
+		req.AddCookie(c)
+	}
 	if body != "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
