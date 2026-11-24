@@ -15,33 +15,40 @@
 //	    VictoriaMetrics datasource;
 //	(c) Grafana Live's WebSocket upgrade works through the proxy: the
 //	    httputil.ReverseProxy upgrade path over a unix-dialing transport,
-//	    carried as far as a real Live (centrifuge) connect reply.
+//	    carried as far as a real Live (centrifuge) connect reply;
+//	(d) Grafana's own script policy (geekdojo/geekdojo-brain#999): every
+//	    response that passes Grafana's CSP middleware carries the rendered
+//	    obs.GrafanaCSPTemplate with a fresh nonce (static public/ files are
+//	    served before that middleware and carry none), and every provisioned
+//	    dashboard renders in the pinned Chrome under it with no violation but
+//	    the one blocked eval probe of Grafana's bundled zod library.
 //
 // Opt-in: RASPUTIN_GRAFANA_FUNCTIONAL must be set; "required" turns skips into
 // failures (what CI sets). Linux + docker only — see obs's
-// grafana_functional_linux_test.go for why it is opt-in.
+// grafana_functional_linux_test.go for why it is opt-in. The browser walk
+// also needs the pinned Chrome: RASPUTIN_IDENTITY_HOME as
+// scripts/install-identity.sh leaves it.
 
 package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
+	stdhtml "html"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/coder/websocket"
-	_ "modernc.org/sqlite"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
@@ -125,6 +132,16 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 
 	client := front.Client()
 	client.Timeout = 30 * time.Second
+	// TC-999-05: every response that passes Grafana's CSP middleware carries
+	// its policy. Grafana serves public/ before that middleware (F-999-04).
+	policyChecked := 0
+	checkPolicy := func(t *testing.T, what string, h http.Header) {
+		t.Helper()
+		if err := checkGrafanaPolicy(h); err != nil {
+			t.Errorf("%s: Grafana's script policy: %v", what, err)
+		}
+		policyChecked++
+	}
 	get := func(t *testing.T, path string) (int, http.Header, string) {
 		t.Helper()
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, front.URL+path, nil)
@@ -137,32 +154,19 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 		defer resp.Body.Close()
 		b, _ := io.ReadAll(resp.Body)
+		if !strings.HasPrefix(path, "/observability/public/") {
+			checkPolicy(t, "GET "+path, resp.Header)
+		}
 		return resp.StatusCode, resp.Header, string(b)
 	}
 
-	// Before ANY authenticated request: wait until Grafana has committed the
-	// provisioned dashboard to its own DB. On a fresh Grafana database a
-	// request that lands before first-boot provisioning finishes hides the
-	// dashboard from search for a while (a fixed 60s idle, longer under load
-	// — measured, and the same on main's config). Once the row is committed
-	// the first search sees it, so after this wait there is ONE read.
-	waitForGrafanaDashboardRow(t, filepath.Join(stateDir, "grafana-data", "grafana.db"),
-		starterDashboardUID, 3*time.Minute)
+	// Before the subtests: wait for the fact that Grafana's own search,
+	// through the proxy, lists the provisioned dashboard. Not Grafana's
+	// database: from Grafana 13 the dashboard lives in unified storage and
+	// the legacy dashboard table stays empty (see obs's
+	// waitForProvisionedDashboard).
 	dashUID := starterDashboardUID
-	if code, _, body := get(t, "/observability/api/search?type=dash-db"); code != http.StatusOK ||
-		!strings.Contains(body, `"uid":"`+dashUID+`"`) {
-		logs, _ := exec.Command("docker", "logs", "--tail", "300", "rasputin-grafana").CombinedOutput()
-		var keep []string
-		for _, l := range strings.Split(string(logs), "\n") {
-			ll := strings.ToLower(l)
-			if strings.Contains(ll, "provision") || strings.Contains(ll, "folder") ||
-				strings.Contains(ll, "level=error") {
-				keep = append(keep, l)
-			}
-		}
-		t.Fatalf("dashboard row is committed but search through the proxy does not show it: %d %s\n--- grafana log (filtered) ---\n%s",
-			code, body, strings.Join(keep, "\n"))
-	}
+	waitForProxiedSearch(t, ctx, client, front.URL, dashUID, 3*time.Minute)
 
 	t.Run("a: pages and static assets render", func(t *testing.T) {
 		code, hdr, html := get(t, "/observability/")
@@ -210,11 +214,37 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 				t.Errorf("asset %s content-type = %q", a, ct)
 			}
 		}
-		// Grafana 11.5.1's shell references both (measured: 8 js, 2 css).
+		// The shell references both (measured on 11.5.1: 8 js, 2 css).
 		if kinds["css"] == 0 || kinds["js"] == 0 {
 			t.Fatalf("shell assets not all loaded through the proxy: %v (refs: %v)", kinds, refs)
 		}
 		t.Logf("loaded %d distinct static assets through the proxy: %v", len(seen), kinds)
+
+		// TC-999-05: every <script> in the shell carries the nonce of the
+		// response it came in, and a second request gets another nonce.
+		nonce := grafanaNonce(hdr)
+		if nonce == "" {
+			t.Fatalf("the app shell carries no Grafana nonce: %q", hdr.Values("Content-Security-Policy"))
+		}
+		scripts := regexp.MustCompile(`<script\b[^>]*>`).FindAllString(html, -1)
+		if len(scripts) == 0 {
+			t.Fatal("the app shell holds no <script>")
+		}
+		// The attribute is HTML-escaped (a '+' in the nonce arrives as
+		// &#43;), so it is compared unescaped.
+		nonceAttr := regexp.MustCompile(`\bnonce="([^"]*)"`)
+		for _, s := range scripts {
+			m := nonceAttr.FindStringSubmatch(s)
+			if m == nil || stdhtml.UnescapeString(m[1]) != nonce {
+				t.Errorf("shell script without the response's nonce %s: %s", nonce, s)
+			}
+		}
+		_, hdr2, _ := get(t, "/observability/")
+		if n2 := grafanaNonce(hdr2); n2 == "" || n2 == nonce {
+			t.Errorf("two app-shell responses carry nonces %q and %q; want two different nonces", nonce, n2)
+		}
+		t.Logf("app shell: %d scripts, each with its response's nonce; two requests' nonces: %s, %s",
+			len(scripts), nonce, grafanaNonce(hdr2))
 
 		// A dashboard page — what the UI's iframe actually points at.
 		code, hdr, _ = get(t, "/observability/d/"+dashUID)
@@ -282,6 +312,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 		qb, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		checkPolicy(t, "POST /observability/api/ds/query", resp.Header)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("ds/query = %d %.500s", resp.StatusCode, qb)
 		}
@@ -360,6 +391,7 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 		qb, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
+		checkPolicy(t, "POST /observability/api/ds/query", resp.Header)
 		if resp.StatusCode != http.StatusOK || strings.Contains(strings.ToLower(string(qb)), "not found") {
 			t.Errorf("ds/query %s = %d %.400s", expr, resp.StatusCode, qb)
 			return nil, false
@@ -553,6 +585,71 @@ func TestObsProxyGrafanaUI_OverSocket(t *testing.T) {
 		}
 	})
 
+	// TC-999-06: every provisioned dashboard, as Grafana's search lists it,
+	// renders in the pinned Chrome under Grafana's policy: each panel's
+	// title, content and no loading bar, no error status, no "plugin not
+	// found", no 'unsafe-eval' in the policy, and no policy violation but
+	// the one blocked eval probe of Grafana's bundled zod library
+	// (dashboardViolationProblems).
+	t.Run("d: every provisioned dashboard renders under the policy", func(t *testing.T) {
+		code, _, body := get(t, "/observability/api/search?type=dash-db")
+		if code != http.StatusOK {
+			t.Fatalf("search = %d", code)
+		}
+		var hits []struct {
+			UID string `json:"uid"`
+		}
+		if err := json.Unmarshal([]byte(body), &hits); err != nil {
+			t.Fatalf("search json: %v", err)
+		}
+		uids := map[string]bool{}
+		for _, h := range hits {
+			uids[h.UID] = true
+		}
+		for _, want := range []string{starterDashboardUID, "rasputin-secret-store"} {
+			if !uids[want] {
+				t.Errorf("search does not list %s: %s", want, body)
+			}
+		}
+		browserCtx := startWalkBrowser(t, "RASPUTIN_GRAFANA_FUNCTIONAL",
+			// Tall enough that every panel is in view: Grafana renders a
+			// panel only once it scrolls into view.
+			chromedp.WindowSize(1600, 4000))
+		tab := newWalkTab(t, browserCtx, "")
+		for _, h := range hits {
+			code, _, body := get(t, "/observability/api/dashboards/uid/"+h.UID)
+			if code != http.StatusOK {
+				t.Fatalf("dashboard model %s = %d", h.UID, code)
+			}
+			var model struct {
+				Dashboard struct {
+					Panels []struct {
+						Title string `json:"title"`
+					} `json:"panels"`
+				} `json:"dashboard"`
+			}
+			if err := json.Unmarshal([]byte(body), &model); err != nil {
+				t.Fatalf("dashboard model json: %v", err)
+			}
+			var titles []string
+			for _, p := range model.Dashboard.Panels {
+				titles = append(titles, p.Title)
+			}
+			v := tab.visit(t, front.URL+"/observability/d/"+h.UID, nil)
+			if err := checkGrafanaPolicy(http.Header{"Content-Security-Policy": strings.Split(v.policy, "\n")}); err != nil {
+				t.Errorf("dashboard %s document: %v", h.UID, err)
+			}
+			if strings.Contains(v.policy, "'unsafe-eval'") {
+				t.Errorf("dashboard %s: the policy carries 'unsafe-eval': %s", h.UID, v.policy)
+			}
+			problems := waitDashboardRendered(t, tab, titles)
+			for _, p := range problems {
+				t.Errorf("dashboard %s: %s", h.UID, p)
+			}
+			t.Logf("dashboard %s: panels %q rendered; %d problems", h.UID, titles, len(problems))
+		}
+	})
+
 	t.Run("c: Grafana Live websocket upgrades through the proxy", func(t *testing.T) {
 		wsURL := "ws" + strings.TrimPrefix(front.URL, "http") + "/observability/api/live/ws"
 		dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
@@ -652,35 +749,111 @@ func seedStarterDashboardMetrics(t *testing.T, vmURL string, nodes ...string) {
 // dashboard (obs package, starterDashboardJSON).
 const starterDashboardUID = "rasputin-cluster-overview"
 
-// waitForGrafanaDashboardRow polls Grafana's own SQLite database, read-only,
-// until the dashboard row exists. Same fact as obs's
-// waitForProvisionedDashboardRow; duplicated because test helpers cannot
-// cross packages.
-func waitForGrafanaDashboardRow(t *testing.T, dbPath, uid string, within time.Duration) {
+// waitForProxiedSearch waits until Grafana's own search, through the proxy at
+// base, lists the dashboard uid. A request that fails while Grafana settles
+// is retried; the deadline bounds only how long provisioning may take.
+func waitForProxiedSearch(t *testing.T, ctx context.Context, client *http.Client, base, uid string, within time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(within)
-	var lastErr error
+	var last string
 	for {
-		db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(2000)")
+		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, base+"/observability/api/search?type=dash-db", nil)
+		resp, err := client.Do(req)
 		if err == nil {
-			var n int
-			qctx, qcancel := context.WithTimeout(context.Background(), 3*time.Second)
-			err = db.QueryRowContext(qctx, `SELECT COUNT(*) FROM dashboard WHERE uid = ?`, uid).Scan(&n)
-			qcancel()
-			_ = db.Close()
-			if err == nil && n > 0 {
+			b, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			last = fmt.Sprintf("%d %s", resp.StatusCode, b)
+			if resp.StatusCode == http.StatusOK && strings.Contains(string(b), `"uid":"`+uid+`"`) {
 				return
 			}
-		}
-		if err != nil {
-			lastErr = err
+		} else {
+			last = err.Error()
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("Grafana never committed dashboard %q to %s within %s (last error: %v)",
-				uid, dbPath, within, lastErr)
+			logs, _ := exec.Command("docker", "logs", "--tail", "300", "rasputin-grafana").CombinedOutput()
+			var keep []string
+			for _, l := range strings.Split(string(logs), "\n") {
+				ll := strings.ToLower(l)
+				if strings.Contains(ll, "provision") || strings.Contains(ll, "folder") ||
+					strings.Contains(ll, "level=error") {
+					keep = append(keep, l)
+				}
+			}
+			t.Fatalf("Grafana's search through the proxy never listed %s within %s (last: %.400s)\n--- grafana log (filtered) ---\n%s",
+				uid, within, last, strings.Join(keep, "\n"))
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// dashboardRenderedJS resolves once every wanted panel title has its panel
+// header, every panel has its content, and no panel's loading bar is left:
+// Grafana's own e2e selectors (grafana-e2e-selectors, v13.3.1). It re-checks
+// on every DOM change. It then reports what the dashboard shows that it
+// should not, and every violation the page recorded, which
+// dashboardViolationProblems judges.
+const dashboardRenderedJS = `new Promise((resolve) => {
+  const want = %s;
+  const done = () => want.every((w) => document.querySelector('[data-testid="data-testid Panel header ' + w + '"]'))
+    && document.querySelectorAll('[data-testid="data-testid panel content"]').length >= want.length
+    && !document.querySelector('[aria-label="Panel loading bar"]');
+  const report = () => {
+    const problems = [];
+    document.querySelectorAll('[data-testid^="data-testid Panel status"]').forEach((e) => {
+      if (/error/i.test(e.getAttribute('data-testid'))) problems.push('panel status: ' + e.getAttribute('data-testid'));
+    });
+    document.querySelectorAll('[data-testid="data-testid Panel data error message"]').forEach((e) => problems.push('panel error: ' + e.innerText));
+    const text = document.body.innerText.toLowerCase();
+    for (const bad of ['plugin not found', 'failed to load']) {
+      if (text.includes(bad)) problems.push('the page shows "' + bad + '"');
+    }
+    if (!window.__rasputinCSPVRecords) problems.push('the violation spy is missing');
+    resolve(JSON.stringify({problems: problems, violations: window.__rasputinCSPVRecords || []}));
+  };
+  if (done()) { report(); return; }
+  const obs = new MutationObserver(() => { if (done()) { obs.disconnect(); report(); } });
+  obs.observe(document, {subtree: true, childList: true, attributes: true});
+})`
+
+// dashboardStateJS reports which of dashboardRenderedJS's facts hold, for a
+// failure message.
+const dashboardStateJS = `JSON.stringify({
+  url: location.href,
+  missingTitles: %s.filter((w) => !document.querySelector('[data-testid="data-testid Panel header ' + w + '"]')),
+  panelContents: document.querySelectorAll('[data-testid="data-testid panel content"]').length,
+  loadingBars: document.querySelectorAll('[aria-label="Panel loading bar"]').length,
+  testids: Array.from(new Set(Array.from(document.querySelectorAll('[data-testid]')).map((e) => e.getAttribute('data-testid')))).slice(0, 60),
+  violations: window.__rasputinCSPV || ['spy missing'],
+  text: document.body ? document.body.innerText.slice(0, 600) : '',
+})`
+
+// waitDashboardRendered waits on the page in tab for dashboardRenderedJS's
+// facts and returns its problems, the page's violations included unless they
+// are the one blocked eval probe dashboardViolationProblems allows. The step
+// timeout bounds the wait.
+func waitDashboardRendered(t *testing.T, tab *walkTab, titles []string) []string {
+	t.Helper()
+	want, _ := json.Marshal(titles)
+	ctx, cancel := context.WithTimeout(tab.ctx, walkStepTimeout)
+	defer cancel()
+	raw, err := chromedp.Run(ctx, chromedp.Evaluate[string](fmt.Sprintf(dashboardRenderedJS, want), chromedp.EvalAwaitPromise))
+	if err != nil {
+		dctx, dcancel := context.WithTimeout(tab.ctx, walkStepTimeout)
+		defer dcancel()
+		diag, derr := chromedp.Run(dctx, chromedp.Evaluate[string](fmt.Sprintf(dashboardStateJS, want)))
+		t.Fatalf("wait for panels %q to render: %v\nthe page then: %s %v", titles, err, diag, derr)
+	}
+	var report struct {
+		Problems   []string       `json:"problems"`
+		Violations []cspViolation `json:"violations"`
+	}
+	if err := json.Unmarshal([]byte(raw), &report); err != nil {
+		t.Fatalf("render report: %v (%s)", err, raw)
+	}
+	for _, v := range report.Violations {
+		t.Logf("recorded violation: %s", v.Text)
+	}
+	return append(report.Problems, dashboardViolationProblems(report.Violations)...)
 }
 
 // rangeLastValueIs reports whether a Prometheus query_range response has

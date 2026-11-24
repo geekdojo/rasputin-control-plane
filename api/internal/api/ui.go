@@ -21,6 +21,9 @@ func (s *Server) SetUIDir(dir string) { s.uiDir = dir }
 //	/_next/static/...  → exact file        (content-hashed, cached immutable)
 //	anything else      → 404.html with status 404
 //
+// Every .html page it serves, the 404 page included, carries its own script
+// policy (pagePolicy); every other file keeps the baseline's.
+//
 // All files are public by design — the bundle contains no secrets and the
 // data behind it only flows through the session-gated /api routes.
 type uiHandler struct {
@@ -50,6 +53,7 @@ func (h uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Unknown path → the export's 404 page, with an honest status so
 		// curl/scripts aren't fooled. Plain 404 if even that is missing.
 		if body, err := fs.ReadFile(h.fsys, "404.html"); err == nil {
+			w.Header().Set("Content-Security-Policy", pagePolicy(r, body))
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write(body)
@@ -67,7 +71,22 @@ func (h uiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
+	if strings.HasSuffix(name, ".html") {
+		h.setPagePolicy(w, r, name)
+	}
 	http.ServeFileFS(w, r, h.fsys, name)
+}
+
+// setPagePolicy sets the Content-Security-Policy of the console page name,
+// built from the bytes about to be served (pagePolicy). A page that cannot be
+// read gets the baseline's script-src 'none', and ServeFileFS then answers
+// the read failure with its own status.
+func (h uiHandler) setPagePolicy(w http.ResponseWriter, r *http.Request, name string) {
+	policy := contentSecurityPolicy
+	if body, err := fs.ReadFile(h.fsys, name); err == nil {
+		policy = pagePolicy(r, body)
+	}
+	w.Header().Set("Content-Security-Policy", policy)
 }
 
 // resolve maps a cleaned, slash-free request path to a file in the export.

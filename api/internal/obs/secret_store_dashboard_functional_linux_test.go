@@ -93,8 +93,8 @@ func TestSecretStoreDashboard_TC_939_17_RealGrafana(t *testing.T) {
 	if err := sup.Start(ctx); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	waitForGrafanaProvisioned(t, stateDir, vmDatasourceUID, vmDatasourceUID, 3*time.Minute)
-	waitForDashboardRow(t, stateDir, secretStoreDashboardUID, 3*time.Minute)
+	waitForGrafanaProvisioned(t, sup, vmDatasourceUID, vmDatasourceUID, 3*time.Minute)
+	waitForDashboardInSearch(t, sup, secretStoreDashboardUID, 3*time.Minute)
 	seedSecretStoreMetrics(t, sup)
 
 	const user = "alice"

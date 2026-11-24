@@ -13,7 +13,8 @@ import (
 )
 
 // baselineHeaders are the values every response carries unless it is the
-// Grafana proxy's same-origin framing exception.
+// Grafana proxy's same-origin framing exception or a console page, whose
+// policy is its own (pagePolicy).
 var baselineHeaders = map[string]string{
 	"X-Content-Type-Options":  "nosniff",
 	"X-Frame-Options":         "DENY",
@@ -67,7 +68,6 @@ func TestSecurityHeadersOnRepresentativeRoutes(t *testing.T) {
 		{"open JSON route", httptest.NewRequest(http.MethodGet, "/healthz", nil), false, http.StatusOK},
 		{"gated route refused", httptest.NewRequest(http.MethodGet, "/api/jobs", nil), false, http.StatusUnauthorized},
 		{"gated route served", httptest.NewRequest(http.MethodGet, "/api/jobs", nil), true, http.StatusOK},
-		{"web UI page", httptest.NewRequest(http.MethodGet, "/", nil), false, http.StatusOK},
 		{"CORS preflight", httptest.NewRequest(http.MethodOptions, "/api/jobs", nil), false, http.StatusNoContent},
 		{"foreign Origin refused", withOrigin(httptest.NewRequest(http.MethodGet, "/api/jobs", nil), foreignOrigin), true, http.StatusForbidden},
 		{"cross-origin POST refused", withOrigin(httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil), foreignOrigin), false, http.StatusForbidden},
@@ -94,6 +94,30 @@ func TestSecurityHeadersOnRepresentativeRoutes(t *testing.T) {
 			assertHeaders(t, label, w.Header(), baselineHeaders)
 			assertNoHSTS(t, label, w.Header())
 		}
+	}
+
+	// A console page carries the baseline's other headers and its own
+	// policy: the page's origin under /_next/, over TLS and over plain HTTP.
+	for _, tlsOn := range []bool{false, true} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		label, want := "web UI page", "http://example.com/_next/ 'wasm-unsafe-eval'"
+		if tlsOn {
+			req = overTLS(req)
+			label, want = label+" (TLS)", "https://example.com/_next/ 'wasm-unsafe-eval'"
+		}
+		w := httptest.NewRecorder()
+		f.handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", label, w.Code)
+		}
+		page := map[string]string{"Content-Security-Policy": cspWithScriptSrc(want)}
+		for k, v := range baselineHeaders {
+			if k != "Content-Security-Policy" {
+				page[k] = v
+			}
+		}
+		assertHeaders(t, label, w.Header(), page)
+		assertNoHSTS(t, label, w.Header())
 	}
 }
 
@@ -219,31 +243,59 @@ func assertNoHSTS(t *testing.T, label string, h http.Header) {
 	}
 }
 
-// TC-988-15: the console's policy names no host source. The UI bundles its
-// font, so no directive reaches another host: every source is a keyword
-// ('self', 'none', 'unsafe-inline', 'wasm-unsafe-eval'), data: or blob:, and
-// font-src is exactly 'self' data: (geekdojo/geekdojo-brain#988).
+// TC-988-15, TC-999-12: the console's policies name no host source but one.
+// The UI bundles its font, so no directive reaches another host: every source
+// is a keyword ('self', 'none', 'wasm-unsafe-eval', a hash), data: or blob:,
+// and font-src is exactly 'self' data: (geekdojo/geekdojo-brain#988). The one
+// host source is a console page's own origin under /_next/, in script-src
+// only (C31). The baseline's script-src is 'none'.
 func TestCSPNamesNoHostSource(t *testing.T) {
-	directives := map[string][]string{}
-	for _, d := range strings.Split(contentSecurityPolicy, ";") {
-		f := strings.Fields(d)
-		if len(f) == 0 {
-			continue
+	page := []byte("<html><script>x()</script></html>")
+	for _, c := range []struct {
+		label, policy, ownOrigin string
+	}{
+		{"baseline", contentSecurityPolicy, ""},
+		{"page over TLS", pagePolicy(overTLS(httptest.NewRequest(http.MethodGet, "https://rasputin.local/", nil)), page), "https://rasputin.local/_next/"},
+		{"page over plain HTTP", pagePolicy(httptest.NewRequest(http.MethodGet, "http://192.168.1.10:8080/trust", nil), page), "http://192.168.1.10:8080/_next/"},
+	} {
+		directives := cspDirectives(c.policy)
+		owned := 0
+		for name, srcs := range directives {
+			for _, src := range srcs {
+				keyword := strings.HasPrefix(src, "'") && strings.HasSuffix(src, "'")
+				switch {
+				case keyword || src == "data:" || src == "blob:":
+				case name == "script-src" && c.ownOrigin != "" && src == c.ownOrigin:
+					owned++
+				default:
+					t.Errorf("%s: CSP directive %s names the source %q, want only keywords, data:, blob: and the page's own /_next/", c.label, name, src)
+				}
+			}
 		}
-		directives[f[0]] = f[1:]
-		for _, src := range f[1:] {
-			keyword := strings.HasPrefix(src, "'") && strings.HasSuffix(src, "'")
-			if !keyword && src != "data:" && src != "blob:" {
-				t.Errorf("CSP directive %s names the source %q, want only keywords, data: and blob:", f[0], src)
+		if c.ownOrigin != "" && owned != 1 {
+			t.Errorf("%s: script-src names its own origin %s %d times, want once: %s", c.label, c.ownOrigin, owned, c.policy)
+		}
+		if got := strings.Join(directives["font-src"], " "); got != "'self' data:" {
+			t.Errorf("%s: font-src = %q, want %q", c.label, got, "'self' data:")
+		}
+		for _, host := range []string{"googleapis", "gstatic"} {
+			if strings.Contains(c.policy, host) {
+				t.Errorf("%s: the CSP names %s: %s", c.label, host, c.policy)
 			}
 		}
 	}
-	if got := strings.Join(directives["font-src"], " "); got != "'self' data:" {
-		t.Errorf("font-src = %q, want %q", got, "'self' data:")
+	if got := strings.Join(cspDirectives(contentSecurityPolicy)["script-src"], " "); got != "'none'" {
+		t.Errorf("the baseline's script-src = %q, want 'none'", got)
 	}
-	for _, host := range []string{"googleapis", "gstatic"} {
-		if strings.Contains(contentSecurityPolicy, host) {
-			t.Errorf("the CSP names %s: %s", host, contentSecurityPolicy)
+}
+
+// cspDirectives splits a policy into its directives' source lists, by name.
+func cspDirectives(policy string) map[string][]string {
+	out := map[string][]string{}
+	for _, d := range strings.Split(policy, ";") {
+		if f := strings.Fields(d); len(f) != 0 {
+			out[f[0]] = f[1:]
 		}
 	}
+	return out
 }

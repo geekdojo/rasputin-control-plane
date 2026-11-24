@@ -246,7 +246,7 @@ in front of the local-stack command when you start it.
 
 ## Next.js version skew (`ui/`)
 
-`ui/` runs **Next.js 16.3.6** — newer than most model training data, with breaking
+`ui/` runs **Next.js 16.4.5** — newer than most model training data, with breaking
 changes to APIs, conventions and file structure. Before writing UI code, read the
 relevant guide in `ui/node_modules/next/dist/docs/` (`01-app/`, `02-pages/`,
 `03-architecture/`) and heed deprecation notices. Re-read after any Next bump.
