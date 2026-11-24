@@ -16,7 +16,6 @@
 package main
 
 import (
-	"archive/zip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -223,11 +222,6 @@ func installChrome(log *slog.Logger, cache string) (string, error) {
 	if sum != identitytest.ChromeMacArm64SHA256 {
 		return "", fmt.Errorf("%s has sha256 %s, not the pinned %s; refusing it (it is left in place)", zipPath, sum, identitytest.ChromeMacArm64SHA256)
 	}
-	zr, err := zip.OpenReader(zipPath)
-	if err != nil {
-		return "", fmt.Errorf("%s is not a zip: %w", zipPath, err)
-	}
-	_ = zr.Close()
 	// ditto keeps the app bundle's links and attributes, which a plain
 	// extraction loses.
 	if out, err := exec.Command("/usr/bin/ditto", "-x", "-k", zipPath, dir).CombinedOutput(); err != nil {
