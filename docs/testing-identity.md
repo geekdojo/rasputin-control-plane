@@ -754,9 +754,10 @@ administrator.
   - the designation is granted only once the account holds an authenticator app as well as
     recovery codes, after which its sessions are gone, a password alone gets no code, and a
     second-step sign-in holds the administrator capabilities (TC-990-03);
-  - the recovery codes are a default action during first run only (TC-990-24);
-  - the unfiltered user listing, `prompt=create` and the exact email lookup behave as rows
-    T250 to T252 record (TC-990-11);
+  - the recovery codes are a default action during first run only, and converge's
+    defaultAction-only writes keep the action's config, as row T253 records (TC-990-24);
+  - the unfiltered user listing, `prompt=create` and the stored lower-case email behave as
+    rows T250 to T252 record (TC-990-11);
   - a removed and an in-use email get byte-identical answers (TC-990-19);
   - a listed password is refused at sign-up (TC-990-20);
   - the 21st waiting account is refused (TC-990-13).

@@ -163,23 +163,34 @@ func TestWaiting_TC990_12_Empty(t *testing.T) {
 	}
 }
 
-// TC-990-34: the email is normalized the one way (removednames.Normal),
-// escaped, and looked up exactly, at most one.
+// TC-990-34: the email is normalized the one way (removednames.Normal) and
+// compared over the People listing; no request carries it (F-990-09). An
+// empty result is false, one hit is true whatever the case or padding, and
+// an Admin API error is an error.
 func TestEmailInUse_TC990_34(t *testing.T) {
 	kc, users := harnessUsers(t)
 	in, err := users.EmailInUse(t.Context(), " A+b@X.org ")
 	if err != nil || in {
 		t.Errorf("no account: %v %v", in, err)
 	}
-	if got := kc.usersList(); len(got) != 1 || got[0] != "/users?email=a%2Bb%40x.org&exact=true&max=1" {
-		t.Errorf("the lookup %v", got)
+	got := kc.usersList()
+	if len(got) != 1 || !strings.HasPrefix(got[0], "/users?briefRepresentation=false&first=0&max=") {
+		t.Errorf("the lookup %v, want the People listing", got)
+	}
+	for _, g := range got {
+		if strings.Contains(strings.ToLower(g), "x.org") || strings.Contains(g, "email") {
+			t.Errorf("a request carries the email: %s", g)
+		}
 	}
 	if removednames.Normal(" A+b@X.org ") != "a+b@x.org" {
-		t.Error("removednames.Normal is not the form looked up")
+		t.Error("removednames.Normal is not the form compared")
 	}
-	kc.add(person{sub: "a", name: "a", email: "a+b@x.org", enabled: true})
-	if in, err := users.EmailInUse(t.Context(), "A+B@x.org"); err != nil || !in {
+	kc.add(person{sub: "a", name: "a", email: "A+b@x.org", enabled: true})
+	if in, err := users.EmailInUse(t.Context(), "a+B@x.org "); err != nil || !in {
 		t.Errorf("an account holds it: %v %v", in, err)
+	}
+	if in, err := users.EmailInUse(t.Context(), "b@x.org"); err != nil || in {
+		t.Errorf("another address: %v %v", in, err)
 	}
 	if in, err := users.EmailInUse(t.Context(), "  "); err != nil || in {
 		t.Errorf("an empty email: %v %v", in, err)

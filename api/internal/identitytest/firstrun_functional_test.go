@@ -180,7 +180,7 @@ func newFirstRunRig(t *testing.T, env *Env) *firstRunRig {
 func (r *firstRunRig) converge(t *testing.T) {
 	t.Helper()
 	if _, err := r.conv.Run(t.Context()); err != nil {
-		t.Fatalf("converge: %v", err)
+		t.Fatalf("converge: %v%s", err, r.convergeFailure())
 	}
 	r.settle(t)
 }
@@ -707,8 +707,8 @@ func (r *firstRunRig) tc24(t *testing.T) {
 
 // TC-990-11: T250, the unfiltered listing's createdTimestamp and no service
 // account; T251, prompt=create's registration page ending as a code at the
-// console's callback (TC-990-01's); T252, the exact email lookup ignoring
-// case.
+// console's callback (TC-990-01's); T252, the listing carrying each email
+// lower-cased, so EmailInUse finds the account from the upper-case form.
 func (r *firstRunRig) tc11(t *testing.T, a person) {
 	_, out := r.admin(t).must(http.StatusOK, http.MethodGet, "/users?first=0&max=1000&briefRepresentation=false", nil)
 	var list []map[string]any
@@ -738,9 +738,17 @@ func (r *firstRunRig) tc11(t *testing.T, a person) {
 	if err != nil || !in {
 		t.Errorf("the upper-case email: %v, %v", in, err)
 	}
-	_, out = r.admin(t).must(http.StatusOK, http.MethodGet, "/users?exact=true&email="+url.QueryEscape(strings.ToUpper(a.email)), nil)
-	if err := json.Unmarshal(out, &list); err != nil || len(list) != 1 {
-		t.Errorf("the exact upper-case lookup found %d", len(list))
+	stored := 0
+	for _, u := range list {
+		if e, _ := u["email"].(string); strings.EqualFold(e, a.email) {
+			stored++
+			if e != strings.ToLower(e) {
+				t.Errorf("the listing carries %q, not lower-cased", e)
+			}
+		}
+	}
+	if stored != 1 {
+		t.Errorf("the listing carries the account's email %d times", stored)
 	}
 }
 

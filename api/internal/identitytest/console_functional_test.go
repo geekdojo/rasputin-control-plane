@@ -331,6 +331,21 @@ func (r *consoleRig) console() http.Handler {
 	})
 }
 
+// convergeFailure is the fields and key providers named by the api log's
+// last record of a failed converge, for a failure message: a run that fails
+// returns only its sentence.
+func (r *consoleRig) convergeFailure() string {
+	recs := r.apiRec.Records()
+	for i := len(recs) - 1; i >= 0; i-- {
+		fields, ok := logkittest.Attr(recs[i], "fields")
+		keys, kok := logkittest.Attr(recs[i], "key_providers")
+		if ok || kok {
+			return " (" + recs[i].Message + " fields=" + fields + " key_providers=" + keys + ")"
+		}
+	}
+	return " (no converge record names its fields)"
+}
+
 func (r *consoleRig) inputs() converge.Inputs {
 	first, _ := r.claim.FirstRun(context.Background())
 	r.mu.Lock()
@@ -513,7 +528,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		"attributes": map[string]string{"pkce.code.challenge.method": "S256"},
 	})
 	if _, err := r.conv.Run(t.Context()); err != nil {
-		t.Fatalf("converge with the console's inputs: %v", err)
+		t.Fatalf("converge with the console's inputs: %v%s", err, r.convergeFailure())
 	}
 	r.settle(t)
 	return r

@@ -300,6 +300,9 @@ type Account struct {
 	Created int64
 	// AppRole is the rasputin_app_role attribute, "" when absent.
 	AppRole AppLevel
+	// Email is the account's email in removednames.Normal form, "" when
+	// absent.
+	Email string
 }
 
 // peoplePage is how many accounts one People read asks for. A page that
@@ -329,6 +332,8 @@ func (u *Users) People(ctx context.Context) ([]Account, error) {
 		}
 		a := Account{ID: id, AppRole: appRoleOf(rep)}
 		a.Enabled, _ = rep["enabled"].(bool)
+		email, _ := rep["email"].(string)
+		a.Email = removednames.Normal(email)
 		if ts, ok := rep["createdTimestamp"].(float64); ok {
 			a.Created = int64(ts)
 		}
@@ -368,21 +373,26 @@ func (u *Users) ConsoleRoleHolders(ctx context.Context) (map[string]bool, error)
 }
 
 // EmailInUse reports whether an account holds email, compared in the one
-// normal form removednames.Normal gives (an exact match at Keycloak, which
-// ignores case: register row T252). An empty email is in use by no one.
+// normal form removednames.Normal gives over the People listing (register
+// row T252). The address is never put in a request: the identity client
+// logs a failed call's path, and the address typed at sign-up is the
+// personal data of someone with no account (LOG-SECRETS, F-990-09). An
+// empty email is in use by no one.
 func (u *Users) EmailInUse(ctx context.Context, email string) (bool, error) {
 	n := removednames.Normal(email)
 	if n == "" {
 		return false, nil
 	}
-	var users []struct {
-		ID string `json:"id"`
-	}
-	path := u.realmPath() + "/users?email=" + url.QueryEscape(n) + "&exact=true&max=1"
-	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &users); err != nil {
+	all, err := u.People(ctx)
+	if err != nil {
 		return false, fmt.Errorf("accounts: look the email up: %w", err)
 	}
-	return len(users) > 0, nil
+	for _, a := range all {
+		if a.Email == n {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Credentials is the types of the account's credentials.

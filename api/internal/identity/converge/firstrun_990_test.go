@@ -20,6 +20,9 @@ func (r *rig) recoveryDefault(t *testing.T) bool {
 // TC-990-23: the recovery-codes action is a default action while first run
 // holds, and the claim, which ends it, changes the desired hash, so
 // ConvergeCond is due with a new rearm key and the next run clears it.
+// That run changes only defaultAction, and the fake replaces the action's
+// config with the PUT body's as Keycloak 26.8.2 does (register row T253), so
+// the run passes only if the action PUT carries the config (F-990-12).
 func TestFirstRun_TC990_23_DefaultActionFollowsTheClaim(t *testing.T) {
 	r := newRig(t)
 	r.inputs.FirstRun = true
@@ -47,5 +50,10 @@ func TestFirstRun_TC990_23_DefaultActionFollowsTheClaim(t *testing.T) {
 	}
 	if r.recoveryDefault(t) {
 		t.Error("after the claim the recovery codes are still a default action")
+	}
+	for _, a := range r.kc.rulesState.actions {
+		if a.Alias == flows.ActionRecoveryCodes && (a.Config["max_auth_age"] != "300" || a.Config["warning_threshold"] != "4") {
+			t.Errorf("the defaultAction write lost the recovery codes' config: %v", a.Config)
+		}
 	}
 }

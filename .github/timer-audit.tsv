@@ -28,7 +28,7 @@ id	path	symbol	class	fact	cite	note
 K01	api/cmd/rasputin-api/main.go	waitForTrustworthyClock:NewTicker	tick	the time-sync marker file appears		Polls for the fact; the wait itself is bounded by clockGateTimeout.
 K02	api/cmd/rasputin-api/restore_trust.go	waitUntil:NewTicker	tick	the condition the caller passed becomes true		A generic fact-poll used by the trust-restore sequence.
 K03	api/internal/scheduler/scheduler.go	Scheduler.runEntry:NewTicker	tick	each tick submits a reconcile job that re-derives desired state from facts		The precedent lives beside it: firewall.dns_forward was deliberately removed from this timer and is submitted on a fact instead.
-K04	api/internal/auth/service.go	Service.janitor:NewTicker	tick	a session row has passed its bound		The sweep is periodic; what it enforces is E3 below and C72.
+K04	api/internal/auth/service.go	Service.janitor:NewTicker	tick	a session row has passed its bound		The sweep is periodic; what it enforces is E3 below, C72, and C73's pruning of pending sign-ins.
 K05	api/internal/metrics/service.go	Service.gcLoop:NewTicker	retention	metric rows older than the retention window are deleted		Data retention. No credential and no state transition.
 K06	api/internal/inventory/service.go	Service.tickLoop:NewTicker	tick	the time of each node's last heartbeat		The transition it drives is bounded by staleAfter and offlineAfter below.
 K07	api/internal/alerts/service.go	Service.RunRuleSync:NewTicker	tick	the alert series the rule evaluator has written to the metric store		A re-read of a fact, not a clock deciding an alert. Runs once before the loop too.

@@ -95,7 +95,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // Normal is the one form a sign-in name or an email is compared in: trimmed
 // and lower-cased. The list hashes it, and the in-use email check
-// (accounts.Users.EmailInUse) queries it, so the two agree on what "the same
+// (accounts.Users.EmailInUse) compares in it, so the two agree on what "the same
 // address" is (F-990-08).
 func Normal(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
 
