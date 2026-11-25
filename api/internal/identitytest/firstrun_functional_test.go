@@ -677,8 +677,16 @@ func (r *firstRunRig) otpInstead(t *testing.T, g *goClient, a doorAnswer) doorAn
 	_, action := g.form(sel, "kc-select-credential-form")
 	for _, m := range regexp.MustCompile(`(?s)<button[^>]*name="authenticationExecution"[^>]*value="([^"]+)"[^>]*>(.*?)</button>`).FindAllSubmatch(sel.body, -1) {
 		if strings.Contains(strings.ToLower(string(m[2])), "authenticator") {
+			// The chooser's post answers the chosen page itself (200), or
+			// a redirect to it, as recoveryInstead reads it too.
 			b := g.send(http.MethodPost, action, url.Values{"authenticationExecution": {string(m[1])}}, nil)
-			return g.follow(b.at.ResolveReference(b.loc).String())
+			if b.status >= 300 && b.status < 400 && b.loc != nil {
+				b = g.follow(b.at.ResolveReference(b.loc).String())
+			}
+			if b.pageID() != "login-login-otp" {
+				t.Fatalf("choosing the authenticator app opened %q (%d)", b.pageID(), b.status)
+			}
+			return b
 		}
 	}
 	t.Fatal("the chooser offers no authenticator app")
