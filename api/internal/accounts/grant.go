@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
@@ -77,6 +79,15 @@ type AppGranter interface {
 	Grant(ctx context.Context, sub string, level AppLevel) error
 }
 
+// GrantUsers is the account reads and writes the grant makes besides the
+// console role (*Users): the network grants it adds gear-admin to, and the
+// confirmed email a console administrator gets (geekdojo/geekdojo-brain#994).
+type GrantUsers interface {
+	Read(ctx context.Context, sub string) (Person, error)
+	SetNetwork(ctx context.Context, sub string, grants []string) error
+	ConfirmEmail(ctx context.Context, sub string) error
+}
+
 // GranterDeps are a Granter's collaborators. NewGranter refuses a missing
 // one.
 type GranterDeps struct {
@@ -85,6 +96,7 @@ type GranterDeps struct {
 	Markers      MarkerWriter
 	Sessions     Sessions
 	Roles        RoleAdder
+	Users        GrantUsers
 	Access       AppGranter
 	Console      ConsoleSessions
 	// Lock is the one accounts lock, held around the console role's grant.
@@ -104,7 +116,7 @@ type Granter struct {
 // NewGranter checks d and returns a Granter. It does no I/O.
 func NewGranter(d GranterDeps) (*Granter, error) {
 	if d.Designations == nil || d.Facts == nil || d.Markers == nil || d.Sessions == nil || d.Roles == nil ||
-		d.Access == nil || d.Console == nil || d.Lock == nil || d.Log == nil {
+		d.Users == nil || d.Access == nil || d.Console == nil || d.Lock == nil || d.Log == nil {
 		return nil, errors.New("accounts: NewGranter: a collaborator is nil")
 	}
 	if d.StepTimeout <= 0 {
@@ -212,8 +224,11 @@ func (g *Granter) check(ctx context.Context, _ *jobs.StepCtx, sub string) (strin
 
 // grant is step 2: the second-step markers first (F-987-08; an account with
 // no second step is waiting and gets nothing), then under the accounts lock
-// the facts read again, the identity sessions ended (C23) and the console
-// role given, then app access (Access.Grant, which takes the lock itself).
+// the facts read again, the identity sessions ended (C23), the console role
+// given (with the confirmed email for an administrator) and gear-admin
+// added to the network grants held now (F-994-03), then app access
+// (Access.Grant, which takes the lock itself). An empty field grants
+// nothing.
 func (g *Granter) grant(ctx context.Context, _ *jobs.StepCtx, sub string) (string, error) {
 	err := g.d.Markers.BeforePrivilege(ctx, sub)
 	switch {
@@ -250,6 +265,22 @@ func (g *Granter) lockedRole(ctx context.Context, sub string) (Designation, stri
 	if x.ConsoleRole != "" {
 		if err := g.d.Roles.AddConsoleRole(ctx, sub, x.ConsoleRole); err != nil {
 			return x, "", err
+		}
+		if x.ConsoleRole == string(authz.Admin) {
+			if err := g.d.Users.ConfirmEmail(ctx, sub); err != nil && !errors.Is(err, ErrNoEmail) {
+				return x, "", err
+			}
+		}
+	}
+	if x.Network != "" {
+		p, err := g.d.Users.Read(ctx, sub)
+		if err != nil {
+			return x, "", err
+		}
+		if !slices.Contains(p.Network, x.Network) {
+			if err := g.d.Users.SetNetwork(ctx, sub, append(slices.Clone(p.Network), x.Network)); err != nil {
+				return x, "", err
+			}
 		}
 	}
 	return x, outcomeComplete, nil
@@ -299,6 +330,25 @@ func NewObserver(d ObserverDeps) (*Observer, error) {
 
 // grantSubmitter is the grant's recorded submitter.
 const grantSubmitter = "accounts.designation"
+
+var _ events.UserSink = (*Observer)(nil)
+
+// signInEvents are the drained user events after which a designated
+// account's setup may be complete: a sign-in at either door, or a second
+// step stored.
+var signInEvents = []string{"LOGIN", "UPDATE_CREDENTIAL", "UPDATE_TOTP"}
+
+// UserEvent is the Observer as a sink of the sign-in history drain
+// (F-994-01): after a sign-in or a stored second step at either door, it
+// checks the account as SignedIn does, so an app or gear administrator who
+// never opens the console still gets the role. The next drained event tries
+// again after any failure.
+func (o *Observer) UserEvent(ctx context.Context, e events.UserEvent) {
+	if e.Error != "" || !slices.Contains(signInEvents, e.Type) {
+		return
+	}
+	o.SignedIn(ctx, e.UserID)
+}
 
 // SignedIn submits the grant when sub is designated, its designation names
 // known roles, and its facts are complete. Any read or submit error submits

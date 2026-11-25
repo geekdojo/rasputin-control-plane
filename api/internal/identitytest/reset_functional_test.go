@@ -72,19 +72,25 @@ func (resetApps) AppFacts(context.Context, string, string) (authz.AppFacts, erro
 
 func newResetRig(t *testing.T, env *Env) *resetRig {
 	t.Helper()
-	r := &resetRig{revokeRig: newRevokeRig(t, env), held: accounts.NewHeld(), otp: &totpCodes{used: map[string]bool{}}}
+	return resetOn(t, newRevokeRig(t, env))
+}
+
+// resetOn is the reset rig on a revoke rig already built.
+func resetOn(t *testing.T, rv *revokeRig) *resetRig {
+	t.Helper()
+	r := &resetRig{revokeRig: rv, held: accounts.NewHeld(), otp: &totpCodes{used: map[string]bool{}}}
 	log, rec := logkittest.New()
 	r.rec = rec
 	users, err := accounts.NewUsers(accounts.UsersDeps{Admin: r.session, Realm: baselineRealm, ConsoleClient: baselineConsole})
 	if err != nil {
 		t.Fatal(err)
 	}
-	checker, err := pwpolicy.New(filepath.Dir(denylistPath(env.kcHome)), flows.PasswordPolicy)
+	checker, err := pwpolicy.New(filepath.Dir(denylistPath(r.env.kcHome)), flows.PasswordPolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.wf, err = accounts.ResetPasswordWorkflow(accounts.ResetDeps{Users: users, Held: r.held, Checker: checker, Revoker: r.rev,
-		Log: log, StepTimeout: 2 * time.Minute}); err != nil {
+		Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute}); err != nil {
 		t.Fatal(err)
 	}
 	kp, err := authz.NewKindPolicy(resetApps{})
@@ -110,11 +116,11 @@ func newResetRig(t *testing.T, env *Env) *resetRig {
 		t.Fatal(err)
 	}
 	r.action.set(action)
-	leaf, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-api"})
+	leaf, err := r.env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-api"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.idc = productionClient(t, env, leaf)
+	r.idc = productionClient(t, r.env, leaf)
 	return r
 }
 

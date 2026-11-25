@@ -1,8 +1,9 @@
 // Package sessions ends a person's sessions at the identity service
 // (geekdojo/geekdojo-brain#991, Identity 4.9): the one session-ending
 // primitive. identity.revoke's online and offline steps and the accounts
-// Access grant call it, and Identity 4.10's password resets
-// (geekdojo/geekdojo-brain#992) call EndAll.
+// Access grant call it, Identity 4.10's password resets
+// (geekdojo/geekdojo-brain#992) call EndAll, and Identity 4.12's sign-out
+// everywhere else (geekdojo/geekdojo-brain#994) calls EndAllExcept.
 //
 // Nothing here logs. An error carries the Admin API's path, which names the
 // account, so a caller logs only its status and kind.
@@ -51,6 +52,36 @@ func (e Ender) EndAll(ctx context.Context, sub string) error {
 		return fmt.Errorf("sessions: end online sessions: %w", err)
 	}
 	return nil
+}
+
+// EndAllExcept ends every online session of sub but keep, the session the
+// request came from (geekdojo/geekdojo-brain#994, "sign out everywhere
+// else"): it lists the account's sessions (GET /users/{id}/sessions) and
+// deletes each other one (DELETE /sessions/{sid}). It sets no not-before,
+// since that would end keep too. A session gone by the time it is deleted
+// counts as ended. It returns how many it ended.
+func (e Ender) EndAllExcept(ctx context.Context, sub, keep string) (int, error) {
+	if sub == "" || keep == "" {
+		return 0, errors.New("sessions: end other sessions: no account id or no session to keep")
+	}
+	var found []struct {
+		ID string `json:"id"`
+	}
+	if _, err := e.Admin.Admin(ctx, http.MethodGet, userPath(sub)+"/sessions", nil, &found); err != nil {
+		return 0, fmt.Errorf("sessions: end other sessions: read: %w", err)
+	}
+	n := 0
+	for _, s := range found {
+		if s.ID == "" || s.ID == keep {
+			continue
+		}
+		_, err := e.Admin.Admin(ctx, http.MethodDelete, realmPath()+"/sessions/"+url.PathEscape(s.ID), nil, nil)
+		if err != nil && !errors.Is(err, idclient.ErrNotFound) {
+			return n, fmt.Errorf("sessions: end other sessions: delete: %w", err)
+		}
+		n++
+	}
+	return n, nil
 }
 
 // EndOffline deletes every offline session of sub: for each client of the

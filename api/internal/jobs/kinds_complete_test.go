@@ -192,3 +192,30 @@ func TestKindTable_TC1001_16_FixtureSystemMismatch(t *testing.T) {
 		t.Errorf("problems = %q, want one naming bmc.power", got)
 	}
 }
+
+// TC-994-31: the scan finds every account kind Identity 4.12 registers
+// (geekdojo/geekdojo-brain#994), each a constant kind in the table and none
+// System, with nothing it cannot resolve.
+func TestKindTable_TC994_31_AccountKinds(t *testing.T) {
+	sc := scanWorkflowKinds(loadForSpecScan(t, ".", modulePath+"/internal/accounts"))
+	if len(sc.problems) != 0 {
+		t.Errorf("problems: %v", sc.problems)
+	}
+	for _, k := range []string{"accounts.set_roles", "accounts.grant_access", "accounts.revoke_access", "accounts.set_network",
+		"accounts.disable", "accounts.enable", "accounts.delete", "accounts.decline", "accounts.unlock", "accounts.sign_out",
+		"accounts.set_email", "accounts.confirm_email", "accounts.set_display_name", "accounts.remove_second_steps",
+		"accounts.remove_credential", "accounts.rename_credential"} {
+		system, ok := sc.kinds[k]
+		switch {
+		case !ok:
+			t.Errorf("the scan did not find %s", k)
+		case system:
+			t.Errorf("%s is a System workflow", k)
+		case !authz.Known(k):
+			t.Errorf("%s is not in the kind table", k)
+		}
+	}
+	for _, p := range sc.check() {
+		t.Error(p)
+	}
+}

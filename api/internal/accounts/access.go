@@ -61,21 +61,32 @@ func NewAccess(d AccessDeps) (*Access, error) {
 // written. Adding offline_access is a realm role change, so the console's
 // role-change sink signs the person out of the console once.
 func (a *Access) Grant(ctx context.Context, sub string, level AppLevel) error {
+	a.d.Lock.Lock()
+	defer a.d.Lock.Unlock()
+	return a.grantLocked(ctx, sub, level)
+}
+
+// errEndSessions marks a grant that stopped because the identity sessions
+// could not be ended, so nothing was written.
+var errEndSessions = errors.New("accounts: end sessions")
+
+// grantLocked is Grant for a caller that holds the accounts lock already:
+// accounts.grant_access, inside the guard's apply (the lock is not
+// re-entrant).
+func (a *Access) grantLocked(ctx context.Context, sub string, level AppLevel) error {
 	if level != AppUser && level != AppAdmin {
 		return fmt.Errorf("accounts: grant access: unknown level %q", level)
 	}
-	a.d.Lock.Lock()
-	defer a.d.Lock.Unlock()
 	p, err := a.d.Users.Read(ctx, sub)
 	if err != nil {
 		return fmt.Errorf("accounts: grant access: %w", err)
 	}
 	if p.AppRole != level && (level == AppAdmin || p.AppRole != "") {
 		if err := a.d.Sessions.EndAll(ctx, sub); err != nil {
-			return fmt.Errorf("accounts: grant access: end online sessions: %w", err)
+			return fmt.Errorf("accounts: grant access: %w: online: %w", errEndSessions, err)
 		}
 		if _, err := a.d.Sessions.EndOffline(ctx, sub); err != nil {
-			return fmt.Errorf("accounts: grant access: end offline sessions: %w", err)
+			return fmt.Errorf("accounts: grant access: %w: offline: %w", errEndSessions, err)
 		}
 	}
 	if err := a.d.Facts.Record(ctx, sub); err != nil {

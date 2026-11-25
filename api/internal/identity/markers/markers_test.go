@@ -244,3 +244,56 @@ func TestNew_Refuses(t *testing.T) {
 		}
 	}
 }
+
+// TC-994-19: AfterRemoval recomputes the markers from what remains (F-994-05).
+func TestAfterRemoval_TC994_19(t *testing.T) {
+	all := func() map[string]any {
+		return map[string]any{"pet": []any{"cat"},
+			flows.MarkerWebAuthnHome: []any{"true"}, flows.MarkerWebAuthnApp: []any{"true"},
+			flows.MarkerSecondStepHome: []any{"true"}, flows.MarkerSecondStepApp: []any{"true"}, flows.MarkerSecondStepAny: []any{"true"}}
+	}
+	homeOnly := func() map[string]any {
+		return map[string]any{flows.MarkerWebAuthnHome: []any{"true"}, flows.MarkerSecondStepHome: []any{"true"},
+			flows.MarkerSecondStepApp: []any{"true"}, flows.MarkerSecondStepAny: []any{"true"}}
+	}
+	cases := []struct {
+		name   string
+		attrs  map[string]any
+		creds  []string
+		roles  []string
+		want   []string
+		writes int
+	}{
+		{"a: no second step left", all(), []string{"password", "recovery-authn-codes"}, nil, nil, 1},
+		{"b: an authenticator app only", all(), []string{"password", "otp"}, nil,
+			sorted(flows.MarkerSecondStepHome, flows.MarkerSecondStepApp, flows.MarkerSecondStepAny), 1},
+		{"c: a home passkey only, unprivileged", homeOnly(), []string{"password", "webauthn"}, nil,
+			sorted(flows.MarkerWebAuthnHome, flows.MarkerSecondStepHome, flows.MarkerSecondStepAny), 1},
+		{"c: a home passkey only, privileged", homeOnly(), []string{"password", "webauthn"}, []string{"operator"},
+			sorted(flows.MarkerWebAuthnHome, flows.MarkerSecondStepHome, flows.MarkerSecondStepApp, flows.MarkerSecondStepAny), 0},
+		{"d: unchanged", all(), []string{"otp", "webauthn-passwordless"}, nil,
+			sorted(flows.Markers...), 0},
+	}
+	for _, c := range cases {
+		u := newUser()
+		u["attributes"] = c.attrs
+		f := &fakeAdmin{user: u, creds: c.creds, roles: c.roles}
+		w, _ := newWriter(t, f)
+		if err := w.AfterRemoval(t.Context(), userID); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := markersOf(f); !slices.Equal(got, c.want) || len(f.puts) != c.writes {
+			t.Errorf("%s: markers %v (%d writes), want %v (%d)", c.name, got, len(f.puts), c.want, c.writes)
+		}
+		if c.writes > 0 {
+			if a := f.puts[0]["attributes"].(map[string]any); c.name[0] == 'a' && a["pet"] == nil {
+				t.Errorf("%s: the other attributes were not written back", c.name)
+			}
+		}
+	}
+	f := &fakeAdmin{user: newUser(), fail: errors.New("down")}
+	w, _ := newWriter(t, f)
+	if err := w.AfterRemoval(t.Context(), userID); err == nil || len(f.puts) != 0 {
+		t.Errorf("a failed read: %v, %d writes", err, len(f.puts))
+	}
+}

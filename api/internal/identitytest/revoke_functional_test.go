@@ -79,13 +79,25 @@ type revokeRig struct {
 	// adminID is an enabled administrator's account id: the actor of every
 	// disable and delete an endpoint would have submitted.
 	adminID string
-	ipMu    sync.Mutex
-	ip      byte
+	// lock is the one accounts lock, and guard, users and ra the accounts
+	// over it, as main wires them (geekdojo/geekdojo-brain#994).
+	lock  *sync.Mutex
+	guard *authz.RoleGuard
+	users *accounts.Users
+	ra    accounts.RoleAccounts
+	ipMu  sync.Mutex
+	ip    byte
 }
 
 func newRevokeRig(t *testing.T, env *Env) *revokeRig {
 	t.Helper()
-	r := &revokeRig{consoleRig: newConsoleRig(t, env)}
+	return revokeOn(t, newConsoleRig(t, env))
+}
+
+// revokeOn is the revoke rig on a console rig already built.
+func revokeOn(t *testing.T, c *consoleRig) *revokeRig {
+	t.Helper()
+	r := &revokeRig{consoleRig: c}
 	ctx := t.Context()
 	var err error
 	if r.moved, err = auth.OpenStore(ctx, r.dbPath); err != nil {
@@ -111,6 +123,7 @@ func newRevokeRig(t *testing.T, env *Env) *revokeRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	r.lock, r.guard, r.users, r.ra = lock, guard, users, ra
 	ender := sessions.Ender{Admin: r.session}
 	if r.rev, err = accounts.NewRevoker(accounts.RevokerDeps{
 		Sessions: ender, Users: users, Guard: guard, Lock: lock, Console: r.sessions, Moved: r.moved,

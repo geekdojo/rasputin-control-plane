@@ -18,7 +18,8 @@ const typeRecoveryCodes = "recovery-authn-codes"
 // decide C29. Facts carries the subject, the sign-in name, the console
 // roles, the enabled state, and the designation facts: a second step
 // (markers.IsSecondStep), recovery codes and a pending required action
-// (geekdojo/geekdojo-brain#990).
+// (geekdojo/geekdojo-brain#990), and the app access and network grants
+// the privileged levels are read from (geekdojo/geekdojo-brain#994).
 type RoleAccounts struct{ users *Users }
 
 var _ authz.RoleAccounts = RoleAccounts{}
@@ -53,7 +54,7 @@ func (a RoleAccounts) Facts(ctx context.Context, sub string) (authz.AccountFacts
 		return authz.AccountFacts{}, fmt.Errorf("accounts: facts: %w", err)
 	}
 	f := authz.AccountFacts{Sub: sub, Username: p.Username, Roles: roles, Enabled: p.Enabled,
-		RequiredActionPending: len(p.RequiredActions) > 0}
+		RequiredActionPending: len(p.RequiredActions) > 0, AppRole: string(p.AppRole), Network: p.Network}
 	for _, c := range creds {
 		f.HoldsSecondStep = f.HoldsSecondStep || markers.IsSecondStep(c)
 		f.HoldsRecoveryCodes = f.HoldsRecoveryCodes || c == typeRecoveryCodes

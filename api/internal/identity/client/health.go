@@ -36,7 +36,9 @@ func (r HealthReport) Down(name string) bool {
 // whose body is the health JSON, the report comes back with the error. It
 // writes its record for a failed call at DEBUG: its caller, the identity
 // state monitor, turns every answer into a state and logs the transition
-// itself (geekdojo/geekdojo-brain#979).
+// itself (geekdojo/geekdojo-brain#979). CodeQL's go/log-injection at its
+// LogAttrs call is the false positive the register records for failed's
+// (client.go), on the same grounds.
 func (c *Client) Health(ctx context.Context) (HealthReport, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()

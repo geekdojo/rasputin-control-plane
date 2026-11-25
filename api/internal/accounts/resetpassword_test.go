@@ -65,7 +65,7 @@ func newResetHarness(t *testing.T) *resetHarness {
 	}
 	slogger, rec := logkittest.New()
 	h.rlog = rec
-	if h.wf, err = ResetPasswordWorkflow(ResetDeps{Users: h.users, Held: h.held, Checker: h.checker, Revoker: h.rev,
+	if h.wf, err = ResetPasswordWorkflow(ResetDeps{Users: h.users, Held: h.held, Checker: h.checker, Revoker: h.rev, Lock: h.lock,
 		Log: slogger, StepTimeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestResetWorkflow_TC992_21_EndSessionsAndCleanup(t *testing.T) {
 	if _, err := ResetPasswordWorkflow(ResetDeps{}); err == nil {
 		t.Error("ResetPasswordWorkflow accepted no collaborators")
 	}
-	d := ResetDeps{Users: h.users, Held: h.held, Checker: h.checker, Revoker: h.rev, Log: slog.New(slog.DiscardHandler)}
+	d := ResetDeps{Users: h.users, Held: h.held, Checker: h.checker, Revoker: h.rev, Lock: h.lock, Log: slog.New(slog.DiscardHandler)}
 	if _, err := ResetPasswordWorkflow(d); err == nil {
 		t.Error("ResetPasswordWorkflow accepted no step timeout")
 	}

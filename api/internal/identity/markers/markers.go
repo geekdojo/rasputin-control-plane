@@ -6,8 +6,9 @@
 // Writer sets them from each drained credential event (a user-event sink of
 // the sign-in history drain) and, for the Jobs that make an account
 // privileged (Identity 4.8 and 6.3), from the account's credentials before
-// the role takes effect (BeforePrivilege). Markers are only ever set here,
-// never cleared: removing a credential is Identity 4.12's.
+// the role takes effect (BeforePrivilege). Identity 4.12's credential
+// removals (geekdojo/geekdojo-brain#994) recompute them from what remains
+// (AfterRemoval), the one path that clears a marker.
 //
 // Nothing here logs a user id.
 package markers
@@ -133,17 +134,11 @@ func (w *Writer) UserEvent(ctx context.Context, e events.UserEvent) {
 // makes it privileged. It returns ErrNoSecondStep, writing nothing, when the
 // account holds no authenticator app, passkey or security key.
 func (w *Writer) BeforePrivilege(ctx context.Context, userID string) error {
-	var creds []struct {
-		Type string `json:"type"`
+	types, err := w.credentialTypes(ctx, userID)
+	if err != nil {
+		return err
 	}
-	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, w.userPath(userID)+"/credentials", nil, &creds); err != nil {
-		return fmt.Errorf("markers: read the account's credentials: %w", err)
-	}
-	if !slices.ContainsFunc(creds, func(c struct {
-		Type string `json:"type"`
-	}) bool {
-		return IsSecondStep(c.Type)
-	}) {
+	if !slices.ContainsFunc(types, IsSecondStep) {
 		return ErrNoSecondStep
 	}
 	set := map[string]bool{flows.MarkerSecondStepHome: true, flows.MarkerSecondStepApp: true, flows.MarkerSecondStepAny: true}
@@ -170,13 +165,9 @@ func (w *Writer) userPath(userID string) string {
 // rasputin_second_step_any), and writes the account back, its other
 // attributes as read, only when a marker changed.
 func (w *Writer) apply(ctx context.Context, userID string, set map[string]bool, follow bool) error {
-	var user map[string]any
-	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, w.userPath(userID), nil, &user); err != nil {
+	user, attrs, err := w.read(ctx, userID)
+	if err != nil {
 		return err
-	}
-	attrs, _ := user["attributes"].(map[string]any)
-	if attrs == nil {
-		attrs = map[string]any{}
 	}
 	if follow {
 		privileged, err := w.privileged(ctx, userID, attrs)
@@ -188,10 +179,33 @@ func (w *Writer) apply(ctx context.Context, userID string, set map[string]bool, 
 			set[flows.MarkerSecondStepApp] = true
 		}
 	}
+	return w.write(ctx, userID, user, attrs, set)
+}
+
+// read is the account's representation and its attributes.
+func (w *Writer) read(ctx context.Context, userID string) (map[string]any, map[string]any, error) {
+	var user map[string]any
+	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, w.userPath(userID), nil, &user); err != nil {
+		return nil, nil, err
+	}
+	attrs, _ := user["attributes"].(map[string]any)
+	if attrs == nil {
+		attrs = map[string]any{}
+	}
+	return user, attrs, nil
+}
+
+// write gives each marker in want its value, true as "true" and false as
+// no attribute, and writes the account back only when one changed.
+func (w *Writer) write(ctx context.Context, userID string, user, attrs map[string]any, want map[string]bool) error {
 	changed := false
-	for name := range set {
-		if !holds(attrs, name, "true") {
+	for name, on := range want {
+		switch held := holds(attrs, name, "true"); {
+		case on && !held:
 			attrs[name] = []any{"true"}
+			changed = true
+		case !on && attrs[name] != nil:
+			delete(attrs, name)
 			changed = true
 		}
 	}
@@ -214,16 +228,75 @@ func (w *Writer) apply(ctx context.Context, userID string, set map[string]bool, 
 	return nil
 }
 
-// privileged reports whether the account is privileged: console admin or
-// operator, app admin, or gear-admin.
+// AfterRemoval recomputes the five markers from the credentials that
+// remain, after a credential was removed (geekdojo/geekdojo-brain#994,
+// F-994-05):
+//
+//   - a door's webauthn marker stays true only while a passkey or security
+//     key remains and it is already true; with none left both clear. A
+//     credential's door comes only from its registration event, so it is
+//     never set here;
+//   - a door's second-step marker is true when an authenticator app remains
+//     or that door's webauthn marker is true;
+//   - rasputin_second_step_any is true while any second step remains;
+//   - a privileged account's two second-step markers follow
+//     rasputin_second_step_any, as UserEvent does.
+//
+// It writes only when a marker changes. A failed read writes nothing.
+func (w *Writer) AfterRemoval(ctx context.Context, userID string) error {
+	types, err := w.credentialTypes(ctx, userID)
+	if err != nil {
+		return err
+	}
+	user, attrs, err := w.read(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("markers: read the account: %w", err)
+	}
+	otp := slices.Contains(types, typeOTP)
+	passkey := slices.Contains(types, typeWebAuthn) || slices.Contains(types, typePasswordless)
+	want := map[string]bool{flows.MarkerSecondStepAny: otp || passkey}
+	for _, door := range []flows.Door{flows.DoorHome, flows.DoorApp} {
+		web := passkey && holds(attrs, flows.WebAuthnMarker(door), "true")
+		want[flows.WebAuthnMarker(door)] = web
+		want[flows.SecondStepMarker(door)] = otp || web
+	}
+	privileged, err := w.privileged(ctx, userID, attrs)
+	if err != nil {
+		return fmt.Errorf("markers: read the account's roles: %w", err)
+	}
+	if privileged {
+		want[flows.MarkerSecondStepHome] = want[flows.MarkerSecondStepAny]
+		want[flows.MarkerSecondStepApp] = want[flows.MarkerSecondStepAny]
+	}
+	if err := w.write(ctx, userID, user, attrs, want); err != nil {
+		return fmt.Errorf("markers: write the account's markers: %w", err)
+	}
+	return nil
+}
+
+// credentialTypes is the type of each of the account's credentials.
+func (w *Writer) credentialTypes(ctx context.Context, userID string) ([]string, error) {
+	var creds []struct {
+		Type string `json:"type"`
+	}
+	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, w.userPath(userID)+"/credentials", nil, &creds); err != nil {
+		return nil, fmt.Errorf("markers: read the account's credentials: %w", err)
+	}
+	out := make([]string, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, c.Type)
+	}
+	return out, nil
+}
+
+// privileged reports whether the account is privileged, by the one rule
+// (authz.HoldsPrivilege, F-994-06) over its console roles, app access and
+// network grants.
 func (w *Writer) privileged(ctx context.Context, userID string, attrs map[string]any) (bool, error) {
-	if holds(attrs, "rasputin_app_role", "admin") || holds(attrs, "rasputin_network", "gear-admin") {
+	f := authz.AccountFacts{AppRole: first(attrs, "rasputin_app_role"), Network: values(attrs, "rasputin_network")}
+	if authz.HoldsPrivilege(f) {
 		return true, nil
 	}
-	var roles []struct {
-		Name string `json:"name"`
-	}
-	path := w.userPath(userID) + "/role-mappings/clients/"
 	var clients []struct {
 		ID string `json:"id"`
 	}
@@ -234,15 +307,36 @@ func (w *Writer) privileged(ctx context.Context, userID string, attrs map[string
 	if len(clients) != 1 {
 		return false, fmt.Errorf("markers: %d console clients", len(clients))
 	}
-	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, path+url.PathEscape(clients[0].ID)+"/composite", nil, &roles); err != nil {
+	var roles []struct {
+		Name string `json:"name"`
+	}
+	if _, err := w.d.Admin.Admin(ctx, http.MethodGet, w.userPath(userID)+"/role-mappings/clients/"+url.PathEscape(clients[0].ID)+"/composite", nil, &roles); err != nil {
 		return false, err
 	}
 	for _, r := range roles {
-		if authz.Privileged(r.Name) {
-			return true, nil
+		f.Roles = append(f.Roles, r.Name)
+	}
+	return authz.HoldsPrivilege(f), nil
+}
+
+// values is the attribute name's string values.
+func values(attrs map[string]any, name string) []string {
+	vs, _ := attrs[name].([]any)
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
 		}
 	}
-	return false, nil
+	return out
+}
+
+// first is the attribute name's first value, "" when it has none.
+func first(attrs map[string]any, name string) string {
+	if vs := values(attrs, name); len(vs) > 0 {
+		return vs[0]
+	}
+	return ""
 }
 
 // holds reports whether the attribute name holds value.

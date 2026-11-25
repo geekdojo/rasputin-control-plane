@@ -31,7 +31,8 @@ func (refusingAdmin) Admin(context.Context, string, string, any, any) (idclient.
 
 type nullConsole struct{}
 
-func (nullConsole) EndBySub(context.Context, string) (int64, error) { return 0, nil }
+func (nullConsole) EndBySub(context.Context, string) (int64, error)               { return 0, nil }
+func (nullConsole) EndBySubExcept(context.Context, string, string) (int64, error) { return 0, nil }
 
 type registered struct{ kinds map[string]jobs.Workflow }
 
@@ -205,5 +206,57 @@ func TestWireAccounts_ListThatDoesNotOpen(t *testing.T) {
 	}
 	if w.revoker == nil {
 		t.Error("no revoker")
+	}
+}
+
+// requestsSink counts SetAccountRequests calls.
+type requestsSink struct{ n int }
+
+func (s *requestsSink) SetAccountRequests(apipkg.AccountRequester) { s.n++ }
+
+// geekdojo/geekdojo-brain#994 (wiring part of TC-994-31): under keycloak
+// every account change registers as a person's kind, each fresh-gated kind
+// has the fresh action, the api gets the requests, and the observer joins
+// the drain's user sinks; outside keycloak none of it.
+func TestWireAccounts_TC994_AccountChanges(t *testing.T) {
+	d, _ := accountsFixture(t, filepath.Join(t.TempDir(), "rasputin.db"))
+	d.mode = identityModeOff
+	off, err := wireAccounts(t.Context(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var none requestsSink
+	off.installRequests(&none)
+	if none.n != 0 || len(off.userSinks(convergeSinks{}).user) != 0 || off.actions() != nil {
+		t.Error("outside keycloak the account changes were wired")
+	}
+	d.mode = identityModeKeycloak
+	w, err := wireAccounts(t.Context(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := &registered{kinds: map[string]jobs.Workflow{}}
+	w.register(r)
+	for _, k := range []string{accounts.KindSetRoles, accounts.KindGrantAccess, accounts.KindRevokeAccess, accounts.KindSetNetwork,
+		accounts.KindDisable, accounts.KindEnable, accounts.KindDelete, accounts.KindDecline, accounts.KindUnlock,
+		accounts.KindSignOut, accounts.KindSetEmail, accounts.KindConfirmEmail, accounts.KindSetDisplayName,
+		accounts.KindRemoveSecondSteps, accounts.KindRemoveCredential, accounts.KindRenameCredential} {
+		wf, ok := r.kinds[k]
+		if !ok || wf.System || wf.OnTerminal == nil || !authz.Known(k) {
+			t.Errorf("%s registered %v, System %v", k, ok, wf.System)
+		}
+	}
+	for _, k := range accounts.FreshKinds {
+		if w.actions()[k] == nil {
+			t.Errorf("%s has no fresh-sign-in action", k)
+		}
+	}
+	var got requestsSink
+	w.installRequests(&got)
+	if got.n != 1 {
+		t.Errorf("SetAccountRequests called %d times", got.n)
+	}
+	if s := w.userSinks(convergeSinks{}); len(s.user) != 1 || s.user[0] != w.observer {
+		t.Errorf("user sinks %v, want the observer", s.user)
 	}
 }

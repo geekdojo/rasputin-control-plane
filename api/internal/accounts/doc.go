@@ -9,7 +9,10 @@
 // accounts through. Identity 4.10's administrator reset is Resetter (the
 // request's check), ResetAction (its fresh-sign-in action) and
 // ResetPasswordWorkflow (accounts.reset_password), whose temporary password
-// travels beside the job in Held, never in its spec.
+// travels beside the job in Held, never in its spec. Identity 4.12's account
+// changes (geekdojo/geekdojo-brain#994) are Requests (the request's
+// decision), FreshAction and Fresh (the fresh sign-in some need) and Changes
+// (one workflow per kind); a value such as a new email travels in Held too.
 //
 // Every account change runs under the one accounts lock, which is not
 // re-entrant. No log record, job-log line, step outcome or error sentence

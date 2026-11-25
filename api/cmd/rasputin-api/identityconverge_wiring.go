@@ -112,10 +112,12 @@ func (w identityConverge) doorBindings() policy.Bindings {
 }
 
 // convergeSinks are the converger's sinks on the sign-in history drain: its
-// admin-event recheck. Both are empty outside keycloak.
+// admin-event recheck; and the user sinks others add (the designation
+// observer, #994). All are empty outside keycloak.
 type convergeSinks struct {
 	admin []events.AdminSink
 	pass  []events.PassSink
+	user  []events.UserSink
 }
 
 // eventSinks is the converger as an admin and a pass sink, or none.

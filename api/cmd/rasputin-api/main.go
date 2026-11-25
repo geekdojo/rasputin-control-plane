@@ -1857,7 +1857,7 @@ func main() {
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
-	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, consoleSI.adminSinks(identityConv.eventSinks()), markersW, logger) // the sign-in history drain, marked for this start (#985)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, acct.userSinks(consoleSI.adminSinks(identityConv.eventSinks())), markersW, logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -1915,7 +1915,8 @@ func main() {
 	if acct.resetter != nil { // the administrator's password reset (#992), under keycloak only
 		srv.SetResetter(acct.resetter)
 	}
-	acct.installWaiting(srv) // how many people wait for access (#990), under keycloak only
+	acct.installWaiting(srv)  // how many people wait for access (#990), under keycloak only
+	acct.installRequests(srv) // every account change (#994), under keycloak only
 	srv.SetNodeTrust(nodeTrust)
 	srv.SetComposeStash(composeStash)
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the

@@ -239,11 +239,21 @@ func (c *ConsoleSessions) EndBySub(ctx context.Context, sub string) (int64, erro
 	return c.end(ctx, `DELETE FROM console_sessions WHERE sub = ?`, sub)
 }
 
-func (c *ConsoleSessions) end(ctx context.Context, query, key string) (int64, error) {
+// EndBySubExcept ends every session of the account sub but those signed in
+// under the identity session sid, the request's own ("sign out everywhere
+// else", geekdojo/geekdojo-brain#994), and returns how many it ended.
+func (c *ConsoleSessions) EndBySubExcept(ctx context.Context, sub, sid string) (int64, error) {
+	if sid == "" {
+		return 0, errors.New("auth: ending console sessions needs a session to keep")
+	}
+	return c.end(ctx, `DELETE FROM console_sessions WHERE sub = ? AND sid <> ?`, sub, sid)
+}
+
+func (c *ConsoleSessions) end(ctx context.Context, query, key string, more ...any) (int64, error) {
 	if key == "" {
 		return 0, errors.New("auth: ending console sessions needs a key")
 	}
-	res, err := c.db.ExecContext(ctx, query, key)
+	res, err := c.db.ExecContext(ctx, query, append([]any{key}, more...)...)
 	if err != nil {
 		return 0, fmt.Errorf("auth: end console sessions: %w", err)
 	}

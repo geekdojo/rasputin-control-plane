@@ -566,3 +566,28 @@ func TestDisabled_ExchangeAndForwarding(t *testing.T) {
 		t.Errorf("Forwarding: %v", err)
 	}
 }
+
+// TC-994-26 (the client's part): a TextBody goes as text/plain, its bytes
+// as they are, and the value it came from is left whole.
+func TestClient_AdminTextBody(t *testing.T) {
+	p := newPKI(t)
+	var gotType, gotBody atomic.Pointer[string]
+	srv := newServer(t, p, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		ct, body := r.Header.Get("Content-Type"), string(b)
+		gotType.Store(&ct)
+		gotBody.Store(&body)
+		w.WriteHeader(http.StatusNoContent)
+	}, nil)
+	c, _ := newClient(t, p, srv.URL)
+	label := secret.New([]byte(`Ana's "phone"`))
+	if _, err := c.Admin(t.Context(), secret.New([]byte("tok")), http.MethodPut, adminRead, TextBody(label), nil); err != nil {
+		t.Fatal(err)
+	}
+	if *gotType.Load() != "text/plain" || *gotBody.Load() != `Ana's "phone"` {
+		t.Errorf("sent %q %q", *gotType.Load(), *gotBody.Load())
+	}
+	if string(label.Reveal()) != `Ana's "phone"` {
+		t.Error("the call zeroed the caller's value")
+	}
+}

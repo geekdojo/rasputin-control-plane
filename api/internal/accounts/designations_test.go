@@ -2,10 +2,12 @@ package accounts
 
 import (
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/dbutil"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
 
 func openDesignations(t *testing.T) (*Designations, string) {
@@ -126,5 +128,110 @@ func TestOpenDesignations_TC990_31_Upgrade(t *testing.T) {
 	}
 	if _, err := OpenDesignations(t.Context(), path, nil); err == nil {
 		t.Error("OpenDesignations with no clock succeeded")
+	}
+}
+
+// TC-994-17: a database holding #990's table (no network column) and one
+// row upgrades on open, twice; the old row reads network ”; Designate,
+// Choose and Withdraw work field by field; an unreadable table is an error
+// from each method, and a step that needs it fails with its sentence and
+// changes no role.
+func TestDesignations_TC994_17_Upgrade(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rasputin.db")
+	old, err := dbutil.Open(t.Context(), path, `
+CREATE TABLE designations (sub TEXT PRIMARY KEY, console_role TEXT NOT NULL, app_role TEXT NOT NULL,
+    reason TEXT NOT NULL, created_at INTEGER NOT NULL);
+INSERT INTO designations VALUES ('old', 'admin', 'admin', 'first_admin', 1);`, "old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = old.Close()
+	for range 2 {
+		d, err := OpenDesignations(t.Context(), path, time.Now)
+		if err != nil {
+			t.Fatalf("open: %v", err)
+		}
+		_ = d.Close()
+	}
+	d, err := OpenDesignations(t.Context(), path, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	var cols []string
+	rows, err := d.db.QueryContext(t.Context(), `SELECT name FROM pragma_table_info('designations')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var c string
+		_ = rows.Scan(&c)
+		cols = append(cols, c)
+	}
+	_ = rows.Close()
+	x, ok, err := d.Get(t.Context(), "old")
+	if !slices.Contains(cols, "network") || err != nil || !ok || x.Network != "" || x.ConsoleRole != "admin" || x.Reason != ReasonFirstAdmin {
+		t.Errorf("columns %v, old row %+v %v %v", cols, x, ok, err)
+	}
+
+	ctx := t.Context()
+	if err := d.Choose(ctx, "c", LevelNetwork, "gear-admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Choose(ctx, "c", LevelConsole, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Choose(ctx, "c", LevelConsole, "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	if x, _, _ := d.Get(ctx, "c"); x.ConsoleRole != "viewer" || x.Network != "gear-admin" || x.Reason != ReasonPrivileged {
+		t.Errorf("after the choices: %+v", x)
+	}
+	if err := d.Designate(ctx, Designation{Sub: "c", ConsoleRole: "operator", Network: "gear-admin", Reason: ReasonReset}); err != nil {
+		t.Fatal(err)
+	}
+	if x, _, _ := d.Get(ctx, "c"); x.ConsoleRole != "operator" || x.Reason != ReasonReset {
+		t.Errorf("a re-designation keeps the higher: %+v", x)
+	}
+	for _, l := range []Level{LevelConsole, LevelNetwork} {
+		if err := d.Withdraw(ctx, "c", l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok, _ := d.Get(ctx, "c"); ok {
+		t.Error("an empty designation kept its row")
+	}
+	if err := d.Withdraw(ctx, "nobody", LevelApp); err != nil {
+		t.Errorf("withdrawing from no designation: %v", err)
+	}
+	for _, bad := range []error{d.Choose(ctx, "c", LevelNetwork, "gear-root"), d.Choose(ctx, "c", "nowhere", "x"), d.Choose(ctx, "c", LevelApp, "")} {
+		if bad == nil {
+			t.Error("a bad choice was accepted")
+		}
+	}
+
+	if _, err := d.db.ExecContext(ctx, `DROP TABLE designations`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Designate(ctx, Designation{Sub: "a", ConsoleRole: "admin", Reason: ReasonReset}); err == nil {
+		t.Error("Designate on an unreadable table")
+	}
+	if err := d.Withdraw(ctx, "a", LevelApp); err == nil {
+		t.Error("Withdraw on an unreadable table")
+	}
+	if _, _, err := d.Get(ctx, "a"); err == nil {
+		t.Error("Get on an unreadable table")
+	}
+	if _, err := d.List(ctx); err == nil {
+		t.Error("List on an unreadable table")
+	}
+
+	h := newChangeHarness(t)
+	if _, err := h.designations.db.ExecContext(ctx, `DROP TABLE designations`); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(t, adminSubmitter, KindSetRoles, RoleSpec{AccountID: target, Role: "operator"}, true, "")
+	if r.job.Status != jobs.StatusFailed || r.job.Error != sentenceDesignation || len(h.log.only("add-console")) != 0 {
+		t.Errorf("the step: %s %q, roles %v", r.job.Status, r.job.Error, h.log.only("add-console"))
 	}
 }

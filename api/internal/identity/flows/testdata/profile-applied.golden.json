@@ -60,6 +60,19 @@
       }
     },
     {
+      "displayName": "rasputin_email",
+      "multivalued": false,
+      "name": "rasputin_email",
+      "permissions": {
+        "edit": [
+          "admin"
+        ],
+        "view": [
+          "admin"
+        ]
+      }
+    },
+    {
       "displayName": "rasputin_network",
       "multivalued": true,
       "name": "rasputin_network",

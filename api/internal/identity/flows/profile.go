@@ -22,12 +22,19 @@ const (
 
 // AdminOnlyAttributes are the user attributes only an administrator sees or
 // edits, by name, with whether each holds more than one value: the app role,
-// the network grants and the five markers. The flows' conditions read them.
+// the network grants, the confirmed email and the five markers. The flows'
+// conditions read them.
 var AdminOnlyAttributes = map[string]bool{
-	attrAppRole: false, attrNetwork: true,
+	attrAppRole: false, attrNetwork: true, AttrConfirmedEmail: false,
 	MarkerWebAuthnHome: false, MarkerWebAuthnApp: false,
 	MarkerSecondStepHome: false, MarkerSecondStepApp: false, MarkerSecondStepAny: false,
 }
+
+// AttrConfirmedEmail is the confirmed email (geekdojo/geekdojo-brain#994):
+// the address an administrator confirmed, which the rasputin-app-email
+// client scope gives app tokens as email. The profile's own email is never
+// given to apps.
+const AttrConfirmedEmail = "rasputin_email"
 
 // ProfileDiff is one owned part of the user profile that differs.
 type ProfileDiff struct {

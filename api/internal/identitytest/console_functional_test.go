@@ -113,6 +113,10 @@ type consoleRig struct {
 	// action is the sign-in's accounts.reset_password action, set by the
 	// reset rig once its runner exists.
 	action lateAction
+	// fresh is every fresh-gated account change's action and users a sink
+	// of the drain, set by the accounts rig (geekdojo/geekdojo-brain#994).
+	fresh lateAction
+	users lateUserSink
 	// claim and reg are the first-run claim's and registration's
 	// collaborators (geekdojo/geekdojo-brain#990), set by the first-run rig;
 	// until then first run is off and registration's facts are the door
@@ -239,6 +243,28 @@ func (l *lateAction) Run(ctx context.Context, p auth.Principal, payload auth.Act
 	return a.Run(ctx, p, payload)
 }
 
+// lateUserSink is a sink of the drain set after the drain is built: the
+// accounts rig's designation observer. Unset, it takes nothing.
+type lateUserSink struct {
+	mu   sync.Mutex
+	sink events.UserSink
+}
+
+func (l *lateUserSink) set(s events.UserSink) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sink = s
+}
+
+func (l *lateUserSink) UserEvent(ctx context.Context, e events.UserEvent) {
+	l.mu.Lock()
+	s := l.sink
+	l.mu.Unlock()
+	if s != nil {
+		s.UserEvent(ctx, e)
+	}
+}
+
 // recordingExchanger keeps each ID token the console's exchange returns,
 // for TC-989-38's claims and TC-989-39's scan.
 type recordingExchanger struct {
@@ -363,6 +389,16 @@ func (r *consoleRig) inputs() converge.Inputs {
 	}
 }
 
+// signInActions are the sign-in's fresh-sign-in actions: the reset's, and every
+// fresh-gated account change's (geekdojo/geekdojo-brain#994).
+func (r *consoleRig) signInActions() map[string]auth.Action {
+	m := map[string]auth.Action{accounts.ResetKind: &r.action}
+	for _, k := range accounts.FreshKinds {
+		m[k] = &r.fresh
+	}
+	return m
+}
+
 func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	t.Helper()
 	r := &consoleRig{
@@ -411,7 +447,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		Door: table.Home, ConsoleHost: ConsoleHost, ClientID: baselineConsole, Realm: baselineRealm,
 		Exchanger: recordingExchanger{inner: client, r: r}, Verifier: verifier, Ender: adminEnder{s: r.session},
 		Ready: doorReady{}, Sessions: r.sessions, FirstRun: &r.claim, Claimer: &r.claim, Observer: &r.claim,
-		Actions: map[string]auth.Action{"accounts.reset_password": &r.action},
+		Actions: r.signInActions(),
 		Now:     time.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
@@ -454,7 +490,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	r.drainer, err = events.New(events.Deps{Admin: r.session, Marks: &doorMarks{m: map[string]string{}}, Signal: events.NewSignal(time.Now),
-		Realm: baselineRealm, UserSinks: []events.UserSink{r.th, r.sink},
+		Realm: baselineRealm, UserSinks: []events.UserSink{r.th, r.sink, &r.users},
 		AdminSinks: []events.AdminSink{r.conv, roleSink, adminEventLog{r: r}}, PassSinks: []events.PassSink{r.th, r.conv, r.passes}, Log: log})
 	if err != nil {
 		t.Fatal(err)
@@ -678,6 +714,9 @@ func TestConsole_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-989-38 T161 the upstream shapes", func(t *testing.T) { r.tc38(t) })
 	t.Run("TC-989-39 the sentinel scan", func(t *testing.T) { r.tc39(t, pw) })
 	t.Run("TC-1000-20 TC-1000-21 IA-F6 TS-20 console tokens and capabilities", func(t *testing.T) { r.tc1000(t, id, pw) })
+	// Identity 4.12's account changes (geekdojo/geekdojo-brain#994), last:
+	// they layer the accounts on this rig.
+	t.Run("Identity 4.12 account changes", func(t *testing.T) { accountsCases(t, r) })
 }
 
 // TC-989-37: converge's own write sets rasputin.console-url to the

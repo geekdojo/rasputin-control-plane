@@ -65,6 +65,7 @@ var wantClass = map[string]string{
 	"POST /api/jobs":           "anyjob",
 	// TC-992-22: the administrator's password reset (geekdojo/geekdojo-brain#992).
 	"POST /api/accounts/{id}/reset-password": "control:iam",
+	"POST /api/accounts/jobs":                "anyjob",
 	// TC-990-25: how many people wait for access (geekdojo/geekdojo-brain#990).
 	"GET /api/accounts/waiting":              "control:iam",
 	"GET /api/jobs":                          "view",
@@ -332,8 +333,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 117 {
-		t.Errorf("%d rules recorded, want 117", n)
+	if n := len(real.rules); n != 118 {
+		t.Errorf("%d rules recorded, want 118", n)
 	}
 }
 

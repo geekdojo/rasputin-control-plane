@@ -154,7 +154,8 @@ func (w identityState) startEvents(ctx context.Context, idw identityWiring, mark
 // logged and left out; a nil mw is left out.
 func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, mw *markers.Writer, log *slog.Logger) (events.Deps, *policy.Throttle) {
 	deps := events.Deps{Admin: idw.session, Marks: marks, Signal: idw.dirty, Realm: identityRealm, Log: log,
-		AdminSinks: sinks.admin, PassSinks: append([]events.PassSink{}, sinks.pass...)}
+		AdminSinks: sinks.admin, PassSinks: append([]events.PassSink{}, sinks.pass...),
+		UserSinks: append([]events.UserSink{}, sinks.user...)}
 	var th *policy.Throttle
 	if tableErr == nil {
 		var err error
