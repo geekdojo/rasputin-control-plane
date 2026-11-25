@@ -193,7 +193,7 @@ func TestFirstPassword_TC1005_14_SpecHoldsNoSecret(t *testing.T) {
 	if r.job.CreatedBy != movedSub {
 		t.Errorf("created by %q", r.job.CreatedBy)
 	}
-	rows, _ := json.Marshal(r)
+	var rows []byte
 	for _, b := range []any{r.job, r.steps} {
 		raw, _ := json.Marshal(b)
 		rows = append(rows, raw...)

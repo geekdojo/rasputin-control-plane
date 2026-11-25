@@ -18,6 +18,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -81,13 +82,17 @@ const (
 	// the bridge's finish or in accounts.set_first_password.
 	SentenceHasPassword       = "This account already has a password, so sign in with it instead."
 	sentenceBridgeUnavailable = "Sign-in isn't available right now, so your passkey couldn't be checked. Try again shortly."
-	sentenceBridgeOff         = "Signing in with a passkey from before the update isn't available on this Rasputin."
-	sentenceBridgeTooLarge    = "The request is too large."
-	sentenceBridgeBadRequest  = "The request couldn't be read. Start again from the sign-in page."
-	sentenceEmailInvalid      = "Enter your email address, such as name@example.com."
-	sentenceGrantUsed         = "This step has already been used. Start again from the sign-in page."
-	sentencePasswordNotSet    = "Rasputin couldn't set your password. Start again from the sign-in page."
-	sentenceOfferUnreadable   = "Rasputin couldn't check for accounts from before the update."
+	// sentenceCheckUnavailable is a dependency that failed while the
+	// password step checked the password and email: the passkey was
+	// accepted and the grant is unspent, so trying again works.
+	sentenceCheckUnavailable = "Your passkey was accepted, but Rasputin couldn't check your new password and email right now. Try again shortly."
+	sentenceBridgeOff        = "Signing in with a passkey from before the update isn't available on this Rasputin."
+	sentenceBridgeTooLarge   = "The request is too large."
+	sentenceBridgeBadRequest = "The request couldn't be read. Start again from the sign-in page."
+	sentenceEmailInvalid     = "Enter your email address, such as name@example.com."
+	sentenceGrantUsed        = "This step has already been used. Start again from the sign-in page."
+	sentencePasswordNotSet   = "Rasputin couldn't set your password. Start again from the sign-in page."
+	sentenceOfferUnreadable  = "Rasputin couldn't check for accounts from before the update."
 )
 
 // MovedAccount is a pre-update operator's moved account, as the bridge and
@@ -239,9 +244,29 @@ func (b *Bridge) refuse(w http.ResponseWriter, r *http.Request, status int, code
 }
 
 // unavailable is a dependency that did not answer: 503, one ERROR record.
-func (b *Bridge) unavailable(w http.ResponseWriter, r *http.Request, kind string) {
-	b.refuse(w, r, http.StatusServiceUnavailable, BridgeCodeUnavailable, sentenceBridgeUnavailable, slog.LevelError,
-		"bridge.unavailable", slog.String("kind", kind))
+func (b *Bridge) unavailable(w http.ResponseWriter, r *http.Request, kind string, err error) {
+	b.unavailableWith(w, r, kind, sentenceBridgeUnavailable, err)
+}
+
+// unavailableWith is unavailable with the sentence for the step it failed
+// at. The error itself is not logged: an identity-service error names the
+// account in its path, so only its cause and status go in the record
+// (LOG-SECRETS), as in SignIn's claim (signin.go).
+func (b *Bridge) unavailableWith(w http.ResponseWriter, r *http.Request, kind, sentence string, err error) {
+	attrs := []slog.Attr{slog.String("kind", kind), slog.String("cause", dependencyCause(err))}
+	var ie *idclient.Error
+	if errors.As(err, &ie) {
+		attrs = append(attrs, slog.Int("status", ie.Status))
+	}
+	b.refuse(w, r, http.StatusServiceUnavailable, BridgeCodeUnavailable, sentence, slog.LevelError, "bridge.unavailable", attrs...)
+}
+
+// dependencyCause is a fixed word for why a dependency failed.
+func dependencyCause(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline"
+	}
+	return kindOf(err)
 }
 
 // key is a fresh cookie value from the injected randomness.
@@ -309,12 +334,12 @@ func (b *Bridge) begin(w http.ResponseWriter, r *http.Request) {
 	}
 	assertion, sd, err := b.web.BeginDiscoverableLogin()
 	if err != nil {
-		b.unavailable(w, r, "ceremony")
+		b.unavailable(w, r, "ceremony", err)
 		return
 	}
 	key, err := b.key()
 	if err != nil {
-		b.unavailable(w, r, "random")
+		b.unavailable(w, r, "random", err)
 		return
 	}
 	b.records.put(key, &bridgeRecord{session: sd, expires: b.d.Now().Add(bridgeLifetime)})
@@ -362,7 +387,7 @@ func (b *Bridge) finish(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case lookupErr != nil:
 		clearCookie(w, bridgeCookieName)
-		b.unavailable(w, r, "old_user")
+		b.unavailable(w, r, "old_user", lookupErr)
 		return
 	case err != nil:
 		clearCookie(w, bridgeCookieName)
@@ -374,7 +399,7 @@ func (b *Bridge) finish(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err != nil:
 		clearCookie(w, bridgeCookieName)
-		b.unavailable(w, r, "move_row")
+		b.unavailable(w, r, "move_row", err)
 		return
 	case !moved:
 		clearCookie(w, bridgeCookieName)
@@ -386,7 +411,7 @@ func (b *Bridge) finish(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err != nil:
 		clearCookie(w, bridgeCookieName)
-		b.unavailable(w, r, "identity")
+		b.unavailable(w, r, "identity", err)
 		return
 	case has:
 		clearCookie(w, bridgeCookieName)
@@ -397,7 +422,7 @@ func (b *Bridge) finish(w http.ResponseWriter, r *http.Request) {
 	next, err := b.key()
 	if err != nil {
 		clearCookie(w, bridgeCookieName)
-		b.unavailable(w, r, "random")
+		b.unavailable(w, r, "random", err)
 		return
 	}
 	b.records.put(next, &bridgeRecord{grant: &bridgeGrant{sub: acct.Sub, name: acct.Name, oldName: acct.OldName},
@@ -506,7 +531,7 @@ func (b *Bridge) password(w http.ResponseWriter, r *http.Request) {
 	defer email.Destroy()
 	ctx := r.Context()
 	if err := b.d.FirstPassword.Check(ctx, g.sub, pw, email); err != nil {
-		b.refused(w, r, err, "bridge.password_refused")
+		b.refused(w, r, err, "bridge.password_refused", sentenceCheckUnavailable)
 		return
 	}
 	if !g.spent.CompareAndSwap(false, true) {
@@ -514,7 +539,9 @@ func (b *Bridge) password(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := b.d.FirstPassword.Set(ctx, authz.BridgeGrant(g.sub), g.sub, pw, email); err != nil {
-		b.refused(w, r, err, "bridge.not_set")
+		// The grant is spent, so a failure here sends the person back to
+		// the sign-in page rather than to grant_used.
+		b.refused(w, r, err, "bridge.not_set", sentencePasswordNotSet)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"next": bridgeNext})
@@ -527,15 +554,16 @@ func (b *Bridge) grantUsed(w http.ResponseWriter, r *http.Request) {
 }
 
 // refused answers Check's or Set's error: a *BridgeRefusal with its own
-// code and sentence, anything else as a dependency that did not answer.
-func (b *Bridge) refused(w http.ResponseWriter, r *http.Request, err error, event string) {
+// code and sentence, anything else as a dependency that did not answer,
+// told with down, the sentence for the step that failed.
+func (b *Bridge) refused(w http.ResponseWriter, r *http.Request, err error, event, down string) {
 	var ref *BridgeRefusal
 	if !errors.As(err, &ref) {
 		if errors.Is(err, context.Canceled) {
 			b.refuse(w, r, http.StatusConflict, BridgeCodeNotSet, sentencePasswordNotSet, slog.LevelWarn, event, slog.String("cause", "cancelled"))
 			return
 		}
-		b.unavailable(w, r, "first_password")
+		b.unavailableWith(w, r, "first_password", down, err)
 		return
 	}
 	level := slog.LevelWarn

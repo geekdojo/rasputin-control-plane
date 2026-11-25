@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/passkeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -490,6 +492,73 @@ func TestBridge_TC1005_09_DependencyDown(t *testing.T) {
 	}
 }
 
+// F-1005-14: a dependency that fails while the password step checks the
+// password and email answers 503 with the password step's own sentence,
+// not the passkey's; the grant is kept and a retry succeeds.
+func TestBridge_F1005_14_CheckDependencyDown(t *testing.T) {
+	r := newBridgeRig(t)
+	g := r.grant(t)
+	r.first.set(func(f *fakeFirst) { f.checkErr = errTest })
+	w := r.password(goodBody, g)
+	if code, sentence, _ := codeOf(t, w); w.Code != http.StatusServiceUnavailable || code != BridgeCodeUnavailable || sentence != sentenceCheckUnavailable {
+		t.Errorf("%d %s", w.Code, w.Body.String())
+	}
+	if rec, ok := r.bridge.records.peek(g.Value); !ok || rec.grant.spent.Load() {
+		t.Error("the grant is gone or spent")
+	}
+	if recs := r.log.AtLevel(slog.LevelError); len(recs) != 1 {
+		t.Errorf("log %s", r.log.Text())
+	} else if kind, _ := logkittest.Attr(recs[0], "kind"); kind != "first_password" {
+		t.Errorf("kind %q", kind)
+	}
+	r.first.set(func(f *fakeFirst) { f.checkErr = nil })
+	if w := r.password(goodBody, g); w.Code != http.StatusOK {
+		t.Errorf("the retry: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// F-1005-15: the 503's ERROR record carries the dependency's cause and,
+// for an identity-service error, its status; never the error's text, whose
+// path names the account.
+func TestBridge_F1005_15_UnavailableLogsCause(t *testing.T) {
+	for name, c := range map[string]struct {
+		err    error
+		cause  string
+		status string
+	}{
+		"identity unreachable": {&idclient.Error{Op: "admin", Path: "/admin/realms/r/users/" + bridgeLogProbe + "/credentials", Status: 503, Kind: idclient.ErrUnreachable}, "unreachable", "503"},
+		"deadline":             {fmt.Errorf("read %s: %w", bridgeLogProbe, context.DeadlineExceeded), "deadline", ""},
+		"other":                {fmt.Errorf("read %s: %w", bridgeLogProbe, errTest), "other", ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newBridgeRig(t)
+			opts, ck := r.begin(t)
+			body := r.assertion(t, r.a, opts, nil)
+			r.first.set(func(f *fakeFirst) { f.hasErr = c.err })
+			serveBridge(r.h, http.MethodPost, "/api/auth/bridge/finish", body, ck)
+			recs := r.log.AtLevel(slog.LevelError)
+			if len(recs) != 1 {
+				t.Fatalf("log %s", r.log.Text())
+			}
+			if v, _ := logkittest.Attr(recs[0], "kind"); v != "identity" {
+				t.Errorf("kind %q", v)
+			}
+			if v, _ := logkittest.Attr(recs[0], "cause"); v != c.cause {
+				t.Errorf("cause %q", v)
+			}
+			if v, ok := logkittest.Attr(recs[0], "status"); v != c.status || ok != (c.status != "") {
+				t.Errorf("status %q %v", v, ok)
+			}
+			if strings.Contains(r.log.Text(), bridgeLogProbe) {
+				t.Errorf("the error's text was logged: %s", r.log.Text())
+			}
+		})
+	}
+}
+
+// bridgeLogProbe stands for an account id inside a dependency's error text.
+const bridgeLogProbe = "probe-account-0c1d"
+
 // TC-1005-10: every refusal at the password step keeps the grant, carries
 // the API's own sentence, and a following valid POST succeeds.
 func TestBridge_TC1005_10_RefusalsKeepTheGrant(t *testing.T) {
@@ -567,8 +636,10 @@ func TestBridge_TC1005_12_BoundsAndSuccess(t *testing.T) {
 	r3 := newBridgeRig(t)
 	g3 := r3.grant(t)
 	r3.first.set(func(f *fakeFirst) { f.setErr = errTest })
-	if code, _, _ := codeOf(t, r3.password(goodBody, g3)); code != BridgeCodeUnavailable {
-		t.Errorf("a submission error: %s", code)
+	// F-1005-14: the grant is spent once Set runs, so a submission error
+	// sends the person back to the sign-in page, not to try again.
+	if code, sentence, _ := codeOf(t, r3.password(goodBody, g3)); code != BridgeCodeUnavailable || sentence != sentencePasswordNotSet {
+		t.Errorf("a submission error: %s %q", code, sentence)
 	}
 	r4 := newBridgeRig(t)
 	g4 := r4.grant(t)
