@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
@@ -19,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/move"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
@@ -389,6 +391,8 @@ func (s *Server) routes() *routeMux {
 	gate("GET /api/repair/state", repairNeeds(), s.handleRepairState)
 	gate("POST /api/repair/end", repairNeeds(), s.handleRepairEnd)
 	gate("POST /api/repair/restart", repairJob(breakglass.RestartKind), s.handleRepairRestart)
+	gate("POST /api/repair/reset", repairJob(accounts.RepairResetKind), s.handleRepairReset)
+	gate("POST /api/repair/move", repairJob(move.Kind), s.handleRepairMove)
 
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
 	gate("POST /api/accounts/{id}/reset-password", needs(authz.NeedControl(authz.IAM)), s.handleResetPassword)

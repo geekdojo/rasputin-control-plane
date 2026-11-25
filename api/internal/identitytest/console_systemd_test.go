@@ -159,6 +159,10 @@ type consoleStackOpts struct {
 	// enables the authenticator app (geekdojo/geekdojo-brain#987). The
 	// runner has no timesyncd, so without it CONFIGURE_TOTP is disabled.
 	clockSynced bool
+	// seedDB, when set, writes the api's rasputin.db at dbPath before the api
+	// first starts: the pre-update operators the identity move imports
+	// (geekdojo/geekdojo-brain#321, C9).
+	seedDB func(t *testing.T, dbPath string)
 }
 
 // startConsoleStack starts the api built from this tree and the pinned
@@ -220,6 +224,12 @@ func startConsoleStack(t *testing.T, opts consoleStackOpts) (*consoleStack, cont
 	}
 	if opts.clockSynced {
 		markClockSynced(t)
+	}
+	if opts.seedDB != nil {
+		if err := atrest.EnsureSecretDir(s.dataDir); err != nil {
+			t.Fatal(err)
+		}
+		opts.seedDB(t, filepath.Join(s.dataDir, "rasputin.db"))
 	}
 	s.startAPI(apiBin)
 	s.awaitFiles(ctx, "the api minted the identity CA and its leaves",

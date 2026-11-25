@@ -29,13 +29,13 @@ type DemoteUsers interface {
 	SetNetwork(ctx context.Context, sub string, grants []string) error
 }
 
-// designateLevels records lv as sub's designation, reason reset, keeping
-// the higher of each field already recorded. An empty lv records nothing.
-func designateLevels(ctx context.Context, des Designator, sub string, lv authz.Levels) error {
+// designateLevels records lv as sub's designation with reason, keeping the
+// higher of each field already recorded. An empty lv records nothing.
+func designateLevels(ctx context.Context, des Designator, sub string, lv authz.Levels, reason Reason) error {
 	if lv.Empty() {
 		return nil
 	}
-	x := Designation{Sub: sub, ConsoleRole: lv.Console, Reason: ReasonReset}
+	x := Designation{Sub: sub, ConsoleRole: lv.Console, Reason: reason}
 	if lv.App {
 		x.AppRole = AppAdmin
 	}
@@ -108,7 +108,7 @@ func (r *Redesignator) Redesignate(ctx context.Context, sub string) (authz.Level
 		return authz.Levels{}, fmt.Errorf("read the account's facts: %w", err)
 	}
 	lv := authz.PrivilegedLevels(f)
-	if err := designateLevels(ctx, r.d.Designations, sub, lv); err != nil {
+	if err := designateLevels(ctx, r.d.Designations, sub, lv, ReasonReset); err != nil {
 		return lv, fmt.Errorf("record the designation: %w", err)
 	}
 	if err := demoteLevels(ctx, r.d.Users, sub, lv); err != nil {

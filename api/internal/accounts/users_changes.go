@@ -190,6 +190,34 @@ func (u *Users) Unlock(ctx context.Context, sub string) error {
 	return nil
 }
 
+// AddRequiredAction adds action to the account's pending required actions,
+// those it holds as read in the same write, and reads it back. An action
+// already pending writes nothing. The caller holds the accounts lock: the
+// write is the whole account's (geekdojo/geekdojo-brain#321).
+func (u *Users) AddRequiredAction(ctx context.Context, sub, action string) error {
+	if action == "" {
+		return errors.New("accounts: no required action")
+	}
+	p, err := u.Read(ctx, sub)
+	switch {
+	case err != nil:
+		return err
+	case slices.Contains(p.RequiredActions, action):
+		return nil
+	}
+	err = u.writeFrom(ctx, sub, func(rep, body, _ map[string]any) {
+		held, _ := rep["requiredActions"].([]any)
+		if !slices.Contains(held, any(action)) {
+			held = append(slices.Clone(held), action)
+		}
+		body["requiredActions"] = held
+	})
+	if err != nil {
+		return err
+	}
+	return u.readBack(ctx, sub, func(p Person) bool { return slices.Contains(p.RequiredActions, action) })
+}
+
 // DeleteCredential removes one of the account's credentials (register row
 // T273).
 func (u *Users) DeleteCredential(ctx context.Context, sub, credID string) error {

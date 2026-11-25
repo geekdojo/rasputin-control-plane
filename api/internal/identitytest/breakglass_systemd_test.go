@@ -45,6 +45,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 const (
@@ -482,17 +483,37 @@ func (bg *breakGlass) tc33AdminSignIn(sess *http.Cookie) {
 }
 
 // signInAdmin makes a synthetic administrator with an authenticator app and
-// signs it in through the launcher with its password and a code. The
-// account enrols the app on a first sign-in, holding no role; once the api
-// has marked its second step, it is granted admin and signs in again.
+// signs it in through the launcher with its password and a code.
 func (bg *breakGlass) signInAdmin() {
+	a := bg.adminFixture(breakGlassAdmin)
+	a.pw.Destroy()
+}
+
+// adminFixture is a synthetic administrator: its id and name, its password
+// now, its authenticator app's secret, and the codes it has used.
+type adminFixture struct {
+	id, name string
+	pw       secret.Value
+	// next is the password an update-password page chooses.
+	next   secret.Value
+	secret string
+	codes  *totpCodes
+	// session is its console session after its last sign-in.
+	session *http.Cookie
+}
+
+// adminFixture makes a synthetic administrator named name with an
+// authenticator app and recovery codes, and signs it in through the launcher with its password
+// and a code. The account enrols the app on a first sign-in, holding no
+// role; once the api has marked its second step, it is granted admin and
+// signs in again.
+func (bg *breakGlass) adminFixture(name string) *adminFixture {
 	t := bg.t
 	ctx := t.Context()
 	pw, err := randomSecret(bg.s.cfg.Rand)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer pw.Destroy()
 	// The enrolment needs the authenticator app offered: converge enables
 	// CONFIGURE_TOTP once it reads the clock-sync fact (markClockSynced).
 	err = proctest.Await(bg.ctx, nil, func(ctx context.Context) (bool, string, error) {
@@ -510,55 +531,28 @@ func (bg *breakGlass) signInAdmin() {
 		t.Fatal(errNamed("converge enabled CONFIGURE_TOTP for the administrator fixture", err))
 	}
 	resp, err := bg.admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users", map[string]any{
-		"username": breakGlassAdmin, "enabled": true, "email": breakGlassAdmin + "@console.invalid", "emailVerified": true,
-		"firstName": "Break", "lastName": "Glass", "requiredActions": []string{flows.ActionConfigureTOTP},
+		"username": name, "enabled": true, "email": name + "@console.invalid", "emailVerified": true,
+		"firstName": "Break", "lastName": "Glass", "requiredActions": []string{flows.ActionConfigureTOTP, flows.ActionRecoveryCodes},
 		"credentials": []map[string]any{{"type": "password", "value": string(pw.Reveal()), "temporary": false}},
 	}, nil)
 	if err != nil {
 		t.Fatalf("create the administrator fixture: %v", err)
 	}
-	id := resp.Location[strings.LastIndex(resp.Location, "/")+1:]
-	codes := &totpCodes{used: map[string]bool{}}
-	var secretB32 string
-	steps := func(p signin.Page, body []byte) (string, map[string]string, error) {
-		switch p.ID {
-		case "login-login-config-totp":
-			m := regexp.MustCompile(`<img id="kc-totp-secret-qr-code" src="([^"]*)"`).FindSubmatch(body)
-			if m == nil {
-				return "", nil, errors.New("the setup page shows no QR code")
-			}
-			text, err := decodeQR(html.UnescapeString(string(m[1])))
-			if err != nil {
-				return "", nil, err
-			}
-			u, err := url.Parse(text)
-			if err != nil || u.Scheme != "otpauth" {
-				return "", nil, errors.New("the QR code holds no otpauth URI")
-			}
-			secretB32 = u.Query().Get("secret")
-			return "kc-totp-settings-form", map[string]string{"totp": codes.next(t, secretB32), "userLabel": "Break-glass phone"}, nil
-		case "login-login-otp":
-			return "kc-otp-login-form", map[string]string{"otp": codes.next(t, secretB32)}, nil
-		case "login-login-recovery-authn-code-config":
-			return "kc-recovery-codes-settings-form", nil, nil
-		}
-		return "", nil, fmt.Errorf("unexpected page %s", p.ID)
-	}
-	c := signin.Console{Origin: "https://" + consoleCID + ".local", Transport: admitted{next: bg.local.Transport, log: bg.s.cfg.Logger},
-		Logger: bg.s.cfg.Logger, Steps: steps}
+	a := &adminFixture{id: resp.Location[strings.LastIndex(resp.Location, "/")+1:], name: name, pw: pw,
+		codes: &totpCodes{used: map[string]bool{}}}
 	var refused *signin.ConsoleRefusedError
-	_, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw)
+	_, pages, err := signin.ConsoleSignIn(ctx, bg.console(a), name, pw)
 	if err != nil && !errors.As(err, &refused) {
 		t.Fatalf("the administrator fixture's enrolment (pages %v): %v", pages, err)
 	}
-	if secretB32 == "" {
+	if a.secret == "" {
 		t.Fatalf("the enrolment sign-in showed no authenticator app setup (pages %v)", pages)
 	}
 	err = proctest.Await(bg.ctx, nil, func(ctx context.Context) (bool, string, error) {
 		var u struct {
 			Attributes map[string][]string `json:"attributes"`
 		}
-		if _, err := bg.admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/users/"+id, nil, &u); err != nil {
+		if _, err := bg.admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/users/"+a.id, nil, &u); err != nil {
 			return false, err.Error(), nil
 		}
 		if v := u.Attributes[flows.MarkerSecondStepHome]; len(v) == 1 && v[0] == "true" {
@@ -581,23 +575,70 @@ func (bg *breakGlass) signInAdmin() {
 	if _, err := bg.admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/clients/"+clients[0].ID+"/roles/admin", nil, &role); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := bg.admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users/"+id+"/role-mappings/clients/"+clients[0].ID, []any{role}, nil); err != nil {
+	if _, err := bg.admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users/"+a.id+"/role-mappings/clients/"+clients[0].ID, []any{role}, nil); err != nil {
 		t.Fatal(err)
 	}
 	// So the grant's event cannot end the sign-in about to be made, as for
 	// the console fixture (F-989-19).
-	bg.s.awaitGrantDrained(bg.ctx, bg.admin, id)
-	jar, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw)
+	bg.s.awaitGrantDrained(bg.ctx, bg.admin, a.id)
+	if err := bg.signInAs(a); err != nil {
+		t.Fatalf("the administrator's sign-in: %v", err)
+	}
+	return a
+}
+
+// console is the launcher's sign-in for a, answering its authenticator
+// app's setup and codes, recovery codes, and a new password.
+func (bg *breakGlass) console(a *adminFixture) signin.Console {
+	t := bg.t
+	steps := func(p signin.Page, body []byte) (string, map[string]string, error) {
+		switch p.ID {
+		case "login-login-config-totp":
+			m := regexp.MustCompile(`<img id="kc-totp-secret-qr-code" src="([^"]*)"`).FindSubmatch(body)
+			if m == nil {
+				return "", nil, errors.New("the setup page shows no QR code")
+			}
+			text, err := decodeQR(html.UnescapeString(string(m[1])))
+			if err != nil {
+				return "", nil, err
+			}
+			u, err := url.Parse(text)
+			if err != nil || u.Scheme != "otpauth" {
+				return "", nil, errors.New("the QR code holds no otpauth URI")
+			}
+			a.secret = u.Query().Get("secret")
+			return "kc-totp-settings-form", map[string]string{"totp": a.codes.next(t, a.secret), "userLabel": "Break-glass phone"}, nil
+		case "login-login-otp":
+			return "kc-otp-login-form", map[string]string{"otp": a.codes.next(t, a.secret)}, nil
+		case "login-login-recovery-authn-code-config":
+			return "kc-recovery-codes-settings-form", nil, nil
+		case "login-login-update-password":
+			if a.next.Len() == 0 {
+				return "", nil, errors.New("the sign-in asked for a new password, and the fixture has none to give")
+			}
+			return "kc-passwd-update-form", map[string]string{"password-new": string(a.next.Reveal()), "password-confirm": string(a.next.Reveal())}, nil
+		}
+		return "", nil, fmt.Errorf("unexpected page %s", p.ID)
+	}
+	return signin.Console{Origin: "https://" + consoleCID + ".local", Transport: admitted{next: bg.local.Transport, log: bg.s.cfg.Logger},
+		Logger: bg.s.cfg.Logger, Steps: steps}
+}
+
+// signInAs signs a in through the launcher and keeps its console session;
+// an error is a sign-in that did not reach the console.
+func (bg *breakGlass) signInAs(a *adminFixture) error {
+	jar, pages, err := signin.ConsoleSignIn(bg.t.Context(), bg.console(a), a.name, a.pw)
 	if err != nil {
-		t.Fatalf("the administrator's sign-in (pages %v): %v", pages, err)
+		return fmt.Errorf("pages %v: %w", pages, err)
 	}
 	u, _ := url.Parse("https://" + consoleCID + ".local/")
 	for _, ck := range jar.Cookies(u) {
 		if ck.Name == auth.SessionCookieName {
-			return
+			a.session = &http.Cookie{Name: ck.Name, Value: ck.Value}
+			return nil
 		}
 	}
-	t.Fatal("the administrator's sign-in left no console session")
+	return fmt.Errorf("the sign-in left no console session (pages %v)", pages)
 }
 
 // doorBusy is the start of the home door's answer to a credential post while

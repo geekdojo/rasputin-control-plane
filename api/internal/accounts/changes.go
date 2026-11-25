@@ -599,22 +599,12 @@ func (c *Changes) removeSecondSteps(ctx context.Context, sc *jobs.StepCtx, spec 
 			return failStep(StepChange, sentenceCheck, err)
 		}
 		lv := authz.PrivilegedLevels(f)
-		if err := designateLevels(ctx, c.d.Designations, sub, lv); err != nil {
+		if err := designateLevels(ctx, c.d.Designations, sub, lv, ReasonReset); err != nil {
 			return failStep(StepChange, sentenceDesignation, err)
 		}
-		creds, err := c.d.Users.CredentialList(ctx, sub)
+		n, err := deleteCredentials(ctx, c.d.Users, sub, markers.IsSecondStep)
 		if err != nil {
 			return failStep(StepChange, sentenceChange, err)
-		}
-		n := 0
-		for _, cr := range creds {
-			if !markers.IsSecondStep(cr.Type) {
-				continue
-			}
-			if err := c.d.Users.DeleteCredential(ctx, sub, cr.ID); err != nil {
-				return failStep(StepChange, sentenceChange, err)
-			}
-			n++
 		}
 		if err := c.d.Markers.AfterRemoval(ctx, sub); err != nil {
 			return failStep(StepChange, sentenceMarkers, err)
@@ -629,6 +619,33 @@ func (c *Changes) removeSecondSteps(ctx context.Context, sc *jobs.StepCtx, spec 
 		return nil, err
 	}
 	return out, nil
+}
+
+// CredentialDeleter lists and deletes an account's credentials (*Users).
+type CredentialDeleter interface {
+	CredentialList(ctx context.Context, sub string) ([]Credential, error)
+	DeleteCredential(ctx context.Context, sub, credID string) error
+}
+
+// deleteCredentials deletes each of sub's credentials whose type match
+// accepts, and returns how many it deleted. It stops at the first list or
+// delete that fails, returning the count deleted before it.
+func deleteCredentials(ctx context.Context, users CredentialDeleter, sub string, match func(credType string) bool) (int, error) {
+	creds, err := users.CredentialList(ctx, sub)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, cr := range creds {
+		if !match(cr.Type) {
+			continue
+		}
+		if err := users.DeleteCredential(ctx, sub, cr.ID); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }
 
 // demote takes the privileged levels lv away (demoteLevels).

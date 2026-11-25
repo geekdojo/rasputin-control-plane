@@ -170,6 +170,10 @@ type Service struct {
 	// root on to make a repair code (LastResort.Alerts,
 	// geekdojo/geekdojo-brain#321). Nil means no such alert.
 	lastResortAlerts func(ctx context.Context, now time.Time) []proto.Alert
+	// lostAccountsAlerts, when set, reports sign-in having lost its
+	// accounts while the pre-update ones remain (LostAccounts.Alerts,
+	// geekdojo/geekdojo-brain#321 C9).
+	lostAccountsAlerts func(ctx context.Context, now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -292,6 +296,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if s.lastResortAlerts != nil {
 		out = append(out, s.lastResortAlerts(ctx, now)...)
+	}
+	if s.lostAccountsAlerts != nil {
+		out = append(out, s.lostAccountsAlerts(ctx, now)...)
 	}
 	if s.outcomeAlerts != nil {
 		alerts, err := s.outcomeAlerts(ctx, now)

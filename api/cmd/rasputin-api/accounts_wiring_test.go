@@ -139,6 +139,12 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	if w.access == nil {
 		t.Error("no access grant")
 	}
+	// TC-321-52: the break-glass repair reset registers as a person's kind
+	// with the terminal hook, and its decider is built.
+	if wf, ok := r.kinds[accounts.RepairResetKind]; !ok || wf.System || wf.OnTerminal == nil ||
+		wf.Steps[0].Name != accounts.StepClearSecondSteps || wf.Steps[1].Name != accounts.StepSetTemporary || w.repairResets == nil {
+		t.Errorf("accounts.repair_reset registered %v", ok)
+	}
 	// #994: the accounts are under main's one lock, the marker writer's.
 	if w.lock != d.lock {
 		t.Error("the accounts lock is not the one main handed over")

@@ -7,6 +7,7 @@ import (
 	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,10 +19,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/move"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/restart"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 // The break-glass endpoints (geekdojo/geekdojo-brain#321) over the real
@@ -35,6 +41,14 @@ const (
 type repairAlerts struct {
 	mu               sync.Mutex
 	issued, redeemed int
+	resets           []string
+}
+
+func (a *repairAlerts) RaiseBreakGlassReset(_ context.Context, _, account string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.resets = append(a.resets, account)
+	return nil
 }
 
 func (a *repairAlerts) RaiseBreakGlassIssued(context.Context, string) error {
@@ -63,6 +77,11 @@ type repairRig struct {
 	// out collects every body and header the rig's requests were answered
 	// with, for TC-321-25's search.
 	out strings.Builder
+	// resets and move are the reset and C9's state the service is given;
+	// alerts are its alerts.
+	resets breakglass.Resets
+	move   breakglass.MoveState
+	alerts *repairAlerts
 }
 
 // newRepairRig is an api fixture with the break-glass service wired, its
@@ -71,8 +90,16 @@ type repairRig struct {
 // identity.restart on the runner.
 func newRepairRig(t *testing.T, identity breakglass.Identity, register bool) *repairRig {
 	t.Helper()
+	return newRepairRigWith(t, identity, register, func(*repairRig) {})
+}
+
+// newRepairRigWith is newRepairRig with wire run on the rig before the
+// service is built, to give it a reset or C9's state.
+func newRepairRigWith(t *testing.T, identity breakglass.Identity, register bool, wire func(*repairRig)) *repairRig {
+	t.Helper()
 	f := routeFixture(t)
 	r := &repairRig{f: f}
+	wire(r)
 	r.svc = newRepairService(t, r, identity)
 	f.srv.SetRepair(r.svc)
 	f.handler = f.srv.Handler()
@@ -97,7 +124,7 @@ func newRepairService(t *testing.T, r *repairRig, identity breakglass.Identity) 
 	n := 0
 	svc, err := breakglass.New(breakglass.Deps{
 		Now: time.Now, Rand: rand.Reader, IDs: func() string { n++; return fmt.Sprintf("ev-%d", n) }, Log: log,
-		Alerts: &repairAlerts{}, Jobs: r.f.jobsStore, Identity: identity,
+		Alerts: r.alertsOrNew(), Jobs: r.f.jobsStore, Identity: identity, Resets: r.resets, Move: r.move,
 		Busy: func(context.Context) (string, bool) { return "", false },
 		Facts: breakglass.Facts{ConsoleHost: repairHost, PrimaryIP: func() net.IP { return net.ParseIP(repairIP) },
 			BMCHost: func() bool { return r.bmcHost }},
@@ -106,6 +133,13 @@ func newRepairService(t *testing.T, r *repairRig, identity breakglass.Identity) 
 		t.Fatal(err)
 	}
 	return svc
+}
+
+func (r *repairRig) alertsOrNew() *repairAlerts {
+	if r.alerts == nil {
+		r.alerts = &repairAlerts{}
+	}
+	return r.alerts
 }
 
 // issue makes a code as the command does and hands its hash to the service.
@@ -638,4 +672,272 @@ func TestRepair_Unwired(t *testing.T) {
 		http.StatusServiceUnavailable, codeRepairUnavailable)
 	wantCoded(t, "ways", r.do(req{method: http.MethodGet, path: "/api/repair/ways"}), http.StatusServiceUnavailable, codeRepairUnavailable)
 	wantCoded(t, "state", r.do(req{method: http.MethodGet, path: "/api/repair/state"}), http.StatusUnauthorized, codeRepairSessionRequired)
+}
+
+// ---- the reset and the move (geekdojo/geekdojo-brain#321 PR 2) ----
+
+// apiResets is the repair reset over the fixture's real runner: Submit
+// submits accounts.repair_reset for the session's submitter unless
+// submitErr is set.
+type apiResets struct {
+	runner    *jobs.Runner
+	targets   []accounts.RepairTarget
+	submitErr error
+}
+
+func (a *apiResets) Targets(context.Context) ([]accounts.RepairTarget, error) { return a.targets, nil }
+
+func (a *apiResets) Confirm(_ context.Context, id string) (accounts.RepairTarget, string, error) {
+	for _, t := range a.targets {
+		if t.ID == id {
+			return t, "tok-" + id, nil
+		}
+	}
+	return accounts.RepairTarget{}, "", accounts.ErrNotRepairTarget
+}
+
+func (a *apiResets) Submit(ctx context.Context, by authz.Submitter, id string, _ secret.Value) (*jobs.Job, error) {
+	if a.submitErr != nil {
+		return nil, a.submitErr
+	}
+	return a.runner.SubmitFor(ctx, by, accounts.RepairResetKind, accounts.ResetSpec{AccountID: id}, nil)
+}
+
+// resetRepairRig is a repair rig with the reset wired over the fixture's
+// runner, registered when register is true, and a live session.
+func resetRepairRig(t *testing.T, register bool) (*repairRig, *apiResets, *http.Cookie) {
+	t.Helper()
+	var res *apiResets
+	r := newRepairRigWith(t, &repairIdentity{st: identitystate.Failed}, false, func(r *repairRig) {
+		res = &apiResets{runner: r.f.runner, targets: []accounts.RepairTarget{{ID: "sub-alice", Username: "alice"}}}
+		r.resets = res
+	})
+	if register {
+		r.f.runner.Register(noop(accounts.RepairResetKind))
+	}
+	return r, res, r.open(t, repairHost)
+}
+
+func (r *repairRig) post(path, body string, c *http.Cookie) *httptest.ResponseRecorder {
+	cs := []*http.Cookie{}
+	if c != nil {
+		cs = append(cs, c)
+	}
+	return r.do(req{method: http.MethodPost, path: path, body: body, cookies: cs})
+}
+
+// confirmBody is a 409 repair_confirm's body.
+type confirmBody struct {
+	Error         string             `json:"error"`
+	Code          string             `json:"code"`
+	CorrelationID string             `json:"correlationId"`
+	StateToken    string             `json:"stateToken"`
+	Account       *breakglass.Target `json:"account"`
+	Accounts      *int               `json:"accounts"`
+}
+
+func wantConfirm(t *testing.T, what string, w *httptest.ResponseRecorder) confirmBody {
+	t.Helper()
+	var b confirmBody
+	if w.Code != http.StatusConflict || json.Unmarshal(w.Body.Bytes(), &b) != nil || b.Code != codeRepairConfirm || b.CorrelationID == "" {
+		t.Fatalf("%s: %d %s, want 409 repair_confirm", what, w.Code, w.Body.String())
+	}
+	return b
+}
+
+// logText is every captured server record, rendered.
+func (r *repairRig) logText() string {
+	var b strings.Builder
+	r.f.logs.mu.Lock()
+	defer r.f.logs.mu.Unlock()
+	for _, rec := range r.f.logs.recs {
+		b.WriteString(rec.Message)
+		rec.Attrs(func(a slog.Attr) bool { b.WriteString(" " + a.Key + "=" + a.Value.String()); return true })
+		b.WriteString("\n")
+	}
+	return b.String() + r.rec.Text()
+}
+
+// TC-321-46: POST /api/repair/reset's answers, and the password nowhere.
+func TestRepair_Reset_TC321_46(t *testing.T) {
+	password := strings.Join([]string{"zebra", "quantum", "otter", "9471"}, "-") // synthetic test password, built so it reads as no key
+	r, res, c := resetRepairRig(t, true)
+	before := len(r.f.logs.withAttr("code", codeRepairConfirm))
+
+	for name, body := range map[string]string{"not JSON": "{", "no accountId": `{"stateToken":"x"}`,
+		"over the cap": `{"accountId":"` + strings.Repeat("a", maxRepairActionBody) + `"}`} {
+		wantCoded(t, name, r.post("/api/repair/reset", body, c), http.StatusBadRequest, codeInvalidRequest)
+	}
+	b := wantConfirm(t, "no token", r.post("/api/repair/reset", `{"accountId":"sub-alice"}`, c))
+	if b.StateToken != "tok-sub-alice" || b.Account == nil || *b.Account != (breakglass.Target{ID: "sub-alice", Name: "alice"}) ||
+		!strings.Contains(b.Error, "alice") || !strings.HasSuffix(b.Error, sentenceRepairResetNext) {
+		t.Errorf("no token: %+v", b)
+	}
+	if b = wantConfirm(t, "stale token", r.post("/api/repair/reset", `{"accountId":"sub-alice","stateToken":"old"}`, c)); b.StateToken != "tok-sub-alice" {
+		t.Errorf("stale token: %+v", b)
+	}
+	if n := len(r.f.logs.withAttr("code", codeRepairConfirm)); n != before {
+		t.Errorf("a 409 wrote %d refusal records", n-before)
+	}
+	wantCoded(t, "no password", r.post("/api/repair/reset", `{"accountId":"sub-alice","stateToken":"tok-sub-alice"}`, c),
+		http.StatusBadRequest, codeInvalidRequest)
+	wantCoded(t, "a non-target", r.post("/api/repair/reset", `{"accountId":"sub-bob"}`, c), http.StatusForbidden, codeRepairResetTarget)
+
+	confirmed := `{"accountId":"sub-alice","stateToken":"tok-sub-alice","password":"` + password + `"}`
+	for _, tc := range []struct {
+		err    error
+		status int
+		code   string
+	}{
+		{&accounts.PasswordRefused{Rule: "denylist", Sentence: "That password is too common. Choose another."}, http.StatusBadRequest, codePasswordRefused},
+		{accounts.ErrPasswordCheckUnavailable, http.StatusServiceUnavailable, codePasswordCheckUnavailable},
+		{fmt.Errorf("%w: down", accounts.ErrIdentityUnavailable), http.StatusServiceUnavailable, codeIdentityNotReady},
+		{&authz.KindRefusal{Code: authz.CodeNotPermitted, Sentence: "You don't have permission to run this job."}, http.StatusForbidden, "job_not_permitted"},
+		{fmt.Errorf("submit: %w", jobs.ErrUnknownKind), http.StatusServiceUnavailable, codeJobUnavailable},
+		{errors.New("the ledger is gone"), http.StatusInternalServerError, codeJobStartFailed},
+	} {
+		res.submitErr = tc.err
+		e := wantCoded(t, tc.code, r.post("/api/repair/reset", confirmed, c), tc.status, tc.code)
+		if tc.code == codePasswordRefused && e.Error != "That password is too common. Choose another." {
+			t.Errorf("refused: %q", e.Error)
+		}
+	}
+	if n := len(r.f.logs.withAttr("event", "breakglass.job_failed")); n != 1 {
+		t.Errorf("%d breakglass.job_failed records, want one", n)
+	}
+	res.submitErr = nil
+
+	w := r.post("/api/repair/reset", confirmed, c)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("confirmed: %d %s", w.Code, w.Body.String())
+	}
+	rows := r.f.rows(t, accounts.RepairResetKind)
+	if len(rows) != 1 || rows[0].CreatedBy != "break-glass" || strings.Contains(string(rows[0].Spec), password) {
+		t.Fatalf("rows %+v", rows)
+	}
+	if len(r.alerts.resets) != 1 || r.alerts.resets[0] != "sub-alice" {
+		t.Errorf("reset alerts %v", r.alerts.resets)
+	}
+	wantCoded(t, "after a reset", r.post("/api/repair/reset", confirmed, c), http.StatusForbidden, codeRepairResetUsed)
+
+	console := r.f.authenticateAs(t, "sub-admin", "admin", "admin")
+	for name, ck := range map[string]*http.Cookie{"a console session": console, "no session": nil} {
+		if w := r.post("/api/repair/reset", confirmed, ck); w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: %d, want 401", name, w.Code)
+		}
+	}
+	if strings.Contains(r.out.String(), password) || strings.Contains(r.logText(), password) {
+		t.Error("the password appears in a response or a log record")
+	}
+
+	// Unregistered kind, and off keycloak (no reset wired: TC-321-52).
+	un, _, uc := resetRepairRig(t, false)
+	wantCoded(t, "unregistered", un.post("/api/repair/reset", confirmed, uc), http.StatusServiceUnavailable, codeJobUnavailable)
+	off := newRepairRig(t, nil, false)
+	oc := off.open(t, repairHost)
+	wantCoded(t, "off keycloak", off.post("/api/repair/reset", confirmed, oc), http.StatusServiceUnavailable, codeJobUnavailable)
+	var st breakglass.StateView
+	if err := json.Unmarshal(off.state(oc, repairHost).Body.Bytes(), &st); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range st.Actions {
+		if a.ID == "reset" || a.ID == "move" {
+			t.Errorf("off keycloak lists %+v", a)
+		}
+	}
+}
+
+// apiMove is C9's state, as the kind table and the service both read it.
+type apiMove struct {
+	mu        sync.Mutex
+	r         breakglass.MoveRepair
+	tokenErr  error
+	repairErr error
+}
+
+func (m *apiMove) RepairToken(context.Context) (string, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.r.Token, m.r.Holds, m.tokenErr
+}
+
+func (m *apiMove) Repair(context.Context) (breakglass.MoveRepair, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.r, m.repairErr
+}
+
+type noAppTiers struct{}
+
+func (noAppTiers) AppFacts(context.Context, string, string) (authz.AppFacts, error) {
+	return authz.AppFacts{}, errors.New("no apps")
+}
+
+// TC-321-47: POST /api/repair/move's answers, decided by the real kind
+// table over C9's state.
+func TestRepair_Move_TC321_47(t *testing.T) {
+	m := &apiMove{r: breakglass.MoveRepair{Holds: true, Accounts: 3, Token: "tok-3"}}
+	if breakglass.MoveKind != move.Kind {
+		t.Fatalf("breakglass.MoveKind %q is not move.Kind %q", breakglass.MoveKind, move.Kind)
+	}
+	r := newRepairRigWith(t, &repairIdentity{st: identitystate.Failed}, false, func(r *repairRig) { r.move = m })
+	policy, err := authz.NewKindPolicy(noAppTiers{}, authz.WithMoveState(m))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := jobs.NewAuthorizedRunner(r.f.jobsStore, r.f.nc, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.Register(noop(move.Kind))
+	r.f.srv.runner = runner
+	c := r.open(t, repairHost)
+
+	b := wantConfirm(t, "no token", r.post("/api/repair/move", "", c))
+	if b.Accounts == nil || *b.Accounts != 3 || b.StateToken != "tok-3" || b.Error != moveConfirmSentence(3) ||
+		!strings.HasPrefix(b.Error, "This brings back the 3 accounts this cluster had before its sign-in update, with no passwords") {
+		t.Errorf("no token: %+v", b)
+	}
+	if b = wantConfirm(t, "stale", r.post("/api/repair/move", `{"stateToken":"old"}`, c)); b.StateToken != "tok-3" {
+		t.Errorf("stale: %+v", b)
+	}
+	if !strings.Contains(moveConfirmSentence(1), "the 1 account this cluster") {
+		t.Errorf("N = 1: %q", moveConfirmSentence(1))
+	}
+	m.repairErr = errors.New("db")
+	e := wantCoded(t, "state unread", r.post("/api/repair/move", "", c), http.StatusServiceUnavailable, codeIdentityNotReady)
+	if e.Error != "The accounts from before the update couldn't be read. Try again." {
+		t.Errorf("state unread: %q", e.Error)
+	}
+	m.repairErr = nil
+	wantCoded(t, "a bad body", r.post("/api/repair/move", "{", c), http.StatusBadRequest, codeInvalidRequest)
+
+	w := r.post("/api/repair/move", `{"stateToken":"tok-3"}`, c)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("confirmed: %d %s", w.Code, w.Body.String())
+	}
+	rows := r.f.rows(t, move.Kind)
+	if len(rows) != 1 || rows[0].CreatedBy != "break-glass" || string(rows[0].Spec) != `{"repair":true,"stateToken":"tok-3"}` {
+		t.Fatalf("rows %+v", rows)
+	}
+	var st breakglass.StateView
+	if err := json.Unmarshal(r.state(c, repairHost).Body.Bytes(), &st); err != nil || len(st.Jobs) != 1 || st.Jobs[0].ID != rows[0].ID {
+		t.Errorf("state jobs %+v %v", st.Jobs, err)
+	}
+	if recs := r.f.logs.withAttr("event", "breakglass.move_submitted"); len(recs) != 1 || recs[0].Level != slog.LevelWarn {
+		t.Errorf("move_submitted records %d", len(recs))
+	} else if id, _ := recAttr(recs[0], "job_id"); id != rows[0].ID {
+		t.Errorf("job_id %q", id)
+	}
+
+	m.mu.Lock()
+	m.r.Holds = false
+	m.mu.Unlock()
+	wantCoded(t, "not holding", r.post("/api/repair/move", `{"stateToken":"tok-3"}`, c), http.StatusForbidden, "job_move_state")
+	m.tokenErr = errors.New("db")
+	wantCoded(t, "the table's read fails", r.post("/api/repair/move", `{"stateToken":"tok-3"}`, c), http.StatusInternalServerError, codeJobCheckFailed)
+	console := r.f.authenticateAs(t, "sub-admin", "admin", "admin")
+	if w := r.post("/api/repair/move", `{"stateToken":"tok-3"}`, console); w.Code != http.StatusUnauthorized {
+		t.Errorf("a console session: %d, want 401", w.Code)
+	}
 }

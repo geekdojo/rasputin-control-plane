@@ -38,7 +38,9 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -65,10 +67,55 @@ var (
 	ErrWrongCode = errors.New("breakglass: the repair code is wrong")
 )
 
-// Alerts raises the two event alerts (alerts.Service).
+// The refusals Reset returns, besides accounts.ErrNotRepairTarget,
+// *ResetConfirm and Resets.Submit's own.
+var (
+	// ErrResetUnavailable: no repair reset is wired (no sign-in service).
+	ErrResetUnavailable = errors.New("breakglass: the repair reset isn't available on this control plane")
+	// ErrResetUsed: the session has already reset an account.
+	ErrResetUsed = errors.New("breakglass: this repair session has already reset a sign-in")
+	// ErrNoPassword: a confirmed reset carried no temporary password.
+	ErrNoPassword = errors.New("breakglass: the reset carries no temporary password")
+	// ErrSessionEnded: the session ended while its reset was decided.
+	ErrSessionEnded = errors.New("breakglass: the repair session has ended")
+	// ErrMoveUnavailable: no move state is wired (no sign-in service).
+	ErrMoveUnavailable = errors.New("breakglass: the accounts from before the update can't be read on this control plane")
+)
+
+// ResetConfirm is a reset that has not been confirmed: the request carried
+// no token, or one that is not Token. Nothing was claimed.
+type ResetConfirm struct {
+	Target Target
+	Token  string
+}
+
+func (e *ResetConfirm) Error() string { return "breakglass: confirm the reset of " + e.Target.ID }
+
+// Alerts raises the event alerts (alerts.Service).
 type Alerts interface {
 	RaiseBreakGlassIssued(ctx context.Context, eventID string) error
 	RaiseBreakGlassRedeemed(ctx context.Context, eventID string) error
+	RaiseBreakGlassReset(ctx context.Context, eventID, accountID string) error
+}
+
+// Resets is the repair reset (accounts.RepairResets).
+type Resets interface {
+	Targets(ctx context.Context) ([]accounts.RepairTarget, error)
+	Confirm(ctx context.Context, id string) (accounts.RepairTarget, string, error)
+	Submit(ctx context.Context, by authz.Submitter, id string, pw secret.Value) (*jobs.Job, error)
+}
+
+// MoveRepair is C9's state as the repair page reads it: move.Repair's
+// fields. This package can't import identity/move, whose tests import it.
+type MoveRepair struct {
+	Holds    bool
+	Accounts int
+	Token    string
+}
+
+// MoveState reads C9's state (move.State, through main's holder).
+type MoveState interface {
+	Repair(ctx context.Context) (MoveRepair, error)
 }
 
 // Jobs reads a job the session submitted (jobs.Store).
@@ -111,6 +158,10 @@ type Deps struct {
 	// with the sentence a person reads (restart.Restarter.Busy).
 	Busy  func(ctx context.Context) (reason string, busy bool)
 	Facts Facts
+	// Resets is the repair reset (C1), and Move C9's state; both nil when
+	// the sign-in service is off.
+	Resets Resets
+	Move   MoveState
 }
 
 // session is the one repair session.
@@ -119,6 +170,8 @@ type session struct {
 	origin    string
 	createdAt time.Time
 	jobs      []string
+	// reset is the session's one reset, claimed (C1).
+	reset bool
 }
 
 // Service is the break-glass business layer.
@@ -355,4 +408,97 @@ func (s *Service) sessionJobs(sess Session) []string {
 		return nil
 	}
 	return append([]string(nil), s.sess.jobs...)
+}
+
+// Reset resets the sign-in of the account id names for sess, submitted as
+// by, once per session (C1). In order: no reset wired is
+// ErrResetUnavailable; a session that has reset one is ErrResetUsed; an
+// account that is not a target is accounts.ErrNotRepairTarget; a request
+// without the current token is *ResetConfirm, and a confirmed one without a
+// password ErrNoPassword, neither claiming anything. Then the session's one
+// reset is claimed, and Resets.Submit runs; any error it returns releases
+// the claim. The job is recorded on the session, a WARN record written, and
+// the critical alert raised; an alert that can't be raised is logged, and
+// the job stands.
+func (s *Service) Reset(ctx context.Context, sess Session, by authz.Submitter, id, token string, pw secret.Value) (*jobs.Job, error) {
+	if s.d.Resets == nil {
+		return nil, ErrResetUnavailable
+	}
+	if s.resetUsed(sess) {
+		return nil, ErrResetUsed
+	}
+	t, want, err := s.d.Resets.Confirm(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(want)) != 1 {
+		return nil, &ResetConfirm{Target: Target{ID: t.ID, Name: t.Username}, Token: want}
+	}
+	if pw.Len() == 0 {
+		return nil, ErrNoPassword
+	}
+	if err := s.claimReset(sess); err != nil {
+		return nil, err
+	}
+	j, err := s.d.Resets.Submit(ctx, by, id, pw)
+	if err != nil {
+		s.releaseReset(sess)
+		return nil, err
+	}
+	s.RecordJob(sess, j.ID)
+	s.log.WarnContext(ctx, "A repair session reset an account's sign-in.", "event", "breakglass.reset_submitted",
+		"job_id", j.ID, "account_id", id)
+	s.raise(ctx, "reset", func(ctx context.Context, ev string) error { return s.d.Alerts.RaiseBreakGlassReset(ctx, ev, id) })
+	return j, nil
+}
+
+// live is the session record sess names, or nil. The caller holds mu.
+func (s *Service) live(sess Session) *session {
+	if s.sess == nil || s.sess.cookie != sess.cookie {
+		return nil
+	}
+	return s.sess
+}
+
+// resetUsed reports whether sess has claimed its reset.
+func (s *Service) resetUsed(sess Session) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.live(sess)
+	return l != nil && l.reset
+}
+
+// claimReset claims sess's one reset: ErrResetUsed when it is claimed,
+// ErrSessionEnded when sess is no longer the live session.
+func (s *Service) claimReset(sess Session) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.live(sess)
+	switch {
+	case l == nil:
+		return ErrSessionEnded
+	case l.reset:
+		return ErrResetUsed
+	}
+	l.reset = true
+	return nil
+}
+
+// releaseReset frees sess's reset after a submit that made no job.
+func (s *Service) releaseReset(sess Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l := s.live(sess); l != nil {
+		l.reset = false
+	}
+}
+
+// MoveState is C9's state, for the move's confirmation: how many accounts
+// would come back and the current token. ErrMoveUnavailable with no state
+// wired.
+func (s *Service) MoveState(ctx context.Context) (MoveRepair, error) {
+	if s.d.Move == nil {
+		return MoveRepair{}, ErrMoveUnavailable
+	}
+	return s.d.Move.Repair(ctx)
 }
