@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"sync"
 	"time"
 
@@ -51,6 +52,13 @@ type pendingAction struct {
 	// callback hands it to the action (geekdojo/geekdojo-brain#992); nil
 	// when the action needs none.
 	payload ActionPayload
+	// method and kcAction are a sign-in method's (PrepareMethod,
+	// geekdojo/geekdojo-brain#1150): the method, and the one kc_action its
+	// fresh sign-in carries. Both are empty for every other action.
+	method   Method
+	kcAction string
+	// forwarded marks that the doors forwarded kcAction once (forward).
+	forwarded bool
 }
 
 // destroy destroys everything rec holds: the PKCE verifier and the
@@ -138,6 +146,34 @@ func (p *pendingSignins) take(key string) *pendingSignin {
 		return nil
 	}
 	return rec
+}
+
+// forward reports whether the doors may forward kcAction under state: true
+// once, for the live record that has begun (not only been prepared), whose
+// state matches and that carries exactly kcAction; it marks that record so
+// no later request forwards it again. Anything else is false and marks
+// nothing: an empty state or action, and a record carrying no kc_action.
+func (p *pendingSignins) forward(state, kcAction string) bool {
+	if state == "" || kcAction == "" {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for _, rec := range p.m {
+		if rec.prepared || rec.action == nil || rec.action.kcAction == "" || !now.Before(rec.expires) {
+			continue
+		}
+		if subtle.ConstantTimeCompare([]byte(rec.state), []byte(state)) != 1 {
+			continue
+		}
+		if rec.action.forwarded || rec.action.kcAction != kcAction {
+			return false
+		}
+		rec.action.forwarded = true
+		return true
+	}
+	return false
 }
 
 // prune drops every expired record (the janitor's sweep).

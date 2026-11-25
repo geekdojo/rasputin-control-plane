@@ -72,8 +72,12 @@ type identityConvergeDeps struct {
 	// firstRun is the first-run predicate (authStore.FirstRun, C03): the
 	// recovery-codes default action follows it (#990).
 	firstRun func(ctx context.Context) (bool, error)
-	now      func() time.Time
-	log      *slog.Logger
+	// clock is the one clock-sync fact (clockSyncFact), shared with the
+	// console sign-in so an outage has one state and one WARN
+	// (geekdojo/geekdojo-brain#1150).
+	clock auth.ClockFact
+	now   func() time.Time
+	log   *slog.Logger
 }
 
 // identityConverge is what identityConvergeWiring built. Every field is
@@ -155,7 +159,7 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		return identityConverge{}, nil
 	}
 	if d.session == nil || d.monitor == nil || d.ledger == nil || d.settings == nil || d.createArmed == nil ||
-		d.stat == nil || d.firstRun == nil || d.now == nil || d.log == nil {
+		d.stat == nil || d.firstRun == nil || d.clock == nil || d.now == nil || d.log == nil {
 		return identityConverge{}, errors.New("identity converge: a collaborator is nil under keycloak")
 	}
 	lock := &sync.Mutex{}
@@ -164,14 +168,13 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		return identityConverge{}, fmt.Errorf("identity converge: %w", err)
 	}
 	settings := d.settings
-	clock := &clockSyncFact{read: readClockSync, log: d.log}
 	conv, err := converge.New(converge.Deps{
 		Admin: d.session, Settings: settings, Realm: identityRealm, Lock: lock,
 		// The console's redirect and back-channel URLs are set only while
 		// the doors are on (geekdojo/geekdojo-brain#989); otherwise both are
 		// empty, the baseline's own state, so it fails closed. AppBindings
 		// is nil until Identity 7.3 registers app clients.
-		Inputs: d.inputs(clock.Synced),
+		Inputs: d.inputs(d.clock.Synced),
 		Now:    d.now, Ready: d.monitor.Ready, Log: d.log,
 	})
 	if err != nil {

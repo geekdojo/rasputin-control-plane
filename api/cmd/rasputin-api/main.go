@@ -1334,10 +1334,13 @@ func main() {
 	if identityRestart != nil {
 		runner.Register(identityRestart.Workflow())
 	}
+	// The one clock-sync fact: converge's authenticator-app input and the
+	// console sign-in's (#1150) read the same outage state.
+	clockFact := &clockSyncFact{read: readClockSync, log: logger}
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
 		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
-		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), firstRun: authStore.FirstRun, now: time.Now, log: logger})
+		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), firstRun: authStore.FirstRun, clock: clockFact, now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
 		os.Exit(1)
@@ -1353,7 +1356,7 @@ func main() {
 	consoleSI, err := consoleSignInWiring(ctx, consoleSignInDeps{mode: identityW.mode, doorsOn: doorsOn, table: doorTable,
 		host: consoleHost(), client: identityW.client, session: identityW.session, ready: consoleReady,
 		sessions: consoleSessions, identity: acct.sessions, actions: acct.actions(),
-		firstRun: authStore, claimer: acct.claimer(), observer: acct.signInObserver(), now: time.Now, log: logger})
+		firstRun: authStore, claimer: acct.claimer(), observer: acct.signInObserver(), clock: clockFact, now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: console sign-in", "err", err.Error())
 		os.Exit(1)
@@ -2265,7 +2268,7 @@ func main() {
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
 			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger, removed: acct.removed,
 			network: doorNet, waiting: acct.doorWaiting(), emails: acct.doorEmails(),
-			resetDone: consoleSI.appResetDone(),
+			resetDone: consoleSI.appResetDone(), actions: consoleSI.doorActions(),
 		})
 		if doorM != nil {
 			doorM.setDoors(homeDoor, appDoorH, identityState.events.doorThrottle())

@@ -49,10 +49,12 @@ var signinSessionRoutes = map[string]string{
 
 // idorProbes holds, for every route classed self, the test that proves a
 // person reaches only their own records through it. A self route with no
-// entry fails TestRouteClasses_TC1002_03_SelfRoutesHaveIDORProbes. No route
-// is classed self yet; /api/me/* (geekdojo/geekdojo-brain#319, #1036) adds
-// its probes here.
-var idorProbes = map[string]func(t *testing.T){}
+// entry fails TestRouteClasses_TC1002_03_SelfRoutesHaveIDORProbes.
+// /api/me/* (geekdojo/geekdojo-brain#319, #1036, #1150) adds its probes here.
+var idorProbes = map[string]func(t *testing.T){
+	// TC-1150-13: the sign-in method a person adds is their own.
+	"POST /api/me/sign-in-methods": probeSignInMethodsIDOR,
+}
 
 // wantClass is every gated pattern at this change and its class, written out
 // literally (TC-1002-04, F-1002-04): view, control:<capability>, self,
@@ -66,6 +68,8 @@ var wantClass = map[string]string{
 	// TC-992-22: the administrator's password reset (geekdojo/geekdojo-brain#992).
 	"POST /api/accounts/{id}/reset-password": "control:iam",
 	"POST /api/accounts/jobs":                "anyjob",
+	// TC-1150-13: a person adds a sign-in method to their own account.
+	"POST /api/me/sign-in-methods": "self",
 	// TC-990-25: how many people wait for access (geekdojo/geekdojo-brain#990).
 	"GET /api/accounts/waiting":              "control:iam",
 	"GET /api/jobs":                          "view",
@@ -333,8 +337,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 118 {
-		t.Errorf("%d rules recorded, want 118", n)
+	if n := len(real.rules); n != 119 {
+		t.Errorf("%d rules recorded, want 119", n)
 	}
 }
 

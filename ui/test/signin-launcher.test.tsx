@@ -50,6 +50,7 @@ describe('TC-989-31 the launcher', () => {
       'reset-incomplete',
       'reset-failed',
       'action-failed',
+      'method-cancelled', // TC-1150-15
     ];
     const seen = new Set<string>();
     for (const v of values) {
@@ -82,6 +83,12 @@ describe('TC-989-31 the launcher', () => {
       "Rasputin couldn't confirm the password reset. If you chose a new password, sign in with it. Otherwise start the reset again.",
     );
     assert.equal(SIGN_IN_SENTENCES['action-failed'], "Rasputin couldn't finish the change you signed in again for. Try it again.");
+    // TC-1150-15: the cancelled sign-in method's key and sentence.
+    assert.equal(signInReturn('?signin=method-cancelled'), 'method-cancelled');
+    assert.equal(
+      SIGN_IN_SENTENCES['method-cancelled'],
+      "Nothing was added to your account. You can add a sign-in method when you're ready.",
+    );
   });
 
   test('the not-ready sentence and no SIGN IN while not ready', async () => {

@@ -64,7 +64,7 @@ func accountJobsRoute(t *testing.T, signIn bool) (*apiFixture, *submitted) {
 		si, err := auth.NewSignIn(auth.SignInDeps{Door: table.Home, ConsoleHost: "ci.local", ClientID: flows.ConsoleClient, Realm: "rasputin",
 			Exchanger: unusedExchange{}, Verifier: unusedTokens{}, Ender: unusedEnder{}, Ready: readyNow{}, Sessions: f.sessions,
 			FirstRun: f.authSvc, Claimer: unusedClaimer{}, Observer: unusedObserver{},
-			Actions: actions, Now: time.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
+			Actions: actions, Clock: syncedClock{}, Now: time.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
 		if err != nil {
 			t.Fatal(err)
 		}

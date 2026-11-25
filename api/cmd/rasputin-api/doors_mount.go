@@ -97,7 +97,11 @@ type doorMountDeps struct {
 	// resetDone is the app door's reset return (consoleSignIn.appResetDone);
 	// nil keeps the doors closed.
 	resetDone door.ResetDone
-	log       *slog.Logger
+	// actions are the kc_action values the console's sign-in issued
+	// (consoleSignIn.doorActions, geekdojo/geekdojo-brain#1150); nil keeps
+	// the doors closed, since the policy refuses to build without them.
+	actions policy.Actions
+	log     *slog.Logger
 }
 
 // mountDoors builds both door handlers, or none. With the doors off it builds
@@ -169,9 +173,8 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 func doorPolicyDeps(d doorMountDeps) policy.Deps {
 	return policy.Deps{
 		Table: d.table, Readiness: d.readiness, Throttle: d.throttle,
-		// The fail-closed stand-ins until Identity 7.3 (app clients) and the
-		// launcher (actions) wire theirs.
-		AppClients: policy.NoAppClients{}, Actions: policy.NoActionsIssued{},
+		// The fail-closed stand-in until Identity 7.3 wires app clients.
+		AppClients: policy.NoAppClients{}, Actions: d.actions,
 		Network: d.network, Waiting: d.waiting, Emails: d.emails,
 		Removed: d.removed, Now: d.now, Bindings: d.bindings,
 	}

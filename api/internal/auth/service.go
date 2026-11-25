@@ -164,6 +164,17 @@ func (s *Service) PrepareAction(w http.ResponseWriter, r *http.Request, kind str
 	return si.PrepareAction(w, r, kind, payload)
 }
 
+// PrepareMethod is SignIn.PrepareMethod on the installed sign-in; with no
+// sign-in installed it refuses with ErrNoAction
+// (geekdojo/geekdojo-brain#1150).
+func (s *Service) PrepareMethod(w http.ResponseWriter, r *http.Request, m Method) (string, error) {
+	si := s.signin()
+	if si == nil {
+		return "", ErrNoAction
+	}
+	return si.PrepareMethod(w, r, m)
+}
+
 // signin is the installed sign-in, or nil.
 func (s *Service) signin() *SignIn {
 	s.signInMu.RLock()

@@ -134,9 +134,13 @@ type SignInDeps struct {
 	Claimer  Claimer
 	Observer Observer
 	Actions  map[string]Action
-	Now      func() time.Time
-	Rand     io.Reader
-	Log      *slog.Logger
+	// Clock is the api's clock-sync fact: an authenticator app is added, and
+	// its kc_action forwarded, only while it holds
+	// (geekdojo/geekdojo-brain#1150).
+	Clock ClockFact
+	Now   func() time.Time
+	Rand  io.Reader
+	Log   *slog.Logger
 }
 
 // SignIn is the console's OIDC client for the home door.
@@ -167,6 +171,8 @@ func NewSignIn(d SignInDeps) (*SignIn, error) {
 		return nil, errors.New("auth: SignInDeps.Sessions is nil")
 	case d.FirstRun == nil || d.Claimer == nil || d.Observer == nil:
 		return nil, errors.New("auth: SignInDeps.FirstRun, Claimer or Observer is nil")
+	case d.Clock == nil:
+		return nil, errors.New("auth: SignInDeps.Clock is nil")
 	case d.Now == nil:
 		return nil, errors.New("auth: SignInDeps.Now is nil")
 	case d.Rand == nil:
@@ -224,15 +230,30 @@ func (s *SignIn) PrepareAction(w http.ResponseWriter, r *http.Request, kind stri
 			payload.Destroy()
 		}
 	}
-	p, ok := PrincipalFrom(r.Context())
-	if _, known := s.d.Actions[kind]; !known || !ok || p.Sub == "" {
+	if _, known := s.d.Actions[kind]; !known {
 		destroy()
+		return "", ErrNoAction
+	}
+	next, err := s.prepare(w, r, kind, &pendingAction{kind: kind, payload: payload})
+	if err != nil {
+		destroy()
+	}
+	return next, err
+}
+
+// prepare stores action, for the person r is signed in as, as a prepared
+// record under the browser's pending cookie (replacing any record there),
+// sets the cookie and returns the fresh sign-in's start. It refuses with
+// ErrNoAction without a signed-in person or with the pending cookie twice;
+// on any refusal it stores nothing and the caller still owns the payload.
+func (s *SignIn) prepare(w http.ResponseWriter, r *http.Request, kind string, action *pendingAction) (string, error) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok || p.Sub == "" {
 		return "", ErrNoAction
 	}
 	key := ""
 	switch c, err := oneCookie(r, pendingCookieName); {
 	case errors.Is(err, errDuplicateCookie):
-		destroy()
 		return "", ErrNoAction
 	case err == nil && s.pending.live(c.Value):
 		key = c.Value
@@ -240,14 +261,20 @@ func (s *SignIn) PrepareAction(w http.ResponseWriter, r *http.Request, kind stri
 	if key == "" {
 		var err error
 		if key, err = s.random(32); err != nil {
-			destroy()
 			return "", err
 		}
 	}
-	s.pending.put(key, &pendingSignin{begin: s.d.Now(), prepared: true,
-		action: &pendingAction{kind: kind, sub: p.Sub, payload: payload}})
+	action.sub = p.Sub
+	s.pending.put(key, &pendingSignin{begin: s.d.Now(), prepared: true, action: action})
 	setCookie(w, pendingCookieName, key, signinPendingLifetime)
 	return actionStartPath + url.QueryEscape(kind), nil
+}
+
+// known reports whether kind names a registered action or a sign-in
+// method.
+func (s *SignIn) known(kind string) bool {
+	_, ok := s.d.Actions[kind]
+	return ok || methodKind(kind)
 }
 
 // StartAction begins the fresh sign-in a prepared action needs, for the
@@ -258,7 +285,7 @@ func (s *SignIn) PrepareAction(w http.ResponseWriter, r *http.Request, kind stri
 // of that kind for that person; anything else is destroyed and sends the
 // browser to the launcher's action-failed sentence.
 func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string) {
-	if _, ok := s.d.Actions[kind]; !ok {
+	if !s.known(kind) {
 		writeErr(w, http.StatusNotFound, "There is no such action.")
 		return
 	}
@@ -287,6 +314,11 @@ func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string
 		s.refused(r.Context(), "action_record", p.Sub)
 		http.Redirect(w, r, signinActionFailed, http.StatusSeeOther)
 		return
+	}
+	if rec.action.method != "" {
+		s.log.LogAttrs(r.Context(), slog.LevelInfo, "A person started adding a sign-in method.",
+			slog.String("event", "signin.method_started"), slog.String("method", string(rec.action.method)),
+			slog.String("kind", rec.action.kind), slog.String("sub", p.Sub))
 	}
 	s.begin(w, r, rec.action, c.Value, promptLogin)
 }
@@ -343,6 +375,9 @@ func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAc
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
 		"prompt":                {prompt},
+	}
+	if action != nil && action.kcAction != "" {
+		q.Set("kc_action", action.kcAction)
 	}
 	http.Redirect(w, r, s.d.Door.Issuer+"/protocol/openid-connect/auth?"+q.Encode(), http.StatusSeeOther)
 }
@@ -428,7 +463,7 @@ func (s *SignIn) Complete(ctx context.Context, in CallbackInput) CallbackResult 
 	p := Principal{Sub: claims.Subject, Name: claims.PreferredUsername, Roles: claims.Roles,
 		Session: SessionRef{SID: claims.SessionID, CreatedAt: s.d.Now()}}
 	if rec.action != nil {
-		res := s.runAction(ctx, rec, claims, p)
+		res := s.runAction(ctx, rec, claims, p, in.Query)
 		s.d.Observer.SignedIn(ctx, p.Sub)
 		return res
 	}
@@ -558,11 +593,20 @@ func exchangeReturn(ctx context.Context, q url.Values, issuer string, x idclient
 
 // runAction runs a fresh sign-in's action when the same person signed in
 // again after it began, and mints no session. The record's payload goes to
-// the action; Complete destroys it afterwards.
-func (s *SignIn) runAction(ctx context.Context, rec *pendingSignin, c idtoken.Claims, p Principal) CallbackResult {
-	if c.Subject != rec.action.sub || c.AuthTime.Before(rec.begin.Truncate(time.Second)) {
+// the action; Complete destroys it afterwards. Another person's return is
+// the action-failed sentence; a sign-in method's return is methodReturn,
+// which reads q.
+func (s *SignIn) runAction(ctx context.Context, rec *pendingSignin, c idtoken.Claims, p Principal, q url.Values) CallbackResult {
+	if c.Subject != rec.action.sub {
+		s.refused(ctx, "action", c.Subject)
+		return CallbackResult{Status: http.StatusSeeOther, Location: signinActionFailed}
+	}
+	if c.AuthTime.Before(rec.begin.Truncate(time.Second)) {
 		s.refused(ctx, "action", c.Subject)
 		return CallbackResult{Status: http.StatusSeeOther, Location: signinFailed}
+	}
+	if rec.action.method != "" {
+		return s.methodReturn(ctx, rec, p, q)
 	}
 	act, ok := s.d.Actions[rec.action.kind]
 	if !ok {
