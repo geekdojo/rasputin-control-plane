@@ -167,8 +167,12 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 		return accountsWiring{}, err
 	}
 	held := accounts.NewHeld()
+	redesignator, err := accounts.NewRedesignator(accounts.RedesignatorDeps{Facts: roleAccounts, Designations: d.designations, Users: users, Lock: lock})
+	if err != nil {
+		return accountsWiring{}, err
+	}
 	reset, err := accounts.ResetPasswordWorkflow(accounts.ResetDeps{Users: users, Held: held, Checker: checker, Revoker: rev,
-		Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout})
+		Redesignate: redesignator, Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout})
 	if err != nil {
 		return accountsWiring{}, err
 	}

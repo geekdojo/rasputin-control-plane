@@ -89,8 +89,12 @@ func resetOn(t *testing.T, rv *revokeRig) *resetRig {
 	if err != nil {
 		t.Fatal(err)
 	}
+	redes, err := accounts.NewRedesignator(accounts.RedesignatorDeps{Facts: r.ra, Designations: r.designations, Users: users, Lock: r.lock})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r.wf, err = accounts.ResetPasswordWorkflow(accounts.ResetDeps{Users: users, Held: r.held, Checker: checker, Revoker: r.rev,
-		Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute}); err != nil {
+		Redesignate: redes, Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute}); err != nil {
 		t.Fatal(err)
 	}
 	kp, err := authz.NewKindPolicy(resetApps{})

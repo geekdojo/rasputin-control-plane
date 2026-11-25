@@ -599,17 +599,8 @@ func (c *Changes) removeSecondSteps(ctx context.Context, sc *jobs.StepCtx, spec 
 			return failStep(StepChange, sentenceCheck, err)
 		}
 		lv := authz.PrivilegedLevels(f)
-		if !lv.Empty() {
-			x := Designation{Sub: sub, ConsoleRole: lv.Console, Reason: ReasonReset}
-			if lv.App {
-				x.AppRole = AppAdmin
-			}
-			if lv.Gear {
-				x.Network = authz.NetworkGearAdmin
-			}
-			if err := c.d.Designations.Designate(ctx, x); err != nil {
-				return failStep(StepChange, sentenceDesignation, err)
-			}
+		if err := designateLevels(ctx, c.d.Designations, sub, lv); err != nil {
+			return failStep(StepChange, sentenceDesignation, err)
 		}
 		creds, err := c.d.Users.CredentialList(ctx, sub)
 		if err != nil {
@@ -640,28 +631,10 @@ func (c *Changes) removeSecondSteps(ctx context.Context, sc *jobs.StepCtx, spec 
 	return out, nil
 }
 
-// demote takes the privileged levels lv away: the console role off, app
-// admin to user, gear-admin out of the network grants.
+// demote takes the privileged levels lv away (demoteLevels).
 func (c *Changes) demote(ctx context.Context, sub string, lv authz.Levels) error {
-	if lv.Console != "" {
-		if err := c.d.Users.SetConsoleRole(ctx, sub, ""); err != nil {
-			return written(err)
-		}
-	}
-	if lv.App {
-		if err := c.d.Users.SetAppRole(ctx, sub, AppUser); err != nil {
-			return written(err)
-		}
-	}
-	if lv.Gear {
-		p, err := c.d.Users.Read(ctx, sub)
-		if err != nil {
-			return written(err)
-		}
-		rest := slices.DeleteFunc(slices.Clone(p.Network), func(g string) bool { return g == authz.NetworkGearAdmin })
-		if err := c.d.Users.SetNetwork(ctx, sub, rest); err != nil {
-			return written(err)
-		}
+	if err := demoteLevels(ctx, c.d.Users, sub, lv); err != nil {
+		return written(err)
 	}
 	return nil
 }
