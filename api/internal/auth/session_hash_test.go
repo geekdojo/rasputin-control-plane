@@ -167,7 +167,7 @@ func TestSessionHash_BackfillIsIdempotentAndRunsOnEveryOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore 1: %v", err)
 	}
-	u, _ := makeUser("bryce", "Bryce")
+	u := &User{ID: []byte("0123456789abcdef"), Name: "bryce", DisplayName: "Bryce", CreatedAt: time.Now().UTC()}
 	if err := s1.CreateUser(ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -329,7 +329,7 @@ func TestSessionHash_RollbackToPreviousAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenStore: %v", err)
 	}
-	u, _ := makeUser("bryce", "Bryce")
+	u := &User{ID: []byte("0123456789abcdef"), Name: "bryce", DisplayName: "Bryce", CreatedAt: time.Now().UTC()}
 	if err := s.CreateUser(ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}

@@ -256,7 +256,7 @@ func newFixture(t *testing.T) *fixture {
 	}
 	f.policySvc, err = policy.New(policy.Deps{Table: table, Readiness: f.ready, Throttle: f.th, AppClients: f.apps,
 		Actions: f.actions, Network: f.network, Waiting: f.waiting, Now: func() time.Time { return f.now },
-		Bindings: noneBound{}, Removed: noneRemoved{}})
+		Bindings: noneBound{}, Removed: noneRemoved{}, Emails: noEmails{}})
 	if err != nil {
 		t.Fatal(err)
 	}

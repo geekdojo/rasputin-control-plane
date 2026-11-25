@@ -76,6 +76,7 @@ func resetRoute(t *testing.T, listed bool) (*apiFixture, string) {
 	}
 	si, err := auth.NewSignIn(auth.SignInDeps{Door: table.Home, ConsoleHost: "ci.local", ClientID: flows.ConsoleClient, Realm: "rasputin",
 		Exchanger: unusedExchange{}, Verifier: unusedTokens{}, Ender: unusedEnder{}, Ready: readyNow{}, Sessions: f.sessions,
+		FirstRun: f.authSvc, Claimer: unusedClaimer{}, Observer: unusedObserver{},
 		Actions: map[string]auth.Action{accounts.ResetKind: noopAction{}}, Now: time.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
@@ -195,3 +196,13 @@ func TestResetPassword_TC992_18(t *testing.T) {
 		}
 	})
 }
+
+// unusedClaimer and unusedObserver are the first-run claim's collaborators
+// (geekdojo/geekdojo-brain#990), which no reset case reaches.
+type unusedClaimer struct{}
+
+func (unusedClaimer) Earliest(context.Context) (string, error) { return "", errors.New("unused") }
+
+type unusedObserver struct{}
+
+func (unusedObserver) SignedIn(context.Context, string) {}

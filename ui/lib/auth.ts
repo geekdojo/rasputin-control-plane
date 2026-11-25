@@ -1,9 +1,3 @@
-import {
-  startAuthentication,
-  startRegistration,
-} from '@simplewebauthn/browser';
-import type { PasskeyAuthenticator } from './passkey-authenticator';
-
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
 /** The signed-in person (GET /api/auth/me): their account's subject, sign-in name and console roles. */
@@ -14,9 +8,10 @@ export interface CurrentUser {
 }
 
 /**
- * GET /api/auth/status: whether the cluster has no pre-update operator yet
- * (firstRun, which offers a restore), whether a sign-in can start now, and
- * the signed-in person when there is one. It never reports how many
+ * GET /api/auth/status: whether the cluster is at first run (no first
+ * administrator claimed and no pre-update operator: firstRun, which offers
+ * CREATE THE FIRST ACCOUNT and a restore), whether a sign-in can start now,
+ * and the signed-in person when there is one. It never reports how many
  * accounts exist.
  */
 export interface AuthStatus {
@@ -69,78 +64,3 @@ export async function logout(): Promise<void> {
     credentials: 'include',
   });
 }
-
-// The option shapes SimpleWebAuthn accepts, derived from the functions
-// themselves rather than imported.
-//
-// PublicKeyCredentialCreationOptionsJSON lives in @simplewebauthn/types, which
-// @simplewebauthn/browser does NOT re-export — importing it would mean naming a
-// transitive dependency, and a version skew between the two would then be ours
-// to notice. Reading the types off the functions costs no dependency and tracks
-// the library automatically: if an upgrade reshapes the options, these reshape
-// with it and any mismatch below becomes a compile error rather than a failure
-// at the authenticator prompt.
-type RegistrationOptions = Parameters<typeof startRegistration>[0]['optionsJSON'];
-type AuthenticationOptions = Parameters<typeof startAuthentication>[0]['optionsJSON'];
-
-// go-webauthn returns { publicKey: { ... } }; SimpleWebAuthn wants the inner
-// publicKey object as optionsJSON.
-//
-// The cast at each call site is unavoidable — this data arrives off the network
-// as `unknown` and nothing here validates its shape. What the cast should NOT
-// be is `any`, which switches off checking for everything downstream of it.
-// Casting to the specific option type keeps the rest of the call checked.
-// Runtime validation of the server's response would be a genuine improvement
-// and is deliberately not attempted here.
-function unwrapPublicKey(opts: unknown): unknown {
-  const o = opts as { publicKey?: Record<string, unknown> };
-  return (o.publicKey ?? (opts as Record<string, unknown>));
-}
-
-// Adding a passkey while signed in is two steps, each started by its own
-// click (a browser only raises a passkey prompt from a user gesture):
-//
-//   1. confirmExistingPasskey — the api asks for an assertion by one of the
-//      signed-in user's existing passkeys. The challenge belongs to this one
-//      ceremony and can be answered once. On success the api returns the
-//      creation options for the new passkey.
-//   2. createNewPasskey — creates the new passkey with those options.
-//
-// A session alone never adds a passkey; the api refuses step 2 unless step 1
-// verified for the same ceremony.
-//
-// `authenticator` is the kind of authenticator the operator chose. It has to
-// be sent here, at step 1, because the api mints the creation options at the
-// end of step 1 — step 2 only replays what it was given.
-export async function confirmExistingPasskey(
-  authenticator: PasskeyAuthenticator,
-): Promise<RegistrationOptions> {
-  const begin = await jsonFetch<{ stepUp?: unknown }>('/api/auth/register/begin', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ authenticator }),
-  });
-  if (!begin.stepUp) {
-    throw new Error('The api did not ask for an existing passkey; refusing to continue.');
-  }
-  const assertion = await startAuthentication({
-    optionsJSON: unwrapPublicKey(begin.stepUp) as AuthenticationOptions,
-  });
-  const creation = await jsonFetch<unknown>('/api/auth/register/step-up', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(assertion),
-  });
-  return unwrapPublicKey(creation) as RegistrationOptions;
-}
-
-export async function createNewPasskey(options: RegistrationOptions): Promise<CurrentUser> {
-  const credential = await startRegistration({ optionsJSON: options });
-  return jsonFetch<CurrentUser>('/api/auth/register/finish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(credential),
-  });
-}
-
-export type NewPasskeyOptions = RegistrationOptions;

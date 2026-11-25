@@ -221,6 +221,11 @@ func (doorNetwork) Facts(context.Context) (policy.NetworkFacts, error) {
 	return policy.NetworkFacts{HomeSubnets: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/24")}, Tailnet: []netip.Prefix{doorTailnet}}, nil
 }
 
+// noEmails holds no email, so no registration is refused for one in use.
+type noEmails struct{}
+
+func (noEmails) EmailInUse(context.Context, string) (bool, error) { return false, nil }
+
 type doorWaiting struct{}
 
 func (doorWaiting) Full(context.Context) (bool, error) { return false, nil }
@@ -290,7 +295,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: doorApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Now: time.Now, Bindings: doorBindings{table: table}})
+		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Emails: noEmails{}, Now: time.Now, Bindings: doorBindings{table: table}})
 	if err != nil {
 		t.Fatal(err)
 	}

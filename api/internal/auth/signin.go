@@ -25,7 +25,8 @@ import (
 // The console's sign-in (geekdojo/geekdojo-brain#989, Identity 4.7; register
 // row C70): the console is an OIDC client, rasputin-console, of the home
 // door. GET /api/auth/signin starts an authorization-code flow with PKCE
-// S256, a state, a nonce and prompt=login at the door's issuer; the door
+// S256, a state, a nonce and prompt=login at the door's issuer (GET
+// /api/auth/signup the same with prompt=create, Identity 4.8); the door
 // sends the browser back to GET /api/auth/callback, where the code is
 // exchanged on loopback over the api's own leaf, the ID token verified, and
 // an opaque console session minted (ConsoleSessions). No token the identity
@@ -85,6 +86,26 @@ type Action interface {
 // destroys it exactly once, whatever becomes of the record holding it.
 type ActionPayload interface{ Destroy() }
 
+// FirstRunner is the first-run predicate (*Store, register row C03).
+type FirstRunner interface {
+	FirstRun(ctx context.Context) (bool, error)
+}
+
+// Claimer names the account a first-run claim designates: the realm's
+// earliest-created person (*accounts.FirstAccount,
+// geekdojo/geekdojo-brain#990).
+type Claimer interface {
+	Earliest(ctx context.Context) (string, error)
+}
+
+// Observer is told of every verified console sign-in, so a designated
+// account whose setup is complete gets its role (*accounts.Observer; row
+// B101: the callback is the fact that submits, and resubmits, the grant).
+// It decides and logs on its own and returns nothing.
+type Observer interface {
+	SignedIn(ctx context.Context, sub string)
+}
+
 // ErrNoAction is PrepareAction's refusal of a kind no action is registered
 // under, a request with no signed-in person, or a browser carrying the
 // pending cookie twice.
@@ -107,10 +128,15 @@ type SignInDeps struct {
 	Ender     SessionEnder
 	Ready     Readiness
 	Sessions  *ConsoleSessions
-	Actions   map[string]Action
-	Now       func() time.Time
-	Rand      io.Reader
-	Log       *slog.Logger
+	// FirstRun, Claimer and Observer are the first-run claim and the
+	// designation's fact (geekdojo/geekdojo-brain#990).
+	FirstRun FirstRunner
+	Claimer  Claimer
+	Observer Observer
+	Actions  map[string]Action
+	Now      func() time.Time
+	Rand     io.Reader
+	Log      *slog.Logger
 }
 
 // SignIn is the console's OIDC client for the home door.
@@ -139,6 +165,8 @@ func NewSignIn(d SignInDeps) (*SignIn, error) {
 		return nil, errors.New("auth: SignInDeps.Ready is nil")
 	case d.Sessions == nil:
 		return nil, errors.New("auth: SignInDeps.Sessions is nil")
+	case d.FirstRun == nil || d.Claimer == nil || d.Observer == nil:
+		return nil, errors.New("auth: SignInDeps.FirstRun, Claimer or Observer is nil")
 	case d.Now == nil:
 		return nil, errors.New("auth: SignInDeps.Now is nil")
 	case d.Rand == nil:
@@ -168,8 +196,22 @@ func (s *SignIn) consoleHost(r *http.Request) bool {
 // Begin serves GET /api/auth/signin: it stores the sign-in's record (or
 // replaces the browser's live one) and sends the browser to the home door.
 func (s *SignIn) Begin(w http.ResponseWriter, r *http.Request) {
-	s.begin(w, r, nil, "")
+	s.begin(w, r, nil, "", promptLogin)
 }
+
+// BeginCreate serves GET /api/auth/signup: Begin with prompt=create, which
+// opens the home door's registration form (geekdojo/geekdojo-brain#990).
+// The new account's return is an ordinary sign-in at the callback, so the
+// api sees every account created.
+func (s *SignIn) BeginCreate(w http.ResponseWriter, r *http.Request) {
+	s.begin(w, r, nil, "", promptCreate)
+}
+
+// The prompts a sign-in starts with: a fresh sign-in, or account creation.
+const (
+	promptLogin  = "login"
+	promptCreate = "create"
+)
 
 // PrepareAction holds payload for the action named kind, for the person r
 // is signed in as, under the browser's pending cookie (replacing any record
@@ -246,13 +288,13 @@ func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string
 		http.Redirect(w, r, signinActionFailed, http.StatusSeeOther)
 		return
 	}
-	s.begin(w, r, rec.action, c.Value)
+	s.begin(w, r, rec.action, c.Value, promptLogin)
 }
 
 // begin starts a sign-in. An action's (StartAction) comes with its
 // prepared record's key and has already left the map; begin owns the
 // action's payload, and destroys it on every answer but the redirect.
-func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAction, key string) {
+func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAction, key, prompt string) {
 	drop := func() {
 		if action != nil && action.payload != nil {
 			action.payload.Destroy()
@@ -300,7 +342,7 @@ func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAc
 		"nonce":                 {rec.nonce},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
-		"prompt":                {"login"},
+		"prompt":                {prompt},
 	}
 	http.Redirect(w, r, s.d.Door.Issuer+"/protocol/openid-connect/auth?"+q.Encode(), http.StatusSeeOther)
 }
@@ -386,18 +428,57 @@ func (s *SignIn) Complete(ctx context.Context, in CallbackInput) CallbackResult 
 	p := Principal{Sub: claims.Subject, Name: claims.PreferredUsername, Roles: claims.Roles,
 		Session: SessionRef{SID: claims.SessionID, CreatedAt: s.d.Now()}}
 	if rec.action != nil {
-		return s.runAction(ctx, rec, claims, p)
+		res := s.runAction(ctx, rec, claims, p)
+		s.d.Observer.SignedIn(ctx, p.Sub)
+		return res
 	}
-	cookie, err := s.d.Sessions.Create(ctx, p)
+	claim := s.claim(ctx)
+	cookie, claimed, err := s.d.Sessions.CreateWithClaim(ctx, p, claim)
 	if err != nil {
 		s.log.LogAttrs(ctx, slog.LevelError, "A console sign-in could not store its session.",
 			slog.String("event", "signin.store_failed"), slog.String("sub", p.Sub), slog.String("err", err.Error()))
 		return CallbackResult{Status: http.StatusInternalServerError}
 	}
+	if claimed {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "First run is over: the account created first is designated the first administrator.",
+			slog.String("event", "firstrun.claimed"), slog.String("sub", claim.Sub))
+	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "A person signed in to the console.",
 		slog.String("event", "signin.succeeded"), slog.String("sub", p.Sub))
+	s.d.Observer.SignedIn(ctx, p.Sub)
 	return CallbackResult{Status: http.StatusSeeOther, Location: launcherPath, Cookie: cookie, Name: p.Name,
 		Admin: p.HasRole(string(authz.Admin))}
+}
+
+// claim is the first-run claim a callback tries, or nil: while first run
+// holds, the realm's earliest-created person, whoever is signing in (D13:
+// the first account created, not the first to finish). A first-run read
+// error is not first run, and an Earliest error claims nothing; either way
+// the session is minted with the roles its token carries, and a later
+// callback tries again.
+func (s *SignIn) claim(ctx context.Context) *Claim {
+	first, err := s.d.FirstRun.FirstRun(ctx)
+	if err != nil {
+		s.log.LogAttrs(ctx, slog.LevelWarn, "First run could not be read, so this sign-in claims nothing.",
+			slog.String("event", "firstrun.unreadable"), slog.String("err", err.Error()))
+		return nil
+	}
+	if !first {
+		return nil
+	}
+	sub, err := s.d.Claimer.Earliest(ctx)
+	if err != nil {
+		// The Admin API's error names the account in its path, so only its
+		// status and kind are logged, never person data.
+		attrs := []slog.Attr{slog.String("event", "firstrun.claim_aborted"), slog.String("kind", kindOf(err))}
+		var ie *idclient.Error
+		if errors.As(err, &ie) {
+			attrs = append(attrs, slog.Int("status", ie.Status))
+		}
+		s.log.LogAttrs(ctx, slog.LevelWarn, "The first account could not be read, so this sign-in claims nothing.", attrs...)
+		return nil
+	}
+	return &Claim{Sub: sub}
 }
 
 // verify runs every check of the callback in order, and returns the

@@ -207,3 +207,26 @@ func TestClassifyDatagram(t *testing.T) {
 		})
 	}
 }
+
+// nlAddrMsgBits is nlAddrMsg with prefix length bits.
+func nlAddrMsgBits(bits byte, index uint32, attrs ...nlAttr) []byte {
+	m := nlAddrMsg(syscall.RTM_NEWADDR, syscall.AF_INET, syscall.IFA_F_PERMANENT, index, attrs...)
+	m[syscall.NLMSG_HDRLEN+1] = bits
+	return m
+}
+
+// TC-990-16: Bits is ifaddrmsg's byte 1, the prefix length, for each of 24,
+// 16 and 32.
+func TestParseAddrDump_TC990_16_Bits(t *testing.T) {
+	got := byIP(parse(t,
+		nlAddrMsgBits(24, 2, local("192.0.2.10")),
+		nlAddrMsgBits(16, 2, local("198.51.100.7")),
+		nlAddrMsgBits(32, 2, local("203.0.113.9")),
+		nlBare(syscall.NLMSG_DONE),
+	))
+	for ip, want := range map[string]int{"192.0.2.10": 24, "198.51.100.7": 16, "203.0.113.9": 32} {
+		if a, ok := got[ip]; !ok || a.Bits != want {
+			t.Errorf("%s: Bits %d (present %v), want %d", ip, a.Bits, ok, want)
+		}
+	}
+}

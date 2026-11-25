@@ -48,12 +48,13 @@ import (
 var openRoutes = map[string]string{
 	"GET /healthz": "liveness probe; part of the documented install contract (AGENTS.md)",
 
-	"GET /api/auth/status":           "drives the launcher before anyone signs in: firstRun and ready, and the caller's own user; never a count",
-	"POST /api/auth/logout":          "clears the caller's own session cookie; nothing to protect",
-	"POST /api/auth/register/begin":  "first-run registration of the pre-update operator; 401 once one exists (auth/handlers.go)",
-	"POST /api/auth/register/finish": "completes a ceremony begin already gated; needs the ceremony cookie begin issued",
-	"POST /api/auth/login/begin":     "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
-	"POST /api/auth/login/finish":    "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	"GET /api/auth/status":  "drives the launcher before anyone signs in: firstRun and ready, and the caller's own user; never a count",
+	"POST /api/auth/logout": "clears the caller's own session cookie; nothing to protect",
+	// TC-990-06 and TC-990-26: account creation at the home door (#990);
+	// register/* is gone.
+	"GET /api/auth/signup":        "starts account creation at the home door (prompt=create), whose return is a sign-in at the callback; it only redirects and stores a pending record, and the door decides who may create an account",
+	"POST /api/auth/login/begin":  "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	"POST /api/auth/login/finish": "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
 	// TC-989-27: the console's sign-in through the home door (#989).
 	"GET /api/auth/signin": "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record; with ?action= it resolves the caller's own session and answers 401 without one",
 	// TC-992-22: the reset clients' return (geekdojo/geekdojo-brain#992).

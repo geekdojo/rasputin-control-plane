@@ -18,6 +18,7 @@
   "passwordPolicy": "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined) and passwordBlacklist(rasputin-common-passwords.txt)",
   "permanentLockout": false,
   "quickLoginCheckMilliSeconds": 0,
+  "registrationAllowed": true,
   "registrationEmailAsUsername": false,
   "rememberMe": false,
   "resetCredentialsFlow": "rasputin-reset",

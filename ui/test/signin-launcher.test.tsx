@@ -3,6 +3,7 @@ import { json, render, stubFetch } from './dom';
 import assert from 'node:assert/strict';
 import { afterEach, describe, test } from 'node:test';
 import {
+  createAccountLabel,
   NOT_READY_SENTENCE,
   SIGN_IN_SENTENCES,
   SignInLauncher,
@@ -99,6 +100,44 @@ describe('TC-989-31 the launcher', () => {
   });
 });
 
+// TC-990-27 and TC-990-04 (the launcher's half): while sign-in is ready, the
+// launcher links to /api/auth/signup as CREATE THE FIRST ACCOUNT at first run,
+// with RESTORE beside it, and as CREATE ACCOUNT after, with no RESTORE; while
+// sign-in is not ready, neither.
+describe('TC-990-27 the create-account link', () => {
+  const create = (c: Element) => Array.from(c.querySelectorAll('a[href="/api/auth/signup"]'));
+
+  test('first run: CREATE THE FIRST ACCOUNT and RESTORE', async () => {
+    const r = await render(<SignInLauncher ready firstRun returned={null} />);
+    cleanups.push(r.unmount);
+    const links = create(r.container);
+    assert.equal(links.length, 1);
+    assert.equal((links[0].textContent ?? '').trim(), 'CREATE THE FIRST ACCOUNT');
+    assert.equal(r.container.querySelectorAll('a[href="/restore"]').length, 1);
+    assert.equal(r.container.querySelectorAll('input, form').length, 0);
+  });
+
+  test('past first run (TC-990-04: a pre-update operator): CREATE ACCOUNT only', async () => {
+    const r = await render(<SignInLauncher ready firstRun={false} returned={null} />);
+    cleanups.push(r.unmount);
+    const links = create(r.container);
+    assert.equal(links.length, 1);
+    assert.equal((links[0].textContent ?? '').trim(), 'CREATE ACCOUNT');
+    assert.ok(!(r.container.textContent ?? '').includes('CREATE THE FIRST ACCOUNT'));
+    assert.equal(r.container.querySelectorAll('a[href="/restore"]').length, 0);
+  });
+
+  test('not ready: neither', async () => {
+    for (const firstRun of [true, false]) {
+      const r = await render(<SignInLauncher ready={false} firstRun={firstRun} returned={null} />);
+      assert.equal(create(r.container).length, 0, `firstRun ${firstRun}`);
+      await r.unmount();
+    }
+    assert.equal(createAccountLabel(true), 'CREATE THE FIRST ACCOUNT');
+    assert.equal(createAccountLabel(false), 'CREATE ACCOUNT');
+  });
+});
+
 describe('TC-989-31 Settings', () => {
   test('renders no Passkeys section', async () => {
     const api = stubFetch((call) => (call.url.includes('/api/') ? json(404, { error: 'not found' }) : undefined));
@@ -109,5 +148,7 @@ describe('TC-989-31 Settings', () => {
     assert.ok(text.includes('SETTINGS'), 'the page rendered');
     assert.ok(!/PASSKEYS/.test(text), 'Settings shows a Passkeys section');
     assert.ok(!text.includes('ADD PASSKEY'));
+    // TC-990-27: and no call reaches the retired register routes.
+    assert.ok(!api.calls.some((c) => c.url.includes('/api/auth/register/')), 'Settings called register/*');
   });
 });

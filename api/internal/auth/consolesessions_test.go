@@ -97,8 +97,12 @@ func TestConsoleSessions_HashOnlyExpiryAndEnds(t *testing.T) {
 	if _, err := f.sessions.EndBySub(f.ctx, ""); err == nil {
 		t.Error("EndBySub accepted an empty subject")
 	}
-	if _, err := NewConsoleSessions(nil, time.Now, rand.Reader); err == nil {
+	if _, err := NewConsoleSessions(nil, time.Now, rand.Reader, f.des); err == nil {
 		t.Error("NewConsoleSessions accepted a nil store")
+	}
+	// TC-990-28: a nil designator is refused (F-990-01).
+	if _, err := NewConsoleSessions(f.store, time.Now, rand.Reader, nil); err == nil {
+		t.Error("NewConsoleSessions accepted a nil designator")
 	}
 }
 
@@ -178,7 +182,8 @@ func TestUpgradeFromPreviousRelease(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	f := &authFixture{ctx: context.Background(), store: store, clock: newTestClock()}
-	if f.sessions, err = NewConsoleSessions(store, f.clock.Now, rand.Reader); err != nil {
+	f.des = newTxDesignator(t, store)
+	if f.sessions, err = NewConsoleSessions(store, f.clock.Now, rand.Reader, f.des); err != nil {
 		t.Fatal(err)
 	}
 	if f.svc, err = NewService(store, Config{RPID: "localhost", RPOrigins: []string{"http://localhost:3000"}, Sessions: f.sessions}); err != nil {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -23,11 +24,14 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca/tlscatest"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // mountReady is the identity service's readiness, settable.
@@ -149,9 +153,22 @@ func newMountFixture(t *testing.T) *mountFixture {
 		identityCA: ca.CertPEM, dataDir: dir, upstream: upURL, themeDir: theme, consoleOrigin: "https://ci.local",
 		installName: func(context.Context) (string, error) { return "CI", nil },
 		dirty:       events.NewSignal(time.Now), now: time.Now, ids: func() string { return "corr" }, log: log,
-		removed:   removednames.Unavailable{Err: errors.New("no list in this fixture")},
+		removed: removednames.Unavailable{Err: errors.New("no list in this fixture")},
+		network: mountRegistration{}, waiting: mountRegistration{}, emails: mountRegistration{},
 		resetDone: mountResetDone{},
 	}}
+}
+
+// mountRegistration is registration's facts, count and email check; these
+// cases never reach them.
+type mountRegistration struct{}
+
+func (mountRegistration) Facts(context.Context) (policy.NetworkFacts, error) {
+	return policy.NetworkFacts{}, errors.New("unused")
+}
+func (mountRegistration) Full(context.Context) (bool, error) { return false, errors.New("unused") }
+func (mountRegistration) EmailInUse(context.Context, string) (bool, error) {
+	return false, errors.New("unused")
 }
 
 // mountResetDone is the app door's reset return; these cases never reach it.
@@ -236,6 +253,10 @@ func TestMountDoors_BuildsBothOrNone(t *testing.T) {
 		"no throttle":  func(d *doorMountDeps) { d.throttle = nil },
 		"no version":   func(d *doorMountDeps) { d.version = nil },
 		"no readiness": func(d *doorMountDeps) { d.readiness = nil },
+		// #990: registration's facts, count and email check.
+		"no network": func(d *doorMountDeps) { d.network = nil },
+		"no waiting": func(d *doorMountDeps) { d.waiting = nil },
+		"no emails":  func(d *doorMountDeps) { d.emails = nil },
 	} {
 		f := newMountFixture(t)
 		unset(&f.deps)
@@ -462,5 +483,40 @@ func TestDoorMountInputs_NilOutsideKeycloak(t *testing.T) {
 	ev.version.Store(f.deps.version)
 	if ev.doorThrottle() != f.deps.throttle || ev.doorVersion() != f.deps.version {
 		t.Error("the bound throttle or version was not read")
+	}
+}
+
+// fixedNodes is an inventory's node list.
+type fixedNodes struct {
+	nodes []*proto.Node
+	err   error
+}
+
+func (n fixedNodes) List(context.Context) ([]*proto.Node, error) { return n.nodes, n.err }
+
+// TC-990-15 (wiring part): the door's network facts are the LAN watcher's
+// home subnets, the mesh's TailnetPrefixes and the inventory's node
+// addresses, read per request; an inventory error is an error.
+func TestDoorNetwork_TC990_15(t *testing.T) {
+	snap := lanaddr.Select([]lanaddr.Addr{{IP: net.ParseIP("192.0.2.5").To4(), Link: "end0", Index: 2, Bits: 24}})
+	nodes := fixedNodes{nodes: []*proto.Node{{LANIP: "192.0.2.10"}, {LANIP: ""}}}
+	src, err := doorNetwork(func() lanaddr.Snapshot { return snap }, nodes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := src.Facts(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.HomeSubnets, []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}) ||
+		!slices.Equal(f.Tailnet, mesh.TailnetPrefixes()) || !slices.Equal(f.Nodes, []netip.Addr{netip.MustParseAddr("192.0.2.10")}) {
+		t.Errorf("facts %+v", f)
+	}
+	bad, _ := doorNetwork(func() lanaddr.Snapshot { return snap }, fixedNodes{err: errors.New("inventory")})
+	if _, err := bad.Facts(t.Context()); err == nil {
+		t.Error("an inventory error was not an error")
+	}
+	if _, err := doorNetwork(nil, nodes); err == nil {
+		t.Error("no LAN watcher was accepted")
 	}
 }

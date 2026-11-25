@@ -65,64 +65,26 @@ func (s *Store) CountUsers(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// ErrNotFirstRun is CreateFirstUser's refusal when a registration
-// authorized by first run finds that an operator already exists.
-var ErrNotFirstRun = errors.New("first-run registration is closed: an operator already exists")
-
-// FirstRun reports whether the installation is at first run: no operator
-// exists yet. It fails closed. Any error reading the answer returns
-// (false, err), so a caller that checks only the bool still reads "not first
-// run" and refuses.
+// FirstRun reports whether the installation is at first run: no first-run
+// claim exists (first_admin) and no pre-update operator does (users), read
+// in one statement (register row C03). It fails closed. Any error reading
+// either table returns (false, err), so a caller that checks only the bool
+// still reads "not first run" and refuses.
 //
 // This is the one implementation; Service.FirstRun is its public face.
-// It lives on the store too only so main can wire the setup probe before the
-// Service exists.
+// It lives on the store too only so main can wire the setup probe and
+// converge's input before the Service exists.
 func (s *Store) FirstRun(ctx context.Context) (bool, error) {
-	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&exists)
+	var first int
+	err := s.db.QueryRowContext(ctx, firstRunSQL).Scan(&first)
 	if err != nil {
 		return false, fmt.Errorf("auth: first-run check: %w", err)
 	}
-	return exists == 0, nil
+	return first == 1, nil
 }
 
-// CreateFirstUser persists the first operator and its first credential in
-// one transaction, so a failed credential write never leaves a user with no
-// way to sign in.
-//
-// The user row is inserted only if the users table is still empty, in the
-// same statement that checks it, and ErrNotFirstRun is returned when it is
-// not. Checking at begin is not enough: a ceremony begun while the table was
-// empty must not create a second operator after another registration has
-// finished. It is the only path that creates a user from a registration;
-// signed-in registration adds a passkey to the caller's own account.
-func (s *Store) CreateFirstUser(ctx context.Context, u *User, c *Credential) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	res, err := tx.ExecContext(ctx, `
-        INSERT INTO users (id, name, display_name, created_at)
-        SELECT ?, ?, ?, ?
-        WHERE NOT EXISTS (SELECT 1 FROM users)`,
-		u.ID, u.Name, u.DisplayName, ms(u.CreatedAt))
-	if err != nil {
-		return err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		return ErrNotFirstRun
-	}
-	if err := insertCredential(ctx, tx, c); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
+// firstRunSQL is C03's predicate: both clauses, one statement.
+const firstRunSQL = `SELECT NOT EXISTS (SELECT 1 FROM first_admin) AND NOT EXISTS (SELECT 1 FROM users)`
 
 const insertUserSQL = `
         INSERT INTO users (id, name, display_name, created_at)

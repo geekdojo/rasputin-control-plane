@@ -44,8 +44,7 @@ import (
 // auth.RegisterRoutes records fails classProblems until it is an open route,
 // pinned here with its reason, or registered through gate.
 var signinSessionRoutes = map[string]string{
-	"GET /api/auth/me":                "the caller's own session view; the handler resolves only the caller's cookie and answers 401 without one",
-	"POST /api/auth/register/step-up": "the pre-update step-up, gone: answers 401 and does no work",
+	"GET /api/auth/me": "the caller's own session view; the handler resolves only the caller's cookie and answers 401 without one",
 }
 
 // idorProbes holds, for every route classed self, the test that proves a
@@ -66,6 +65,8 @@ var wantClass = map[string]string{
 	"POST /api/jobs":           "anyjob",
 	// TC-992-22: the administrator's password reset (geekdojo/geekdojo-brain#992).
 	"POST /api/accounts/{id}/reset-password": "control:iam",
+	// TC-990-25: how many people wait for access (geekdojo/geekdojo-brain#990).
+	"GET /api/accounts/waiting":              "control:iam",
 	"GET /api/jobs":                          "view",
 	"GET /api/jobs/{id}":                     "view",
 	"GET /api/jobs/{id}/steps":               "view",
@@ -331,8 +332,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 116 {
-		t.Errorf("%d rules recorded, want 116", n)
+	if n := len(real.rules); n != 117 {
+		t.Errorf("%d rules recorded, want 117", n)
 	}
 }
 
@@ -385,8 +386,8 @@ func TestRouteClasses_TC1002_14_SigninIsClosed(t *testing.T) {
 	m := newRouteMux()
 	f.srv.auth.RegisterRoutes(signinRegistrar{m})
 	signin := m.SigninPatterns()
-	if len(signin) != 12 {
-		t.Errorf("auth.RegisterRoutes registered %d patterns, want 12", len(signin))
+	if len(signin) != 10 {
+		t.Errorf("auth.RegisterRoutes registered %d patterns, want 10", len(signin))
 	}
 	for p := range signin {
 		why, ok := openRoutes[p]

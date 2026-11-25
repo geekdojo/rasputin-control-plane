@@ -234,20 +234,21 @@ func diffRules(d Desired, o observed, w *writes) {
 			w.fields = append(w.fields, "action."+want.Alias+".defaultAction")
 			put.DefaultAction, changed = *want.DefaultAction, true
 		}
+		// cfg is the config the action ends with: as read, the owned keys
+		// set over it.
+		cfg := map[string]string{}
+		maps.Copy(cfg, got.Config)
+		maps.Copy(cfg, want.Config)
 		if changed || !ok {
-			put.Config = nil
+			// The action PUT replaces the action's whole config with the
+			// body's, and a body with none clears it (register row T253),
+			// so it carries the config the action ends with.
+			put.Config = cfg
 			w.rules.actions[want.Alias] = put
 			w.rules.actionOrder = append(w.rules.actionOrder, want.Alias)
 		}
 		if want.Config != nil && !configHolds(got.Config, want.Config) {
 			w.fields = append(w.fields, "action."+want.Alias+".config")
-			cfg := map[string]string{}
-			for k, v := range got.Config {
-				cfg[k] = v
-			}
-			for k, v := range want.Config {
-				cfg[k] = v
-			}
 			w.rules.configs[want.Alias] = cfg
 			w.rules.configOrder = append(w.rules.configOrder, want.Alias)
 		}

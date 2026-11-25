@@ -13,6 +13,11 @@ type Inputs struct {
 	// AppBindings are the app clients' variants, by client id (Identity
 	// 7.3); nil until then.
 	AppBindings map[string]Variant
+	// FirstRun is the first-run predicate (register row C03): while it
+	// holds, saving recovery codes is a default action, so every account
+	// created before the claim ends sign-up on "Save your recovery codes"
+	// (geekdojo/geekdojo-brain#990).
+	FirstRun bool
 }
 
 // The clock bounds the realm is rendered from (D22, ratified by Bryce on
@@ -81,6 +86,9 @@ func RealmRules(in Inputs) map[string]any {
 		// unless resets are allowed (Identity 4.10).
 		"resetCredentialsFlow": ResetAlias,
 		"resetPasswordAllowed": true,
+		// Anyone on the home network may create an account; the home door
+		// decides who (Identity 4.8).
+		"registrationAllowed": true,
 
 		"ssoSessionIdleTimeout":            seconds(ssoSessionIdleLifetime),
 		"ssoSessionMaxLifespan":            seconds(ssoSessionMaxLifetime),

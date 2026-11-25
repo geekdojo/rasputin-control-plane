@@ -1,6 +1,7 @@
 package door
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"log/slog"
@@ -233,13 +234,13 @@ func TestDoor_Registration(t *testing.T) {
 	f.network.err = nil
 
 	closed, err := policy.New(policy.Deps{Table: f.table, Readiness: f.ready, Throttle: f.th, AppClients: policy.NoAppClients{},
-		Actions: policy.NoActionsIssued{}, Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{}, Removed: noneRemoved{}, Now: func() time.Time { return f.now }})
+		Actions: policy.NoActionsIssued{}, Network: closedRegistration{}, Waiting: closedRegistration{}, Removed: noneRemoved{}, Emails: noEmails{}, Now: func() time.Time { return f.now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.policySvc = closed
 	f.home, f.app = f.build(t)
-	refused(reg, "with RegistrationClosed")
+	refused(reg, "with registration's facts unreadable")
 	f.want400(Home, req{target: oidc("registrations") + "?" + authQuery("rasputin-mesh", map[string]string{"prompt": "create"})}, "another client")
 
 	// The template's refusal names a refused name and links back (4.8's
@@ -313,3 +314,17 @@ func TestDoor_CrossOriginAndSAML(t *testing.T) {
 		}
 	}
 }
+
+// closedRegistration's facts and count can't be read, so every
+// registration is refused.
+type closedRegistration struct{}
+
+func (closedRegistration) Facts(context.Context) (policy.NetworkFacts, error) {
+	return policy.NetworkFacts{}, errors.New("closed")
+}
+func (closedRegistration) Full(context.Context) (bool, error) { return false, errors.New("closed") }
+
+// noEmails holds no email.
+type noEmails struct{}
+
+func (noEmails) EmailInUse(context.Context, string) (bool, error) { return false, nil }

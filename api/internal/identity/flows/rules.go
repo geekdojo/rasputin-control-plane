@@ -6,9 +6,13 @@ import "slices"
 // folds it into its desired state's hash, so the hash changes exactly when
 // a rule does.
 type Rules struct {
-	Flows          map[string][]Node  `json:"flows"`
-	Realm          map[string]any     `json:"realm"`
-	EnabledActions []string           `json:"enabledActions"`
+	Flows          map[string][]Node `json:"flows"`
+	Realm          map[string]any    `json:"realm"`
+	EnabledActions []string          `json:"enabledActions"`
+	// DefaultActions are the required actions every new account gets: the
+	// recovery codes' during first run, none after (Identity 4.8). They are
+	// here so the claim changes the desired hash.
+	DefaultActions []string           `json:"defaultActions"`
 	Clients        []OwnClient        `json:"clients"`
 	Bindings       map[string]Variant `json:"bindings"`
 	ConsoleRoles   []string           `json:"consoleRoles"`
@@ -23,6 +27,7 @@ func Render(in Inputs) Rules {
 		Flows:          map[string][]Node{},
 		Realm:          RealmRules(in),
 		EnabledActions: enabledActions(in),
+		DefaultActions: defaultActions(in),
 		Clients:        OwnClients(),
 		Bindings:       Bindings(in.AppBindings),
 		ConsoleRoles:   slices.Clone(ConsoleRoles),

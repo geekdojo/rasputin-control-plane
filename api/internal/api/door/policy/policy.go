@@ -68,6 +68,13 @@ type RemovedNames interface {
 	Removed(ctx context.Context, name, email string) (bool, error)
 }
 
+// Emails answers whether an email belongs to an account
+// (*accounts.Users.EmailInUse, Identity 4.8). An error means it can't be
+// checked, which refuses the registration.
+type Emails interface {
+	EmailInUse(ctx context.Context, email string) (bool, error)
+}
+
 // Throttler is the per-source throttle Check consults last.
 type Throttler interface {
 	Admit(door Kind, addr netip.Addr, now time.Time) Admission
@@ -92,7 +99,10 @@ type Deps struct {
 	Waiting    Waiting
 	// Removed is the removed-name list registration checks.
 	Removed RemovedNames
-	Now     func() time.Time
+	// Emails is the in-use email check registration makes beside Removed
+	// (F-991-12).
+	Emails Emails
+	Now    func() time.Time
 	// Bindings pauses clients bound stricter than the realm default while
 	// the rules differ. Nil fails closed: every client outside the door
 	// table is paused (ERR-CLOSED).
@@ -100,7 +110,14 @@ type Deps struct {
 }
 
 // Service is the door policy.
-type Service struct{ d Deps }
+type Service struct {
+	d Deps
+	// creating is the one registration slot: a registration post holds it
+	// from before the waiting count is read until the door has relayed it
+	// (ReleaseRegistration), so concurrent posts can't pass the cap
+	// together (F-990-02).
+	creating chan struct{}
+}
 
 // New checks d and returns the service.
 func New(d Deps) (*Service, error) {
@@ -122,6 +139,8 @@ func New(d Deps) (*Service, error) {
 		missing = "Waiting"
 	case d.Removed == nil:
 		missing = "Removed"
+	case d.Emails == nil:
+		missing = "Emails"
 	case d.Now == nil:
 		missing = "Now"
 	}
@@ -131,7 +150,17 @@ func New(d Deps) (*Service, error) {
 	if d.Bindings == nil {
 		d.Bindings = newPauseAppClients(d.Table)
 	}
-	return &Service{d: d}, nil
+	return &Service{d: d, creating: make(chan struct{}, 1)}, nil
+}
+
+// ReleaseRegistration releases the registration slot an allowed Decision
+// holds (RegistrationHeld). The door calls it once the request is done,
+// whatever became of it.
+func (s *Service) ReleaseRegistration() {
+	select {
+	case <-s.creating:
+	default:
+	}
 }
 
 // pauseAppClients is the Bindings a policy built without one gets: it
@@ -168,6 +197,10 @@ type Decision struct {
 	// reports Answered on it once the identity service has answered.
 	Held    bool
 	HeldKey Key
+	// RegistrationHeld is an admitted registration post holding the one
+	// registration slot; the door releases it (ReleaseRegistration) once
+	// the request is done.
+	RegistrationHeld bool
 }
 
 // The log reasons that are WARN rather than INFO.
@@ -177,6 +210,9 @@ const (
 	// ReasonRegistrationPaused is sign-up paused because the removed-name
 	// list can't be read.
 	ReasonRegistrationPaused = "registration_paused"
+	// ReasonRegistrationUnknown is sign-up refused because the network
+	// facts, the waiting count or the in-use email check can't be read.
+	ReasonRegistrationUnknown = "registration_unknown"
 )
 
 // The sentences (ERR-MESSAGE).
@@ -194,15 +230,15 @@ const (
 	sentenceAction          = "This sign-in step wasn't started by Rasputin, so it was refused. Start again from Rasputin."
 	sentenceReset           = "Resetting a password isn't available for this app here. Start again from the sign-in page."
 	sentenceRegisterDoor    = "Accounts can only be created on your home network, at the Rasputin console."
-	sentenceRegisterSource  = "Accounts can only be created from a device on your home network."
-	sentenceRegisterFull    = "Too many accounts are waiting for access. Ask an administrator to give access to the ones waiting, then try again."
+	sentenceRegisterSource  = "Create your account from a device on your home network."
+	sentenceRegisterFull    = "Too many people are waiting for access. Ask an administrator."
 	sentenceRegisterUnknown = "Creating an account isn't available right now. Ask whoever runs this cluster to add you."
 	sentenceRegisterPaused  = "Sign-up is paused: Rasputin can't check removed names right now."
 	sentenceRemovedName     = "That sign-in name belonged to a removed account and can't be used again."
-	// sentenceEmailTaken is the identity service's own taken-email
-	// sentence (the theme's emailExistsMessage), so a removed address reads
-	// as any address in use.
-	sentenceEmailTaken   = "That email is already used. Use a different email, or ask an administrator."
+	// sentenceEmailTaken is the answer to a removed email and to one in
+	// use alike, and the theme's emailExistsMessage, so no answer confirms
+	// that an address exists or belonged to a removed account (F-991-12).
+	sentenceEmailTaken   = "Use a different email, or ask an administrator."
 	sentenceBusy         = "Another sign-in from this device is still being checked. Try again in a moment."
 	sentenceClientPaused = "Signing in to this app is paused because its sign-in settings changed. An administrator can see why in Rasputin's alerts."
 )
@@ -258,9 +294,23 @@ func (s *Service) Check(ctx context.Context, r Request) Decision {
 	if d, ok := s.action(ctx, r, client); !ok {
 		return d
 	}
-	if d, ok := s.registration(ctx, r, client); !ok {
+	d, ok, held := s.registration(ctx, r, client)
+	if !ok {
 		return d
 	}
+	d = s.throttle(r)
+	switch {
+	case held && d.Allow:
+		d.RegistrationHeld = true
+	case held:
+		s.ReleaseRegistration()
+	}
+	return d
+}
+
+// throttle is Check's last rule: a credential post is admitted one at a
+// time per source.
+func (s *Service) throttle(r Request) Decision {
 	if r.CredentialPost() {
 		a := s.d.Throttle.Admit(r.Door, r.Peer, s.d.Now())
 		if !a.OK {
@@ -434,33 +484,53 @@ func (s *Service) action(ctx context.Context, r Request, client string) (Decisio
 // routes, whose client and door the client rule checked, and an
 // authorization request with prompt=create, which opens the registration
 // form too: only the console's, only at the home door.
-func (s *Service) registration(ctx context.Context, r Request, client string) (Decision, bool) {
+//
+// A registration post, the one request on which the identity service
+// creates an account, first takes the one registration slot, waiting no
+// longer than its request; held reports that the slot is taken, and it is
+// released here on every refusal (F-990-02).
+func (s *Service) registration(ctx context.Context, r Request, client string) (d Decision, ok, held bool) {
 	creates := r.Route == RouteAuth && slices.Contains(strings.Fields(r.param("prompt")), "create")
 	if r.Route != RouteRegistrations && r.Route != RouteRegistration && !creates {
-		return Decision{}, true
+		return Decision{}, true, false
 	}
-	back := func(d Decision) (Decision, bool) { d.BackLink = true; return d, false }
+	back := func(d Decision) (Decision, bool, bool) {
+		if held {
+			s.ReleaseRegistration()
+		}
+		d.BackLink = true
+		return d, false, false
+	}
+	unknown := refuse(http.StatusForbidden, ReasonRegistrationUnknown, sentenceRegisterUnknown)
 	if creates && (r.Door != Home || client != ConsoleClient) {
 		return back(badRequest("registration_client", sentenceRegisterDoor))
 	}
 	facts, err := s.d.Network.Facts(ctx)
 	if err != nil {
-		return back(refuse(http.StatusForbidden, "registration_unknown", sentenceRegisterUnknown))
+		return back(unknown)
 	}
 	if !facts.AdmitsRegistration(r.Peer) {
 		return back(refuse(http.StatusForbidden, "registration_source", sentenceRegisterSource))
 	}
+	if r.Route == RouteRegistration && r.Method == http.MethodPost {
+		select {
+		case s.creating <- struct{}{}:
+			held = true
+		case <-ctx.Done():
+			return back(unknown)
+		}
+	}
 	full, err := s.d.Waiting.Full(ctx)
 	switch {
 	case err != nil:
-		return back(refuse(http.StatusForbidden, "registration_unknown", sentenceRegisterUnknown))
+		return back(unknown)
 	case full:
 		return back(refuse(http.StatusForbidden, "registration_full", sentenceRegisterFull))
 	}
 	if d, ok := s.removedName(ctx, r); !ok {
 		return back(d)
 	}
-	return Decision{}, true
+	return Decision{}, true, held
 }
 
 // removedName refuses a registration post whose sign-in name or email
@@ -488,13 +558,22 @@ func (s *Service) removedName(ctx context.Context, r Request) (Decision, bool) {
 			return refuse(http.StatusForbidden, "registration_removed_name", sentenceRemovedName), false
 		}
 	}
+	// Each email is checked against both the removed list and the
+	// accounts, always both, so the two answers can't be told apart by
+	// what was asked (F-991-12): either match is the same Decision, and
+	// only the logged reason differs.
 	for _, e := range emails {
-		found, err := s.d.Removed.Removed(ctx, "", e)
+		removed, rerr := s.d.Removed.Removed(ctx, "", e)
+		inUse, uerr := s.d.Emails.EmailInUse(ctx, e)
 		switch {
-		case err != nil:
+		case rerr != nil:
 			return paused, false
-		case found:
+		case uerr != nil:
+			return refuse(http.StatusForbidden, ReasonRegistrationUnknown, sentenceRegisterUnknown), false
+		case removed:
 			return refuse(http.StatusForbidden, "registration_removed_email", sentenceEmailTaken), false
+		case inUse:
+			return refuse(http.StatusForbidden, "registration_email_in_use", sentenceEmailTaken), false
 		}
 	}
 	return Decision{}, true
@@ -517,18 +596,3 @@ type NoActionsIssued struct{}
 
 // Issued answers false.
 func (NoActionsIssued) Issued(context.Context, ActionRequest) (bool, error) { return false, nil }
-
-// ErrRegistrationClosed is RegistrationClosed's answer.
-var ErrRegistrationClosed = errors.New("policy: account creation is not wired")
-
-// RegistrationClosed refuses every registration until Identity 4.8 supplies
-// the network facts and the waiting count.
-type RegistrationClosed struct{}
-
-// Facts refuses.
-func (RegistrationClosed) Facts(context.Context) (NetworkFacts, error) {
-	return NetworkFacts{}, ErrRegistrationClosed
-}
-
-// Full refuses.
-func (RegistrationClosed) Full(context.Context) (bool, error) { return false, ErrRegistrationClosed }

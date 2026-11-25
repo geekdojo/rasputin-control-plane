@@ -47,6 +47,7 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
@@ -83,10 +84,13 @@ type consoleRig struct {
 	conv     *converge.Converger
 	settings *memSettings
 	sessions *auth.ConsoleSessions
-	authSvc  *auth.Service
-	session  *idclient.Session
-	dbPath   string
-	apiRec   *logkittest.Recorder
+	// designations is the one accounts.Designations, as main opens it
+	// (geekdojo/geekdojo-brain#990).
+	designations *accounts.Designations
+	authSvc      *auth.Service
+	session      *idclient.Session
+	dbPath       string
+	apiRec       *logkittest.Recorder
 
 	mu sync.Mutex
 	// backchannel is the URL the console client's back-channel names, set
@@ -109,6 +113,107 @@ type consoleRig struct {
 	// action is the sign-in's accounts.reset_password action, set by the
 	// reset rig once its runner exists.
 	action lateAction
+	// claim and reg are the first-run claim's and registration's
+	// collaborators (geekdojo/geekdojo-brain#990), set by the first-run rig;
+	// until then first run is off and registration's facts are the door
+	// rig's fixed ones.
+	claim lateClaim
+	reg   lateRegistration
+}
+
+// lateClaim is the sign-in's first-run predicate, claimer and observer, set
+// after the sign-in is built. Unset, first run is off and the observer is
+// told nothing.
+type lateClaim struct {
+	mu       sync.Mutex
+	first    func(context.Context) (bool, error)
+	claimer  auth.Claimer
+	observer auth.Observer
+}
+
+func (l *lateClaim) set(first func(context.Context) (bool, error), c auth.Claimer, o auth.Observer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.first, l.claimer, l.observer = first, c, o
+}
+
+func (l *lateClaim) FirstRun(ctx context.Context) (bool, error) {
+	l.mu.Lock()
+	f := l.first
+	l.mu.Unlock()
+	if f == nil {
+		return false, nil
+	}
+	return f(ctx)
+}
+
+func (l *lateClaim) Earliest(ctx context.Context) (string, error) {
+	l.mu.Lock()
+	c := l.claimer
+	l.mu.Unlock()
+	if c == nil {
+		return "", errors.New("no claimer is set in this rig")
+	}
+	return c.Earliest(ctx)
+}
+
+func (l *lateClaim) SignedIn(ctx context.Context, sub string) {
+	l.mu.Lock()
+	o := l.observer
+	l.mu.Unlock()
+	if o != nil {
+		o.SignedIn(ctx, sub)
+	}
+}
+
+// lateRegistration is the door policy's registration collaborators, each
+// replaceable while the doors run. Unset, they are the door rig's fixed
+// ones: loopback is home, nothing waits, and no email or name is taken.
+type lateRegistration struct {
+	mu      sync.Mutex
+	network policy.Network
+	waiting policy.Waiting
+	emails  policy.Emails
+	removed policy.RemovedNames
+}
+
+func (l *lateRegistration) get() (policy.Network, policy.Waiting, policy.Emails, policy.RemovedNames) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n, w, e, r := l.network, l.waiting, l.emails, l.removed
+	if n == nil {
+		n = doorNetwork{}
+	}
+	if w == nil {
+		w = doorWaiting{}
+	}
+	if e == nil {
+		e = noEmails{}
+	}
+	if r == nil {
+		r = noRemovedNames{}
+	}
+	return n, w, e, r
+}
+
+func (l *lateRegistration) Facts(ctx context.Context) (policy.NetworkFacts, error) {
+	n, _, _, _ := l.get()
+	return n.Facts(ctx)
+}
+
+func (l *lateRegistration) Full(ctx context.Context) (bool, error) {
+	_, w, _, _ := l.get()
+	return w.Full(ctx)
+}
+
+func (l *lateRegistration) EmailInUse(ctx context.Context, email string) (bool, error) {
+	_, _, e, _ := l.get()
+	return e.EmailInUse(ctx, email)
+}
+
+func (l *lateRegistration) Removed(ctx context.Context, name, email string) (bool, error) {
+	_, _, _, r := l.get()
+	return r.Removed(ctx, name, email)
 }
 
 // lateAction is a fresh-sign-in action set after the sign-in is built: the
@@ -226,10 +331,26 @@ func (r *consoleRig) console() http.Handler {
 	})
 }
 
+// convergeFailure is the fields and key providers named by the api log's
+// last record of a failed converge, for a failure message: a run that fails
+// returns only its sentence.
+func (r *consoleRig) convergeFailure() string {
+	recs := r.apiRec.Records()
+	for i := len(recs) - 1; i >= 0; i-- {
+		fields, ok := logkittest.Attr(recs[i], "fields")
+		keys, kok := logkittest.Attr(recs[i], "key_providers")
+		if ok || kok {
+			return " (" + recs[i].Message + " fields=" + fields + " key_providers=" + keys + ")"
+		}
+	}
+	return " (no converge record names its fields)"
+}
+
 func (r *consoleRig) inputs() converge.Inputs {
+	first, _ := r.claim.FirstRun(context.Background())
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return converge.Inputs{InstallName: consoleInstall, ClockSynced: true,
+	return converge.Inputs{InstallName: consoleInstall, ClockSynced: true, FirstRun: first,
 		AppBindings: map[string]flows.Variant{doorTestApp: flows.AppClients},
 		RedirectURIs: map[string][]string{
 			baselineConsole: {"https://" + ConsoleHost + consoleCallback}, baselineMesh: {callbackOn(ConsoleHost)},
@@ -271,7 +392,11 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if r.sessions, err = auth.NewConsoleSessions(store, time.Now, rand.Reader); err != nil {
+	if r.designations, err = accounts.OpenDesignations(t.Context(), r.dbPath, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.designations.Close() })
+	if r.sessions, err = auth.NewConsoleSessions(store, time.Now, rand.Reader, r.designations); err != nil {
 		t.Fatal(err)
 	}
 	if r.authSvc, err = auth.NewService(store, auth.Config{RPID: ConsoleHost, RPOrigins: []string{"https://" + ConsoleHost},
@@ -285,8 +410,9 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	si, err := auth.NewSignIn(auth.SignInDeps{
 		Door: table.Home, ConsoleHost: ConsoleHost, ClientID: baselineConsole, Realm: baselineRealm,
 		Exchanger: recordingExchanger{inner: client, r: r}, Verifier: verifier, Ender: adminEnder{s: r.session},
-		Ready: doorReady{}, Sessions: r.sessions, Actions: map[string]auth.Action{"accounts.reset_password": &r.action},
-		Now: time.Now, Rand: rand.Reader, Log: log,
+		Ready: doorReady{}, Sessions: r.sessions, FirstRun: &r.claim, Claimer: &r.claim, Observer: &r.claim,
+		Actions: map[string]auth.Action{"accounts.reset_password": &r.action},
+		Now:     time.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -334,7 +460,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: consoleApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Now: time.Now, Bindings: r.conv})
+		Actions: r.actions, Network: &r.reg, Waiting: &r.reg, Removed: &r.reg, Emails: &r.reg, Now: time.Now, Bindings: r.conv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +528,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		"attributes": map[string]string{"pkce.code.challenge.method": "S256"},
 	})
 	if _, err := r.conv.Run(t.Context()); err != nil {
-		t.Fatalf("converge with the console's inputs: %v", err)
+		t.Fatalf("converge with the console's inputs: %v%s", err, r.convergeFailure())
 	}
 	r.settle(t)
 	return r

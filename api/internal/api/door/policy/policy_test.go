@@ -8,6 +8,20 @@ import (
 	"time"
 )
 
+// closedNetwork refuses every registration: its facts and its count can't
+// be read.
+type closedNetwork struct{}
+
+var errClosed = errors.New("closed")
+
+func (closedNetwork) Facts(context.Context) (NetworkFacts, error) { return NetworkFacts{}, errClosed }
+func (closedNetwork) Full(context.Context) (bool, error)          { return false, errClosed }
+
+// noEmails holds no email.
+type noEmails struct{}
+
+func (noEmails) EmailInUse(context.Context, string) (bool, error) { return false, nil }
+
 type okReady struct{}
 
 func (okReady) Ready(context.Context) error { return nil }
@@ -16,7 +30,7 @@ func (okReady) Ready(context.Context) error { return nil }
 func TestNew_RefusesMissing(t *testing.T) {
 	th, _ := newThrottle(t)
 	good := Deps{Table: table(t), Readiness: okReady{}, Throttle: th, AppClients: NoAppClients{}, Actions: NoActionsIssued{},
-		Network: RegistrationClosed{}, Waiting: RegistrationClosed{}, Removed: noneRemoved{}, Now: time.Now}
+		Network: closedNetwork{}, Waiting: closedNetwork{}, Removed: noneRemoved{}, Emails: noEmails{}, Now: time.Now}
 	if _, err := New(good); err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +39,7 @@ func TestNew_RefusesMissing(t *testing.T) {
 		"Throttle": func(d *Deps) { d.Throttle = nil }, "AppClients": func(d *Deps) { d.AppClients = nil },
 		"Actions": func(d *Deps) { d.Actions = nil }, "Network": func(d *Deps) { d.Network = nil },
 		"Waiting": func(d *Deps) { d.Waiting = nil }, "Now": func(d *Deps) { d.Now = nil },
-		"Removed": func(d *Deps) { d.Removed = nil },
+		"Removed": func(d *Deps) { d.Removed = nil }, "Emails": func(d *Deps) { d.Emails = nil },
 	} {
 		d := good
 		mut(&d)
@@ -43,12 +57,6 @@ func TestFailClosedCollaborators(t *testing.T) {
 	}
 	if ok, err := (NoActionsIssued{}).Issued(ctx, ActionRequest{Client: ConsoleClient, Action: "UPDATE_PASSWORD"}); ok || err != nil {
 		t.Error("NoActionsIssued issued an action")
-	}
-	if _, err := (RegistrationClosed{}).Facts(ctx); !errors.Is(err, ErrRegistrationClosed) {
-		t.Error("RegistrationClosed gave network facts")
-	}
-	if _, err := (RegistrationClosed{}).Full(ctx); !errors.Is(err, ErrRegistrationClosed) {
-		t.Error("RegistrationClosed gave a waiting count")
 	}
 	if (NetworkFacts{HomeSubnets: []netip.Prefix{netip.MustParsePrefix("192.0.2.0/24")}}).AdmitsRegistration(netip.Addr{}) {
 		t.Error("an address that did not parse admits registration")

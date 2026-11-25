@@ -69,7 +69,7 @@ func policyWith(t *testing.T, removed RemovedNames) *Service {
 	t.Helper()
 	th, _ := newThrottle(t)
 	svc, err := New(Deps{Table: table(t), Readiness: okReady{}, Throttle: th, AppClients: NoAppClients{},
-		Actions: NoActionsIssued{}, Network: homeNetwork{}, Waiting: notFull{}, Removed: removed, Now: time.Now})
+		Actions: NoActionsIssued{}, Network: homeNetwork{}, Waiting: notFull{}, Removed: removed, Emails: noEmails{}, Now: time.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +77,16 @@ func policyWith(t *testing.T, removed RemovedNames) *Service {
 }
 
 var homePeer = netip.MustParseAddr("192.0.2.7")
+
+// checked is Check, releasing an admitted post's registration slot as the
+// door does once the request is done.
+func checked(ctx context.Context, svc *Service, r Request) Decision {
+	d := svc.Check(ctx, r)
+	if d.RegistrationHeld {
+		svc.ReleaseRegistration()
+	}
+	return d
+}
 
 // post is a registration form post with form.
 func post(form url.Values) Request {
@@ -109,7 +119,7 @@ func TestRegistration_RemovedName(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, names := range [][]string{{"alice"}, {" Alice "}, {"ALICE"}, {"bob", "alice"}} {
-		d := r.svc.Check(t.Context(), post(url.Values{"username": names, "email": {"new@example.invalid"}}))
+		d := checked(t.Context(), r.svc, post(url.Values{"username": names, "email": {"new@example.invalid"}}))
 		if d.Allow || d.Status != http.StatusForbidden || d.Reason != "registration_removed_name" || d.Sentence != sentenceRemovedWant {
 			t.Errorf("username %q: %+v", names, d)
 		}
@@ -124,11 +134,11 @@ func TestRegistration_RemovedEmail(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, email := range []string{"alice@example.invalid", "ALICE@EXAMPLE.INVALID"} {
-		d := r.svc.Check(t.Context(), post(url.Values{"username": {"carol"}, "email": {email}}))
+		d := checked(t.Context(), r.svc, post(url.Values{"username": {"carol"}, "email": {email}}))
 		if d.Allow || d.Status != http.StatusForbidden {
 			t.Fatalf("email %q admitted: %+v", email, d)
 		}
-		if d.Sentence != "That email is already used. "+sentenceEmailWant {
+		if d.Sentence != sentenceEmailWant {
 			t.Errorf("email %q: sentence %q", email, d.Sentence)
 		}
 		for _, leak := range []string{"removed", "deleted"} {
@@ -143,7 +153,7 @@ func TestRegistration_RemovedEmail(t *testing.T) {
 // rule. TC-991-14: an empty list admits and raises no alert.
 func TestRegistration_UnrecordedAndEmptyAdmit(t *testing.T) {
 	r := newRemovedRig(t)
-	d := r.svc.Check(t.Context(), post(url.Values{"username": {"dave"}, "email": {"dave@example.invalid"}}))
+	d := checked(t.Context(), r.svc, post(url.Values{"username": {"dave"}, "email": {"dave@example.invalid"}}))
 	if !d.Allow {
 		t.Errorf("an empty list refused: %+v", d)
 	}
@@ -153,7 +163,7 @@ func TestRegistration_UnrecordedAndEmptyAdmit(t *testing.T) {
 	if err := r.store.Record(t.Context(), "erin", ""); err != nil {
 		t.Fatal(err)
 	}
-	if d := r.svc.Check(t.Context(), post(url.Values{"username": {"dave"}, "email": {"dave@example.invalid"}})); !d.Allow {
+	if d := checked(t.Context(), r.svc, post(url.Values{"username": {"dave"}, "email": {"dave@example.invalid"}})); !d.Allow {
 		t.Errorf("an unrecorded name was refused: %+v", d)
 	}
 }
@@ -174,7 +184,7 @@ func TestRegistration_PausedWhileUnreadable(t *testing.T) {
 	reqs := creates()
 	reqs["registration POST"] = post(url.Values{"username": {"frank"}, "email": {"frank@example.invalid"}})
 	for what, req := range reqs {
-		d := r.svc.Check(t.Context(), req)
+		d := checked(t.Context(), r.svc, req)
 		if d.Allow || d.Status != http.StatusForbidden || d.Reason != ReasonRegistrationPaused || d.Sentence != sentencePausedWant || !d.BackLink {
 			t.Errorf("%s while unreadable: %+v", what, d)
 		}
@@ -183,14 +193,14 @@ func TestRegistration_PausedWhileUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for what, req := range reqs {
-		if d := r.svc.Check(t.Context(), req); !d.Allow {
+		if d := checked(t.Context(), r.svc, req); !d.Allow {
 			t.Errorf("%s after the repair: %+v", what, d)
 		}
 	}
 	// Unavailable, wired when the store didn't open, pauses too.
 	off := policyWith(t, removednames.Unavailable{Err: sql.ErrConnDone})
 	for what, req := range reqs {
-		if d := off.Check(t.Context(), req); d.Allow || d.Reason != ReasonRegistrationPaused {
+		if d := checked(t.Context(), off, req); d.Allow || d.Reason != ReasonRegistrationPaused {
 			t.Errorf("%s with no store: %+v", what, d)
 		}
 	}

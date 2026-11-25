@@ -142,7 +142,7 @@ func (w *Writer) BeforePrivilege(ctx context.Context, userID string) error {
 	if !slices.ContainsFunc(creds, func(c struct {
 		Type string `json:"type"`
 	}) bool {
-		return c.Type == typeOTP || c.Type == typeWebAuthn || c.Type == typePasswordless
+		return IsSecondStep(c.Type)
 	}) {
 		return ErrNoSecondStep
 	}
@@ -151,6 +151,14 @@ func (w *Writer) BeforePrivilege(ctx context.Context, userID string) error {
 		return fmt.Errorf("markers: write the account's markers: %w", err)
 	}
 	return nil
+}
+
+// IsSecondStep reports whether a credential of type credType is a second
+// step: an authenticator app, a passkey or a security key. It is the one
+// test BeforePrivilege and the designation facts (accounts.RoleAccounts)
+// share.
+func IsSecondStep(credType string) bool {
+	return credType == typeOTP || credType == typeWebAuthn || credType == typePasswordless
 }
 
 func (w *Writer) userPath(userID string) string {

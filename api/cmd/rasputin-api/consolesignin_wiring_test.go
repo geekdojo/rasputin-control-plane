@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
@@ -27,18 +29,38 @@ func (a *recordingAdmin) Admin(_ context.Context, method, path string, _, _ any)
 	return idclient.Response{Status: http.StatusNoContent}, nil
 }
 
+// notFirstRun, noClaimer and noObserver are the #990 collaborators the
+// sign-in requires; nothing here signs anyone in.
+type notFirstRun struct{}
+
+func (notFirstRun) FirstRun(context.Context) (bool, error) { return false, nil }
+
+type noClaimer struct{}
+
+func (noClaimer) Earliest(context.Context) (string, error) { return "", errors.New("no person") }
+
+type noObserver struct{}
+
+func (noObserver) SignedIn(context.Context, string) {}
+
 type readyNow struct{}
 
 func (readyNow) Ready(context.Context) error { return nil }
 
 func consoleAuth(t *testing.T) (*auth.Service, *auth.ConsoleSessions) {
 	t.Helper()
-	store, err := auth.OpenStore(t.Context(), filepath.Join(t.TempDir(), "auth.db"))
+	path := filepath.Join(t.TempDir(), "auth.db")
+	store, err := auth.OpenStore(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	sessions, err := auth.NewConsoleSessions(store, time.Now, rand.Reader)
+	designations, err := accounts.OpenDesignations(t.Context(), path, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = designations.Close() })
+	sessions, err := auth.NewConsoleSessions(store, time.Now, rand.Reader, designations)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +84,8 @@ func TestConsoleSignInWiring_OnlyUnderKeycloakWithDoors(t *testing.T) {
 			svc, sessions := consoleAuth(t)
 			w, err := consoleSignInWiring(t.Context(), consoleSignInDeps{mode: mode, doorsOn: doorsOn, table: table, host: "ci.local",
 				client: idclient.Disabled{Kind: idclient.ErrDisabled}, session: &recordingAdmin{}, ready: readyNow{},
-				sessions: sessions, identity: sessionsEnder(), now: time.Now, log: slog.New(slog.DiscardHandler)})
+				sessions: sessions, identity: sessionsEnder(), firstRun: notFirstRun{}, claimer: noClaimer{}, observer: noObserver{},
+				now: time.Now, log: slog.New(slog.DiscardHandler)})
 			if err != nil {
 				t.Fatalf("%s doors=%v: %v", mode, doorsOn, err)
 			}

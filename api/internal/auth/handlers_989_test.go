@@ -11,8 +11,7 @@ import (
 
 // TC-989-23 (acceptance; issue TC-06): a valid pre-update passkey gets 410
 // with a sentence from login/begin and login/finish, no cookie, and no row
-// in either session table; a first-run register/finish sets no session
-// cookie.
+// in either session table. (register/* is gone: TC-990-06.)
 func TestOldPasskeyRoutesGone(t *testing.T) {
 	f := newAuthFixture(t)
 	h := f.handler()
@@ -35,22 +34,6 @@ func TestOldPasskeyRoutesGone(t *testing.T) {
 	}
 	if f.countRows(t, "sessions") != 0 || f.countRows(t, "console_sessions") != 0 {
 		t.Error("a pre-update passkey opened a session")
-	}
-
-	g := newAuthFixture(t)
-	gh := g.handler()
-	_, c := registerBegin(t, gh, "bob", nil)
-	w := registerFinish(gh, c, nil)
-	if w.Code != http.StatusOK {
-		t.Fatalf("first-run finish: %d %s", w.Code, w.Body.String())
-	}
-	for _, ck := range w.Result().Cookies() {
-		if strings.Contains(ck.Name, "session") && ck.Value != "" {
-			t.Errorf("register/finish set %s", ck.Name)
-		}
-	}
-	if g.countRows(t, "sessions") != 0 || g.countRows(t, "console_sessions") != 0 {
-		t.Error("register/finish opened a session")
 	}
 }
 

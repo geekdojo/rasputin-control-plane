@@ -116,7 +116,7 @@ type eventsMarks interface {
 // the doors' resource version, binds them to the monitor's facts, marks both
 // for this start and runs them until ctx ends. It does nothing outside
 // keycloak.
-func (w identityState) startEvents(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, log *slog.Logger) {
+func (w identityState) startEvents(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, mw *markers.Writer, log *slog.Logger) {
 	ev := w.events
 	if ev == nil || idw.mode != identityModeKeycloak || idw.dirty == nil {
 		return
@@ -131,7 +131,7 @@ func (w identityState) startEvents(ctx context.Context, idw identityWiring, mark
 			go rv.Run(ctx)
 		}
 	}
-	deps, th := eventsDeps(ctx, idw, marks, table, tableErr, sinks, log)
+	deps, th := eventsDeps(ctx, idw, marks, table, tableErr, sinks, mw, log)
 	if th != nil {
 		ev.throttle.Store(th)
 	}
@@ -148,11 +148,11 @@ func (w identityState) startEvents(ctx context.Context, idw identityWiring, mark
 }
 
 // eventsDeps is the drain's collaborators: the throttle (with a door table)
-// as a user and pass sink, the marker writer as a user sink, and the
-// converger's sinks (geekdojo/geekdojo-brain#987). It returns the throttle
-// it built, nil for none. A part that cannot be built is logged and left
-// out.
-func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, log *slog.Logger) (events.Deps, *policy.Throttle) {
+// as a user and pass sink, the marker writer mw (markerWriter's) as a user
+// sink, and the converger's sinks (geekdojo/geekdojo-brain#987). It returns
+// the throttle it built, nil for none. A part that cannot be built is
+// logged and left out; a nil mw is left out.
+func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, table doors.Table, tableErr error, sinks convergeSinks, mw *markers.Writer, log *slog.Logger) (events.Deps, *policy.Throttle) {
 	deps := events.Deps{Admin: idw.session, Marks: marks, Signal: idw.dirty, Realm: identityRealm, Log: log,
 		AdminSinks: sinks.admin, PassSinks: append([]events.PassSink{}, sinks.pass...)}
 	var th *policy.Throttle
@@ -167,13 +167,26 @@ func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, tabl
 			deps.PassSinks = append(deps.PassSinks, th)
 		}
 	}
-	mw, err := markers.New(markers.Deps{Admin: idw.session, Realm: identityRealm, DoorOf: doorOf(table, tableErr), Log: log})
-	if err != nil {
-		log.ErrorContext(ctx, "sign-in marker writer not built", "component", "identity", "err", err.Error())
-	} else {
+	if mw != nil {
 		deps.UserSinks = append(deps.UserSinks, mw)
 	}
 	return deps, th
+}
+
+// markerWriter is the one second-step marker writer: the drain's user sink
+// and the designated-role grant's BeforePrivilege
+// (geekdojo/geekdojo-brain#990). It is nil outside keycloak, and nil, with
+// one ERROR record, when it cannot be built.
+func markerWriter(ctx context.Context, idw identityWiring, table doors.Table, tableErr error, log *slog.Logger) *markers.Writer {
+	if idw.mode != identityModeKeycloak {
+		return nil
+	}
+	mw, err := markers.New(markers.Deps{Admin: idw.session, Realm: identityRealm, DoorOf: doorOf(table, tableErr), Log: log})
+	if err != nil {
+		log.ErrorContext(ctx, "sign-in marker writer not built", "component", "identity", "err", err.Error())
+		return nil
+	}
+	return mw
 }
 
 // doorOf is the door each client in the door table belongs to; with no

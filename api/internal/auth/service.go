@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -39,9 +37,6 @@ type Service struct {
 	// origins is cfg.RPOrigins normalized: the one browser-origin allowlist
 	// (see OriginAllowlist).
 	origins *OriginAllowlist
-
-	mu      sync.Mutex
-	pending map[string]*pendingAuth // keyed by random pending-token
 
 	hookMu    sync.RWMutex
 	loginHook LoginHook
@@ -80,28 +75,10 @@ type Service struct {
 // both subsystems already meet.
 type LoginHook func(ctx context.Context, name string) error
 
-type pendingAuth struct {
-	kind    string // "register"
-	user    *User
-	session *webauthn.SessionData
-	expires time.Time
-}
-
 const (
 	// sessionLifetime bounds a console session (register rows E3 and C72)
 	// and a legacy one.
 	sessionLifetime = 7 * 24 * time.Hour
-	// pendingLifetime bounds an unfinished WebAuthn ceremony. A ceremony is
-	// consumed at finish, but one the browser abandons produces no fact the
-	// api could observe, so this bound is what frees its memory and ends its
-	// authority. It is a safety net, not a state transition (principles.md's
-	// clock rule; exception register row E5).
-	pendingLifetime = 5 * time.Minute
-	// maxPending caps the in-memory ceremony map. login/begin is
-	// unauthenticated, so without a cap the map grows with every request
-	// until the janitor catches up. At the cap, expired entries are pruned
-	// first, then the entry closest to expiry is evicted.
-	maxPending = 1024
 )
 
 // SessionLifetime is sessionLifetime for the sessions other packages bound
@@ -145,7 +122,6 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		web:      w,
 		cfg:      cfg,
 		origins:  origins,
-		pending:  make(map[string]*pendingAuth),
 		sessions: cfg.Sessions,
 	}, nil
 }
@@ -279,13 +255,11 @@ func (s *Service) janitor() {
 	}
 }
 
-// sweep is one janitor pass: expired pre-update ceremonies and legacy
-// session rows (so #745's plaintext rows are gone within sessionLifetime,
+// sweep is one janitor pass: legacy session rows (so #745's plaintext rows are gone within sessionLifetime,
 // and nothing writes new ones), expired console sessions and expired
 // pending sign-ins. Each is a tidy-up of state its own reader already
 // refuses once expired, so a failed delete changes no decision.
 func (s *Service) sweep(ctx context.Context, now time.Time) {
-	s.cleanupPending(now)
 	_ = s.store.DeleteExpiredSessions(ctx, now.UTC())
 	if s.sessions != nil {
 		_ = s.sessions.DeleteExpired(ctx)
@@ -295,97 +269,19 @@ func (s *Service) sweep(ctx context.Context, now time.Time) {
 	}
 }
 
-func (s *Service) cleanupPending(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for token, p := range s.pending {
-		if now.After(p.expires) {
-			delete(s.pending, token)
-		}
-	}
-}
-
 // ----- first run ------------------------------------------------------------
 
-// FirstRun reports whether the installation is at first run: no operator has
-// registered yet. It is the one predicate every first-run surface reads
-// (register/begin, auth/status, the restore routes, the setup probe), and it
-// fails closed: an error returns (false, err), never "first run".
+// FirstRun reports whether the installation is at first run: no first-run
+// claim and no pre-update operator exist (C03). It is the one predicate
+// every first-run surface reads (auth/status and the launcher, the restore
+// routes, the setup probe, converge's recovery-codes default action and the
+// claim), and it fails closed: an error returns (false, err), never "first
+// run".
 func (s *Service) FirstRun(ctx context.Context) (bool, error) {
 	return s.store.FirstRun(ctx)
 }
 
-// ----- pending-auth state -------------------------------------------------
-
-func randomToken(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func (s *Service) storePending(p *pendingAuth) (string, error) {
-	token, err := randomToken(16)
-	if err != nil {
-		return "", err
-	}
-	now := time.Now()
-	p.expires = now.Add(pendingLifetime)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.pending) >= maxPending {
-		s.evictPendingLocked(now)
-	}
-	s.pending[token] = p
-	return token, nil
-}
-
-// evictPendingLocked makes room for one entry: it drops every expired entry,
-// and if none had expired, the one closest to expiry. Caller holds s.mu.
-func (s *Service) evictPendingLocked(now time.Time) {
-	var (
-		oldest    string
-		oldestExp time.Time
-		pruned    bool
-	)
-	for token, p := range s.pending {
-		if now.After(p.expires) {
-			delete(s.pending, token)
-			pruned = true
-			continue
-		}
-		if oldest == "" || p.expires.Before(oldestExp) {
-			oldest, oldestExp = token, p.expires
-		}
-	}
-	if !pruned && oldest != "" {
-		delete(s.pending, oldest)
-	}
-}
-
-func (s *Service) takePending(token string) *pendingAuth {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.pending[token]
-	if !ok {
-		return nil
-	}
-	delete(s.pending, token)
-	if time.Now().After(p.expires) {
-		return nil
-	}
-	return p
-}
-
 // ----- cookies ------------------------------------------------------------
-
-// setCeremonyCookie names a pre-update passkey ceremony in flight.
-func (s *Service) setCeremonyCookie(w http.ResponseWriter, token string) {
-	setCookie(w, ceremonyCookieName, token, pendingLifetime)
-}
-
-func (s *Service) clearCeremonyCookie(w http.ResponseWriter) { clearCookie(w, ceremonyCookieName) }
 
 // setSessionCookie writes the console session's cookie.
 func setSessionCookie(w http.ResponseWriter, cookie secret.Value) {
@@ -474,50 +370,13 @@ func (s *Service) RequireSessionFunc(next http.HandlerFunc) http.HandlerFunc {
 
 // ----- helpers ------------------------------------------------------------
 
-// makeUser creates a User with a fresh 16-byte WebAuthn handle.
-func makeUser(name, displayName string) (*User, error) {
-	if displayName == "" {
-		displayName = name
-	}
-	if !validUserName(name) {
-		return nil, errors.New("invalid user name")
-	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
-		return nil, err
-	}
-	return &User{
-		ID:          id,
-		Name:        name,
-		DisplayName: displayName,
-		CreatedAt:   time.Now().UTC(),
-	}, nil
-}
-
-func validUserName(s string) bool {
-	if len(s) < 1 || len(s) > 32 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.':
-		default:
-			return false
-		}
-	}
-	return !strings.HasPrefix(s, "-") && !strings.HasPrefix(s, ".")
-}
-
 // ownCookiePrefix starts the name of every cookie the api sets, once an
 // optional __Host- or __Secure- prefix is removed (signin-origin.md §5.3).
 const ownCookiePrefix = "rasputin-"
 
 // IsOwnCookie reports whether name is one of the api's own cookies: with an
 // optional __Host- or __Secure- prefix removed, it starts with rasputin-
-// (the session, the pending ceremony, the repair session and any later
+// (the session, the pending sign-in, the repair session and any later
 // one). The sign-in doors strip these both ways, and StripCookies drops
 // them before a request is forwarded (geekdojo/geekdojo-brain#985).
 func IsOwnCookie(name string) bool {
