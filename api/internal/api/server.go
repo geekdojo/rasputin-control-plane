@@ -89,6 +89,9 @@ type Server struct {
 	// resetter decides an administrator's password reset
 	// (geekdojo/geekdojo-brain#992); nil answers 503 identity_not_ready.
 	resetter resetChecker
+	// accountRequests decides every account change
+	// (geekdojo/geekdojo-brain#994); nil answers 503 identity_not_ready.
+	accountRequests AccountRequester
 	// waiting counts the accounts waiting for access
 	// (geekdojo/geekdojo-brain#990), set under keycloak only.
 	waiting   WaitingCounter
@@ -389,6 +392,9 @@ func (s *Server) routes() *routeMux {
 
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
 	gate("POST /api/accounts/{id}/reset-password", needs(authz.NeedControl(authz.IAM)), s.handleResetPassword)
+	// Every account change (#994): the request names its kind, so the
+	// router checks Self and the runner decides the kind.
+	gate("POST /api/accounts/jobs", anyJob(), s.handleAccountJob)
 	gate("GET /api/accounts/waiting", needs(authz.AccountsRead()), s.handleWaiting)
 	gate("GET /api/jobs", needs(authz.NeedView()), s.handleListJobs)
 	gate("GET /api/jobs/{id}", needs(authz.NeedView()), s.handleGetJob)

@@ -767,3 +767,36 @@ rig sets the authenticator-app required action through the Admin API), the "N pe
 copy (Identity 6.2), a truly simultaneous pair of callbacks (the unit test TC-990-08 proves
 the claim's transaction under concurrency), and the appliance itself (the bench,
 `rasputin-identity-test`, TC-990-30).
+
+## Account changes
+
+[geekdojo-brain#994](https://github.com/geekdojo/geekdojo-brain/issues/994) (Identity 4.12)
+makes every change to a person's account one job, submitted through
+`POST /api/accounts/jobs`, authorized by the kind table and run under the one accounts lock.
+
+- **`TestConsole_AgainstPinnedKeycloak`**'s last subtest, *Identity 4.12 account changes*
+  (`accounts_functional_test.go`, TC-994-36 to TC-994-41), in the backend job's identity step.
+  It layers the reset rig on the console rig with `accounts.Requests`, the account workflows,
+  the designated-role grant and its observer as main wires them; the observer is told of
+  every console callback and, as a sink of the sign-in history drain, of every sign-in at
+  either door. Requests are decided as the route decides them, then followed through the real
+  fresh sign-in. It proves:
+  - a privileged role given to a password-only account is a designation, and is granted once
+    the account holds an authenticator app and codes and signs in (TC-994-36);
+  - a privileged account can't remove its recovery codes or its only second step, and an
+    unprivileged account's removed authenticator app is gone and no longer asked for at the
+    home door (TC-994-37, row T273);
+  - `set_email` needs `iam`, and only `confirm_email` puts the address in an app's ID token
+    and userinfo through `rasputin-app-email` (TC-994-38, row T274);
+  - privileged changes submit nothing without a fresh sign-in, fail through `POST /api/jobs`,
+    and apply after one (TC-994-39);
+  - signing out everywhere else keeps the request's session, a credential label reads back,
+    an account attack detection holds signs in after `unlock`, and a taken email gets the
+    duplicate sentence (TC-994-40, rows T270 to T275);
+  - an app-only designation completes at an app-door sign-in with no console sign-in
+    (TC-994-41).
+
+What it does not prove: the screens (Identity 6.2, 6.3 and 9.6, and #319), the app relay
+(Identity 7.5) and the RADIUS hook (Identity 9.5), and the appliance itself. The unit tests
+(`api/internal/accounts`, TC-994-01 to TC-994-34) prove the guard's decisions, the lock, the
+designations and every kind's steps over a fake Admin API.

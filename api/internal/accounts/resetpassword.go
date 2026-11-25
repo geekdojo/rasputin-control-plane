@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/pwpolicy"
@@ -55,7 +56,10 @@ type ResetDeps struct {
 	Held    *Held
 	Checker PasswordChecker
 	Revoker SignOutSteps
-	Log     *slog.Logger
+	// Lock is the one accounts lock, held for set_temporary's write
+	// (geekdojo/geekdojo-brain#994).
+	Lock sync.Locker
+	Log  *slog.Logger
 	// StepTimeout bounds set_temporary; it marks work gone far outside
 	// normal and decides nothing else.
 	StepTimeout time.Duration
@@ -66,7 +70,7 @@ type ResetDeps struct {
 // terminal hook destroys a password still held, on success, failure and
 // Recover alike. It refuses a missing collaborator.
 func ResetPasswordWorkflow(d ResetDeps) (jobs.Workflow, error) {
-	if d.Users == nil || d.Held == nil || d.Checker == nil || d.Revoker == nil || d.Log == nil {
+	if d.Users == nil || d.Held == nil || d.Checker == nil || d.Revoker == nil || d.Lock == nil || d.Log == nil {
 		return jobs.Workflow{}, errors.New("accounts: ResetPasswordWorkflow: a collaborator is nil")
 	}
 	if d.StepTimeout <= 0 {
@@ -105,7 +109,9 @@ func setTemporary(d ResetDeps, log *slog.Logger) jobs.DoFn {
 			return nil, fail(sentenceSpec, errors.New("the spec names no account"), slog.LevelWarn,
 				StepSetTemporary+": failed", "event", "reset.set_failed", "cause", "spec")
 		}
+		d.Lock.Lock()
 		status, err := d.Users.SetTemporaryPassword(sc.Ctx, spec.AccountID, pw)
+		d.Lock.Unlock()
 		switch {
 		case err == nil:
 			jobs.LogStep(log, sc, slog.LevelInfo, StepSetTemporary+": set", "event", "reset.set")

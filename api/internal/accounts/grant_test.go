@@ -25,8 +25,10 @@ type grantRig struct {
 	fail  map[string]error
 	des   map[string]Designation
 	facts authz.AccountFacts
-	g     *Granter
-	rec   *logkittest.Recorder
+	// network is the grants the account holds when the grant reads them.
+	network []string
+	g       *Granter
+	rec     *logkittest.Recorder
 }
 
 func (r *grantRig) call(name string) error {
@@ -81,6 +83,16 @@ func (a gAccess) Grant(_ context.Context, _ string, level AppLevel) error {
 	return a.r.call("Access.Grant:" + string(level))
 }
 
+type gUsers struct{ r *grantRig }
+
+func (u gUsers) Read(context.Context, string) (Person, error) {
+	return Person{Network: u.r.network}, u.r.fail["Read"]
+}
+func (u gUsers) SetNetwork(_ context.Context, _ string, grants []string) error {
+	return u.r.call("SetNetwork:" + strings.Join(grants, ","))
+}
+func (u gUsers) ConfirmEmail(context.Context, string) error { return u.r.call("ConfirmEmail") }
+
 type gConsole struct{ r *grantRig }
 
 func (c gConsole) EndBySub(context.Context, string) (int64, error) { return 0, c.r.call("EndBySub") }
@@ -95,7 +107,7 @@ func newGrantRig(t *testing.T) *grantRig {
 	r := &grantRig{log: &callLog{}, fail: map[string]error{}, rec: rec, facts: complete,
 		des: map[string]Designation{grantSub: {Sub: grantSub, ConsoleRole: "admin", AppRole: AppAdmin, Reason: ReasonFirstAdmin}}}
 	g, err := NewGranter(GranterDeps{Designations: gDes{r}, Facts: gFacts{r}, Markers: gMarkers{r}, Sessions: gSessions{r},
-		Roles: gRoles{r}, Access: gAccess{r}, Console: gConsole{r}, Lock: &sync.Mutex{}, Log: log, StepTimeout: time.Minute})
+		Roles: gRoles{r}, Users: gUsers{r}, Access: gAccess{r}, Console: gConsole{r}, Lock: &sync.Mutex{}, Log: log, StepTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +142,7 @@ func TestGranter_TC990_21(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []string{"BeforePrivilege", "EndAll", "EndOffline", "AddConsoleRole:admin", "Access.Grant:admin", "EndBySub", "Clear"}
+		want := []string{"BeforePrivilege", "EndAll", "EndOffline", "AddConsoleRole:admin", "ConfirmEmail", "Access.Grant:admin", "EndBySub", "Clear"}
 		if got := r.log.all(); !slices.Equal(got, want) {
 			t.Errorf("calls %v, want %v", got, want)
 		}
@@ -145,7 +157,7 @@ func TestGranter_TC990_21(t *testing.T) {
 		for _, by := range []string{"", "someone-else", "admin-sub"} {
 			r := newGrantRig(t)
 			out, err := r.run(t, by)
-			if err != nil || out[StepFinish] != outcomeFinished || len(r.log.all()) != 7 {
+			if err != nil || out[StepFinish] != outcomeFinished || len(r.log.all()) != 8 {
 				t.Errorf("CreatedBy %q: %v %v %v", by, out, err, r.log.all())
 			}
 		}
@@ -191,7 +203,7 @@ func TestGranter_TC990_21(t *testing.T) {
 	})
 	t.Run("a failure at each step stops the job, keeps the designation, and is one WARN with no account id", func(t *testing.T) {
 		ie := &idclient.Error{Op: "admin", Path: "/admin/realms/rasputin/users/" + grantSub, Status: 503, Kind: idclient.ErrUnreachable}
-		for _, at := range []string{"Facts", "Get", "BeforePrivilege", "EndAll", "EndOffline", "AddConsoleRole:admin", "Access.Grant:admin", "EndBySub", "Clear"} {
+		for _, at := range []string{"Facts", "Get", "BeforePrivilege", "EndAll", "EndOffline", "AddConsoleRole:admin", "ConfirmEmail", "Access.Grant:admin", "EndBySub", "Clear"} {
 			r := newGrantRig(t)
 			r.fail[at] = ie
 			_, err := r.run(t, "")

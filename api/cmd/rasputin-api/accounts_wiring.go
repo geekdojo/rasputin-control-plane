@@ -12,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/pwpolicy"
@@ -29,7 +30,10 @@ import (
 // fresh-sign-in action and its job. Identity 4.8 (#990) adds the first-run
 // claim's first account, the waiting count, the in-use email check, and the
 // designated-role grant with its observer, over the one Designations main
-// opened before the console sessions.
+// opened before the console sessions. Identity 4.12 (#994) adds every
+// account change: the request seam, the fresh-sign-in action of the
+// fresh-gated kinds, and their workflows, all under the one accounts lock;
+// and the observer as a sink of the sign-in history drain.
 
 // accountsStepTimeout bounds one identity.revoke step: it marks work gone
 // far outside normal and decides nothing else.
@@ -56,7 +60,7 @@ type accountsDeps struct {
 	admin   accounts.Admin
 	dbPath  string
 	mac     removednames.MAC
-	console accounts.ConsoleSessions
+	console accounts.RevokeConsole
 	moved   *auth.Store
 	// kinds is the kind table, the reset's dry run; runner submits the
 	// reset; listDir holds the password deny list (#992).
@@ -98,6 +102,12 @@ type accountsWiring struct {
 	waiting  *accounts.Waiting
 	observer *accounts.Observer
 	granter  *accounts.Granter
+	// requests decides every account change; freshAction submits a
+	// fresh-gated one after the fresh sign-in; changes are their
+	// workflows (#994).
+	requests    *accounts.Requests
+	freshAction *accounts.FreshAction
+	changes     *accounts.Changes
 }
 
 // wireAccounts builds the accounts under keycloak. A removed-name list that
@@ -158,7 +168,7 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	}
 	held := accounts.NewHeld()
 	reset, err := accounts.ResetPasswordWorkflow(accounts.ResetDeps{Users: users, Held: held, Checker: checker, Revoker: rev,
-		Log: d.log, StepTimeout: accountsStepTimeout})
+		Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout})
 	if err != nil {
 		return accountsWiring{}, err
 	}
@@ -179,7 +189,7 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 		return accountsWiring{}, err
 	}
 	granter, err := accounts.NewGranter(accounts.GranterDeps{
-		Designations: d.designations, Facts: roleAccounts, Markers: d.markers, Sessions: ender, Roles: users,
+		Designations: d.designations, Facts: roleAccounts, Markers: d.markers, Sessions: ender, Roles: users, Users: users,
 		Access: access, Console: d.console, Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout,
 	})
 	if err != nil {
@@ -189,19 +199,57 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	if err != nil {
 		return accountsWiring{}, err
 	}
+	fresh := accounts.NewFresh()
+	changes, err := accounts.NewChanges(accounts.ChangesDeps{
+		Guard: guard, Users: users, Access: access, Sessions: ender, Markers: d.markers, Designations: d.designations,
+		Facts: roleAccounts, Revoker: rev, Removed: removed, Held: held, Fresh: fresh, Lock: lock, Log: d.log,
+		StepTimeout: accountsStepTimeout,
+	})
+	if err != nil {
+		return accountsWiring{}, err
+	}
+	requests, err := accounts.NewRequests(accounts.RequestsDeps{Authorizer: d.kinds, Runner: d.runner, Held: held, Facts: roleAccounts, Log: d.log})
+	if err != nil {
+		return accountsWiring{}, err
+	}
+	freshAction, err := accounts.NewFreshAction(d.runner, fresh)
+	if err != nil {
+		return accountsWiring{}, err
+	}
 	return accountsWiring{revoker: rev, access: access, removed: removed, sessions: ender,
 		resetter: resetter, resetAction: action, reset: reset,
-		users: users, first: first, waiting: waiting, observer: observer, granter: granter}, nil
+		users: users, first: first, waiting: waiting, observer: observer, granter: granter,
+		requests: requests, freshAction: freshAction, changes: changes}, nil
 }
 
-// register registers identity.revoke, accounts.reset_password and
-// accounts.grant_designated_role, under keycloak only.
+// register registers identity.revoke, accounts.reset_password,
+// accounts.grant_designated_role and every account change's workflow,
+// under keycloak only.
 func (w accountsWiring) register(r interface{ Register(jobs.Workflow) }) {
 	if w.revoker != nil {
 		r.Register(w.revoker.Workflow())
 		r.Register(w.reset)
 		r.Register(w.granter.Workflow())
+		for _, wf := range w.changes.Workflows() {
+			r.Register(wf)
+		}
 	}
+}
+
+// installRequests gives the api the account changes, under keycloak only.
+func (w accountsWiring) installRequests(srv interface{ SetAccountRequests(apipkg.AccountRequester) }) {
+	if w.requests != nil {
+		srv.SetAccountRequests(w.requests)
+	}
+}
+
+// userSinks adds the designation observer to the drain's user sinks
+// (F-994-01), under keycloak only.
+func (w accountsWiring) userSinks(sinks convergeSinks) convergeSinks {
+	if w.observer != nil {
+		sinks.user = append(append([]events.UserSink(nil), sinks.user...), w.observer)
+	}
+	return sinks
 }
 
 // doorWaiting, doorEmails and apiWaiting are the count and the in-use email
@@ -228,13 +276,17 @@ func (w accountsWiring) installWaiting(srv interface{ SetWaiting(apipkg.WaitingC
 	}
 }
 
-// actions are the fresh-sign-in actions the accounts own, by kind; none
-// outside keycloak.
+// actions are the fresh-sign-in actions the accounts own, by kind: the
+// reset's and every fresh-gated account change's; none outside keycloak.
 func (w accountsWiring) actions() map[string]auth.Action {
 	if w.resetAction == nil {
 		return nil
 	}
-	return map[string]auth.Action{accounts.ResetKind: w.resetAction}
+	out := map[string]auth.Action{accounts.ResetKind: w.resetAction}
+	for _, k := range accounts.FreshKinds {
+		out[k] = w.freshAction
+	}
+	return out
 }
 
 // alerts is the removed-name list's warning; none outside keycloak.

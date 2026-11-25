@@ -299,6 +299,11 @@ func (c *Client) tokenField(ctx context.Context, path string, form []byte, field
 	return tok, nil
 }
 
+// TextBody is an Admin API request body sent as text/plain, its bytes as
+// they are: a credential's userLabel (register row T271). It is a
+// secret.Value so the label never renders in a log or an error.
+type TextBody secret.Value
+
 func (c *Client) admin(ctx context.Context, token secret.Value, method, path string, in, out any) (Response, *Error) {
 	const op = "admin"
 	if path != serverInfoPath && !strings.HasPrefix(path, adminPrefix) {
@@ -306,7 +311,13 @@ func (c *Client) admin(ctx context.Context, token secret.Value, method, path str
 	}
 	var reqBody []byte
 	contentType := ""
-	if in != nil {
+	switch tb := in.(type) {
+	case nil:
+	case TextBody:
+		// The bytes are copied: the call zeroes its body when it returns,
+		// and the value is its holder's to destroy.
+		reqBody, contentType = append([]byte{}, secret.Value(tb).Reveal()...), "text/plain"
+	default:
 		b, err := json.Marshal(in)
 		if err != nil {
 			return Response{}, &Error{Op: op, Path: path, Kind: ErrInvalidValue, Err: errors.New("the request body does not encode as JSON")}

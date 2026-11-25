@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,13 @@ type kcUser struct {
 	// role's users read lists them); creds are the credential types.
 	roles []string
 	creds []string
+	// credIDs are the credentials' ids, beside creds; labels their
+	// userLabels by id; sessions the online sessions' ids; locked is held
+	// by attack detection.
+	credIDs  []string
+	labels   map[string]string
+	sessions []string
+	locked   bool
 }
 
 // request is one write's method, path (realm-relative) and body.
@@ -108,6 +116,11 @@ type fakeKC struct {
 	gets []string
 	// noID leaves the id out of the user list.
 	noID bool
+	// keepNothing answers a user PUT and keeps no attribute it carried.
+	keepNothing bool
+	// observe, when set, sees every call before it is answered, outside
+	// the fake's lock, so it may block.
+	observe func(method, rel string)
 }
 
 func notFound(path string) error {
@@ -124,6 +137,12 @@ func answer(out, v any) {
 
 func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idclient.Response, error) {
 	k.mu.Lock()
+	obs := k.observe
+	k.mu.Unlock()
+	if obs != nil {
+		obs(method, strings.TrimPrefix(path, "/admin/realms/"+realm))
+	}
+	k.mu.Lock()
 	defer k.mu.Unlock()
 	rel, ok := strings.CutPrefix(path, "/admin/realms/"+realm)
 	if !ok {
@@ -135,7 +154,9 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		}
 	}
 	var body []byte
-	if in != nil {
+	if tb, ok := in.(idclient.TextBody); ok {
+		body = append([]byte("text/plain:"), secret.Value(tb).Reveal()...)
+	} else if in != nil {
 		body, _ = json.Marshal(in)
 	}
 	if method != http.MethodGet {
@@ -178,6 +199,18 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	case parts[0] == "roles":
 		answer(out, map[string]any{"id": "offline-role-id", "name": offlineAccess})
 		return idclient.Response{Status: 200}, nil
+	case parts[0] == "attack-detection" && method == http.MethodDelete:
+		k.log.add("unlock")
+		if x := k.users[parts[len(parts)-1]]; x != nil {
+			x.locked = false
+		}
+		return idclient.Response{Status: 204}, nil
+	case parts[0] == "sessions" && u.Query().Get("isOffline") != "true":
+		k.log.add("session-delete:" + parts[1])
+		for _, x := range k.users {
+			x.sessions = slices.DeleteFunc(x.sessions, func(s string) bool { return s == parts[1] })
+		}
+		return idclient.Response{Status: 204}, nil
 	case parts[0] == "sessions":
 		k.log.add("offline-delete:" + parts[1])
 		for _, x := range k.users {
@@ -203,9 +236,26 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	case tail == "" && method == http.MethodPut:
 		var b map[string]any
 		_ = json.Unmarshal(body, &b)
+		if e, ok := b["email"].(string); ok && e != x.rep["email"] {
+			for id, o := range k.users {
+				if id != parts[1] && strings.EqualFold(o.rep["email"].(string), e) {
+					return idclient.Response{}, &idclient.Error{Op: "admin", Path: path, Status: http.StatusConflict, Kind: idclient.ErrConflict}
+				}
+			}
+			k.log.add("set-email")
+			x.rep["email"] = strings.ToLower(e)
+		}
 		if e, ok := b["enabled"].(bool); ok && !e && x.rep["enabled"] == true {
 			k.log.add("disable")
 			x.rep["enabled"] = false
+		}
+		if e, ok := b["enabled"].(bool); ok && e && x.rep["enabled"] == false {
+			k.log.add("enable")
+			x.rep["enabled"] = true
+		}
+		if n, ok := b["firstName"].(string); ok && n != x.rep["firstName"] {
+			k.log.add("set-name")
+			x.rep["firstName"] = n
 		}
 		before, after := roleOf(x.rep["attributes"]), roleOf(b["attributes"])
 		switch {
@@ -214,7 +264,14 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		case after != before:
 			k.log.add("set-attr:" + after)
 		}
-		x.rep["attributes"] = b["attributes"]
+		for _, a := range []string{AttrNetwork, "rasputin_email"} {
+			if bv, av := attrOf(x.rep["attributes"], a), attrOf(b["attributes"], a); bv != av {
+				k.log.add("set-" + a + ":" + av)
+			}
+		}
+		if !k.keepNothing {
+			x.rep["attributes"] = b["attributes"]
+		}
 	case tail == "" && method == http.MethodDelete:
 		k.log.add("delete-user")
 		delete(k.users, parts[1])
@@ -236,10 +293,50 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		answer(out, list)
 	case tail == "credentials" && method == http.MethodGet:
 		var list []map[string]string
-		for _, c := range x.creds {
-			list = append(list, map[string]string{"type": c})
+		for i, c := range x.creds {
+			list = append(list, map[string]string{"id": x.credIDs[i], "type": c})
 		}
 		answer(out, list)
+	case strings.HasPrefix(tail, "credentials/") && len(parts) == 4 && method == http.MethodDelete:
+		i := slices.Index(x.credIDs, parts[3])
+		if i < 0 {
+			return idclient.Response{}, notFound(path)
+		}
+		k.log.add("delete-credential:" + x.creds[i])
+		x.creds, x.credIDs = slices.Delete(x.creds, i, i+1), slices.Delete(x.credIDs, i, i+1)
+	case strings.HasPrefix(tail, "credentials/") && len(parts) == 5 && parts[4] == "userLabel":
+		if !slices.Contains(x.credIDs, parts[3]) {
+			return idclient.Response{}, notFound(path)
+		}
+		k.log.add("rename-credential")
+		if x.labels == nil {
+			x.labels = map[string]string{}
+		}
+		x.labels[parts[3]] = string(body)
+	case tail == "sessions" && method == http.MethodGet:
+		var list []map[string]string
+		for _, s := range x.sessions {
+			list = append(list, map[string]string{"id": s})
+		}
+		answer(out, list)
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodGet:
+		var list []map[string]string
+		for _, r := range x.console {
+			list = append(list, map[string]string{"name": r})
+		}
+		answer(out, list)
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodDelete:
+		var reps []map[string]any
+		_ = json.Unmarshal(body, &reps)
+		for _, r := range reps {
+			name, _ := r["name"].(string)
+			k.log.add("remove-console:" + name)
+			x.console = slices.DeleteFunc(x.console, func(c string) bool { return c == name })
+			x.roles = slices.DeleteFunc(x.roles, func(c string) bool { return c == name })
+			if name == "admin" {
+				x.directAdmin = false
+			}
+		}
 	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodPost:
 		var reps []map[string]any
 		_ = json.Unmarshal(body, &reps)
@@ -289,6 +386,18 @@ func (k *fakeKC) list(q url.Values, out any) {
 	answer(out, list)
 }
 
+// attrOf is an attribute's values, joined by commas.
+func attrOf(attrs any, name string) string {
+	m, _ := attrs.(map[string]any)
+	vs, _ := m[name].([]any)
+	var out []string
+	for _, v := range vs {
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return strings.Join(out, ",")
+}
+
 func roleOf(attrs any) string {
 	m, _ := attrs.(map[string]any)
 	vs, _ := m[AttrAppRole].([]any)
@@ -315,6 +424,9 @@ type person struct {
 	appRole     string
 	offlineRole bool
 	offline     map[string][]string
+	// network is the network grants; sessions the online sessions.
+	network  []string
+	sessions []string
 }
 
 func (k *fakeKC) add(p person) {
@@ -324,13 +436,24 @@ func (k *fakeKC) add(p person) {
 	if p.appRole != "" {
 		attrs[AttrAppRole] = []any{p.appRole}
 	}
+	if len(p.network) > 0 {
+		var vs []any
+		for _, g := range p.network {
+			vs = append(vs, g)
+		}
+		attrs[AttrNetwork] = vs
+	}
 	actions := p.actions
 	if actions == nil {
 		actions = []any{"CONFIGURE_TOTP"}
 	}
 	u := &kcUser{rep: map[string]any{"id": p.sub, "username": p.name, "email": p.email, "firstName": "Test",
 		"enabled": p.enabled, "attributes": attrs, "requiredActions": actions, "createdTimestamp": p.created},
-		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}, roles: p.roles, creds: p.creds}
+		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}, roles: p.roles, creds: slices.Clone(p.creds),
+		sessions: slices.Clone(p.sessions)}
+	for i, c := range p.creds {
+		u.credIDs = append(u.credIDs, "id-"+c+"-"+strconv.Itoa(i))
+	}
 	if p.offlineRole {
 		u.realm = []string{offlineAccess}
 	}
@@ -353,6 +476,21 @@ func (k *fakeKC) exists(sub string) bool {
 	return k.users[sub] != nil
 }
 
+// countingLock is the one accounts lock, counting the callers waiting for
+// it: the fact a lock test waits on.
+type countingLock struct {
+	mu      sync.Mutex
+	waiting atomic.Int32
+}
+
+func (l *countingLock) Lock() {
+	l.waiting.Add(1)
+	l.mu.Lock()
+	l.waiting.Add(-1)
+}
+
+func (l *countingLock) Unlock() { l.mu.Unlock() }
+
 // ---- the recording collaborators -------------------------------------------
 
 type recGuard struct {
@@ -373,6 +511,11 @@ type recConsole struct {
 func (c recConsole) EndBySub(ctx context.Context, sub string) (int64, error) {
 	c.log.add("console")
 	return c.inner.EndBySub(ctx, sub)
+}
+
+func (c recConsole) EndBySubExcept(ctx context.Context, sub, sid string) (int64, error) {
+	c.log.add("console-except:" + sid)
+	return c.inner.EndBySubExcept(ctx, sub, sid)
 }
 
 type recMoved struct {
@@ -448,6 +591,10 @@ type harness struct {
 	sessions     sessions.Ender
 	mac          *credmac.Key
 	nc           *nats.Conn
+	// lock is the one accounts lock; guard the real guard over it.
+	lock  *countingLock
+	guard *authz.RoleGuard
+	ra    RoleAccounts
 }
 
 func newHarness(t *testing.T) *harness {
@@ -486,8 +633,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock := &sync.Mutex{}
-	guard, err := authz.NewRoleGuard(ra, lock)
+	h.ra = ra
+	h.lock = &countingLock{}
+	lock := h.lock
+	h.guard, err = authz.NewRoleGuard(ra, lock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +651,7 @@ func newHarness(t *testing.T) *harness {
 	slogger, log := logkittest.New()
 	h.rec = log
 	if h.rev, err = NewRevoker(RevokerDeps{
-		Sessions: h.sessions, Users: h.users, Guard: recGuard{inner: guard, log: h.log}, Lock: lock,
+		Sessions: h.sessions, Users: h.users, Guard: recGuard{inner: h.guard, log: h.log}, Lock: lock,
 		Console: recConsole{inner: h.console, log: h.log}, Moved: recMoved{inner: h.auth, log: h.log},
 		Removed: h.list, Facts: h.facts, Devices: h.hooks[StepDevices], Apps: h.hooks[StepApps], Network: h.hooks[StepNetwork],
 		Log: slogger, StepTimeout: time.Minute,

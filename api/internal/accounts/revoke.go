@@ -36,9 +36,14 @@ const (
 	Disable RevokeKind = "disable"
 	// Delete deletes the account.
 	Delete RevokeKind = "delete"
+	// NetworkChange follows a network grant removed (geekdojo/geekdojo-brain#994).
+	NetworkChange RevokeKind = "network_change"
+	// SecondStepsRemoved follows removing a person's second steps, which
+	// demoted them (geekdojo/geekdojo-brain#994).
+	SecondStepsRemoved RevokeKind = "second_steps_removed"
 )
 
-var revokeKinds = []RevokeKind{SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete}
+var revokeKinds = []RevokeKind{SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete, NetworkChange, SecondStepsRemoved}
 
 // Spec is identity.revoke's spec: ids only, never a name or an email. A
 // job spec is persisted, shown on the Tasks page and carried in backups.
@@ -48,6 +53,10 @@ type Spec struct {
 	// AccessChanged, on a role_change, says the change also lowered app
 	// access, which ends the identity sessions too.
 	AccessChanged bool `json:"accessChanged,omitempty"`
+	// KeepSID is the identity session a person signing themselves out
+	// keeps, the one their request came from ("sign out everywhere else").
+	// It is honoured only when the account is the job's submitter's own.
+	KeepSID string `json:"keepSid,omitempty"`
 }
 
 // The steps, in their fixed order.
@@ -67,14 +76,14 @@ const (
 // doesn't run records {"outcome":"not_needed"}.
 var stepKinds = map[string][]RevokeKind{
 	StepAuthorize:       {Disable, Delete},
-	StepOnlineSessions:  {SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete},
-	StepOfflineSessions: {SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete},
+	StepOnlineSessions:  {SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete, NetworkChange, SecondStepsRemoved},
+	StepOfflineSessions: {SignOut, Privileged, RoleChange, RemoveAccess, Disable, Delete, NetworkChange, SecondStepsRemoved},
 	StepChange:          {RemoveAccess, Disable, Delete},
-	StepConsoleSessions: {SignOut, RoleChange, RemoveAccess, Disable, Delete},
-	StepMovedRows:       {RoleChange, Disable, Delete},
+	StepConsoleSessions: {SignOut, RoleChange, RemoveAccess, Disable, Delete, SecondStepsRemoved},
+	StepMovedRows:       {RoleChange, Disable, Delete, SecondStepsRemoved},
 	StepDevices:         {RemoveAccess, Disable, Delete},
-	StepApps:            {SignOut, RemoveAccess, Disable, Delete},
-	StepNetwork:         {RemoveAccess, Disable, Delete},
+	StepApps:            {SignOut, RemoveAccess, Disable, Delete, SecondStepsRemoved},
+	StepNetwork:         {RemoveAccess, Disable, Delete, NetworkChange},
 }
 
 // The outcomes a step records.
@@ -123,6 +132,13 @@ type Sessions interface {
 	EndOffline(ctx context.Context, sub string) (int, error)
 }
 
+// RevokeSessions is Sessions with ending every online session but one
+// (sessions.Ender), for a person signing themselves out everywhere else.
+type RevokeSessions interface {
+	Sessions
+	EndAllExcept(ctx context.Context, sub, keep string) (int, error)
+}
+
 // RevokeUsers is the account calls the revoker makes (*Users).
 type RevokeUsers interface {
 	Read(ctx context.Context, sub string) (Person, error)
@@ -144,6 +160,13 @@ type ConsoleSessions interface {
 	EndBySub(ctx context.Context, sub string) (int64, error)
 }
 
+// RevokeConsole is ConsoleSessions with ending every console session of an
+// account but the request's own (*auth.ConsoleSessions).
+type RevokeConsole interface {
+	ConsoleSessions
+	EndBySubExcept(ctx context.Context, sub, sid string) (int64, error)
+}
+
 // MovedRows removes a moved person's pre-update rows (*auth.Store).
 type MovedRows interface {
 	RemoveMovedRows(ctx context.Context, sub string) (creds, sessions int64, err error)
@@ -163,13 +186,13 @@ type FactHolder interface {
 // RevokerDeps are a Revoker's collaborators. NewRevoker refuses a missing
 // one.
 type RevokerDeps struct {
-	Sessions Sessions
+	Sessions RevokeSessions
 	Users    RevokeUsers
 	Guard    Guard
 	// Lock is the one accounts lock, held around remove_access's writes.
 	// The guard holds it for a disable or a delete.
 	Lock    sync.Locker
-	Console ConsoleSessions
+	Console RevokeConsole
 	Moved   MovedRows
 	Removed NameRecorder
 	Facts   FactHolder
@@ -378,9 +401,26 @@ func (r *Revoker) authorize(ctx context.Context, sc *jobs.StepCtx, spec Spec) (m
 	return map[string]any{"outcome": outcomeAllowed}, nil
 }
 
+// keep is the session a sign-out keeps: the spec's KeepSID, honoured only
+// when the account is the submitter's own.
+func keep(sc *jobs.StepCtx, spec Spec) string {
+	if spec.KeepSID != "" && spec.AccountID == sc.CreatedBy {
+		return spec.KeepSID
+	}
+	return ""
+}
+
 // online is step 2: every online identity session ends, and the account's
-// not-before is set.
-func (r *Revoker) online(ctx context.Context, _ *jobs.StepCtx, spec Spec) (map[string]any, error) {
+// not-before is set; or, keeping the request's own session, every other
+// one ends.
+func (r *Revoker) online(ctx context.Context, sc *jobs.StepCtx, spec Spec) (map[string]any, error) {
+	if k := keep(sc, spec); k != "" {
+		n, err := r.d.Sessions.EndAllExcept(ctx, spec.AccountID, k)
+		if err != nil {
+			return nil, failStep(StepOnlineSessions, SentenceSessions, fmt.Errorf("end other online sessions: %w", err))
+		}
+		return map[string]any{"outcome": outcomeEnded, "sessions": n, "kept": true}, nil
+	}
 	if err := r.d.Sessions.EndAll(ctx, spec.AccountID); err != nil {
 		return nil, failStep(StepOnlineSessions, SentenceSessions, fmt.Errorf("end online sessions: %w", err))
 	}
@@ -458,9 +498,16 @@ func (r *Revoker) deleteAccount(ctx context.Context, sub string) (bool, error) {
 	return held, nil
 }
 
-// console is step 5: the api's console sessions end.
-func (r *Revoker) console(ctx context.Context, _ *jobs.StepCtx, spec Spec) (map[string]any, error) {
-	n, err := r.d.Console.EndBySub(ctx, spec.AccountID)
+// console is step 5: the api's console sessions end, but the request's own
+// when the spec keeps it.
+func (r *Revoker) console(ctx context.Context, sc *jobs.StepCtx, spec Spec) (map[string]any, error) {
+	var n int64
+	var err error
+	if k := keep(sc, spec); k != "" {
+		n, err = r.d.Console.EndBySubExcept(ctx, spec.AccountID, k)
+	} else {
+		n, err = r.d.Console.EndBySub(ctx, spec.AccountID)
+	}
 	if err != nil {
 		return nil, failStep(StepConsoleSessions, sentenceConsole, err)
 	}
@@ -468,10 +515,10 @@ func (r *Revoker) console(ctx context.Context, _ *jobs.StepCtx, spec Spec) (map[
 }
 
 // movedRows is step 6 (C15): a moved person's pre-update credentials and
-// sessions rows go. On a role change, only once the person no longer holds
-// admin.
+// sessions rows go. On a role change, and after second steps were removed,
+// only once the person no longer holds admin.
 func (r *Revoker) movedRows(ctx context.Context, _ *jobs.StepCtx, spec Spec) (map[string]any, error) {
-	if spec.Kind == RoleChange {
+	if spec.Kind == RoleChange || spec.Kind == SecondStepsRemoved {
 		roles, err := r.d.Users.ConsoleRoles(ctx, spec.AccountID)
 		if err != nil {
 			return nil, failStep(StepMovedRows, sentenceMovedRows, err)

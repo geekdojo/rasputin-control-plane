@@ -11,12 +11,17 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 )
 
 // AttrAppRole is the account attribute that holds a person's app access:
 // "user" or "admin".
 const AttrAppRole = "rasputin_app_role"
+
+// AttrNetwork is the account attribute that holds a person's network
+// grants: any of join, gear-read and gear-admin.
+const AttrNetwork = "rasputin_network"
 
 // offlineAccess is the realm role that lets an app keep an offline session.
 const offlineAccess = "offline_access"
@@ -71,9 +76,15 @@ func NewUsers(d UsersDeps) (*Users, error) {
 // Person is what Read returns about an account.
 type Person struct {
 	Username, Email string
-	Enabled         bool
+	// DisplayName is the account's one name field (firstName).
+	DisplayName string
+	// ConfirmedEmail is the rasputin_email attribute, the address apps get.
+	ConfirmedEmail string
+	Enabled        bool
 	// AppRole is the rasputin_app_role attribute, "" when absent.
 	AppRole AppLevel
+	// Network is the rasputin_network attribute's grants.
+	Network []string
 	// RequiredActions are the account's pending required actions.
 	RequiredActions []string
 }
@@ -105,8 +116,13 @@ func (u *Users) Read(ctx context.Context, sub string) (Person, error) {
 	p := Person{}
 	p.Username, _ = rep["username"].(string)
 	p.Email, _ = rep["email"].(string)
+	p.DisplayName, _ = rep["firstName"].(string)
 	p.Enabled, _ = rep["enabled"].(bool)
 	p.AppRole = appRoleOf(rep)
+	p.Network = attrValues(rep, AttrNetwork)
+	if vs := attrValues(rep, flows.AttrConfirmedEmail); len(vs) > 0 {
+		p.ConfirmedEmail = vs[0]
+	}
 	ras, _ := rep["requiredActions"].([]any)
 	for _, a := range ras {
 		if s, ok := a.(string); ok && s != "" {
@@ -124,6 +140,19 @@ func appRoleOf(rep map[string]any) AppLevel {
 		return AppLevel(s)
 	}
 	return ""
+}
+
+// attrValues is a representation's attribute name, its string values.
+func attrValues(rep map[string]any, name string) []string {
+	attrs, _ := rep["attributes"].(map[string]any)
+	vs, _ := attrs[name].([]any)
+	var out []string
+	for _, v := range vs {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // write re-reads the account and writes back its profile fields and
@@ -395,16 +424,29 @@ func (u *Users) EmailInUse(ctx context.Context, email string) (bool, error) {
 	return false, nil
 }
 
-// Credentials is the types of the account's credentials.
-func (u *Users) Credentials(ctx context.Context, sub string) ([]string, error) {
+// Credential is one of an account's credentials: its id and its type.
+type Credential struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// CredentialList is the account's credentials, each with its id.
+func (u *Users) CredentialList(ctx context.Context, sub string) ([]Credential, error) {
 	if sub == "" {
 		return nil, errors.New("accounts: no account id")
 	}
-	var creds []struct {
-		Type string `json:"type"`
-	}
+	var creds []Credential
 	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, u.userPath(sub)+"/credentials", nil, &creds); err != nil {
 		return nil, fmt.Errorf("accounts: read the account's credentials: %w", err)
+	}
+	return creds, nil
+}
+
+// Credentials is the types of the account's credentials.
+func (u *Users) Credentials(ctx context.Context, sub string) ([]string, error) {
+	creds, err := u.CredentialList(ctx, sub)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]string, 0, len(creds))
 	for _, c := range creds {

@@ -230,3 +230,33 @@ func TestUpgradeFromPreviousRelease(t *testing.T) {
 		t.Errorf("legacy rows after a sweep: %d, want the live one only", n)
 	}
 }
+
+// TC-994-29: EndBySubExcept deletes the account's other rows, keeps the
+// request's own, touches no other account, and refuses an empty key.
+func TestConsoleSessions_TC994_29_EndBySubExcept(t *testing.T) {
+	f := newAuthFixture(t)
+	s1 := consoleCookie(t, f, Principal{Sub: "a", Session: SessionRef{SID: "s1"}})
+	s2 := consoleCookie(t, f, Principal{Sub: "a", Session: SessionRef{SID: "s2"}})
+	s3 := consoleCookie(t, f, Principal{Sub: "a", Session: SessionRef{SID: "s3"}})
+	other := consoleCookie(t, f, Principal{Sub: "b", Session: SessionRef{SID: "s2"}})
+	resolves := func(ck *http.Cookie) bool {
+		v := secretOf(ck)
+		defer v.Destroy()
+		_, ok, err := f.sessions.Resolve(f.ctx, v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if n, err := f.sessions.EndBySubExcept(f.ctx, "a", "s1"); err != nil || n != 2 {
+		t.Fatalf("EndBySubExcept = %d, %v; want 2", n, err)
+	}
+	if !resolves(s1) || resolves(s2) || resolves(s3) || !resolves(other) {
+		t.Error("EndBySubExcept ended the wrong rows")
+	}
+	for _, k := range [][2]string{{"", "s1"}, {"a", ""}} {
+		if _, err := f.sessions.EndBySubExcept(f.ctx, k[0], k[1]); err == nil {
+			t.Errorf("EndBySubExcept(%q, %q) was accepted", k[0], k[1])
+		}
+	}
+}
