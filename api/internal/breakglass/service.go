@@ -447,8 +447,8 @@ func (s *Service) Reset(ctx context.Context, sess Session, by authz.Submitter, i
 	}
 	s.RecordJob(sess, j.ID)
 	s.log.WarnContext(ctx, "A repair session reset an account's sign-in.", "event", "breakglass.reset_submitted",
-		"job_id", j.ID, "account_id", id)
-	s.raise(ctx, "reset", func(ctx context.Context, ev string) error { return s.d.Alerts.RaiseBreakGlassReset(ctx, ev, id) })
+		"job_id", j.ID, "account_id", t.ID)
+	s.raise(ctx, "reset", func(ctx context.Context, ev string) error { return s.d.Alerts.RaiseBreakGlassReset(ctx, ev, t.ID) })
 	return j, nil
 }
 

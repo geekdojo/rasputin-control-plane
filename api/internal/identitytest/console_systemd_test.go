@@ -55,6 +55,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
@@ -276,7 +277,12 @@ func (s *consoleStack) layOut(uiDir, theme string) {
 		}
 	})
 	share := "/usr/share/rasputin/identity"
-	for _, d := range []string{share, "/var/lib/rasputin/identity", "/run/rasputin-identity-exits", "/run/rasputin-identity-start-hold"} {
+	// The password deny list, at the place the api tarball installs it
+	// (rasputin-os package/rasputin-api/rasputin-api.mk copies identity/,
+	// password-blacklists/ included, to /usr/share/rasputin/identity), which
+	// is where the api's password check reads it (identityDenylists).
+	denylists := filepath.Join(share, "password-blacklists")
+	for _, d := range []string{share, denylists, "/var/lib/rasputin/identity", "/run/rasputin-identity-exits", "/run/rasputin-identity-start-hold"} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -285,6 +291,9 @@ func (s *consoleStack) layOut(uiDir, theme string) {
 		if err := copyFile(filepath.Join("..", "..", "..", "identity", f), filepath.Join(share, f)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := copyFile(filepath.Join(s.cfg.DenylistDir, flows.DenylistFile), filepath.Join(denylists, flows.DenylistFile)); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Symlink(theme, filepath.Join(share, "theme")); err != nil {
 		t.Fatal(err)
