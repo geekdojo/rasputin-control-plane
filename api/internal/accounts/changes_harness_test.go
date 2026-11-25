@@ -99,7 +99,6 @@ type changeHarness struct {
 	changes  *Changes
 	requests *Requests
 	granter  *Granter
-	reset    jobs.Workflow
 	runner   *jobs.Runner
 	removedC *removedCheck
 	factsC   *factsCheck

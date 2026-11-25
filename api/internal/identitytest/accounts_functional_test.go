@@ -18,7 +18,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -492,6 +491,13 @@ func (r *accountsRig) tc39(t *testing.T) {
 	r.enrol(t, id, name, pw, true)
 	roles := spec("accountId", id, "role", "admin")
 	steps := spec("accountId", id)
+	// Earlier cases' jobs of these kinds stay in the ledger: this case
+	// counts only the ones its own requests would add.
+	kinds := []string{accounts.KindSetRoles, accounts.KindRemoveSecondSteps}
+	before := map[string]int{}
+	for _, k := range kinds {
+		before[k] = r.jobCount(t, k)
+	}
 	_, rolesPending, err := r.ask(t, r.actor, accounts.KindSetRoles, roles, "")
 	if err != nil || rolesPending == nil {
 		t.Fatalf("set_roles admin: %v", err)
@@ -499,9 +505,9 @@ func (r *accountsRig) tc39(t *testing.T) {
 	if _, p, err := r.ask(t, r.actor, accounts.KindRemoveSecondSteps, steps, ""); err != nil || p == nil {
 		t.Fatalf("remove_second_steps: %v", err)
 	}
-	for _, k := range []string{accounts.KindSetRoles, accounts.KindRemoveSecondSteps} {
-		if js, _ := r.ledger.ListJobsByKind(t.Context(), k, 10); len(js) != 0 {
-			t.Errorf("%s: %d jobs without the fresh sign-in", k, len(js))
+	for _, k := range kinds {
+		if n := r.jobCount(t, k) - before[k]; n != 0 {
+			t.Errorf("%s: %d jobs without the fresh sign-in", k, n)
 		}
 	}
 	for _, c := range [][2]string{{accounts.KindSetRoles, roles}, {accounts.KindRemoveSecondSteps, steps}} {
@@ -571,28 +577,37 @@ func (r *accountsRig) tc40(t *testing.T) {
 		}
 	}
 
-	// T272: an account attack detection holds signs in after unlock.
+	// T272: an account attack detection holds signs in after unlock. The
+	// realm's failureFactor wrong passwords go straight to Keycloak, as
+	// TC-987-15's do: through a door, the per-source throttle admits one
+	// credential post per source until a drain pass sees its answer
+	// (policy.Throttle.Admit), so the doors alone never reach the backstop
+	// in a bounded test.
 	const lk = "acct-lock"
 	lkID, lkPw := r.user(t, lk)
-	for i := 1; i <= 40 && !r.bruteForce(t, lkID).Disabled; i++ {
-		g := r.client(t, netip.AddrFrom4([4]byte{127, 0, 12, byte(i)}).String())
-		a := g.follow(r.appAuth("rasputin-account", nil))
-		for range 3 {
-			if a.pageID() != "login-login" {
-				break
-			}
-			a = g.submit(a, "kc-form-login", map[string]string{"username": lk, "password": "not the password"})
-		}
-		// Keycloak counts a failure on its own executor: wait for this
-		// source's three, bounded far outside normal.
-		for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
-			if bf := r.bruteForce(t, lkID); bf.Disabled || bf.NumFailures >= 3*i || time.Now().After(deadline) {
-				break
-			}
-		}
+	_, out := r.admin(t).must(http.StatusOK, http.MethodGet, "", nil)
+	var realm struct {
+		BruteForceProtected bool `json:"bruteForceProtected"`
+		FailureFactor       int  `json:"failureFactor"`
 	}
-	if !r.bruteForce(t, lkID).Disabled {
-		t.Fatal("attack detection does not hold the account")
+	if err := json.Unmarshal(out, &realm); err != nil || !realm.BruteForceProtected || realm.FailureFactor < 1 || realm.FailureFactor > 1000 {
+		t.Fatalf("the realm's brute-force settings: protected %v, failureFactor %d (%v)", realm.BruteForceProtected, realm.FailureFactor, err)
+	}
+	up := r.upstreamClient(t)
+	page := up.follow(r.env.KeycloakUpstream().String() + "/realms/rasputin/protocol/openid-connect/auth?" +
+		doorAuthQuery("rasputin-account", r.sites.Table.App.Host, nil))
+	for range realm.FailureFactor {
+		if page.pageID() != "login-login" {
+			t.Fatalf("a wrong password led to %q", page.pageID())
+		}
+		page = up.submit(page, "kc-form-login", map[string]string{"username": lk, "password": "not the password"})
+	}
+	// Keycloak counts a failure on its own executor: wait on the hold,
+	// bounded far outside normal so a missing hold fails in a minute.
+	for deadline := time.Now().Add(time.Minute); !r.bruteForce(t, lkID).Disabled; time.Sleep(100 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("attack detection does not hold the account after %d failures: %+v", realm.FailureFactor, r.bruteForce(t, lkID))
+		}
 	}
 	if a := r.fresh(t).signIn(r.appAuth("rasputin-account", nil), lk, lkPw); a.loc != nil && a.loc.Path == callbackPath {
 		t.Fatal("a held account signed in")
@@ -609,7 +624,7 @@ func (r *accountsRig) tc40(t *testing.T) {
 	}
 
 	// T275: an address another account holds is the duplicate sentence.
-	_, out := r.admin(t).must(http.StatusOK, http.MethodGet, "/users/"+soID, nil)
+	_, out = r.admin(t).must(http.StatusOK, http.MethodGet, "/users/"+soID, nil)
 	var before struct{ Email string }
 	_ = json.Unmarshal(out, &before)
 	j := r.submitted(t, r.actor, accounts.KindSetEmail, spec("accountId", soID), cr+"@door.invalid")
@@ -619,6 +634,16 @@ func (r *accountsRig) tc40(t *testing.T) {
 	if j.Status != jobs.StatusFailed || j.Error != "Another account already uses that email address." || after.Email != before.Email {
 		t.Errorf("T275: job %s %q, email %q (was %q)", j.Status, j.Error, after.Email, before.Email)
 	}
+}
+
+// jobCount is how many jobs of kind the ledger holds.
+func (r *accountsRig) jobCount(t *testing.T, kind string) int {
+	t.Helper()
+	js, err := r.ledger.ListJobsByKind(t.Context(), kind, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(js)
 }
 
 // sessionIDs are the account's online sessions, by id, sorted.

@@ -94,8 +94,25 @@ func TestRequests_TC994_21_DependencyDown(t *testing.T) {
 			t.Errorf("%s: %+v, %v, want a fresh sign-in", c.kind, ans, err)
 		}
 	}
-	if recs := h.clog.Matching(slog.LevelWarn, "fresh sign-in"); len(recs) != 3 {
+	recs := h.clog.Matching(slog.LevelWarn, "fresh sign-in")
+	if len(recs) != 3 {
 		t.Errorf("%d facts_unreadable records", len(recs))
+	}
+	// Each record names its kind, the table's constant (F-994-15).
+	for i, want := range []string{KindSetRoles, KindGrantAccess, KindSetNetwork} {
+		if i >= len(recs) {
+			break
+		}
+		got := ""
+		recs[i].Attrs(func(a slog.Attr) bool {
+			if a.Key == "kind" {
+				got = a.Value.String()
+			}
+			return true
+		})
+		if got != want {
+			t.Errorf("record %d names kind %q, want %q", i, got, want)
+		}
 	}
 	_, err := h.requests.Request(t.Context(), who("viewer-sub", "viewer"), "sid",
 		RequestInput{Kind: KindSetRoles, Spec: json.RawMessage(`{"accountId":"` + target + `","role":"viewer"}`)})

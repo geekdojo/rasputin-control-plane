@@ -833,3 +833,40 @@ type acceptAll struct{}
 func (acceptAll) Check(secret.Value, string, string) (pwpolicy.Refusal, error) {
 	return pwpolicy.Refusal{}, nil
 }
+
+// F-994-18: set_roles admin applied to a complete account confirms its
+// address, copying email into rasputin_email, so an administrator's app
+// tokens carry it; operator, applied the same way, confirms nothing.
+func TestChanges_F994_18_AdminConfirmsTheAddress(t *testing.T) {
+	for _, c := range []struct{ role, want string }{
+		{"admin", "full@example.invalid"},
+		{"operator", ""},
+	} {
+		h := newChangeHarness(t)
+		h.kc.add(person{sub: "full", name: "full", email: "full@example.invalid", enabled: true, creds: completeCreds, actions: []any{}})
+		r := h.run(t, adminSubmitter, KindSetRoles, RoleSpec{AccountID: "full", Role: c.role}, true, "")
+		if r.job.Status != jobs.StatusSucceeded || r.out(StepChange)["outcome"] != outcomeApplied || !slices.Contains(h.consoleOf("full"), c.role) {
+			t.Fatalf("%s: job %s %q, outcome %v, console %v", c.role, r.job.Status, r.job.Error, r.out(StepChange), h.consoleOf("full"))
+		}
+		if got := h.attr("full", "rasputin_email"); got != c.want {
+			t.Errorf("%s: rasputin_email %q, want %q", c.role, got, c.want)
+		}
+	}
+}
+
+// F-994-18 (F-994-09): grant_access admin, designated for a person with no
+// app access, gives app access user at once and records admin.
+func TestChanges_F994_18_DesignatedAppAdminGetsUser(t *testing.T) {
+	h := newChangeHarness(t)
+	h.kc.add(person{sub: "new", name: "new", email: "new@example.invalid", enabled: true, creds: []string{"password"}, actions: []any{}})
+	r := h.run(t, adminSubmitter, KindGrantAccess, AccessSpec{AccountID: "new", Level: string(AppAdmin)}, true, "")
+	if r.job.Status != jobs.StatusSucceeded || r.out(StepChange)["outcome"] != outcomeDesignated {
+		t.Fatalf("job %s %q, outcome %v", r.job.Status, r.job.Error, r.out(StepChange))
+	}
+	if got := h.attr("new", AttrAppRole); got != string(AppUser) {
+		t.Errorf("app access %q while designated, want %s", got, AppUser)
+	}
+	if x, ok := h.designation(t, "new"); !ok || x.AppRole != AppAdmin {
+		t.Errorf("designation %+v, %v", x, ok)
+	}
+}

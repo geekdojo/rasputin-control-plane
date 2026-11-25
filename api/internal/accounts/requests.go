@@ -302,7 +302,7 @@ func (rq *Requests) needsFresh(ctx context.Context, kind string, rule kindRule, 
 	f, err := rq.d.Facts.Facts(ctx, *s.AccountID)
 	if err != nil {
 		rq.log.LogAttrs(ctx, slog.LevelWarn, "An account could not be read to decide on a fresh sign-in, so one is asked for.",
-			slog.String("event", "accounts.request.facts_unreadable"), slog.String("kind", kind), slog.String("err_kind", errKind(err)))
+			slog.String("event", "accounts.request.facts_unreadable"), slog.String("kind", tableKind(kind)), slog.String("err_kind", errKind(err)))
 		return true
 	}
 	ch := authz.RoleChange{Op: rule.op}
@@ -315,6 +315,18 @@ func (rq *Requests) needsFresh(ctx context.Context, kind string, rule kindRule, 
 		ch.Network = *s.Grants
 	}
 	return authz.RaisesPrivilege(f, ch)
+}
+
+// tableKind is the request table's own key equal to kind, "" for none: the
+// kind constant a record names, never the requester's text (CodeQL
+// go/log-injection, F-994-15).
+func tableKind(kind string) string {
+	for k := range requestKinds {
+		if k == kind {
+			return k
+		}
+	}
+	return ""
 }
 
 // decodeRequestSpec decodes raw strictly: a JSON object with no unknown

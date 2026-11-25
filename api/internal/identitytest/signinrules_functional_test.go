@@ -853,7 +853,7 @@ func (r *rulesRig) tc14(t *testing.T) {
 
 // upstreamClient signs in straight at Keycloak, past the doors and their
 // per-source throttle, over the door's own client leaf.
-func (r *rulesRig) upstreamClient(t *testing.T) *goClient {
+func (r *doorRig) upstreamClient(t *testing.T) *goClient {
 	t.Helper()
 	tr, err := r.env.DoorTransport()
 	if err != nil {

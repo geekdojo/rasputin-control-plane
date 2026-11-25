@@ -194,6 +194,16 @@ func (c *Client) Ready(ctx context.Context) error {
 // level is DEBUG for the outcomes a caller expects (not found, conflict) and
 // for a readiness answer inside WaitReady, which asks until the service is
 // ready; ERROR for a protocol error; WARN for the rest.
+//
+// CodeQL reports go/log-injection at the LogAttrs call below; the register
+// (.github/codeql-register.tsv) records it as a false positive. The request
+// text it traces is an account or credential id from a person's account
+// request, which reaches Error.Path only through url.PathEscape (the
+// callers' userPath and credential paths), so it carries no control
+// character; and the logger is the composition root's logkit.New, whose
+// TextHandler quotes and escapes every value. The verdict holds while every
+// id in an Admin API path is url.PathEscape'd and the client's logger is
+// logkit.New's.
 func (c *Client) failed(ctx context.Context, e *Error) error {
 	level := slog.LevelWarn
 	switch {

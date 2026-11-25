@@ -414,8 +414,12 @@ jobs:
         # sign-in page open 6 minutes by definition (past Keycloak's stock
         # 5-minute action timeout), so the package passes go test's default
         # 10-minute limit. 25 minutes bounds a hung run, and decides nothing.
+        # -v: the identity harness's cases run only here, on the pinned
+        # Keycloak, so the job log is their only record; without it a passing
+        # case prints nothing and cannot be told from one that never ran
+        # (geekdojo/geekdojo-brain#994, F-994-16).
         run: |
-          go test -race -timeout 25m -coverprofile=api.coverage.out -covermode=atomic ./api/...
+          go test -v -race -timeout 25m -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
       # The console's own pages under their page policy, in the pinned Chrome
       # the steps above installed (geekdojo/geekdojo-brain#999, CI UI-1's
