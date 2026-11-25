@@ -15,6 +15,7 @@ package identitytest
 // RASPUTIN_IDENTITY_SYSTEMD_FUNCTIONAL=required it fails (TC-321-35).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -495,7 +497,8 @@ func (bg *breakGlass) signInAdmin() {
 		}
 		return "", nil, fmt.Errorf("unexpected page %s", p.ID)
 	}
-	c := signin.Console{Origin: "https://" + consoleCID + ".local", Transport: bg.local.Transport, Logger: bg.s.cfg.Logger, Steps: steps}
+	c := signin.Console{Origin: "https://" + consoleCID + ".local", Transport: admitted{next: bg.local.Transport, log: bg.s.cfg.Logger},
+		Logger: bg.s.cfg.Logger, Steps: steps}
 	var refused *signin.ConsoleRefusedError
 	if _, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw); err != nil && !errors.As(err, &refused) {
 		t.Fatalf("the administrator fixture's enrolment (pages %v): %v", pages, err)
@@ -533,6 +536,9 @@ func (bg *breakGlass) signInAdmin() {
 	if _, err := bg.admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users/"+id+"/role-mappings/clients/"+clients[0].ID, []any{role}, nil); err != nil {
 		t.Fatal(err)
 	}
+	// So the grant's event cannot end the sign-in about to be made, as for
+	// the console fixture (F-989-19).
+	bg.s.awaitGrantDrained(bg.ctx, bg.admin, id)
 	jar, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw)
 	if err != nil {
 		t.Fatalf("the administrator's sign-in (pages %v): %v", pages, err)
@@ -544,6 +550,66 @@ func (bg *breakGlass) signInAdmin() {
 		}
 	}
 	t.Fatal("the administrator's sign-in left no console session")
+}
+
+// doorBusy is the start of the home door's answer to a credential post while
+// the source's previous one is still being checked (policy.sentenceBusy).
+const doorBusy = "Another sign-in from this device is still being checked."
+
+// admitted sends each request through next, and re-sends a POST the home
+// door answered 429 busy until the door admits it. The door holds one
+// credential post per source and releases the slot on its next drain pass
+// after the answer, so the code post that follows a password post at once
+// finds the slot held. No request of the test's sees the release, so the
+// door's admission of the post is the fact waited on; the test's context
+// bounds the wait.
+type admitted struct {
+	next http.RoundTripper
+	log  *slog.Logger
+}
+
+func (a admitted) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Method != http.MethodPost || req.GetBody == nil {
+		return a.next.RoundTrip(req)
+	}
+	if req.Body != nil {
+		_ = req.Body.Close() // every send below is from GetBody
+	}
+	var resp *http.Response
+	err := proctest.Await(req.Context(), nil, func(context.Context) (bool, string, error) {
+		body, err := req.GetBody()
+		if err != nil {
+			return false, "", &proctest.Final{Err: err}
+		}
+		r := req.Clone(req.Context())
+		r.Body = body
+		out, err := a.next.RoundTrip(r)
+		if err != nil {
+			return false, "", &proctest.Final{Err: err}
+		}
+		if out.StatusCode != http.StatusTooManyRequests {
+			resp = out
+			return true, "", nil
+		}
+		b, err := io.ReadAll(io.LimitReader(out.Body, 1<<20))
+		_ = out.Body.Close()
+		if err != nil {
+			return false, "", &proctest.Final{Err: err}
+		}
+		if !strings.Contains(string(b), doorBusy) {
+			// Any other 429 is the caller's to read.
+			out.Body = io.NopCloser(bytes.NewReader(b))
+			resp = out
+			return true, "", nil
+		}
+		return false, "the door holds the source's previous credential post", nil
+	}, func(last string) {
+		a.log.Info("break-glass: waiting for the door to admit a credential post", "last", last)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 // TC-321-34: an api restart ends the session and retires the outstanding

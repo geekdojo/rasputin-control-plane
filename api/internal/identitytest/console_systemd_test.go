@@ -549,7 +549,9 @@ func (s *consoleStack) clientAt(addr string, jar http.CookieJar) *http.Client {
 	dialer := &net.Dialer{Timeout: 30 * time.Second}
 	tr := &http.Transport{
 		Proxy: nil,
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Every request dials addr, whatever its URL's host: ci.local and
+		// sso-ci.local don't resolve on the runner.
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 			return dialer.DialContext(ctx, network, addr)
 		},
 		// The chain is checked against this run's CA by VerifyConnection.

@@ -135,6 +135,10 @@ const (
 	// codeJobUnavailable: the runner has no workflow for the job's kind on
 	// this control plane, so no job was created.
 	codeJobUnavailable = "job_unavailable"
+	// codeJobStartFailed: a job the runner can run couldn't be recorded or
+	// started (a failed ledger write, a cancelled request), so no job was
+	// created; trying again may work.
+	codeJobStartFailed = "job_start_failed"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

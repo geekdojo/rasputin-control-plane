@@ -457,6 +457,7 @@ func TestRepair_EverythingElseIs403_TC321_18(t *testing.T) {
 // TC-321-19: RESTART through the repair route submits identity.restart by
 // "break-glass" and the page lists it; a console session alone and no
 // session are 401; with the kind unregistered the answer is job_unavailable
+// and, for a job that is registered but can't be recorded, job_start_failed
 // and, with no sign-in service, RESTART is not offered as enabled.
 func TestRepair_Restart_TC321_19(t *testing.T) {
 	r := newRepairRig(t, &repairIdentity{st: identitystate.Failed}, true)
@@ -486,6 +487,25 @@ func TestRepair_Restart_TC321_19(t *testing.T) {
 		http.StatusServiceUnavailable, codeJobUnavailable)
 	if err := json.Unmarshal(off.state(c, repairHost).Body.Bytes(), &st); err != nil || st.Actions[0].Enabled {
 		t.Errorf("identity off: RESTART %+v %v", st.Actions, err)
+	}
+
+	// Registered, but the job ledger can't be written: not "can't run here".
+	broken := newRepairRig(t, &repairIdentity{st: identitystate.Failed}, true)
+	c = broken.open(t, repairHost)
+	if err := broken.f.jobsStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	e := wantCoded(t, "a failed ledger write", broken.do(req{method: http.MethodPost, path: "/api/repair/restart", cookies: []*http.Cookie{c}}),
+		http.StatusInternalServerError, codeJobStartFailed)
+	if e.Error != sentenceJobStartFailed {
+		t.Errorf("a failed ledger write: %q, want %q", e.Error, sentenceJobStartFailed)
+	}
+	recs := broken.f.logs.withAttr("event", "breakglass.job_failed")
+	if len(recs) != 1 || recs[0].Level != slog.LevelError {
+		t.Fatalf("a failed ledger write: %d breakglass.job_failed records, want one at ERROR", len(recs))
+	}
+	if id, _ := recAttr(recs[0], "correlation_id"); id != e.CorrelationID {
+		t.Errorf("a failed ledger write: the record's correlation id %q, the body's %q", id, e.CorrelationID)
 	}
 }
 

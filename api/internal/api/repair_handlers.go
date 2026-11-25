@@ -12,6 +12,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -60,6 +61,7 @@ const (
 	sentenceRepairOnly         = "A repair session can only repair sign-in."
 	sentenceRepairFailed       = "The repair session couldn't be opened. Try again."
 	sentenceJobUnavailable     = "This job can't run on this control plane."
+	sentenceJobStartFailed     = "The job couldn't be started. Try again."
 )
 
 // repairAttrs are the fields every break-glass refusal record carries.
@@ -278,7 +280,9 @@ func (s *Server) handleRepairEnd(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRepairRestart is POST /api/repair/restart: submits identity.restart
-// for the session. The runner's kind policy decides it.
+// for the session. The runner's kind policy decides it. A kind this runner
+// has no workflow for is 503 job_unavailable; any other failure to start the
+// job is 500 job_start_failed, under one ERROR record.
 func (s *Server) handleRepairRestart(w http.ResponseWriter, r *http.Request) {
 	sess, _ := breakglass.SessionFrom(r.Context()) // RequireRepair put it there
 	job, err := s.runner.SubmitFor(r.Context(), submitter(r), breakglass.RestartKind, nil, nil)
@@ -286,8 +290,16 @@ func (s *Server) handleRepairRestart(w http.ResponseWriter, r *http.Request) {
 		if s.refusedSubmit(w, r, breakglass.RestartKind, err) {
 			return
 		}
-		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeJobUnavailable, sentenceJobUnavailable,
-			slog.String("kind", breakglass.RestartKind), slog.String("err", err.Error()))
+		if errors.Is(err, jobs.ErrUnknownKind) {
+			s.writeCodedError(w, r, http.StatusServiceUnavailable, codeJobUnavailable, sentenceJobUnavailable,
+				slog.String("kind", breakglass.RestartKind), slog.String("err", err.Error()))
+			return
+		}
+		id := s.newCorrelationID()
+		s.log.LogAttrs(r.Context(), slog.LevelError, "api: a repair job could not be started",
+			append(repairAttrs("breakglass.job_failed"), slog.String("correlation_id", id),
+				slog.String("kind", breakglass.RestartKind), slog.String("err", err.Error()))...)
+		writeCodedBody(w, http.StatusInternalServerError, codeJobStartFailed, sentenceJobStartFailed, id)
 		return
 	}
 	s.repair.RecordJob(sess, job.ID)
