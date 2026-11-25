@@ -193,7 +193,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		_, ok := rulesAppBindings[c]
 		return flows.DoorApp, ok
 	}
-	if r.marks, err = markers.New(markers.Deps{Admin: session, Realm: baselineRealm, DoorOf: doorOf, Log: log}); err != nil {
+	if r.marks, err = markers.New(markers.Deps{Admin: session, Realm: baselineRealm, DoorOf: doorOf, Lock: &sync.Mutex{}, Log: log}); err != nil {
 		t.Fatal(err)
 	}
 	if r.th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: time.Now}); err != nil {

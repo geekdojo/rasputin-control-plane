@@ -71,7 +71,10 @@ type accountsDeps struct {
 	// second-step marker writer (markerWriter).
 	designations *accounts.Designations
 	markers      *markers.Writer
-	log          *slog.Logger
+	// lock is the one accounts lock, main's, which the marker writer's drain
+	// sink holds too (#994).
+	lock sync.Locker
+	log  *slog.Logger
 }
 
 // accountsRunner is the job runner as the accounts submit to it
@@ -125,7 +128,7 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 		return accountsWiring{}, nil
 	}
 	if d.admin == nil || d.mac == nil || d.console == nil || d.moved == nil || d.kinds == nil || d.runner == nil || d.log == nil ||
-		d.designations == nil || d.markers == nil || d.dbPath == "" || d.listDir == "" {
+		d.designations == nil || d.markers == nil || d.lock == nil || d.dbPath == "" || d.listDir == "" {
 		return accountsWiring{}, errors.New("accounts: a collaborator is nil under keycloak")
 	}
 	var removed removedList
@@ -147,8 +150,9 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	if err != nil {
 		return accountsWiring{}, err
 	}
-	// The one accounts lock: the guard, the revoker and the grant share it.
-	lock := &sync.Mutex{}
+	// The one accounts lock: the guard, the revoker, the grant and the marker
+	// writer share it.
+	lock := d.lock
 	guard, err := authz.NewRoleGuard(roleAccounts, lock)
 	if err != nil {
 		return accountsWiring{}, err

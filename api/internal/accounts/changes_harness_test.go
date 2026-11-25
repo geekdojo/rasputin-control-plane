@@ -103,6 +103,8 @@ type changeHarness struct {
 	removedC *removedCheck
 	factsC   *factsCheck
 	clog     *logkittest.Recorder
+	// mw is the one marker writer, the drain's sink in main.
+	mw *markers.Writer
 }
 
 func newChangeHarness(t *testing.T) *changeHarness {
@@ -112,11 +114,12 @@ func newChangeHarness(t *testing.T) *changeHarness {
 	slogger, rec := logkittest.New()
 	c := &changeHarness{harness: h, held: NewHeld(), fresh: NewFresh(), clog: rec,
 		removedC: &removedCheck{inner: h.removed}, factsC: &factsCheck{inner: h.ra}}
-	mw, err := markers.New(markers.Deps{Admin: h.kc, Realm: realm, Log: slogger,
+	mw, err := markers.New(markers.Deps{Admin: h.kc, Realm: realm, Lock: h.lock, Log: slogger,
 		DoorOf: func(string) (flows.Door, bool) { return "", false }})
 	if err != nil {
 		t.Fatal(err)
 	}
+	c.mw = mw
 	kp, err := authz.NewKindPolicy(noApps{})
 	if err != nil {
 		t.Fatal(err)

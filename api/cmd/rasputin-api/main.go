@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -1302,11 +1303,14 @@ func main() {
 	// identity.revoke, the app-access grant and the removed-name list
 	// (#991), under keycloak only: a System job, so POST /api/jobs refuses it.
 	// The one second-step marker writer: the drain's sink and the
-	// designated-role grant's (#990).
-	markersW := markerWriter(ctx, identityW, doorTable, doorErr, logger)
+	// designated-role grant's (#990). The one accounts lock is the marker
+	// writer's and every account change's: each reads the whole account and
+	// writes it back (#994).
+	accountsLock := &sync.Mutex{}
+	markersW := markerWriter(ctx, identityW, doorTable, doorErr, accountsLock, logger)
 	acct, err := wireAccounts(ctx, accountsDeps{mode: identityW.mode, admin: identityW.session, dbPath: dbPath, mac: mac,
 		console: consoleSessions, moved: authStore, kinds: kindPolicy, runner: runner, listDir: identityDenylists,
-		designations: designations, markers: markersW, log: logger})
+		designations: designations, markers: markersW, lock: accountsLock, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: accounts", "err", err.Error())
 		os.Exit(1)

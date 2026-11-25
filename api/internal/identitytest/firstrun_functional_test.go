@@ -138,7 +138,7 @@ func newFirstRunRig(t *testing.T, env *Env) *firstRunRig {
 		t.Fatal(err)
 	}
 	table := r.sites.Table
-	mw, err := markers.New(markers.Deps{Admin: r.session, Realm: baselineRealm, Log: log, DoorOf: func(c string) (flows.Door, bool) {
+	mw, err := markers.New(markers.Deps{Admin: r.session, Realm: baselineRealm, Lock: lock, Log: log, DoorOf: func(c string) (flows.Door, bool) {
 		switch {
 		case slices.Contains(table.Home.Clients, c):
 			return flows.DoorHome, true

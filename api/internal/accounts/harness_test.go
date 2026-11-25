@@ -20,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/sessions"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -121,6 +122,15 @@ type fakeKC struct {
 	// observe, when set, sees every call before it is answered, outside
 	// the fake's lock, so it may block.
 	observe func(method, rel string)
+	// rows models the identity service's attribute rows
+	// (geekdojo/geekdojo-brain#994; Keycloak 26.8.2's UserAdapter): a user
+	// PUT compares each attribute with the rows as they stood when the call
+	// began (before observe), and only where they differ deletes those rows
+	// and inserts the new values, so two overlapping writes of one
+	// attribute store it twice. A PUT carrying an admin-only single-valued
+	// attribute more than once is refused with a 400, counted in rejected.
+	rows     bool
+	rejected int
 }
 
 func notFound(path string) error {
@@ -138,6 +148,7 @@ func answer(out, v any) {
 func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idclient.Response, error) {
 	k.mu.Lock()
 	obs := k.observe
+	snap := k.snapshot(method, path)
 	k.mu.Unlock()
 	if obs != nil {
 		obs(method, strings.TrimPrefix(path, "/admin/realms/"+realm))
@@ -236,6 +247,16 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	case tail == "" && method == http.MethodPut:
 		var b map[string]any
 		_ = json.Unmarshal(body, &b)
+		if snap != nil {
+			attrs, _ := b["attributes"].(map[string]any)
+			for name, multi := range flows.AdminOnlyAttributes {
+				if vs, _ := attrs[name].([]any); !multi && len(vs) > 1 {
+					k.rejected++
+					return idclient.Response{Status: http.StatusBadRequest}, &idclient.Error{Op: "admin", Path: path, Status: http.StatusBadRequest, Kind: idclient.ErrProtocol}
+				}
+			}
+			b["attributes"] = mergeRows(x.rep["attributes"], snap, attrs)
+		}
 		if e, ok := b["email"].(string); ok && e != x.rep["email"] {
 			for id, o := range k.users {
 				if id != parts[1] && strings.EqualFold(o.rep["email"].(string), e) {
@@ -364,6 +385,61 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		return idclient.Response{}, errors.New("fake: unknown path " + rel)
 	}
 	return idclient.Response{Status: 200}, nil
+}
+
+// snapshot is, under rows, a user PUT's account attributes as they stand
+// when the call begins: the rows its transaction loads. Otherwise nil.
+func (k *fakeKC) snapshot(method, path string) map[string]any {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, "/admin/realms/"+realm), "/"), "/")
+	if !k.rows || method != http.MethodPut || len(parts) != 2 || parts[0] != "users" || k.users[parts[1]] == nil {
+		return nil
+	}
+	return cloneAttrs(k.users[parts[1]].rep["attributes"])
+}
+
+func cloneAttrs(attrs any) map[string]any {
+	m, _ := attrs.(map[string]any)
+	out := map[string]any{}
+	for name, v := range m {
+		vs, _ := v.([]any)
+		out[name] = slices.Clone(vs)
+	}
+	return out
+}
+
+// mergeRows is what a user PUT leaves under rows: for each attribute whose
+// new values differ from snap (the rows the call loaded), the rows snap
+// held are deleted from cur and the new values inserted; an attribute
+// whose values equal snap is left as cur holds it.
+func mergeRows(cur any, snap, body map[string]any) map[string]any {
+	out := cloneAttrs(cur)
+	names := map[string]bool{}
+	for n := range snap {
+		names[n] = true
+	}
+	for n := range body {
+		names[n] = true
+	}
+	for n := range names {
+		old, _ := snap[n].([]any)
+		nw, _ := body[n].([]any)
+		if slices.Equal(old, nw) {
+			continue
+		}
+		vs, _ := out[n].([]any)
+		for _, o := range old {
+			if i := slices.Index(vs, o); i >= 0 {
+				vs = slices.Delete(vs, i, i+1)
+			}
+		}
+		vs = append(vs, nw...)
+		if len(vs) == 0 {
+			delete(out, n)
+			continue
+		}
+		out[n] = vs
+	}
+	return out
 }
 
 // list answers the users listing: by exact email, or every account in

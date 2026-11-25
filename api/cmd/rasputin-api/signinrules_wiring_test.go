@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
@@ -60,11 +61,11 @@ func TestSignInRulesWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	idw := identityWiring{mode: identityModeKeycloak, session: convergeDeps(t, identityModeKeycloak, &st).session, dirty: newIdentityDirty()}
-	mw := markerWriter(t.Context(), idw, table, nil, slog.New(slog.DiscardHandler))
+	mw := markerWriter(t.Context(), idw, table, nil, &sync.Mutex{}, slog.New(slog.DiscardHandler))
 	if mw == nil {
 		t.Fatal("no marker writer under keycloak")
 	}
-	if markerWriter(t.Context(), identityWiring{mode: identityModeOff}, table, nil, slog.New(slog.DiscardHandler)) != nil {
+	if markerWriter(t.Context(), identityWiring{mode: identityModeOff}, table, nil, &sync.Mutex{}, slog.New(slog.DiscardHandler)) != nil {
 		t.Error("a marker writer outside keycloak")
 	}
 	deps, th := eventsDeps(t.Context(), idw, &memMarks{m: map[string]string{}}, table, nil, sinks, mw, slog.New(slog.DiscardHandler))

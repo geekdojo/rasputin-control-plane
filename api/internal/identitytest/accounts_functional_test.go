@@ -45,6 +45,9 @@ type accountsRig struct {
 	actorOTP string
 	cookie   secret.Value
 	acctLog  *logkittest.Recorder
+	// race holds a grant's marker write until another grant waits for the
+	// accounts lock (grantRace).
+	race *raceGate
 }
 
 func newAccountsRig(t *testing.T, c *consoleRig) *accountsRig {
@@ -53,7 +56,8 @@ func newAccountsRig(t *testing.T, c *consoleRig) *accountsRig {
 	log, rec := logkittest.New()
 	r.acctLog = rec
 	table := r.sites.Table
-	mw, err := markers.New(markers.Deps{Admin: r.session, Realm: baselineRealm, Log: log, DoorOf: func(cl string) (flows.Door, bool) {
+	r.race = &raceGate{lock: &contendedLock{inner: r.lock}}
+	mw, err := markers.New(markers.Deps{Admin: gatedAdmin{inner: r.session, gate: r.race}, Realm: baselineRealm, Lock: r.race.lock, Log: log, DoorOf: func(cl string) (flows.Door, bool) {
 		switch {
 		case slices.Contains(table.Home.Clients, cl):
 			return flows.DoorHome, true
@@ -77,7 +81,7 @@ func newAccountsRig(t *testing.T, c *consoleRig) *accountsRig {
 		r.runner.Register(wf)
 	}
 	granter, err := accounts.NewGranter(accounts.GranterDeps{Designations: r.designations, Facts: r.ra, Markers: mw, Sessions: ender,
-		Roles: r.users, Users: r.users, Access: r.access, Console: r.sessions, Admins: r.ra, Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute})
+		Roles: r.users, Users: r.users, Access: r.access, Console: r.sessions, Admins: r.ra, Lock: r.race.lock, Log: log, StepTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -707,4 +711,5 @@ func accountsCases(t *testing.T, c *consoleRig) {
 	t.Run("TC-994-39 C24 TS-21 privileged changes need a fresh sign-in", r.tc39)
 	t.Run("TC-994-40 T270 to T275", r.tc40)
 	t.Run("TC-994-41 F-994-01 an app-only designation completes at the app door", r.tc41)
+	t.Run("GrantRace two overlapping grants for one account", r.grantRace)
 }

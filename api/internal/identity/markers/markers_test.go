@@ -76,7 +76,7 @@ func newUser() map[string]any {
 func newWriter(t *testing.T, f *fakeAdmin) (*Writer, *logkittest.Recorder) {
 	t.Helper()
 	log, rec := logkittest.New()
-	w, err := New(Deps{Admin: f, Realm: "rasputin", Log: log, DoorOf: func(c string) (flows.Door, bool) {
+	w, err := New(Deps{Admin: f, Realm: "rasputin", Lock: &sync.Mutex{}, Log: log, DoorOf: func(c string) (flows.Door, bool) {
 		switch c {
 		case "rasputin-console":
 			return flows.DoorHome, true
@@ -232,10 +232,14 @@ func TestBeforePrivilege(t *testing.T) {
 
 func TestNew_Refuses(t *testing.T) {
 	log, _ := logkittest.New()
-	good := Deps{Admin: &fakeAdmin{}, Realm: "r", DoorOf: func(string) (flows.Door, bool) { return "", false }, Log: log}
+	good := Deps{Admin: &fakeAdmin{}, Realm: "r", DoorOf: func(string) (flows.Door, bool) { return "", false }, Lock: &sync.Mutex{}, Log: log}
+	if _, err := New(good); err != nil {
+		t.Fatalf("New with every collaborator: %v", err)
+	}
 	for name, mut := range map[string]func(*Deps){
 		"Admin": func(d *Deps) { d.Admin = nil }, "Realm": func(d *Deps) { d.Realm = "" },
 		"DoorOf": func(d *Deps) { d.DoorOf = nil }, "Log": func(d *Deps) { d.Log = nil },
+		"Lock": func(d *Deps) { d.Lock = nil },
 	} {
 		d := good
 		mut(&d)
