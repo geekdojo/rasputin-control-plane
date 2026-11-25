@@ -95,11 +95,15 @@ type firstRunRig struct {
 	otp     *totpCodes
 	ip      atomic.Uint32
 	rec     *logkittest.Recorder
+	// top is the test the rig was built in. A person outlives the subtest
+	// that made them (TC-990-01's A and B sign in again in TC-990-03 and
+	// TC-990-05), so their passwords are destroyed when it ends.
+	top *testing.T
 }
 
 func newFirstRunRig(t *testing.T, env *Env) *firstRunRig {
 	t.Helper()
-	r := &firstRunRig{consoleRig: newConsoleRig(t, env), net: &switchNetwork{f: homeFacts()}, otp: &totpCodes{used: map[string]bool{}}}
+	r := &firstRunRig{consoleRig: newConsoleRig(t, env), net: &switchNetwork{f: homeFacts()}, otp: &totpCodes{used: map[string]bool{}}, top: t}
 	r.ip.Store(1)
 	ctx := t.Context()
 	var err error
@@ -213,7 +217,7 @@ func (r *firstRunRig) newPerson(t *testing.T, name string) person {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(pw.Destroy)
+	r.top.Cleanup(pw.Destroy)
 	g, _ := r.next(t)
 	return person{name: name, email: name + "@firstrun.invalid", pw: pw, g: g}
 }
