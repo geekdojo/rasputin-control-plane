@@ -1,6 +1,7 @@
 package accounts
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -29,9 +30,17 @@ type redesignateHarness struct {
 
 func newRedesignateHarness(t *testing.T) *redesignateHarness {
 	t.Helper()
+	return newFaultyRedesignateHarness(t, "")
+}
+
+// newFaultyRedesignateHarness is newRedesignateHarness with the
+// redesignate step's call named by fail refused ("" refuses none).
+func newFaultyRedesignateHarness(t *testing.T, fail string) *redesignateHarness {
+	t.Helper()
 	h := &redesignateHarness{changeHarness: newChangeHarness(t)}
-	redes, err := NewRedesignator(RedesignatorDeps{Facts: h.factsC, Designations: recDes{inner: h.designations, log: h.log},
-		Users: h.users, Lock: h.lock})
+	redes, err := NewRedesignator(RedesignatorDeps{Facts: h.factsC,
+		Designations: faultyDes{inner: recDes{inner: h.designations, log: h.log}, fail: fail},
+		Users:        faultyDemote{inner: h.users, fail: fail}, Lock: h.lock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,6 +58,55 @@ func newRedesignateHarness(t *testing.T) *redesignateHarness {
 		roles: []string{"operator"}, appRole: "admin", network: []string{"join", "gear-admin"}, actions: []any{},
 		creds: completeCreds, offline: map[string][]string{appUUID: {"sp"}}})
 	return h
+}
+
+// faultyDemote refuses the DemoteUsers call named by fail.
+type faultyDemote struct {
+	inner DemoteUsers
+	fail  string
+}
+
+var errInjected = errors.New("injected fault")
+
+func (f faultyDemote) Read(ctx context.Context, sub string) (Person, error) {
+	if f.fail == "read" {
+		return Person{}, errInjected
+	}
+	return f.inner.Read(ctx, sub)
+}
+
+func (f faultyDemote) SetConsoleRole(ctx context.Context, sub, role string) error {
+	if f.fail == "console" {
+		return errInjected
+	}
+	return f.inner.SetConsoleRole(ctx, sub, role)
+}
+
+func (f faultyDemote) SetAppRole(ctx context.Context, sub string, level AppLevel) error {
+	if f.fail == "app" {
+		return errInjected
+	}
+	return f.inner.SetAppRole(ctx, sub, level)
+}
+
+func (f faultyDemote) SetNetwork(ctx context.Context, sub string, grants []string) error {
+	if f.fail == "network" {
+		return errInjected
+	}
+	return f.inner.SetNetwork(ctx, sub, grants)
+}
+
+// faultyDes refuses the designation write when fail is "designate".
+type faultyDes struct {
+	inner Designator
+	fail  string
+}
+
+func (d faultyDes) Designate(ctx context.Context, x Designation) error {
+	if d.fail == "designate" {
+		return errInjected
+	}
+	return d.inner.Designate(ctx, x)
 }
 
 func (h *redesignateHarness) reset(t *testing.T, sub string) result {
@@ -261,5 +319,61 @@ func TestNewRedesignator_RefusesNil(t *testing.T) {
 	if _, err := ResetPasswordWorkflow(ResetDeps{Users: h.users, Held: h.held, Checker: acceptAll{}, Revoker: h.rev, Lock: h.lock,
 		Log: slog.New(slog.DiscardHandler), StepTimeout: time.Minute}); err == nil {
 		t.Error("ResetPasswordWorkflow accepted no Redesignate")
+	}
+}
+
+// TC-992-44 (F-992-16): each redesignate write or read that fails stops the
+// job with its sentence, ends no session, keeps whatever designation was
+// already written and leaves every level not yet taken still held, with
+// one ERROR reset.redesignate_failed record. The gear-admin network write
+// (redesignate.go demoteLevels) is the case the lived mutant missed.
+func TestResetRedesignate_TC992_44_EachFailingCallStopsTheJob(t *testing.T) {
+	cases := []struct {
+		fail                    string
+		designated, console     bool // the designation written; the console role still held
+		appAdmin, gearAdminHeld bool
+	}{
+		{fail: "designate", designated: false, console: true, appAdmin: true, gearAdminHeld: true},
+		{fail: "console", designated: true, console: true, appAdmin: true, gearAdminHeld: true},
+		{fail: "read", designated: true, console: false, appAdmin: false, gearAdminHeld: true},
+		{fail: "network", designated: true, console: false, appAdmin: false, gearAdminHeld: true},
+	}
+	for _, c := range cases {
+		t.Run(c.fail, func(t *testing.T) {
+			h := newFaultyRedesignateHarness(t, c.fail)
+			r := h.reset(t, privTarget)
+			if r.job.Status != jobs.StatusFailed || r.job.Error != sentenceRedesignate {
+				t.Fatalf("job %s %q", r.job.Status, r.job.Error)
+			}
+			if index(h.log.all(), "reset-password") < 0 {
+				t.Error("the temporary password was not set")
+			}
+			if got := h.log.only("logout", "offline-delete", "console"); len(got) != 0 {
+				t.Errorf("sessions ended after a failed redesignate: %v", got)
+			}
+			x, ok := h.designation(t, privTarget)
+			if ok != c.designated {
+				t.Fatalf("designation found %v, want %v", ok, c.designated)
+			}
+			if ok && (x.ConsoleRole != "operator" || x.AppRole != AppAdmin || x.Network != "gear-admin" || x.Reason != ReasonReset) {
+				t.Errorf("designation %+v", x)
+			}
+			if got := len(h.consoleOf(privTarget)) != 0; got != c.console {
+				t.Errorf("console role held %v (%v), want %v", got, h.consoleOf(privTarget), c.console)
+			}
+			if got := h.attr(privTarget, AttrAppRole) == "admin"; got != c.appAdmin {
+				t.Errorf("app admin held %v (%q), want %v", got, h.attr(privTarget, AttrAppRole), c.appAdmin)
+			}
+			if got := slices.Contains(strings.Split(h.attr(privTarget, AttrNetwork), ","), "gear-admin"); got != c.gearAdminHeld {
+				t.Errorf("gear-admin held %v (%q), want %v", got, h.attr(privTarget, AttrNetwork), c.gearAdminHeld)
+			}
+			recs := h.events("reset.redesignate_failed")
+			if len(recs) != 1 || recs[0].Level != slog.LevelError {
+				t.Fatalf("records %v", recs)
+			}
+			if id, _ := logkittest.Attr(recs[0], "job_id"); id != r.job.ID {
+				t.Errorf("job_id %q, want %q", id, r.job.ID)
+			}
+		})
 	}
 }
