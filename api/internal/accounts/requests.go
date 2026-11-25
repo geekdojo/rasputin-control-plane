@@ -41,12 +41,16 @@ const (
 	KindRemoveSecondSteps = "accounts.remove_second_steps"
 	KindRemoveCredential  = "accounts.remove_credential"
 	KindRenameCredential  = "accounts.rename_credential"
+	// KindGrantWaiting grants a waiting entry's pre-fill in one action
+	// (geekdojo/geekdojo-brain#1004, F-1004-01).
+	KindGrantWaiting = "accounts.grant_waiting"
 )
 
 // FreshKinds are the kinds that run only from a fresh sign-in's callback
 // (C18, C24): always for removing second steps or a credential, and for
-// the three grants when they raise privilege.
-var FreshKinds = []string{KindSetRoles, KindGrantAccess, KindSetNetwork, KindRemoveSecondSteps, KindRemoveCredential}
+// the three grants when they raise privilege; always for granting a
+// waiting entry.
+var FreshKinds = []string{KindSetRoles, KindGrantAccess, KindSetNetwork, KindRemoveSecondSteps, KindRemoveCredential, KindGrantWaiting}
 
 // The specs. Each carries opaque ids and enums only, never a name, an
 // email or a label: a spec is persisted, shown on the Tasks page and
@@ -149,6 +153,7 @@ var requestKinds = map[string]kindRule{
 	KindSetEmail:          {value: valueEmail, build: account},
 	KindSetDisplayName:    {value: valueText, build: account},
 	KindRemoveSecondSteps: {fresh: freshAlways, build: account},
+	KindGrantWaiting:      {fresh: freshAlways, op: authz.OpSetRole, build: account},
 	KindRemoveCredential: {fields: []string{"credentialId"}, fresh: freshAlways, keep: true,
 		build: func(s requestSpec, keep string) any {
 			return CredentialSpec{AccountID: *s.AccountID, CredentialID: *s.CredentialID, KeepSID: keep}

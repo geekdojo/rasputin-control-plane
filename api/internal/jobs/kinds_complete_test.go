@@ -108,7 +108,9 @@ func (sc kindScan) check() []string {
 		switch {
 		case !authz.Known(k):
 			out = append(out, fmt.Sprintf("kind %q is registered and not in authz's kind table", k))
-		case sc.kinds[k] && !authz.SystemOnly(k):
+		case sc.kinds[k] && !authz.SystemOnly(k) && !authz.SystemOrRepair(k):
+			// identity.move alone is the system's and a repair session's in
+			// C9's state (geekdojo/geekdojo-brain#1004).
 			out = append(out, fmt.Sprintf("kind %q is a System workflow and not system-only in authz's kind table", k))
 		}
 	}

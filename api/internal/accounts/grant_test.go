@@ -27,8 +27,10 @@ type grantRig struct {
 	facts authz.AccountFacts
 	// network is the grants the account holds when the grant reads them.
 	network []string
-	g       *Granter
-	rec     *logkittest.Recorder
+	// admins is the enabled administrators' count (C25).
+	admins int
+	g      *Granter
+	rec    *logkittest.Recorder
 }
 
 func (r *grantRig) call(name string) error {
@@ -52,6 +54,35 @@ func (d gDes) Clear(_ context.Context, sub string) error {
 	}
 	delete(d.r.des, sub)
 	return nil
+}
+
+func (d gDes) Wait(_ context.Context, sub string) error {
+	if err := d.r.call("Wait"); err != nil {
+		return err
+	}
+	x := d.r.des[sub]
+	x.Reason = ReasonWaiting
+	d.r.des[sub] = x
+	return nil
+}
+
+func (d gDes) WaitMoved(_ context.Context, except string) error {
+	if err := d.r.call("WaitMoved"); err != nil {
+		return err
+	}
+	for sub, x := range d.r.des {
+		if sub != except && x.Reason == ReasonMoved {
+			x.Reason = ReasonWaiting
+			d.r.des[sub] = x
+		}
+	}
+	return nil
+}
+
+type gAdmins struct{ r *grantRig }
+
+func (a gAdmins) EnabledAdmins(context.Context) (int, error) {
+	return a.r.admins, a.r.call("EnabledAdmins")
 }
 
 type gFacts struct{ r *grantRig }
@@ -107,7 +138,7 @@ func newGrantRig(t *testing.T) *grantRig {
 	r := &grantRig{log: &callLog{}, fail: map[string]error{}, rec: rec, facts: complete,
 		des: map[string]Designation{grantSub: {Sub: grantSub, ConsoleRole: "admin", AppRole: AppAdmin, Reason: ReasonFirstAdmin}}}
 	g, err := NewGranter(GranterDeps{Designations: gDes{r}, Facts: gFacts{r}, Markers: gMarkers{r}, Sessions: gSessions{r},
-		Roles: gRoles{r}, Users: gUsers{r}, Access: gAccess{r}, Console: gConsole{r}, Lock: &sync.Mutex{}, Log: log, StepTimeout: time.Minute})
+		Roles: gRoles{r}, Users: gUsers{r}, Access: gAccess{r}, Console: gConsole{r}, Admins: gAdmins{r}, Lock: &sync.Mutex{}, Log: log, StepTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

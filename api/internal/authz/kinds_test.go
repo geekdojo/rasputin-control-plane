@@ -131,17 +131,19 @@ func TestAuthorize_TC1001_06_OSOutcomeKinds(t *testing.T) {
 	}
 }
 
-// TC-1001-08: identity.move is the system's alone; a repair session is
-// refused in every state until geekdojo/geekdojo-brain#1004.
+// TC-1001-08: identity.move is the system's; a person is refused
+// system_only. A repair session's C9 allowance is TC-1004-17's: with no move
+// state wired, its submission is a check that failed.
 func TestAuthorize_TC1001_08_IdentityMove(t *testing.T) {
 	p := newPolicy(t, &fakeApps{})
 	if err := p.Authorize(t.Context(), "identity.move", []byte(`{}`), sysSub); err != nil {
 		t.Errorf("system: %v, want allowed", err)
 	}
-	for name, by := range map[string]Submitter{"repair": repairSub, "admin": adminSub} {
-		if got := code(p.Authorize(t.Context(), "identity.move", []byte(`{}`), by)); got != CodeSystemOnly {
-			t.Errorf("%s: %q, want system_only", name, got)
-		}
+	if got := code(p.Authorize(t.Context(), "identity.move", []byte(`{}`), adminSub)); got != CodeSystemOnly {
+		t.Errorf("admin: %q, want system_only", got)
+	}
+	if err := p.Authorize(t.Context(), "identity.move", []byte(`{}`), repairSub); !errors.Is(err, ErrCheckFailed) {
+		t.Errorf("repair with no move state: %v, want ErrCheckFailed", err)
 	}
 	if got := code(p.Authorize(t.Context(), "identity.move", []byte(`{}`), zeroSub)); got == "" {
 		t.Error("zero submitter: allowed, want refused")
@@ -334,7 +336,8 @@ func TestKindTable_TC1001_16_AppendixE(t *testing.T) {
 		others: {"accounts.grant_access", "accounts.revoke_access", "accounts.set_roles", "accounts.set_network",
 			"accounts.set_claims", "accounts.set_groups", "accounts.set_email", "accounts.confirm_email",
 			"accounts.disable", "accounts.enable", "accounts.delete", "accounts.decline", "accounts.unlock",
-			"accounts.reset_password", "accounts.remove_second_steps", "accounts.clear_network_password"},
+			"accounts.reset_password", "accounts.remove_second_steps", "accounts.clear_network_password",
+			"accounts.grant_waiting"},
 		selfOrOthers: {"accounts.sign_out", "accounts.set_display_name", "accounts.revoke_device_certificate", "accounts.remove_mesh_device"},
 		self: {"accounts.remove_credential", "accounts.rename_credential", "accounts.set_network_password",
 			"accounts.enrol_gear_code", "accounts.issue_device_certificate"},
@@ -369,8 +372,11 @@ func TestKindTable_TC1001_16_AppendixE(t *testing.T) {
 	if err := p.Authorize(t.Context(), "app.backchannel_logout", []byte(`{"appId":"a1"}`), sysSub); err != nil {
 		t.Errorf("the system's relay of app.backchannel_logout: %v, want allowed", err)
 	}
-	if !SystemOnly("identity.recover") || !SystemOnly("identity.move") || SystemOnly("identity.converge") || SystemOnly("nope") {
+	if !SystemOnly("identity.recover") || SystemOnly("identity.move") || SystemOnly("identity.converge") || SystemOnly("nope") {
 		t.Error("SystemOnly disagrees with the table")
+	}
+	if !SystemOrRepair("identity.move") || SystemOrRepair("identity.recover") || SystemOrRepair("nope") {
+		t.Error("SystemOrRepair disagrees with the table")
 	}
 	if !Known("app.deploy") || Known("nope") {
 		t.Error("Known disagrees with the table")
@@ -381,7 +387,10 @@ func TestKindTable_TC1001_16_AppendixE(t *testing.T) {
 // "" for allowed.
 func TestAuthorize_TC1001_18_Matrix(t *testing.T) {
 	apps := &fakeApps{facts: map[string]AppFacts{"a1": {Tiers: []string{"routine"}}}}
-	p := newPolicy(t, apps)
+	p, err := NewKindPolicy(apps, WithMoveState(&fakeMove{token: "t1", holds: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	subs := []struct {
 		name string
 		by   Submitter
@@ -419,7 +428,10 @@ func TestAuthorize_TC1001_18_Matrix(t *testing.T) {
 		{"appTier routine", "app.deploy", []byte(`{"appId":"a1"}`), [9]string{ok, ok, ok, np, np, np, np, np, np}},
 		{"repairOnly", "identity.restore_data", nil, [9]string{np, np, np, np, np, np, ok, np, np}},
 		{"repairOr(iam)", "identity.restart", nil, [9]string{ok, ok, np, np, np, np, ok, np, np}},
-		{"move", "identity.move", nil, [9]string{ok, so, so, so, so, so, so, so, np}},
+		// A repair session with C9's state holding and the current token is
+		// allowed; with none in the spec it is state_changed (TC-1004-17).
+		{"move", "identity.move", nil, [9]string{ok, so, so, so, so, so, CodeStateChanged, so, np}},
+		{"move with the token", "identity.move", []byte(`{"repair":true,"stateToken":"t1"}`), [9]string{ok, so, so, so, so, so, ok, so, np}},
 		{"bridge A to A", "accounts.set_first_password", acct("s-A"), [9]string{np, np, np, np, np, np, np, ok, np}},
 		{"bridge A to B", "accounts.set_first_password", acct("s-B"), [9]string{np, np, np, np, np, np, np, nya, np}},
 		{"never", "os.store_init", nil, [9]string{ns, ns, ns, ns, ns, ns, ns, ns, ns}},
@@ -437,7 +449,7 @@ func TestAuthorize_TC1001_18_Matrix(t *testing.T) {
 // stop (ERR-MESSAGE), and Error names only the code.
 func TestKindRefusal_Sentences(t *testing.T) {
 	for _, c := range []string{CodeUnknownKind, CodeSystemOnly, CodeNotSubmittable, CodeNotPermitted,
-		CodeNotYourAccount, CodeOwnAccount, CodeNoTarget, CodeNoApp, CodeUnknownTier} {
+		CodeNotYourAccount, CodeOwnAccount, CodeNoTarget, CodeNoApp, CodeUnknownTier, CodeMoveState, CodeStateChanged} {
 		s := sentences[c]
 		if s == "" || !strings.HasSuffix(s, ".") || strings.ToUpper(s[:1]) != s[:1] {
 			t.Errorf("%s: sentence %q", c, s)
@@ -456,5 +468,107 @@ func TestSubmitterCapabilities(t *testing.T) {
 	}
 	if c := (Submitter{}).Capabilities(); len(c.List()) != 0 {
 		t.Errorf("the zero Submitter holds %v", c.List())
+	}
+}
+
+// fakeMove is a MoveState over fixed answers, counting its reads.
+type fakeMove struct {
+	token string
+	holds bool
+	err   error
+	reads int
+}
+
+func (m *fakeMove) RepairToken(context.Context) (string, bool, error) {
+	m.reads++
+	return m.token, m.holds, m.err
+}
+
+// TC-1004-17: identity.move's rule. The system is allowed; a repair session
+// only while C9's state holds and the spec's stateToken is current; a state
+// that does not hold is move_state, another token state_changed; a state
+// read error or no state wired is ErrCheckFailed; every person is
+// system_only and the zero submitter is refused. SystemOnly is false for it.
+func TestAuthorize_TC1004_17_Move(t *testing.T) {
+	spec := func(tok string) []byte { return []byte(`{"repair":true,"stateToken":"` + tok + `"}`) }
+	pol := func(m MoveState) *KindPolicy {
+		t.Helper()
+		p, err := NewKindPolicy(&fakeApps{}, WithMoveState(m))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	t.Run("system", func(t *testing.T) {
+		m := &fakeMove{}
+		if err := pol(m).Authorize(t.Context(), "identity.move", []byte(`{}`), sysSub); err != nil {
+			t.Errorf("system: %v, want allowed", err)
+		}
+		if m.reads != 0 {
+			t.Errorf("the system's submission read the state %d times, want 0", m.reads)
+		}
+	})
+	t.Run("repair, state holds, current token", func(t *testing.T) {
+		if err := pol(&fakeMove{token: "abc", holds: true}).Authorize(t.Context(), "identity.move", spec("abc"), repairSub); err != nil {
+			t.Errorf("%v, want allowed", err)
+		}
+	})
+	t.Run("repair, state does not hold", func(t *testing.T) {
+		if got := code(pol(&fakeMove{token: "abc"}).Authorize(t.Context(), "identity.move", spec("abc"), repairSub)); got != CodeMoveState {
+			t.Errorf("%q, want move_state", got)
+		}
+	})
+	t.Run("repair, another token", func(t *testing.T) {
+		for _, s := range [][]byte{spec("old"), []byte(`{"repair":true}`), []byte(`{"stateToken":"abc","stateToken":"abc"}`)} {
+			if got := code(pol(&fakeMove{token: "abc", holds: true}).Authorize(t.Context(), "identity.move", s, repairSub)); got != CodeStateChanged {
+				t.Errorf("%s: %q, want state_changed", s, got)
+			}
+		}
+	})
+	t.Run("repair, state read error", func(t *testing.T) {
+		err := pol(&fakeMove{err: errors.New("db down")}).Authorize(t.Context(), "identity.move", spec("abc"), repairSub)
+		if !errors.Is(err, ErrCheckFailed) {
+			t.Errorf("%v, want ErrCheckFailed", err)
+		}
+	})
+	t.Run("no option refuses every repair submission", func(t *testing.T) {
+		if err := newPolicy(t, &fakeApps{}).Authorize(t.Context(), "identity.move", spec("abc"), repairSub); !errors.Is(err, ErrCheckFailed) {
+			t.Errorf("%v, want ErrCheckFailed", err)
+		}
+	})
+	t.Run("persons and the zero submitter", func(t *testing.T) {
+		p := pol(&fakeMove{token: "abc", holds: true})
+		for name, by := range map[string]Submitter{"admin": adminSub, "operator": operatorSub, "viewer": viewerSub,
+			"norole": noRoleSub, "bridge": bridgeSub} {
+			if got := code(p.Authorize(t.Context(), "identity.move", spec("abc"), by)); got != CodeSystemOnly {
+				t.Errorf("%s: %q, want system_only", name, got)
+			}
+		}
+		if got := code(p.Authorize(t.Context(), "identity.move", spec("abc"), zeroSub)); got == "" {
+			t.Error("zero submitter: allowed, want refused")
+		}
+	})
+	if SystemOnly("identity.move") {
+		t.Error(`SystemOnly("identity.move") is true, want false`)
+	}
+	for _, c := range []string{CodeMoveState, CodeStateChanged} {
+		if KindSentence(c) == "" {
+			t.Errorf("%s has no sentence", c)
+		}
+	}
+}
+
+// TC-1004-17 (grant_waiting): accounts.grant_waiting is an others kind
+// under iam: an administrator on another account, never on their own.
+func TestAuthorize_TC1004_GrantWaiting(t *testing.T) {
+	p := newPolicy(t, &fakeApps{})
+	if err := p.Authorize(t.Context(), "accounts.grant_waiting", acct("s-x"), adminSub); err != nil {
+		t.Errorf("admin on another: %v, want allowed", err)
+	}
+	if got := code(p.Authorize(t.Context(), "accounts.grant_waiting", acct("s-admin"), adminSub)); got != CodeOwnAccount {
+		t.Errorf("admin on own: %q, want own_account", got)
+	}
+	if got := code(p.Authorize(t.Context(), "accounts.grant_waiting", acct("s-x"), operatorSub)); got != CodeNotPermitted {
+		t.Errorf("operator: %q, want not_permitted", got)
 	}
 }

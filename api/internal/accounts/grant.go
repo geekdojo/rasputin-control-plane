@@ -34,9 +34,12 @@ const (
 const (
 	outcomeNotDesignated = "not_designated"
 	outcomeWaiting       = "waiting"
-	outcomeComplete      = "complete"
-	outcomeGranted       = "granted"
-	outcomeFinished      = "finished"
+	// outcomeWaitingForAdmin is a waiting designation (C25): it grants
+	// nothing until an administrator grants it (accounts.grant_waiting).
+	outcomeWaitingForAdmin = "waiting_for_admin"
+	outcomeComplete        = "complete"
+	outcomeGranted         = "granted"
+	outcomeFinished        = "finished"
 )
 
 // The grant's failure sentences (ERR-MESSAGE).
@@ -52,10 +55,24 @@ type GrantSpec struct {
 }
 
 // DesignationStore is the designations the grant reads and clears
-// (*Designations).
+// (*Designations), and sets waiting for a moved account (C25).
 type DesignationStore interface {
 	Get(ctx context.Context, sub string) (Designation, bool, error)
 	Clear(ctx context.Context, sub string) error
+	Wait(ctx context.Context, sub string) error
+	WaitMoved(ctx context.Context, except string) error
+}
+
+// DesignationReader reads a designation (*Designations): what the Observer
+// reads.
+type DesignationReader interface {
+	Get(ctx context.Context, sub string) (Designation, bool, error)
+}
+
+// AdminCounter counts the enabled administrators (RoleAccounts): C25
+// reads it before a moved account becomes administrator.
+type AdminCounter interface {
+	EnabledAdmins(ctx context.Context) (int, error)
 }
 
 // FactsReader reads an account's facts (RoleAccounts).
@@ -99,6 +116,8 @@ type GranterDeps struct {
 	Users        GrantUsers
 	Access       AppGranter
 	Console      ConsoleSessions
+	// Admins counts the enabled administrators under the lock (C25).
+	Admins AdminCounter
 	// Lock is the one accounts lock, held around the console role's grant.
 	Lock sync.Locker
 	Log  *slog.Logger
@@ -116,7 +135,7 @@ type Granter struct {
 // NewGranter checks d and returns a Granter. It does no I/O.
 func NewGranter(d GranterDeps) (*Granter, error) {
 	if d.Designations == nil || d.Facts == nil || d.Markers == nil || d.Sessions == nil || d.Roles == nil ||
-		d.Users == nil || d.Access == nil || d.Console == nil || d.Lock == nil || d.Log == nil {
+		d.Users == nil || d.Access == nil || d.Console == nil || d.Admins == nil || d.Lock == nil || d.Log == nil {
 		return nil, errors.New("accounts: NewGranter: a collaborator is nil")
 	}
 	if d.StepTimeout <= 0 {
@@ -193,8 +212,9 @@ func (g *Granter) failed(sc *jobs.StepCtx, name string, err error) error {
 	return err
 }
 
-// designated reads sub's designation and facts: not_designated, waiting
-// (incomplete, C29) or complete.
+// designated reads sub's designation and facts: not_designated,
+// waiting_for_admin (a waiting designation, C25, which grants nothing),
+// waiting (incomplete, C29) or complete.
 func (g *Granter) designated(ctx context.Context, sub string) (Designation, string, error) {
 	x, found, err := g.d.Designations.Get(ctx, sub)
 	switch {
@@ -205,6 +225,9 @@ func (g *Granter) designated(ctx context.Context, sub string) (Designation, stri
 	}
 	if err := x.Valid(); err != nil {
 		return Designation{}, "", err
+	}
+	if x.Reason == ReasonWaiting {
+		return x, outcomeWaitingForAdmin, nil
 	}
 	f, err := g.d.Facts.Facts(ctx, sub)
 	if err != nil {
@@ -249,12 +272,32 @@ func (g *Granter) grant(ctx context.Context, _ *jobs.StepCtx, sub string) (strin
 	return outcomeGranted, nil
 }
 
+// lockedRole is the grant under the lock. A moved account (C25) becomes
+// administrator only while no enabled administrator exists: then every
+// other moved designation is set waiting first. With one, its own
+// designation is set waiting and nothing is granted. An unread count fails
+// the step with the designation kept.
 func (g *Granter) lockedRole(ctx context.Context, sub string) (Designation, string, error) {
 	g.d.Lock.Lock()
 	defer g.d.Lock.Unlock()
 	x, out, err := g.designated(ctx, sub)
 	if err != nil || out != outcomeComplete {
 		return x, out, err
+	}
+	if x.Reason == ReasonMoved {
+		n, err := g.d.Admins.EnabledAdmins(ctx)
+		if err != nil {
+			return x, "", fmt.Errorf("count the administrators: %w", err)
+		}
+		if n > 0 {
+			if err := g.d.Designations.Wait(ctx, sub); err != nil {
+				return x, "", err
+			}
+			return x, outcomeWaitingForAdmin, nil
+		}
+		if err := g.d.Designations.WaitMoved(ctx, sub); err != nil {
+			return x, "", err
+		}
 	}
 	if err := g.d.Sessions.EndAll(ctx, sub); err != nil {
 		return x, "", fmt.Errorf("end online sessions: %w", err)
@@ -305,7 +348,7 @@ type GrantSubmitter interface {
 
 // ObserverDeps are an Observer's collaborators.
 type ObserverDeps struct {
-	Designations DesignationStore
+	Designations DesignationReader
 	Facts        FactsReader
 	Runner       GrantSubmitter
 	Log          *slog.Logger
@@ -351,7 +394,7 @@ func (o *Observer) UserEvent(ctx context.Context, e events.UserEvent) {
 }
 
 // SignedIn submits the grant when sub is designated, its designation names
-// known roles, and its facts are complete. Any read or submit error submits
+// known roles and is not waiting (C25), and its facts are complete. Any read or submit error submits
 // nothing and is one WARN record with no account id.
 func (o *Observer) SignedIn(ctx context.Context, sub string) {
 	if sub == "" {
@@ -366,7 +409,7 @@ func (o *Observer) SignedIn(ctx context.Context, sub string) {
 	case err != nil:
 		warn("designations", err)
 		return
-	case !found:
+	case !found || x.Reason == ReasonWaiting:
 		return
 	}
 	if err := x.Valid(); err != nil {

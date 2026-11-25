@@ -77,7 +77,7 @@ func newAccountsRig(t *testing.T, c *consoleRig) *accountsRig {
 		r.runner.Register(wf)
 	}
 	granter, err := accounts.NewGranter(accounts.GranterDeps{Designations: r.designations, Facts: r.ra, Markers: mw, Sessions: ender,
-		Roles: r.users, Users: r.users, Access: r.access, Console: r.sessions, Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute})
+		Roles: r.users, Users: r.users, Access: r.access, Console: r.sessions, Admins: r.ra, Lock: r.lock, Log: log, StepTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,16 +19,19 @@ type Reason string
 // claim's; moved is Identity 5.1's moved operator; reset is Identity 4.10's;
 // repair is the break-glass repair's (#321); grant is any privileged grant
 // to an account that does not yet hold a second step and recovery codes
-// (C3).
+// (C3); waiting is a moved operator who finished after another became
+// administrator (C25, geekdojo/geekdojo-brain#1004): a pre-fill that grants
+// nothing until an administrator grants it with accounts.grant_waiting.
 const (
 	ReasonFirstAdmin Reason = "first_admin"
 	ReasonMoved      Reason = "moved"
 	ReasonReset      Reason = "reset"
 	ReasonRepair     Reason = "repair"
 	ReasonPrivileged Reason = "grant" // a privileged grant (C3)
+	ReasonWaiting    Reason = "waiting"
 )
 
-var reasons = []Reason{ReasonFirstAdmin, ReasonMoved, ReasonReset, ReasonRepair, ReasonPrivileged}
+var reasons = []Reason{ReasonFirstAdmin, ReasonMoved, ReasonReset, ReasonRepair, ReasonPrivileged, ReasonWaiting}
 
 // Designation is a role an account will hold once its setup is complete
 // (C29): a console role, app access, gear administration, or any of them.
@@ -63,7 +66,7 @@ CREATE TABLE IF NOT EXISTS designations (
     sub          TEXT PRIMARY KEY,         -- the identity service's subject
     console_role TEXT NOT NULL,            -- admin, operator, viewer or ''
     app_role     TEXT NOT NULL,            -- admin, user or ''
-    reason       TEXT NOT NULL,            -- first_admin, moved, reset, repair or grant
+    reason       TEXT NOT NULL,            -- first_admin, moved, reset, repair, grant or waiting
     created_at   INTEGER NOT NULL          -- unix milliseconds
 );
 `
@@ -255,13 +258,15 @@ func (x Designation) set(level Level, value string) (Designation, error) {
 // Choose records an administrator's choice for sub: level's field becomes
 // value, whatever it held, so the latest choice wins (F-994-02). The other
 // fields, the reason and created_at of a row already there are kept; a new
-// row's reason is grant.
+// row's reason is grant. A waiting row's pre-fill is discarded
+// (F-1004-02): the row then holds only the chosen field, reason grant, with
+// a fresh created_at, so a lesser grant never yields the pre-filled roles.
 func (d *Designations) Choose(ctx context.Context, sub string, level Level, value string) error {
 	if value == "" {
 		return errors.New("accounts: choose a designation: no value; withdraw it instead")
 	}
 	return d.change(ctx, sub, func(x Designation, found bool) (Designation, bool, error) {
-		if !found {
+		if !found || x.Reason == ReasonWaiting {
 			x = Designation{Sub: sub, Reason: ReasonPrivileged}
 		}
 		x, err := x.set(level, value)
@@ -274,11 +279,15 @@ func (d *Designations) Choose(ctx context.Context, sub string, level Level, valu
 
 // Withdraw empties level's field of sub's designation, and deletes the row
 // when no field is left. An account with no designation has nothing to
-// withdraw.
+// withdraw. A waiting row is deleted whole: the administrator has decided
+// that account (F-1004-02).
 func (d *Designations) Withdraw(ctx context.Context, sub string, level Level) error {
 	return d.change(ctx, sub, func(x Designation, found bool) (Designation, bool, error) {
 		if !found {
 			return x, false, nil
+		}
+		if x.Reason == ReasonWaiting {
+			return Designation{Sub: sub}, true, nil
 		}
 		x, err := x.set(level, "")
 		return x, true, err
@@ -286,7 +295,8 @@ func (d *Designations) Withdraw(ctx context.Context, sub string, level Level) er
 }
 
 // change reads sub's row in a transaction, lets edit decide the new row,
-// and writes it, or deletes it when it holds no field.
+// and writes it, or deletes it when it holds no field. The row keeps the
+// stored created_at unless edit returns a row with none, which is new.
 func (d *Designations) change(ctx context.Context, sub string, edit func(x Designation, found bool) (Designation, bool, error)) error {
 	if sub == "" {
 		return errors.New("accounts: change a designation: no account id")
@@ -312,7 +322,7 @@ func (d *Designations) change(ctx context.Context, sub string, edit func(x Desig
 		}
 	default:
 		created := old.CreatedAt
-		if !found {
+		if !found || x.CreatedAt.IsZero() {
 			created = d.now().UTC()
 		}
 		if err := put(ctx, tx, x, created); err != nil {
@@ -330,6 +340,79 @@ func (d *Designations) change(ctx context.Context, sub string, edit func(x Desig
 // admin, reason first_admin.
 func (d *Designations) DesignateFirstAdmin(ctx context.Context, tx *sql.Tx, sub string) error {
 	return d.DesignateTx(ctx, tx, Designation{Sub: sub, ConsoleRole: string(authz.Admin), AppRole: AppAdmin, Reason: ReasonFirstAdmin})
+}
+
+// DesignateMoved is Identity 5.1's designation of a moved operator
+// (geekdojo/geekdojo-brain#1004): console role admin and app access admin,
+// reason moved. A waiting row becomes moved again, so a repair re-run
+// designates afresh; any other row is re-designated as DesignateTx does.
+func (d *Designations) DesignateMoved(ctx context.Context, sub string) error {
+	x := Designation{Sub: sub, ConsoleRole: string(authz.Admin), AppRole: AppAdmin, Reason: ReasonMoved}
+	if err := x.Valid(); err != nil {
+		return err
+	}
+	tx, err := d.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("accounts: designate a moved account: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	old, found, err := get(ctx, tx, sub)
+	switch {
+	case err != nil:
+		return err
+	case found && old.Reason == ReasonWaiting:
+		err = put(ctx, tx, x, old.CreatedAt)
+	default:
+		err = d.DesignateTx(ctx, tx, x)
+	}
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("accounts: designate a moved account: %w", err)
+	}
+	return nil
+}
+
+// WaitMoved sets every moved row except except's to waiting: except is the
+// moved account becoming the administrator (C25). Other reasons are left as
+// they are.
+func (d *Designations) WaitMoved(ctx context.Context, except string) error {
+	if _, err := d.db.ExecContext(ctx, `UPDATE designations SET reason = ? WHERE reason = ? AND sub != ?`,
+		string(ReasonWaiting), string(ReasonMoved), except); err != nil {
+		return fmt.Errorf("accounts: set the moved designations waiting: %w", err)
+	}
+	return nil
+}
+
+// Wait sets sub's row to waiting: a moved account that finished while an
+// administrator exists (C25).
+func (d *Designations) Wait(ctx context.Context, sub string) error {
+	if sub == "" {
+		return errors.New("accounts: set a designation waiting: no account id")
+	}
+	if _, err := d.db.ExecContext(ctx, `UPDATE designations SET reason = ? WHERE sub = ?`, string(ReasonWaiting), sub); err != nil {
+		return fmt.Errorf("accounts: set a designation waiting: %w", err)
+	}
+	return nil
+}
+
+// ErrNotWaiting is Confirm on an account whose designation is not waiting.
+var ErrNotWaiting = errors.New("accounts: the designation is not waiting")
+
+// Confirm turns sub's waiting row into reason grant, its pre-filled fields
+// and created_at kept, so accounts.grant_designated_role gives them once the
+// account's setup is complete. Only accounts.grant_waiting calls it, on an
+// administrator's explicit grant. A row that is not waiting is
+// ErrNotWaiting.
+func (d *Designations) Confirm(ctx context.Context, sub string) error {
+	return d.change(ctx, sub, func(x Designation, found bool) (Designation, bool, error) {
+		if !found || x.Reason != ReasonWaiting {
+			return x, false, ErrNotWaiting
+		}
+		x.Reason = ReasonPrivileged
+		return x, true, nil
+	})
 }
 
 // queryer is the part of *sql.DB and *sql.Tx a read needs.

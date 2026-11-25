@@ -323,8 +323,10 @@ func (u *Users) EnabledAdmins(ctx context.Context) (int, error) {
 
 // Account is one person in the realm as People lists them.
 type Account struct {
-	ID      string
-	Enabled bool
+	ID string
+	// Username is the sign-in name.
+	Username string
+	Enabled  bool
 	// Created is the identity service's createdTimestamp, unix milliseconds.
 	Created int64
 	// AppRole is the rasputin_app_role attribute, "" when absent.
@@ -360,6 +362,7 @@ func (u *Users) People(ctx context.Context) ([]Account, error) {
 			return nil, errors.New("accounts: an account in the list has no id")
 		}
 		a := Account{ID: id, AppRole: appRoleOf(rep)}
+		a.Username, _ = rep["username"].(string)
 		a.Enabled, _ = rep["enabled"].(bool)
 		email, _ := rep["email"].(string)
 		a.Email = removednames.Normal(email)

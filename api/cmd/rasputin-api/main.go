@@ -1023,7 +1023,10 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: app tier reader", "err", err.Error())
 		os.Exit(1)
 	}
-	kindPolicy, err := authz.NewKindPolicy(tiers)
+	// identity.move's repair re-run reads C9's state through the holder,
+	// filled once the move is wired below (#1004).
+	moveHolder := &moveStateHolder{}
+	kindPolicy, err := authz.NewKindPolicy(tiers, authz.WithMoveState(moveHolder))
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: job kind policy", "err", err.Error())
 		os.Exit(1)
@@ -1346,6 +1349,17 @@ func main() {
 		os.Exit(1)
 	}
 	identityConv.register(runner)
+	// identity.move (#1004), under keycloak only: a System job its trigger
+	// submits, and a repair session's re-run in C9's state.
+	identityMv, err := identityMoveWiring(ctx, identityMoveDeps{mode: identityW.mode, dbPath: dbPath, session: identityW.session,
+		oldUsers: authStore, acct: acct, designations: designations, monitor: identityState.monitor,
+		converger: identityConv.converger, ledger: jobStore, holder: moveHolder, now: time.Now, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity move", "err", err.Error())
+		os.Exit(1)
+	}
+	defer identityMv.close()
+	identityMv.register(runner)
 	wireControlGate(authSvc, identityConv) // the control lock, under keycloak only (#987)
 	// The console's sign-in through the home door, under keycloak with the
 	// doors on (#989); its role-change sink joins the drain below.
@@ -1855,7 +1869,7 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...)...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...), entriesOf(identityMv.entry)...)...)...))
 	sched.Start(ctx)
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
