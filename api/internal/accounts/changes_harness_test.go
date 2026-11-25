@@ -133,8 +133,13 @@ func newChangeHarness(t *testing.T) *changeHarness {
 	for _, wf := range c.changes.Workflows() {
 		c.runner.Register(wf)
 	}
+	gw, err := c.changes.GrantWaitingWorkflow(h.designations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.runner.Register(gw)
 	if c.granter, err = NewGranter(GranterDeps{Designations: h.designations, Facts: h.ra, Markers: recMarkers{inner: mw, log: h.log},
-		Sessions: h.sessions, Roles: h.users, Users: h.users, Access: h.access, Console: h.console, Lock: h.lock, Log: slogger,
+		Sessions: h.sessions, Roles: h.users, Users: h.users, Access: h.access, Console: h.console, Admins: h.ra, Lock: h.lock, Log: slogger,
 		StepTimeout: time.Minute}); err != nil {
 		t.Fatal(err)
 	}

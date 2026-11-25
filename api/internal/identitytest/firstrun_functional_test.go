@@ -151,7 +151,7 @@ func newFirstRunRig(t *testing.T, env *Env) *firstRunRig {
 		t.Fatal(err)
 	}
 	granter, err := accounts.NewGranter(accounts.GranterDeps{Designations: r.designations, Facts: ra, Markers: mw, Sessions: ender,
-		Roles: r.users, Users: r.users, Access: access, Console: r.sessions, Lock: lock, Log: log, StepTimeout: 2 * time.Minute})
+		Roles: r.users, Users: r.users, Access: access, Console: r.sessions, Admins: ra, Lock: lock, Log: log, StepTimeout: 2 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}

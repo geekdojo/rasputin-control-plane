@@ -108,6 +108,12 @@ type accountsWiring struct {
 	requests    *accounts.Requests
 	freshAction *accounts.FreshAction
 	changes     *accounts.Changes
+	// grantWaiting is the one-action grant of a waiting entry; lock is the
+	// one accounts lock and facts the app-access fact, which the move
+	// shares (#1004).
+	grantWaiting jobs.Workflow
+	lock         sync.Locker
+	facts        accessFacts
 }
 
 // wireAccounts builds the accounts under keycloak. A removed-name list that
@@ -194,7 +200,7 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	}
 	granter, err := accounts.NewGranter(accounts.GranterDeps{
 		Designations: d.designations, Facts: roleAccounts, Markers: d.markers, Sessions: ender, Roles: users, Users: users,
-		Access: access, Console: d.console, Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout,
+		Access: access, Console: d.console, Admins: roleAccounts, Lock: lock, Log: d.log, StepTimeout: accountsStepTimeout,
 	})
 	if err != nil {
 		return accountsWiring{}, err
@@ -220,10 +226,15 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	if err != nil {
 		return accountsWiring{}, err
 	}
+	grantWaiting, err := changes.GrantWaitingWorkflow(d.designations)
+	if err != nil {
+		return accountsWiring{}, err
+	}
 	return accountsWiring{revoker: rev, access: access, removed: removed, sessions: ender,
 		resetter: resetter, resetAction: action, reset: reset,
 		users: users, first: first, waiting: waiting, observer: observer, granter: granter,
-		requests: requests, freshAction: freshAction, changes: changes}, nil
+		requests: requests, freshAction: freshAction, changes: changes,
+		grantWaiting: grantWaiting, lock: lock, facts: facts}, nil
 }
 
 // register registers identity.revoke, accounts.reset_password,
@@ -237,6 +248,7 @@ func (w accountsWiring) register(r interface{ Register(jobs.Workflow) }) {
 		for _, wf := range w.changes.Workflows() {
 			r.Register(wf)
 		}
+		r.Register(w.grantWaiting)
 	}
 }
 

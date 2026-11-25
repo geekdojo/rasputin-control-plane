@@ -23,7 +23,9 @@ type DesignationLister interface {
 }
 
 // Waiting counts the accounts waiting for access: enabled persons with no
-// console role, no app access and no designation. The same count backs the
+// console role, and either no app access and no designation, or a waiting
+// designation (C25, geekdojo/geekdojo-brain#1004), which a moved operator
+// holds with app access user. The same count backs the
 // home door's sign-up cap (policy.Waiting) and GET /api/accounts/waiting.
 type Waiting struct {
 	people       WaitingPeople
@@ -53,13 +55,17 @@ func (w *Waiting) Count(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("accounts: waiting: %w", err)
 	}
-	designated := make(map[string]bool, len(ds))
+	reason := make(map[string]Reason, len(ds))
 	for _, d := range ds {
-		designated[d.Sub] = true
+		reason[d.Sub] = d.Reason
 	}
 	n := 0
 	for _, a := range all {
-		if a.Enabled && !holders[a.ID] && a.AppRole == "" && !designated[a.ID] {
+		if !a.Enabled || holders[a.ID] {
+			continue
+		}
+		r, designated := reason[a.ID]
+		if r == ReasonWaiting || a.AppRole == "" && !designated {
 			n++
 		}
 	}

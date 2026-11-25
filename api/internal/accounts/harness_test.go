@@ -344,6 +344,9 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			name, _ := r["name"].(string)
 			k.log.add("add-console:" + name)
 			x.console = append(x.console, name)
+			// The role's holders list it from now on, as the identity
+			// service's does.
+			x.roles = append(x.roles, name)
 		}
 	case tail == "role-mappings/realm" && method == http.MethodGet:
 		var list []map[string]string
