@@ -409,17 +409,23 @@ jobs:
           # The built sign-in theme, linked as the harness's themes/rasputin;
           # unset, the theme walk fails under required (TC-988-28).
           RASPUTIN_IDENTITY_THEME: ${{ runner.temp }}/identity-theme
-        # -timeout 25m: api/internal/identitytest measured 460 s on main
-        # before geekdojo/geekdojo-brain#987, whose TC-987-20 leaves a
-        # sign-in page open 6 minutes by definition (past Keycloak's stock
-        # 5-minute action timeout), so the package passes go test's default
-        # 10-minute limit. 25 minutes bounds a hung run, and decides nothing.
+        # -timeout 45m: api/internal/identitytest is the slowest package and
+        # sets this bound. Measured in this job (2026-11-25): 1307.5 s on
+        # main, 1429.5 s on geekdojo/geekdojo-brain#994's branch, recent runs
+        # 1078-1315 s, so a normal run is 18-24 minutes and growing as the
+        # identity walk gains cases (TC-987-20 alone holds a sign-in page
+        # open 6 minutes, past Keycloak's stock 5-minute action timeout). The
+        # old 25m (1500 s) left 70.5 s of headroom, so it decided runs
+        # (F-994-21). 45 minutes is about twice the slowest normal run: a
+        # timeout here marks a run performing well outside normal bounds
+        # (ARCH-FACTS), bounds a hung run, and decides nothing. The job has
+        # no timeout-minutes, so GitHub's 6-hour default never cuts it first.
         # -v: the identity harness's cases run only here, on the pinned
         # Keycloak, so the job log is their only record; without it a passing
         # case prints nothing and cannot be told from one that never ran
         # (geekdojo/geekdojo-brain#994, F-994-16).
         run: |
-          go test -v -race -timeout 25m -coverprofile=api.coverage.out -covermode=atomic ./api/...
+          go test -v -race -timeout 45m -coverprofile=api.coverage.out -covermode=atomic ./api/...
 
       # The console's own pages under their page policy, in the pinned Chrome
       # the steps above installed (geekdojo/geekdojo-brain#999, CI UI-1's
