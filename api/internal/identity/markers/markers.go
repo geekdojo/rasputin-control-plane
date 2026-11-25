@@ -65,7 +65,11 @@ type Deps struct {
 	// DoorOf is the door a client belongs to; false for a client no door
 	// serves.
 	DoorOf func(clientID string) (flows.Door, bool)
-	Log    *slog.Logger
+	// Lock is the one accounts lock. UserEvent holds it across its read and
+	// write; BeforePrivilege and AfterRemoval never take it, as their
+	// callers hold it (the lock is not re-entrant).
+	Lock sync.Locker
+	Log  *slog.Logger
 }
 
 // Writer writes the markers.
@@ -87,6 +91,8 @@ func New(d Deps) (*Writer, error) {
 		return nil, errors.New("markers: Deps.Realm is empty")
 	case d.DoorOf == nil:
 		return nil, errors.New("markers: Deps.DoorOf is nil")
+	case d.Lock == nil:
+		return nil, errors.New("markers: Deps.Lock is nil")
 	case d.Log == nil:
 		return nil, errors.New("markers: Deps.Log is nil")
 	}
@@ -103,6 +109,7 @@ var _ events.UserSink = (*Writer)(nil)
 // authenticator app sets both doors' second-step markers; either sets
 // rasputin_second_step_any. A privileged account's two second-step markers
 // follow rasputin_second_step_any. Recovery codes and passwords set nothing.
+// The read and the write run under the accounts lock.
 func (w *Writer) UserEvent(ctx context.Context, e events.UserEvent) {
 	if !slices.Contains(credentialEvents, e.Type) || e.UserID == "" {
 		return
@@ -125,14 +132,21 @@ func (w *Writer) UserEvent(ctx context.Context, e events.UserEvent) {
 		return
 	}
 	set[flows.MarkerSecondStepAny] = true
-	err := w.apply(ctx, e.UserID, set, true)
-	w.outage(ctx, err)
+	w.outage(ctx, w.locked(ctx, e.UserID, set))
+}
+
+// locked is apply, following privilege, under the accounts lock.
+func (w *Writer) locked(ctx context.Context, userID string, set map[string]bool) error {
+	w.d.Lock.Lock()
+	defer w.d.Lock.Unlock()
+	return w.apply(ctx, userID, set, true)
 }
 
 // BeforePrivilege sets both doors' second-step markers and
 // rasputin_second_step_any from the account's credentials, before a Job
 // makes it privileged. It returns ErrNoSecondStep, writing nothing, when the
-// account holds no authenticator app, passkey or security key.
+// account holds no authenticator app, passkey or security key. Its caller
+// holds the accounts lock.
 func (w *Writer) BeforePrivilege(ctx context.Context, userID string) error {
 	types, err := w.credentialTypes(ctx, userID)
 	if err != nil {
@@ -196,9 +210,10 @@ func (w *Writer) read(ctx context.Context, userID string) (map[string]any, map[s
 }
 
 // write gives each marker in want its value, true as "true" and false as
-// no attribute, and writes the account back only when one changed.
+// no attribute, and writes the account back only when one changed or an
+// attribute stored twice was collapsed (CollapseSingleValued).
 func (w *Writer) write(ctx context.Context, userID string, user, attrs map[string]any, want map[string]bool) error {
-	changed := false
+	changed := CollapseSingleValued(attrs)
 	for name, on := range want {
 		switch held := holds(attrs, name, "true"); {
 		case on && !held:
@@ -242,7 +257,8 @@ func (w *Writer) write(ctx context.Context, userID string, user, attrs map[strin
 //   - a privileged account's two second-step markers follow
 //     rasputin_second_step_any, as UserEvent does.
 //
-// It writes only when a marker changes. A failed read writes nothing.
+// It writes only when a marker changes. A failed read writes nothing. Its
+// caller holds the accounts lock.
 func (w *Writer) AfterRemoval(ctx context.Context, userID string) error {
 	types, err := w.credentialTypes(ctx, userID)
 	if err != nil {
@@ -337,6 +353,25 @@ func first(attrs map[string]any, name string) string {
 		return vs[0]
 	}
 	return ""
+}
+
+// CollapseSingleValued keeps only the first value of each admin-only
+// attribute the user profile declares single-valued
+// (flows.AdminOnlyAttributes) that attrs holds more than once, and reports
+// whether it changed attrs. Two overlapping writes of one account can store
+// such an attribute twice; the identity service then refuses any write
+// that sends it back so, so every whole-account write passes its
+// attributes through here first (geekdojo/geekdojo-brain#994). The first
+// value is the one every reader here already takes.
+func CollapseSingleValued(attrs map[string]any) bool {
+	changed := false
+	for name, multi := range flows.AdminOnlyAttributes {
+		if vs, _ := attrs[name].([]any); !multi && len(vs) > 1 {
+			attrs[name] = []any{vs[0]}
+			changed = true
+		}
+	}
+	return changed
 }
 
 // holds reports whether the attribute name holds value.

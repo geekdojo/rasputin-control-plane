@@ -81,7 +81,7 @@ type FactsReader interface {
 }
 
 // MarkerWriter writes the second-step markers before a privileged grant
-// (*markers.Writer; F-987-08).
+// (*markers.Writer; F-987-08), under the accounts lock the grant holds.
 type MarkerWriter interface {
 	BeforePrivilege(ctx context.Context, userID string) error
 }
@@ -89,11 +89,6 @@ type MarkerWriter interface {
 // RoleAdder gives an account a console role (*Users).
 type RoleAdder interface {
 	AddConsoleRole(ctx context.Context, sub, role string) error
-}
-
-// AppGranter gives app access (*Access), taking the accounts lock itself.
-type AppGranter interface {
-	Grant(ctx context.Context, sub string, level AppLevel) error
 }
 
 // GrantUsers is the account reads and writes the grant makes besides the
@@ -114,11 +109,12 @@ type GranterDeps struct {
 	Sessions     Sessions
 	Roles        RoleAdder
 	Users        GrantUsers
-	Access       AppGranter
-	Console      ConsoleSessions
+	// Access gives app access under the lock the grant holds.
+	Access  LockedGranter
+	Console ConsoleSessions
 	// Admins counts the enabled administrators under the lock (C25).
 	Admins AdminCounter
-	// Lock is the one accounts lock, held around the console role's grant.
+	// Lock is the one accounts lock, held across the whole grant step.
 	Lock sync.Locker
 	Log  *slog.Logger
 	// StepTimeout bounds each step; it marks work gone far outside normal
@@ -245,88 +241,89 @@ func (g *Granter) check(ctx context.Context, _ *jobs.StepCtx, sub string) (strin
 	return out, err
 }
 
-// grant is step 2: the second-step markers first (F-987-08; an account with
-// no second step is waiting and gets nothing), then under the accounts lock
-// the facts read again, the identity sessions ended (C23), the console role
-// given (with the confirmed email for an administrator) and gear-admin
-// added to the network grants held now (F-994-03), then app access
-// (Access.Grant, which takes the lock itself). An empty field grants
-// nothing.
+// grant is step 2, wholly under the accounts lock, so no other account
+// change reads and writes the account meanwhile (geekdojo/geekdojo-brain#994:
+// two grants for one account run at once, one per qualifying sign-in
+// event). In order: the designation and facts read again; the second-step
+// markers (F-987-08; an account with no second step is waiting and gets
+// nothing); the identity sessions ended (C23); the console role given
+// (with the confirmed email for an administrator); gear-admin added to the
+// network grants held now (F-994-03); then app access. An empty field
+// grants nothing.
 func (g *Granter) grant(ctx context.Context, _ *jobs.StepCtx, sub string) (string, error) {
-	err := g.d.Markers.BeforePrivilege(ctx, sub)
+	g.d.Lock.Lock()
+	defer g.d.Lock.Unlock()
+	x, out, err := g.designated(ctx, sub)
+	if err != nil || out != outcomeComplete {
+		return out, err
+	}
+	err = g.d.Markers.BeforePrivilege(ctx, sub)
 	switch {
 	case errors.Is(err, markers.ErrNoSecondStep):
 		return outcomeWaiting, nil
 	case err != nil:
 		return "", err
 	}
-	x, out, err := g.lockedRole(ctx, sub)
-	if err != nil || out != outcomeComplete {
+	if out, err := g.lockedRole(ctx, sub, x); err != nil || out != outcomeComplete {
 		return out, err
 	}
 	if x.AppRole != "" {
-		if err := g.d.Access.Grant(ctx, sub, x.AppRole); err != nil {
+		if err := g.d.Access.grantLocked(ctx, sub, x.AppRole); err != nil {
 			return "", err
 		}
 	}
 	return outcomeGranted, nil
 }
 
-// lockedRole is the grant under the lock. A moved account (C25) becomes
-// administrator only while no enabled administrator exists: then every
-// other moved designation is set waiting first. With one, its own
-// designation is set waiting and nothing is granted. An unread count fails
-// the step with the designation kept.
-func (g *Granter) lockedRole(ctx context.Context, sub string) (Designation, string, error) {
-	g.d.Lock.Lock()
-	defer g.d.Lock.Unlock()
-	x, out, err := g.designated(ctx, sub)
-	if err != nil || out != outcomeComplete {
-		return x, out, err
-	}
+// lockedRole is the grant's roles, under the lock grant holds. A moved
+// account (C25) becomes administrator only while no enabled administrator
+// exists: then every other moved designation is set waiting first. With
+// one, its own designation is set waiting and nothing is granted. An unread
+// count fails the step with the designation kept.
+func (g *Granter) lockedRole(ctx context.Context, sub string, x Designation) (string, error) {
 	if x.Reason == ReasonMoved {
 		n, err := g.d.Admins.EnabledAdmins(ctx)
 		if err != nil {
-			return x, "", fmt.Errorf("count the administrators: %w", err)
+			return "", fmt.Errorf("count the administrators: %w", err)
 		}
 		if n > 0 {
 			if err := g.d.Designations.Wait(ctx, sub); err != nil {
-				return x, "", err
+				return "", err
 			}
-			return x, outcomeWaitingForAdmin, nil
+			return outcomeWaitingForAdmin, nil
 		}
 		if err := g.d.Designations.WaitMoved(ctx, sub); err != nil {
-			return x, "", err
+			return "", err
 		}
 	}
 	if err := g.d.Sessions.EndAll(ctx, sub); err != nil {
-		return x, "", fmt.Errorf("end online sessions: %w", err)
+		return "", fmt.Errorf("end online sessions: %w", err)
 	}
 	if _, err := g.d.Sessions.EndOffline(ctx, sub); err != nil {
-		return x, "", fmt.Errorf("end offline sessions: %w", err)
+		return "", fmt.Errorf("end offline sessions: %w", err)
 	}
 	if x.ConsoleRole != "" {
 		if err := g.d.Roles.AddConsoleRole(ctx, sub, x.ConsoleRole); err != nil {
-			return x, "", err
+			return "", err
 		}
 		if x.ConsoleRole == string(authz.Admin) {
 			if err := g.d.Users.ConfirmEmail(ctx, sub); err != nil && !errors.Is(err, ErrNoEmail) {
-				return x, "", err
+				return "", err
 			}
 		}
 	}
 	if x.Network != "" {
 		p, err := g.d.Users.Read(ctx, sub)
 		if err != nil {
-			return x, "", err
+			return "", err
 		}
 		if !slices.Contains(p.Network, x.Network) {
 			if err := g.d.Users.SetNetwork(ctx, sub, append(slices.Clone(p.Network), x.Network)); err != nil {
-				return x, "", err
+				return "", err
 			}
 		}
 	}
-	return x, outcomeComplete, nil
+	return outcomeComplete, nil
 }
 
 // finish is step 3: the console sessions made before the role end, and the

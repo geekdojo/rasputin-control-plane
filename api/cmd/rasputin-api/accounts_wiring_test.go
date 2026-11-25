@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,14 +60,15 @@ func accountsFixture(t *testing.T, dbPath string) (accountsDeps, *logkittest.Rec
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = designations.Close() })
+	lock := &sync.Mutex{}
 	mw, err := markers.New(markers.Deps{Admin: refusingAdmin{}, Realm: identityRealm,
-		DoorOf: func(string) (flows.Door, bool) { return "", false }, Log: log})
+		DoorOf: func(string) (flows.Door, bool) { return "", false }, Lock: lock, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return accountsDeps{mode: identityModeKeycloak, admin: refusingAdmin{}, dbPath: dbPath, mac: mac,
 		console: nullConsole{}, moved: store, kinds: kinds, runner: refusingRunner{}, listDir: t.TempDir(),
-		designations: designations, markers: mw, log: log}, rec
+		designations: designations, markers: mw, lock: lock, log: log}, rec
 }
 
 // waitingSink counts SetWaiting calls.
@@ -137,6 +139,10 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	if w.access == nil {
 		t.Error("no access grant")
 	}
+	// #994: the accounts are under main's one lock, the marker writer's.
+	if w.lock != d.lock {
+		t.Error("the accounts lock is not the one main handed over")
+	}
 	// TC-990-28: the designated-role grant registers as a System kind, and
 	// the claim's first account, the count, the email check and the
 	// observer are there for the sign-in, the door and the server.
@@ -157,6 +163,12 @@ func TestWireAccounts_ByMode(t *testing.T) {
 		t.Error("a nil collaborator was accepted")
 	}
 	d.moved = store(t)
+	lock := d.lock
+	d.lock = nil
+	if _, err := wireAccounts(t.Context(), d); err == nil {
+		t.Error("no accounts lock was accepted under keycloak")
+	}
+	d.lock = lock
 	d.designations = nil
 	if _, err := wireAccounts(t.Context(), d); err == nil {
 		t.Error("no designations was accepted under keycloak")

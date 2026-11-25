@@ -31,10 +31,18 @@ type grantRig struct {
 	admins int
 	g      *Granter
 	rec    *logkittest.Recorder
+	// lock is the accounts lock; unlocked the calls made while no one held
+	// it.
+	lock     *sync.Mutex
+	unlocked []string
 }
 
 func (r *grantRig) call(name string) error {
 	r.log.add(name)
+	if r.lock.TryLock() {
+		r.lock.Unlock()
+		r.unlocked = append(r.unlocked, name)
+	}
 	return r.fail[name]
 }
 
@@ -110,7 +118,7 @@ func (g gRoles) AddConsoleRole(_ context.Context, _, role string) error {
 
 type gAccess struct{ r *grantRig }
 
-func (a gAccess) Grant(_ context.Context, _ string, level AppLevel) error {
+func (a gAccess) grantLocked(_ context.Context, _ string, level AppLevel) error {
 	return a.r.call("Access.Grant:" + string(level))
 }
 
@@ -135,10 +143,10 @@ var complete = authz.AccountFacts{Sub: grantSub, Enabled: true, HoldsSecondStep:
 func newGrantRig(t *testing.T) *grantRig {
 	t.Helper()
 	log, rec := logkittest.New()
-	r := &grantRig{log: &callLog{}, fail: map[string]error{}, rec: rec, facts: complete,
+	r := &grantRig{log: &callLog{}, fail: map[string]error{}, rec: rec, facts: complete, lock: &sync.Mutex{},
 		des: map[string]Designation{grantSub: {Sub: grantSub, ConsoleRole: "admin", AppRole: AppAdmin, Reason: ReasonFirstAdmin}}}
 	g, err := NewGranter(GranterDeps{Designations: gDes{r}, Facts: gFacts{r}, Markers: gMarkers{r}, Sessions: gSessions{r},
-		Roles: gRoles{r}, Users: gUsers{r}, Access: gAccess{r}, Console: gConsole{r}, Admins: gAdmins{r}, Lock: &sync.Mutex{}, Log: log, StepTimeout: time.Minute})
+		Roles: gRoles{r}, Users: gUsers{r}, Access: gAccess{r}, Console: gConsole{r}, Admins: gAdmins{r}, Lock: r.lock, Log: log, StepTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,6 +292,26 @@ func TestGranter_TC990_21(t *testing.T) {
 	}
 	if _, err := NewGranter(GranterDeps{}); err == nil {
 		t.Error("NewGranter with nothing succeeded")
+	}
+}
+
+// TestGrantRace_GrantStepUnderTheLock: every read and write of the grant
+// step, the markers and app access included, runs under the accounts lock
+// (geekdojo/geekdojo-brain#994); only the finish step's runs without it.
+func TestGrantRace_GrantStepUnderTheLock(t *testing.T) {
+	r := newGrantRig(t)
+	r.network = []string{"join"}
+	x := r.des[grantSub]
+	x.Network = "gear-admin"
+	r.des[grantSub] = x
+	if _, err := r.run(t, ""); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"EndBySub", "Clear"}; !slices.Equal(r.unlocked, want) {
+		t.Errorf("calls made without the lock: %v, want only %v", r.unlocked, want)
+	}
+	if !slices.Contains(r.log.all(), "BeforePrivilege") || !slices.Contains(r.log.all(), "Access.Grant:admin") {
+		t.Errorf("calls %v", r.log.all())
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 )
 
@@ -156,7 +157,9 @@ func attrValues(rep map[string]any, name string) []string {
 }
 
 // write re-reads the account and writes back its profile fields and
-// attributes as read, changed by edit.
+// attributes as read, changed by edit. An admin-only attribute stored twice
+// goes back with one value (markers.CollapseSingleValued), which the
+// identity service would otherwise refuse (geekdojo/geekdojo-brain#994).
 func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map[string]any)) error {
 	rep, err := u.raw(ctx, sub)
 	if err != nil {
@@ -166,6 +169,7 @@ func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map
 	if attrs == nil {
 		attrs = map[string]any{}
 	}
+	markers.CollapseSingleValued(attrs)
 	body := map[string]any{}
 	for _, k := range profileFields {
 		if v, ok := rep[k]; ok {

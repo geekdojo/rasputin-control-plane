@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -176,13 +177,15 @@ func eventsDeps(ctx context.Context, idw identityWiring, marks eventsMarks, tabl
 
 // markerWriter is the one second-step marker writer: the drain's user sink
 // and the designated-role grant's BeforePrivilege
-// (geekdojo/geekdojo-brain#990). It is nil outside keycloak, and nil, with
-// one ERROR record, when it cannot be built.
-func markerWriter(ctx context.Context, idw identityWiring, table doors.Table, tableErr error, log *slog.Logger) *markers.Writer {
+// (geekdojo/geekdojo-brain#990). lock is the one accounts lock, which its
+// drain sink holds as every account change does (geekdojo/geekdojo-brain#994).
+// It is nil outside keycloak, and nil, with one ERROR record, when it cannot
+// be built.
+func markerWriter(ctx context.Context, idw identityWiring, table doors.Table, tableErr error, lock sync.Locker, log *slog.Logger) *markers.Writer {
 	if idw.mode != identityModeKeycloak {
 		return nil
 	}
-	mw, err := markers.New(markers.Deps{Admin: idw.session, Realm: identityRealm, DoorOf: doorOf(table, tableErr), Log: log})
+	mw, err := markers.New(markers.Deps{Admin: idw.session, Realm: identityRealm, DoorOf: doorOf(table, tableErr), Lock: lock, Log: log})
 	if err != nil {
 		log.ErrorContext(ctx, "sign-in marker writer not built", "component", "identity", "err", err.Error())
 		return nil
