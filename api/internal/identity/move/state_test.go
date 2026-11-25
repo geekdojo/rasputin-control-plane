@@ -173,7 +173,7 @@ func TestRepair_TC1004_18(t *testing.T) {
 	if r6, _ := none.state(t).Repair(ctx); r6.Holds {
 		t.Error("holds with no old users")
 	}
-	for _, f := range []string{"count", "recorded", "people", "removed", "list"} {
+	for _, f := range []string{"count", "recorded", "people", "removed", "list", "rows"} {
 		w.fail = map[string]error{f: errDown}
 		if _, err := st.Repair(ctx); !errors.Is(err, errDown) {
 			t.Errorf("%s fails: %v, want the error", f, err)

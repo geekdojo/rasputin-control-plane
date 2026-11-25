@@ -2,6 +2,7 @@ package move
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"slices"
 	"strings"
@@ -98,27 +99,28 @@ func TestMove_TC1004_10_Shape(t *testing.T) {
 
 // TC-1004-11: every failure path fails the job with its sentence, writes
 // no move row, sends no import when it fails before the import, and writes
-// one ERROR record with the step (and an Admin API error's status and
-// kind), naming no account.
+// one ERROR record with the step, the path's fixed cause code (F-1004-12)
+// and an Admin API error's status and kind, naming no account.
 func TestMove_TC1004_11_FailClosed(t *testing.T) {
 	adminErr := &idclient.Error{Op: "admin", Status: 503, Kind: idclient.ErrUnreachable}
 	for _, c := range []struct {
 		name     string
 		set      func(w *world)
 		step     string
+		cause    string
 		sentence string
 		imported bool
 		status   bool
 	}{
-		{"import 5xx", func(w *world) { w.fail["import"] = adminErr }, StepImport, sentenceMove, true, true},
-		{"read-back other name", func(w *world) { w.readName = "other" }, StepImport, sentenceMove, true, false},
-		{"read-back no app access", func(w *world) { w.noApp = true }, StepImport, sentenceMove, true, false},
-		{"read-back not found", func(w *world) { w.fail["read"] = &idclient.Error{Status: 404, Kind: idclient.ErrNotFound} }, StepImport, sentenceMove, true, true},
-		{"access fact unreadable", func(w *world) { w.fail["fact"] = removednames.ErrUnreadable }, StepImport, sentenceMove, false, false},
-		{"designation", func(w *world) { w.fail["designate"] = errDown }, StepImport, sentenceMove, false, false},
-		{"map", func(w *world) {}, StepImport, sentenceMove, false, false},
-		{"not ready", func(w *world) { w.fail["ready"] = errDown }, StepCheck, sentenceNotReady, false, false},
-		{"record", func(w *world) { w.fail["record"] = errDown }, StepRecord, sentenceMove, true, false},
+		{"import 5xx", func(w *world) { w.fail["import"] = adminErr }, StepImport, causePartialImport, sentenceMove, true, true},
+		{"read-back other name", func(w *world) { w.readName = "other" }, StepImport, causeReadBackName, sentenceMove, true, false},
+		{"read-back no app access", func(w *world) { w.noApp = true }, StepImport, causeReadBackAccess, sentenceMove, true, false},
+		{"read-back not found", func(w *world) { w.fail["read"] = &idclient.Error{Status: 404, Kind: idclient.ErrNotFound} }, StepImport, causeReadBack, sentenceMove, true, true},
+		{"access fact unreadable", func(w *world) { w.fail["fact"] = removednames.ErrUnreadable }, StepImport, causeAccessFact, sentenceMove, false, false},
+		{"designation", func(w *world) { w.fail["designate"] = errDown }, StepImport, causeDesignation, sentenceMove, false, false},
+		{"map", func(w *world) {}, StepImport, causeMapping, sentenceMove, false, false},
+		{"not ready", func(w *world) { w.fail["ready"] = errDown }, StepCheck, causeNotReady, sentenceNotReady, false, false},
+		{"record", func(w *world) { w.fail["record"] = errDown }, StepRecord, causeRecord, sentenceMove, true, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			w := newWorld(t)
@@ -148,6 +150,9 @@ func TestMove_TC1004_11_FailClosed(t *testing.T) {
 			}
 			if v, _ := logkittest.Attr(errs[0], "step"); v != c.step {
 				t.Errorf("step %q, want %q", v, c.step)
+			}
+			if v, _ := logkittest.Attr(errs[0], "cause"); v != c.cause {
+				t.Errorf("cause %q, want %q", v, c.cause)
 			}
 			if _, ok := logkittest.Attr(errs[0], "status"); ok != c.status {
 				t.Errorf("status present %v, want %v", ok, c.status)
@@ -224,6 +229,38 @@ func TestMove_TC1004_19_Repair(t *testing.T) {
 			}
 		}
 	})
+	// F-1004-11: operators a door account pushed to bryce-2 and bryce-3
+	// come back under those recorded names, though the emptied realm no
+	// longer holds the door account; the removed-name list is read with
+	// the recorded name.
+	t.Run("recorded names come back", func(t *testing.T) {
+		w := newWorld(t)
+		h1 := w.addOld(t, 1, "Bryce", 1)
+		h2 := w.addOld(t, 2, "bryce", 2)
+		w.realm["door"] = accounts.Account{ID: "door", Username: "bryce"}
+		if _, err := w.run(t, Spec{}); err != nil {
+			t.Fatal(err)
+		}
+		w.realm = map[string]accounts.Account{}
+		w.imports = nil
+		w.removed = map[string]bool{"bryce-3": true}
+		r, err := w.state(t).Repair(ctx)
+		if err != nil || !r.Holds || r.Accounts != 1 {
+			t.Fatalf("C9 with bryce-3 removed: %+v %v, want holding with 1", r, err)
+		}
+		if _, err := w.run(t, Spec{Repair: true, StateToken: r.Token}); err != nil {
+			t.Fatal(err)
+		}
+		if len(w.imports) != 1 || len(w.imports[0].Users) != 1 {
+			t.Fatalf("imports %+v, want one user", w.imports)
+		}
+		if u := w.imports[0].Users[0]; u.ID != auth.MovedAccountID(h1) || u.Username != "bryce-2" {
+			t.Errorf("imported %s as %q, want Bryce as bryce-2", u.ID, u.Username)
+		}
+		if _, ok := w.realm[auth.MovedAccountID(h2)]; ok {
+			t.Error("the removed bryce-3 came back")
+		}
+	})
 	t.Run("removed-name list unreadable", func(t *testing.T) {
 		w, tok := setup(t)
 		w.fail["removed"] = removednames.ErrUnreadable
@@ -236,10 +273,63 @@ func TestMove_TC1004_19_Repair(t *testing.T) {
 				t.Errorf("pass %d: err %v, %d imports", pass, err, len(w.imports))
 			}
 		}
-		if v, _ := logkittest.Attr(w.rec.AtLevel(slog.LevelError)[1], "step"); v != StepImport {
+		errs := w.rec.AtLevel(slog.LevelError)
+		if v, _ := logkittest.Attr(errs[0], "cause"); v != causeStateRead {
+			t.Errorf("the first failure's cause %q, want %q", v, causeStateRead)
+		}
+		if v, _ := logkittest.Attr(errs[1], "step"); v != StepImport {
 			t.Errorf("the second failure was at %q, want the import", v)
 		}
+		if v, _ := logkittest.Attr(errs[1], "cause"); v != causeRemovedList {
+			t.Errorf("the second failure's cause %q, want %q", v, causeRemovedList)
+		}
 	})
+}
+
+// F-1004-10 (TC-1004-02's crash before record, with a mapping that
+// changed): partialImport answers 409 for an existing id under another
+// name, so a re-run keeps the name each moved account holds in the realm.
+// Here the door account that pushed Bryce and bryce to bryce-2 and bryce-3
+// is gone before the re-run; they stay bryce-2 and bryce-3, the import
+// succeeds and the rows record those names.
+func TestMove_F1004_10_RerunKeepsHeldNames(t *testing.T) {
+	ctx := t.Context()
+	w := newWorld(t)
+	h1 := w.addOld(t, 1, "Bryce", 1)
+	h2 := w.addOld(t, 2, "bryce", 2)
+	w.realm["door"] = accounts.Account{ID: "door", Username: "bryce"}
+	if _, err := w.run(t, Spec{}); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{auth.MovedAccountID(h1): "bryce-2", auth.MovedAccountID(h2): "bryce-3"}
+	// A crash before record, and the door account deleted.
+	if _, err := w.store.db.ExecContext(ctx, `DELETE FROM identity_move`); err != nil {
+		t.Fatal(err)
+	}
+	delete(w.realm, "door")
+	// The fake answers as Keycloak does to the name a fresh mapping gives.
+	if _, err := (fAdmin{w}).Admin(ctx, "POST", "/admin/realms/rasputin/partialImport", importBody{IfResourceExists: "SKIP",
+		Users: []importUser{{ID: auth.MovedAccountID(h1), Username: "bryce", Attributes: map[string][]string{accounts.AttrAppRole: {"user"}}}}}, nil); !errors.Is(err, idclient.ErrConflict) {
+		t.Fatalf("the fake took an existing id under another name: %v", err)
+	}
+	if _, err := w.run(t, Spec{}); err != nil {
+		t.Fatalf("the re-run: %v", err)
+	}
+	last := w.imports[len(w.imports)-1]
+	for _, u := range last.Users {
+		if want[u.ID] != u.Username {
+			t.Errorf("the re-run sent %s as %q, want %q", u.ID, u.Username, want[u.ID])
+		}
+	}
+	rows, _ := w.store.Rows(ctx)
+	if len(rows) != 2 {
+		t.Fatalf("%d rows, want 2", len(rows))
+	}
+	for _, r := range rows {
+		if want[r.AccountID] != r.NewName {
+			t.Errorf("row %+v, want %q", r, want[r.AccountID])
+		}
+	}
 }
 
 // TC-1004-23: New refuses each nil collaborator, an empty realm and a

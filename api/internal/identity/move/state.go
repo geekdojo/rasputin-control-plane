@@ -68,8 +68,9 @@ func (s *State) Pending(ctx context.Context) (bool, error) {
 
 // Repair is C9's state: Holds when the realm has no person, old operators
 // exist, a move is recorded, and at least one old operator is not on the
-// removed-name list. Accounts is how many would come back; Token is the
-// state the person confirms, which changes when the set does.
+// removed-name list under the name its move row records. Accounts is how
+// many would come back; Token is the state the person confirms, which
+// changes when the set does.
 type Repair struct {
 	Holds    bool
 	Accounts int
@@ -94,6 +95,16 @@ func oldUsers(ctx context.Context, src OldUsers) ([]OldUser, error) {
 		out = append(out, OldUser{Handle: u.ID, Name: u.Name, DisplayName: u.DisplayName, CreatedAt: u.CreatedAt})
 	}
 	return out, nil
+}
+
+// recordedNames adds to keep, for each account rows record and keep does
+// not already hold, the new name its move row records.
+func recordedNames(rows []Row, keep map[string]string) {
+	for _, r := range rows {
+		if _, ok := keep[r.AccountID]; !ok {
+			keep[r.AccountID] = r.NewName
+		}
+	}
 }
 
 // kept is ms without those the removed-name list reports, and how many
@@ -130,7 +141,13 @@ func (s *State) Repair(ctx context.Context) (Repair, error) {
 	if err != nil {
 		return Repair{}, err
 	}
-	ms, err := Map(old, nil)
+	rows, err := s.records.Rows(ctx)
+	if err != nil {
+		return Repair{}, err
+	}
+	keep := map[string]string{}
+	recordedNames(rows, keep)
+	ms, err := mapKeeping(old, nil, keep)
 	if err != nil {
 		return Repair{}, err
 	}

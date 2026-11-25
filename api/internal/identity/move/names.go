@@ -84,6 +84,15 @@ func base(name string) string {
 // base cut to fit 32 characters. A name outside the old rule, or a result
 // the identity service would refuse, is an error, and nothing is mapped.
 func Map(old []OldUser, taken map[string]bool) ([]Mapping, error) {
+	return mapKeeping(old, taken, nil)
+}
+
+// mapKeeping is Map where keep holds, by account id, the sign-in name an
+// old operator already holds: the one its moved account has in the realm,
+// or in repair mode the one its move row records. Such an operator keeps
+// that name, and no other operator is mapped to it. An id in keep that is
+// no old operator's is ignored.
+func mapKeeping(old []OldUser, taken map[string]bool, keep map[string]string) ([]Mapping, error) {
 	users := slices.Clone(old)
 	slices.SortStableFunc(users, func(a, b OldUser) int {
 		if c := a.CreatedAt.Compare(b.CreatedAt); c != 0 {
@@ -95,6 +104,11 @@ func Map(old []OldUser, taken map[string]bool) ([]Mapping, error) {
 	for n := range taken {
 		used[strings.ToLower(n)] = true
 	}
+	for _, u := range users {
+		if n, ok := keep[auth.MovedAccountID(u.Handle)]; ok {
+			used[strings.ToLower(n)] = true
+		}
+	}
 	out := make([]Mapping, 0, len(users))
 	for i, u := range users {
 		if len(u.Handle) == 0 {
@@ -103,17 +117,21 @@ func Map(old []OldUser, taken map[string]bool) ([]Mapping, error) {
 		if !validOld(u.Name) {
 			return nil, fmt.Errorf("move: old user %d's name is outside the old rule", i)
 		}
-		b := base(u.Name)
-		to := b
-		for k := 2; used[to]; k++ {
-			suf := "-" + strconv.Itoa(k)
-			to = b[:min(len(b), maxName-len(suf))] + suf
+		id := auth.MovedAccountID(u.Handle)
+		to, held := keep[id]
+		if !held {
+			b := base(u.Name)
+			to = b
+			for k := 2; used[to]; k++ {
+				suf := "-" + strconv.Itoa(k)
+				to = b[:min(len(b), maxName-len(suf))] + suf
+			}
 		}
 		if !usernameRE.MatchString(to) {
 			return nil, errors.New("move: a mapped name does not match the identity service's rule")
 		}
 		used[to] = true
-		out = append(out, Mapping{User: u, AccountID: auth.MovedAccountID(u.Handle), From: u.Name, To: to})
+		out = append(out, Mapping{User: u, AccountID: id, From: u.Name, To: to})
 	}
 	return out, nil
 }

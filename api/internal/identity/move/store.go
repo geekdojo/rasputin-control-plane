@@ -34,6 +34,9 @@ type Row struct {
 type Records interface {
 	Recorded(ctx context.Context) (bool, error)
 	Record(ctx context.Context, rows []Row) error
+	// Rows is every row; a repair re-run maps each recorded account to its
+	// recorded new name.
+	Rows(ctx context.Context) ([]Row, error)
 }
 
 // Store is the identity_move table.

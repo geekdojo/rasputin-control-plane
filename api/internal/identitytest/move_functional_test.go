@@ -432,6 +432,7 @@ func TestMove_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-1004-01 TC-1004-08 the fixture and a door account that took bryce", func(t *testing.T) { before = r.tcFixture(t) })
 	t.Run("TC-1004-04 TC-1004-06 TC-1004-08 the move", func(t *testing.T) { r.tcMove(t, before) })
 	t.Run("TC-1004-02 a re-run creates no second account", func(t *testing.T) { r.tc02(t, before) })
+	t.Run("TC-1004-02 F-1004-10 a re-run whose mapping changed keeps the held names", func(t *testing.T) { r.tc02Remapped(t) })
 	t.Run("TC-1004-04 C29 the first to finish becomes administrator", func(t *testing.T) { r.tc04(t) })
 	t.Run("TC-1004-05 C25 the second to finish waits", func(t *testing.T) { r.tc05(t) })
 	t.Run("TC-1004-06 C15 deleting a moved person", func(t *testing.T) { r.tc06(t) })
@@ -442,7 +443,10 @@ func TestMove_AgainstPinnedKeycloak(t *testing.T) {
 
 // TC-1004-22: partialImport with SKIP adds a new user under its own id with
 // its attributes, required action and realm role and no credential or
-// email, and skips a user whose id exists, leaving it unchanged.
+// email; skips a user whose id exists under the same username, leaving it
+// unchanged; and answers 409 "Duplicate resource error" for a user whose id
+// exists under another username, leaving the realm unchanged (measured at
+// 26.8.2, F-1004-10).
 func (r *moveRig) tc22(t *testing.T) {
 	api := r.admin(t)
 	id := auth.MovedAccountID([]byte("k-partialimport-probe"))
@@ -466,13 +470,27 @@ func (r *moveRig) tc22(t *testing.T) {
 	if !slices.Contains(r.realmRoles(t, id), "offline_access") || len(r.credTypes(t, id)) != 0 {
 		t.Errorf("ADDED: realm roles %v, credentials %v", r.realmRoles(t, id), r.credTypes(t, id))
 	}
-	user["firstName"], user["username"] = "Changed", "kpi-changed"
-	_, out = api.must(http.StatusOK, http.MethodPost, "/partialImport", map[string]any{"ifResourceExists": "SKIP", "users": []any{user}})
-	if err := json.Unmarshal(out, &res); err != nil || res.Skipped != 1 || res.Added != 0 {
-		t.Errorf("the second import: %+v %v (%s)", res, err, out)
+	unchanged := func(stage string) {
+		t.Helper()
+		if again := r.rep(t, id); again["firstName"] != "Probe" || again["username"] != "kpi-probe" || again["createdTimestamp"] != rep["createdTimestamp"] {
+			t.Errorf("%s changed the user: %v", stage, again)
+		}
 	}
-	if again := r.rep(t, id); again["firstName"] != "Probe" || again["username"] != "kpi-probe" || again["createdTimestamp"] != rep["createdTimestamp"] {
-		t.Errorf("SKIPPED changed the user: %v", again)
+	user["firstName"] = "Changed"
+	_, out = api.must(http.StatusOK, http.MethodPost, "/partialImport", map[string]any{"ifResourceExists": "SKIP", "users": []any{user}})
+	res = struct{ Added, Skipped, Overwritten int }{}
+	if err := json.Unmarshal(out, &res); err != nil || res.Skipped != 1 || res.Added != 0 {
+		t.Errorf("the same id and username again: %+v %v (%s)", res, err, out)
+	}
+	unchanged("SKIPPED")
+	user["username"] = "kpi-changed"
+	_, out = api.must(http.StatusConflict, http.MethodPost, "/partialImport", map[string]any{"ifResourceExists": "SKIP", "users": []any{user}})
+	if !strings.Contains(string(out), "Duplicate resource error") {
+		t.Errorf("the same id under another username: %s, want Duplicate resource error", out)
+	}
+	unchanged("the 409")
+	if _, out := api.must(http.StatusOK, http.MethodGet, "/users?exact=true&username=kpi-changed", nil); strings.TrimSpace(string(out)) != "[]" {
+		t.Errorf("the 409 left a user named kpi-changed: %s", out)
 	}
 	api.must(http.StatusNoContent, http.MethodDelete, "/users/"+id, nil)
 }
@@ -585,6 +603,40 @@ func (r *moveRig) tc02(t *testing.T, before map[string]string) {
 	}
 	if after := r.dump(t); !mapsEqual(after, before) {
 		t.Errorf("a re-run changed the old tables")
+	}
+}
+
+// TC-1004-02, F-1004-10: a crash before record, and then the door account
+// that pushed Bryce and bryce to bryce-2 and bryce-3 is deleted, so a fresh
+// mapping would give them bryce and bryce-2, which partialImport answers
+// 409 for. The re-run succeeds: each moved account keeps the name it
+// holds, createdTimestamp unchanged, and the rows record those names.
+func (r *moveRig) tc02Remapped(t *testing.T) {
+	db := r.db(t)
+	if _, err := db.ExecContext(t.Context(), `DELETE FROM identity_move`); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	r.admin(t).must(http.StatusNoContent, http.MethodDelete, "/users/"+r.door, nil)
+	delete(r.ids, r.door)
+	delete(r.created, r.door)
+	job, _ := r.runMove(t)
+	if job.Status != jobs.StatusSucceeded {
+		t.Fatalf("the re-run with a changed mapping: %s %q", job.Status, job.Error)
+	}
+	names, created := r.realm(t)
+	if !mapsEqual(names, r.ids) || fmt.Sprint(created) != fmt.Sprint(r.created) {
+		t.Errorf("the re-run changed an account: %v (was %v)", names, r.ids)
+	}
+	rows, err := r.moveStore.Rows(t.Context())
+	if err != nil || len(rows) != len(r.ops) {
+		t.Fatalf("%d rows after the re-run (%v), want %d", len(rows), err, len(r.ops))
+	}
+	for _, o := range r.ops {
+		id := auth.MovedAccountID(o.handle)
+		if i := slices.IndexFunc(rows, func(x move.Row) bool { return x.AccountID == id }); i < 0 || rows[i].NewName != o.want {
+			t.Errorf("the row for %s: %+v, want %s", o.name, rows, o.want)
+		}
 	}
 }
 

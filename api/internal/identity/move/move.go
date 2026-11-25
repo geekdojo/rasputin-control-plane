@@ -51,6 +51,29 @@ const (
 	sentenceSpec     = "Rasputin couldn't read this request, so no account was moved."
 )
 
+// The causes an identity.move.failed record carries: a fixed code for what
+// failed, which names no account (LOG-STRUCT).
+const (
+	causeSpec           = "spec"
+	causeNotReady       = "not_ready"
+	causeStateRead      = "state_read"
+	causeMoveState      = "move_state"
+	causeStateChanged   = "state_changed"
+	causeOldUsers       = "old_users"
+	causeRealmRead      = "realm_read"
+	causeRecordsRead    = "records_read"
+	causeMapping        = "mapping"
+	causeRemovedList    = "removed_list"
+	causeAccessFact     = "access_fact"
+	causeDesignation    = "designation"
+	causePartialImport  = "partial_import"
+	causeReadBack       = "read_back"
+	causeReadBackName   = "read_back_name"
+	causeReadBackAccess = "read_back_access"
+	causeResult         = "result"
+	causeRecord         = "record"
+)
+
 // Spec is the move's spec: system mode, or a repair session's re-run with
 // the state token it confirmed. It carries no name.
 type Spec struct {
@@ -126,17 +149,19 @@ func New(d Deps) (*Mover, error) {
 }
 
 // stepError is a step's failure: the sentence the runner records as the
-// job's error, and the cause, which names the step.
+// job's error, the fixed cause code the log carries, and the error, which
+// names the step.
 type stepError struct {
 	sentence string
+	cause    string
 	err      error
 }
 
 func (e *stepError) Error() string { return e.sentence }
 func (e *stepError) Unwrap() error { return e.err }
 
-func fail(step, sentence string, err error) error {
-	return &stepError{sentence: sentence, err: fmt.Errorf("%s: %w", step, err)}
+func fail(step, sentence, cause string, err error) error {
+	return &stepError{sentence: sentence, cause: cause, err: fmt.Errorf("%s: %w", step, err)}
 }
 
 // Workflow is the move: check, import, record. A failure stops the job and
@@ -158,7 +183,7 @@ func (m *Mover) wrap(name string, do func(sc *jobs.StepCtx, spec Spec) (map[stri
 	return func(sc *jobs.StepCtx) (json.RawMessage, error) {
 		var spec Spec
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil {
-			return nil, m.failed(sc, name, modeSystem, fail(name, sentenceSpec, err))
+			return nil, m.failed(sc, name, modeSystem, fail(name, sentenceSpec, causeSpec, err))
 		}
 		mode := modeSystem
 		if spec.Repair {
@@ -178,7 +203,7 @@ func (m *Mover) wrap(name string, do func(sc *jobs.StepCtx, spec Spec) (map[stri
 		}
 		b, err := json.Marshal(out)
 		if err != nil {
-			return nil, m.failed(sc, name, mode, fail(name, sentenceMove, err))
+			return nil, m.failed(sc, name, mode, fail(name, sentenceMove, causeResult, err))
 		}
 		jobs.LogStep(m.log, sc, slog.LevelInfo, name+": "+fmt.Sprint(out["outcome"]), attrs...)
 		return b, nil
@@ -195,10 +220,15 @@ func outcomeOf(raw json.RawMessage) string {
 	return o.Outcome
 }
 
-// failed writes the failure's one ERROR record: the step, the mode, and an
-// Admin API error's status and kind, never a name, an email or an id.
+// failed writes the failure's one ERROR record: the step, the mode, the
+// cause code, and an Admin API error's status and kind, never a name, an
+// email or an id.
 func (m *Mover) failed(sc *jobs.StepCtx, name, mode string, err error) error {
 	attrs := []any{"event", "identity.move.failed", "step", name, "mode", mode}
+	var se *stepError
+	if errors.As(err, &se) {
+		attrs = append(attrs, "cause", se.cause)
+	}
 	var ie *idclient.Error
 	if errors.As(err, &ie) {
 		attrs = append(attrs, "status", ie.Status, "kind", fmt.Sprint(ie.Kind))
@@ -213,13 +243,13 @@ func (m *Mover) failed(sc *jobs.StepCtx, name, mode string, err error) error {
 func (m *Mover) check(sc *jobs.StepCtx, spec Spec) (map[string]any, error) {
 	ctx := sc.Ctx
 	if err := m.d.Ready.Ready(ctx); err != nil {
-		return nil, fail(StepCheck, sentenceNotReady, err)
+		return nil, fail(StepCheck, sentenceNotReady, causeNotReady, err)
 	}
 	if !spec.Repair {
 		pending, err := m.state.Pending(ctx)
 		switch {
 		case err != nil:
-			return nil, fail(StepCheck, sentenceMove, err)
+			return nil, fail(StepCheck, sentenceMove, causeStateRead, err)
 		case !pending:
 			return map[string]any{"outcome": outcomeNotNeeded}, nil
 		}
@@ -228,11 +258,11 @@ func (m *Mover) check(sc *jobs.StepCtx, spec Spec) (map[string]any, error) {
 	r, err := m.state.Repair(ctx)
 	switch {
 	case err != nil:
-		return nil, fail(StepCheck, sentenceMove, err)
+		return nil, fail(StepCheck, sentenceMove, causeStateRead, err)
 	case !r.Holds:
-		return nil, fail(StepCheck, authz.KindSentence(authz.CodeMoveState), errors.New("C9's state does not hold"))
+		return nil, fail(StepCheck, authz.KindSentence(authz.CodeMoveState), causeMoveState, errors.New("C9's state does not hold"))
 	case spec.StateToken == "" || r.Token != spec.StateToken:
-		return nil, fail(StepCheck, authz.KindSentence(authz.CodeStateChanged), errors.New("the state token changed"))
+		return nil, fail(StepCheck, authz.KindSentence(authz.CodeStateChanged), causeStateChanged, errors.New("the state token changed"))
 	}
 	return map[string]any{"outcome": outcomeDue}, nil
 }
@@ -267,55 +297,64 @@ type importUser struct {
 }
 
 // importBody is the partialImport body: users only, SKIP for an id that
-// exists, so a re-run changes nothing already imported.
+// exists under the same name, so a re-run changes nothing already
+// imported. An existing id under another name is a 409 at Keycloak 26.8.2
+// (K-PARTIALIMPORT), so mappings keeps each held name.
 type importBody struct {
 	IfResourceExists string       `json:"ifResourceExists"`
 	Users            []importUser `json:"users"`
 }
 
-// taken is the sign-in names the realm holds for accounts that are not
-// moved ones: a door sign-up that took a name before the move.
-func (m *Mover) taken(ctx context.Context, ms []Mapping) (map[string]bool, error) {
-	people, err := m.d.Persons.People(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list the realm's persons: %w", err)
-	}
-	moved := make(map[string]bool, len(ms))
-	for _, x := range ms {
-		moved[x.AccountID] = true
-	}
-	out := map[string]bool{}
-	for _, p := range people {
-		if !moved[p.ID] && p.Username != "" {
-			out[p.Username] = true
-		}
-	}
-	return out, nil
-}
-
-// mappings maps the old operators against the realm's names, leaving out
-// in repair mode each one the removed-name list reports.
+// mappings maps the old operators. A moved account the realm already
+// holds keeps the sign-in name it holds there, so a re-run never sends an
+// existing id under another name (which partialImport answers 409); other
+// operators are mapped around those names and around the names accounts
+// that are not moved ones hold, such as a door sign-up. In repair mode
+// each recorded account is mapped to its recorded new name, and each the
+// removed-name list reports under that name is left out. A failure is a
+// stepError with its cause.
 func (m *Mover) mappings(ctx context.Context, repair bool) ([]Mapping, int, error) {
 	old, err := oldUsers(ctx, m.d.OldUsers)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fail(StepImport, sentenceMove, causeOldUsers, err)
 	}
-	first, err := Map(old, nil)
+	people, err := m.d.Persons.People(ctx)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fail(StepImport, sentenceMove, causeRealmRead, fmt.Errorf("list the realm's persons: %w", err))
 	}
-	taken, err := m.taken(ctx, first)
-	if err != nil {
-		return nil, 0, err
+	ids := make(map[string]bool, len(old))
+	for _, u := range old {
+		ids[auth.MovedAccountID(u.Handle)] = true
 	}
-	ms, err := Map(old, taken)
+	taken, keep := map[string]bool{}, map[string]string{}
+	for _, p := range people {
+		switch {
+		case p.Username == "":
+		case ids[p.ID]:
+			keep[p.ID] = p.Username
+		default:
+			taken[p.Username] = true
+		}
+	}
+	if repair {
+		rows, err := m.d.Records.Rows(ctx)
+		if err != nil {
+			return nil, 0, fail(StepImport, sentenceMove, causeRecordsRead, err)
+		}
+		recordedNames(rows, keep)
+	}
+	ms, err := mapKeeping(old, taken, keep)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fail(StepImport, sentenceMove, causeMapping, err)
 	}
 	if !repair {
 		return ms, 0, nil
 	}
-	return kept(ctx, m.d.Removed, ms)
+	back, leftOut, err := kept(ctx, m.d.Removed, ms)
+	if err != nil {
+		return nil, 0, fail(StepImport, sentenceMove, causeRemovedList, err)
+	}
+	return back, leftOut, nil
 }
 
 // importAccounts is step 2, under the accounts lock: the names mapped, the
@@ -327,16 +366,16 @@ func (m *Mover) importAccounts(sc *jobs.StepCtx, spec Spec) (map[string]any, err
 	defer m.d.Lock.Unlock()
 	ms, leftOut, err := m.mappings(ctx, spec.Repair)
 	if err != nil {
-		return nil, fail(StepImport, sentenceMove, err)
+		return nil, err
 	}
 	for _, x := range ms {
 		if err := m.d.Facts.Record(ctx, x.AccountID); err != nil {
-			return nil, fail(StepImport, sentenceMove, fmt.Errorf("record the app-access fact: %w", err))
+			return nil, fail(StepImport, sentenceMove, causeAccessFact, fmt.Errorf("record the app-access fact: %w", err))
 		}
 	}
 	for _, x := range ms {
 		if err := m.d.Designations.DesignateMoved(ctx, x.AccountID); err != nil {
-			return nil, fail(StepImport, sentenceMove, fmt.Errorf("designate: %w", err))
+			return nil, fail(StepImport, sentenceMove, causeDesignation, fmt.Errorf("designate: %w", err))
 		}
 	}
 	body := importBody{IfResourceExists: "SKIP", Users: make([]importUser, 0, len(ms))}
@@ -351,7 +390,7 @@ func (m *Mover) importAccounts(sc *jobs.StepCtx, spec Spec) (map[string]any, err
 	if len(body.Users) > 0 {
 		path := "/admin/realms/" + url.PathEscape(m.d.Realm) + "/partialImport"
 		if _, err := m.d.Admin.Admin(ctx, http.MethodPost, path, body, nil); err != nil {
-			return nil, fail(StepImport, sentenceMove, fmt.Errorf("partial import: %w", err))
+			return nil, fail(StepImport, sentenceMove, causePartialImport, fmt.Errorf("partial import: %w", err))
 		}
 	}
 	res := importResult{Outcome: outcomeImported, Accounts: make([]Moved, 0, len(ms)), LeftOut: leftOut}
@@ -360,11 +399,11 @@ func (m *Mover) importAccounts(sc *jobs.StepCtx, spec Spec) (map[string]any, err
 		p, err := m.d.Persons.Read(ctx, x.AccountID)
 		switch {
 		case err != nil:
-			return nil, fail(StepImport, sentenceMove, fmt.Errorf("read back: %w", err))
+			return nil, fail(StepImport, sentenceMove, causeReadBack, fmt.Errorf("read back: %w", err))
 		case p.Username != x.To:
-			return nil, fail(StepImport, sentenceMove, errors.New("read back: the account holds another sign-in name"))
+			return nil, fail(StepImport, sentenceMove, causeReadBackName, errors.New("read back: the account holds another sign-in name"))
 		case p.AppRole == "":
-			return nil, fail(StepImport, sentenceMove, errors.New("read back: the account holds no app access"))
+			return nil, fail(StepImport, sentenceMove, causeReadBackAccess, errors.New("read back: the account holds no app access"))
 		}
 		if x.From != x.To {
 			renamed++
@@ -380,11 +419,11 @@ func (m *Mover) record(sc *jobs.StepCtx, _ Spec) (map[string]any, error) {
 	ctx := sc.Ctx
 	var res importResult
 	if err := json.Unmarshal(sc.PriorResults[StepImport], &res); err != nil {
-		return nil, fail(StepRecord, sentenceMove, fmt.Errorf("read the import's result: %w", err))
+		return nil, fail(StepRecord, sentenceMove, causeResult, fmt.Errorf("read the import's result: %w", err))
 	}
 	us, err := m.d.OldUsers.ListUsers(ctx)
 	if err != nil {
-		return nil, fail(StepRecord, sentenceMove, fmt.Errorf("list the old users: %w", err))
+		return nil, fail(StepRecord, sentenceMove, causeOldUsers, fmt.Errorf("list the old users: %w", err))
 	}
 	handles := make(map[string][]byte, len(us))
 	for _, u := range us {
@@ -397,12 +436,12 @@ func (m *Mover) record(sc *jobs.StepCtx, _ Spec) (map[string]any, error) {
 	for _, a := range res.Accounts {
 		h, ok := handles[a.AccountID]
 		if !ok {
-			return nil, fail(StepRecord, sentenceMove, errors.New("a moved account's old user is gone"))
+			return nil, fail(StepRecord, sentenceMove, causeOldUsers, errors.New("a moved account's old user is gone"))
 		}
 		rows = append(rows, Row{Handle: h, AccountID: a.AccountID, OldName: a.From, NewName: a.To, MovedAt: now})
 	}
 	if err := m.d.Records.Record(ctx, rows); err != nil {
-		return nil, fail(StepRecord, sentenceMove, err)
+		return nil, fail(StepRecord, sentenceMove, causeRecord, err)
 	}
 	return map[string]any{"outcome": outcomeRecorded, "counts": counts{Accounts: len(rows)}}, nil
 }

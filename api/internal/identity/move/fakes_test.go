@@ -76,6 +76,14 @@ func (a fAdmin) Admin(_ context.Context, method, path string, in, _ any) (idclie
 	a.w.mu.Lock()
 	defer a.w.mu.Unlock()
 	a.w.imports = append(a.w.imports, body)
+	// Keycloak 26.8.2 (K-PARTIALIMPORT): SKIP skips an existing id under
+	// the same username, and answers 409 for the whole import, changing
+	// nothing, when an existing id comes under another username.
+	for _, u := range body.Users {
+		if ex, ok := a.w.realm[u.ID]; ok && ex.Username != u.Username {
+			return idclient.Response{}, &idclient.Error{Op: "admin", Status: 409, Kind: idclient.ErrConflict}
+		}
+	}
 	for _, u := range body.Users {
 		if _, ok := a.w.realm[u.ID]; ok && body.IfResourceExists == "SKIP" {
 			continue
@@ -149,7 +157,7 @@ type fReady struct{ w *world }
 func (r fReady) Ready(context.Context) error { return r.w.call("ready") }
 
 // failingRecords is the Store with a failure by name ("recorded",
-// "record") taken from the world.
+// "record", "rows") taken from the world.
 type failingRecords struct {
 	w     *world
 	inner *Store
@@ -160,6 +168,13 @@ func (f failingRecords) Recorded(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	return f.inner.Recorded(ctx)
+}
+
+func (f failingRecords) Rows(ctx context.Context) ([]Row, error) {
+	if err := f.w.fail["rows"]; err != nil {
+		return nil, err
+	}
+	return f.inner.Rows(ctx)
 }
 
 func (f failingRecords) Record(ctx context.Context, rows []Row) error {
