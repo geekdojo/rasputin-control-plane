@@ -151,14 +151,7 @@ func (s *Service) SeedOperatorSSHKeyFromFile(ctx context.Context, path string) (
 		}
 		return "", 0, err
 	}
-	var keys []string
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") || !ValidOperatorSSHKey(line) {
-			continue
-		}
-		keys = append(keys, line)
-	}
+	keys := AuthorizedKeyLines(data)
 	if len(keys) == 0 {
 		return "", 0, nil // nothing usable; stay unset so a later boot can seed
 	}
@@ -167,6 +160,23 @@ func (s *Service) SeedOperatorSSHKeyFromFile(ctx context.Context, path string) (
 		return "", 0, err
 	}
 	return key, len(keys) - 1, nil
+}
+
+// AuthorizedKeyLines is every valid key line of an authorized_keys file's
+// contents, in order: blank, comment and invalid lines are skipped. The seed
+// capture above and the break-glass no-last-resort warning
+// (geekdojo/geekdojo-brain#321) both read the control plane's own file
+// through it.
+func AuthorizedKeyLines(data []byte) []string {
+	var keys []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") || !ValidOperatorSSHKey(line) {
+			continue
+		}
+		keys = append(keys, line)
+	}
+	return keys
 }
 
 // truncateKey keeps error messages readable (keys are ~100s of chars).

@@ -1,6 +1,6 @@
 // Package systemsubmitter is a fixture for specargs_test.go: a person-path
 // handler that builds its own Submitter instead of passing submitter(r),
-// and uses of the constructors no package may call.
+// and uses of constructors outside their owners (RepairSession: breakglass).
 package systemsubmitter
 
 import (
@@ -29,7 +29,7 @@ func (s *Server) AsPerson(r *http.Request) {
 	_, _ = s.runner.SubmitFor(r.Context(), authz.Person(authz.Subject{Sub: "x"}), "k", nil, nil)
 }
 
-// Constructors no package may build yet.
+// Constructors outside their owners (TC-321-26 plants RepairSession here).
 func Constructors() (authz.Submitter, authz.Submitter) {
 	a := authz.RepairSession()
 	b := authz.BridgeGrant("x")

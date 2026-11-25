@@ -45,6 +45,9 @@ type Service struct {
 
 	hookMu    sync.RWMutex
 	loginHook LoginHook
+	// adminHook runs after a sign-in that minted a session holding admin
+	// (SetAdminSignInHook).
+	adminHook func(ctx context.Context)
 
 	// control is the control lock's gate (controllock.go).
 	control controlGate
@@ -96,6 +99,12 @@ const (
 	// first, then the entry closest to expiry is evicted.
 	maxPending = 1024
 )
+
+// SessionLifetime is sessionLifetime for the sessions other packages bound
+// the same way: the break-glass repair session takes the console session's
+// seven days (register row C72, D22; geekdojo/geekdojo-brain#321). The
+// unexported name stays the one register row E3 and timer-audit L01 cite.
+const SessionLifetime = sessionLifetime
 
 // NewService constructs an auth Service. The store must be opened separately
 // (see OpenStore).
@@ -166,6 +175,28 @@ func (s *Service) SetLoginHook(h LoginHook) {
 	s.hookMu.Lock()
 	s.loginHook = h
 	s.hookMu.Unlock()
+}
+
+// SetAdminSignInHook installs (or replaces) the hook that runs after a
+// console sign-in mints a session holding the admin role: an administrator's
+// normal sign-in, the fact that ends a break-glass repair session and
+// retires its outstanding code (geekdojo/geekdojo-brain#321). It is called
+// synchronously before the session cookie is written and returns nothing:
+// the hook's own owner logs what it did. Pass nil to uninstall.
+func (s *Service) SetAdminSignInHook(h func(ctx context.Context)) {
+	s.hookMu.Lock()
+	s.adminHook = h
+	s.hookMu.Unlock()
+}
+
+// runAdminSignInHook invokes the installed admin sign-in hook, if any.
+func (s *Service) runAdminSignInHook(ctx context.Context) {
+	s.hookMu.RLock()
+	hook := s.adminHook
+	s.hookMu.RUnlock()
+	if hook != nil {
+		hook(ctx)
+	}
 }
 
 // runLoginHook invokes the installed hook with a request-scoped context.

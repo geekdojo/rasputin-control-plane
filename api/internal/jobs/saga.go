@@ -203,6 +203,10 @@ type Authorizer interface {
 // submission, so it refuses it (ERR-CLOSED).
 var ErrNotSystem = errors.New("jobs: this runner runs only the system's jobs")
 
+// ErrUnknownKind is a submission of a kind no workflow is registered for on
+// this runner, so no job was created.
+var ErrUnknownKind = errors.New("unknown job kind")
+
 // NewRunner constructs the system-only Runner bound to a Store and NATS
 // connection: it runs every system submission and refuses every other
 // submitter with ErrNotSystem. The api's runner is NewAuthorizedRunner's.
@@ -393,7 +397,7 @@ func (r *Runner) create(ctx context.Context, by authz.Submitter, kind string, ra
 	wf, ok := r.workflows[kind]
 	r.mu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("unknown job kind %q", kind)
+		return nil, fmt.Errorf("%w %q", ErrUnknownKind, kind)
 	}
 	j := &Job{
 		ID:        ulid.Make().String(),

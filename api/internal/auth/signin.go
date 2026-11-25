@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/idtoken"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -263,6 +264,9 @@ type CallbackResult struct {
 	// Name is the signed-in account's preferred_username, for the login
 	// hook; set only with Cookie.
 	Name string
+	// Admin reports that the minted session holds the admin role, for the
+	// admin sign-in hook; set only with Cookie.
+	Admin bool
 }
 
 // refusal is one callback refusal: the class logged and where the browser
@@ -299,7 +303,8 @@ func (s *SignIn) Complete(ctx context.Context, in CallbackInput) CallbackResult 
 	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "A person signed in to the console.",
 		slog.String("event", "signin.succeeded"), slog.String("sub", p.Sub))
-	return CallbackResult{Status: http.StatusSeeOther, Location: launcherPath, Cookie: cookie, Name: p.Name}
+	return CallbackResult{Status: http.StatusSeeOther, Location: launcherPath, Cookie: cookie, Name: p.Name,
+		Admin: p.HasRole(string(authz.Admin))}
 }
 
 // verify runs every check of the callback in order, and returns the

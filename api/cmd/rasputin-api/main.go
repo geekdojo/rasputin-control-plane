@@ -78,6 +78,11 @@ import (
 //   in the geekdojo-brain.
 
 func main() {
+	// `rasputin-api repair-code` (#321) runs before anything else: no
+	// settings, logger or listener of the api's own.
+	if isRepairCode(os.Args) {
+		os.Exit(runRepairCode())
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -1306,6 +1311,16 @@ func main() {
 		os.Exit(1)
 	}
 	identityState.register(runner)
+	// identity.restart (#321): the break-glass repair page's RESTART, under
+	// keycloak only, behind identity.recover's guards.
+	identityRestart, err := identityRestartWiring(identityState.monitor, restoreSessions, execrun.CombinedOutput, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity restart", "err", err.Error())
+		os.Exit(1)
+	}
+	if identityRestart != nil {
+		runner.Register(identityRestart.Workflow())
+	}
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
 		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
@@ -2078,6 +2093,23 @@ func main() {
 	alertsSvc.SetMeshMembership(meshSvc.Membership)
 	alertsSvc.SetAppDoorReachAlerts(meshSvc.AppDoorReachAlerts)
 	srv.SetAlertsService(alertsSvc)
+	// Break-glass (#321): the repair-code socket, the repair session's
+	// routes, an administrator's normal sign-in ending it, and the warning
+	// while nobody could become root here to make a code.
+	breakglassW, err := wireBreakglass(ctx, breakglassDeps{
+		monitor: identityState.monitor, restarter: identityRestart, alerts: alertsSvc, jobs: jobStore,
+		host: consoleHost(), primaryIP: lanWatch.PrimaryIP, dataDir: dataDir, identityCA: identityCA != nil, log: logger,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: break-glass", "err", err.Error())
+		os.Exit(1)
+	}
+	if breakglassW.svc != nil {
+		srv.SetRepair(breakglassW.svc)
+		authSvc.SetAdminSignInHook(breakglassW.svc.AdminSignedIn)
+		breakglassW.socket.Start(ctx)
+	}
+	alertsSvc.SetLastResortAlerts(lastResortAlerts(consoleStore, akPath))
 	// The inventory hook installed before Start can raise alerts from here on.
 	nodeKeyAlerts.Store(alertsSvc)
 

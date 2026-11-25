@@ -150,6 +150,9 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	if res.Cookie.Len() > 0 {
 		s.runLoginHook(r.Context(), res.Name)
+		if res.Admin {
+			s.runAdminSignInHook(r.Context())
+		}
 		setSessionCookie(w, res.Cookie)
 		res.Cookie.Destroy()
 	}

@@ -453,7 +453,8 @@ jobs:
       # go test's own 10m: the tests' waits end before it with an error that
       # names the fact they waited for, and their cleanup still runs. The
       # console stack test (#989) starts the real api and waits on its
-      # converge, so the bound is 20m.
+      # converge, and the break-glass test (#321) starts a second stack and
+      # restarts its identity service and its api, so the bound is 30m.
       - name: test (identity under real systemd, root)
         run: |
           go test -c -race -o "$RUNNER_TEMP/identitytest.test" ./api/internal/identitytest
@@ -467,7 +468,7 @@ jobs:
             RASPUTIN_IDENTITY_THEME="$RUNNER_TEMP/identity-theme" \
             RASPUTIN_UI_DIR="$GITHUB_WORKSPACE/ui/out" \
             RASPUTIN_API_BIN="$RUNNER_TEMP/rasputin-api" \
-            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=20m -test.run '^TestIdentitySystemd_'
+            "$RUNNER_TEMP/identitytest.test" -test.v -test.count=1 -test.timeout=30m -test.run '^TestIdentitySystemd_'
 
       # CI SO-19 (geekdojo/geekdojo-brain#995): the home sign-in name's mDNS
       # responder in two network namespaces joined by a veth pair, beside a

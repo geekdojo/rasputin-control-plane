@@ -166,6 +166,10 @@ type Service struct {
 	// signinNameAlerts, when set, reports the home sign-in name's state
 	// (signinname.Responder.Alerts). Nil means no such alert.
 	signinNameAlerts func(now time.Time) []proto.Alert
+	// lastResortAlerts, when set, reports a control plane nobody can become
+	// root on to make a repair code (LastResort.Alerts,
+	// geekdojo/geekdojo-brain#321). Nil means no such alert.
+	lastResortAlerts func(ctx context.Context, now time.Time) []proto.Alert
 }
 
 // SetBusTLSAlert wires the bus TLS alert (bustls.State.Alert: crit when the bus
@@ -285,6 +289,9 @@ func (s *Service) List(ctx context.Context) ([]proto.Alert, error) {
 	}
 	if s.signinNameAlerts != nil {
 		out = append(out, s.signinNameAlerts(now)...)
+	}
+	if s.lastResortAlerts != nil {
+		out = append(out, s.lastResortAlerts(ctx, now)...)
 	}
 	if s.outcomeAlerts != nil {
 		alerts, err := s.outcomeAlerts(ctx, now)

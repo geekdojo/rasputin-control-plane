@@ -107,6 +107,38 @@ const (
 	// request before its handler ran. A Job route's refusal answers the kind
 	// table's "job_" code instead.
 	codeRouteNotPermitted = "route_not_permitted"
+	// The break-glass repair session's codes (geekdojo/geekdojo-brain#321).
+	// codeRepairOrigin: a repair code or a repair session was used at an
+	// origin other than the console's or the control plane's LAN address, or
+	// with an Origin header that differs from the request's own.
+	codeRepairOrigin = "repair_origin"
+	// codeRepairSourceRefused: the device sent five wrong repair codes, so
+	// it is refused until a new code is made.
+	codeRepairSourceRefused = "repair_source_refused"
+	// codeRepairCodeNone: no repair code is waiting.
+	codeRepairCodeNone = "repair_code_none"
+	// codeRepairCodeWrong: the repair code is not the waiting one.
+	codeRepairCodeWrong = "repair_code_wrong"
+	// codeRepairCodeBody: the code was not sent as the one field of a small
+	// JSON body (in the query string, an empty body, a body over 1 KiB).
+	codeRepairCodeBody = "repair_code_body"
+	// codeRepairUnavailable: this api has no break-glass service wired.
+	codeRepairUnavailable = "repair_unavailable"
+	// codeRepairSessionRequired: a repair route was asked for with no live
+	// repair session at this origin.
+	codeRepairSessionRequired = "repair_session_required"
+	// codeRepairCookieDuplicate: the repair cookie was sent twice.
+	codeRepairCookieDuplicate = "repair_cookie_duplicate"
+	// codeRepairOnly: a console route was asked for with a live repair
+	// session, which can only repair sign-in.
+	codeRepairOnly = "repair_only"
+	// codeJobUnavailable: the runner has no workflow for the job's kind on
+	// this control plane, so no job was created.
+	codeJobUnavailable = "job_unavailable"
+	// codeJobStartFailed: a job the runner can run couldn't be recorded or
+	// started (a failed ledger write, a cancelled request), so no job was
+	// created; trying again may work.
+	codeJobStartFailed = "job_start_failed"
 )
 
 // codedError is the body of a coded error. "error" stays a plain string, as

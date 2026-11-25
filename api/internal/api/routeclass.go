@@ -8,6 +8,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 )
 
 // Route classes (geekdojo/geekdojo-brain#1002; identity-authz.md §3.2).
@@ -34,11 +35,15 @@ const (
 	ruleAnyJob
 )
 
-// routeRule is what a session route needs before its handler runs.
+// routeRule is what a session route needs before its handler runs. A repair
+// rule is a break-glass repair session's route (geekdojo/geekdojo-brain#321):
+// gate wraps it in RequireRepair instead of RequireSession, and authorize
+// reads the repair session's capabilities (Repair only).
 type routeRule struct {
-	kind  ruleKind
-	need  authz.Requirement
-	kinds []string
+	kind   ruleKind
+	need   authz.Requirement
+	kinds  []string
+	repair bool
 }
 
 // needs is a view, control or self route.
@@ -52,10 +57,25 @@ func job(kinds ...string) routeRule { return routeRule{kind: ruleJob, kinds: kin
 // Self, and the runner decides the kind.
 func anyJob() routeRule { return routeRule{kind: ruleAnyJob} }
 
+// repairNeeds is a repair session's route: control under Repair.
+func repairNeeds() routeRule {
+	return routeRule{kind: ruleNeed, need: authz.NeedControl(authz.Repair), repair: true}
+}
+
+// repairJob is a repair session's route that submits jobs of kinds. Its
+// floor is each kind's, decided on the repair session's capabilities; the
+// runner still decides each job.
+func repairJob(kinds ...string) routeRule {
+	return routeRule{kind: ruleJob, kinds: kinds, repair: true}
+}
+
 // label is the rule as text, for the refusal record's need field and the
 // route table test: view, control:<capability>, self, job:<k1>,<k2>, anyjob,
-// or none.
+// or none, and repair: before it for a repair rule.
 func (r routeRule) label() string {
+	if r.repair {
+		return "repair:" + routeRule{kind: r.kind, need: r.need, kinds: r.kinds}.label()
+	}
 	switch r.kind {
 	case ruleNeed:
 		switch r.need.Class {
@@ -108,9 +128,16 @@ func (r routeRule) check(caps authz.Set) error {
 const codeRouteNotPermittedMsg = "You don't have permission to do this."
 
 // gate registers h at pattern behind the session and rule, and records rule
-// on mux. It is the only way a session route is registered.
+// on mux. It is the only way a session route is registered. A repair rule's
+// session is the repair session (RequireRepair); every other route's is the
+// console session, and a request carrying a live repair session is refused
+// before it (refuseRepair).
 func (s *Server) gate(mux *routeMux, pattern string, rule routeRule, h http.Handler) {
-	mux.HandleRule(pattern, rule, s.auth.RequireSession(s.authorize(rule, h)))
+	if rule.repair {
+		mux.HandleRule(pattern, rule, s.RequireRepair(s.authorize(rule, h)))
+		return
+	}
+	mux.HandleRule(pattern, rule, s.refuseRepair(s.auth.RequireSession(s.authorize(rule, h))))
 }
 
 // authorize runs next only when the session's principal meets rule. A
@@ -122,7 +149,11 @@ func (s *Server) gate(mux *routeMux, pattern string, rule routeRule, h http.Hand
 func (s *Server) authorize(rule routeRule, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var caps authz.Set
-		if p, ok := auth.PrincipalFrom(r.Context()); ok {
+		if rule.repair {
+			if sess, ok := breakglass.SessionFrom(r.Context()); ok {
+				caps = sess.Capabilities()
+			}
+		} else if p, ok := auth.PrincipalFrom(r.Context()); ok {
 			caps = p.Capabilities()
 		}
 		err := rule.check(caps)

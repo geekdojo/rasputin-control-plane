@@ -675,6 +675,19 @@ the pinned identity service.
   in the pinned Chrome from `https://ci.local/login`; `/api/auth/me` answers 200 with its
   subject and role, and the signed-in `/` is screenshotted. It refuses to run where
   `/usr/share/rasputin`, `/var/lib/rasputin` or a `keycloak.service` unit exists.
+- **`TestIdentitySystemd_BreakGlass`** (`breakglass_systemd_test.go`, TC-321-27 to
+  TC-321-35, geekdojo/geekdojo-brain#321), in the same step, on its own stack of the same
+  shape with the api's https listener on every address (`:443`), so it answers at
+  `https://ci.local` and at the runner's primary address. With `keycloak.service` stopped,
+  root runs the real `rasputin-api repair-code` in a pty (`script`); `setpriv` as `nobody`
+  and root writing to a file are refused. Codes redeem from the Go client at `ci.local` and
+  in the pinned Chrome at `https://<runner address>/repair`; reuse and both sign-in doors are
+  refused, five wrong codes refuse 127.0.0.1 while the runner's address still redeems, and a
+  repair session gets 403 on console routes. RESTART on `/repair` makes `identity.restart` by
+  `break-glass`, which brings the real Keycloak back to ready. A synthetic administrator,
+  enrolled with an authenticator app, signs in through the launcher and so ends the repair
+  session and retires the outstanding code; so does an api restart. It also needs
+  util-linux's `script` and `setpriv`.
 
 On a Mac, `scripts/identity-on-mac.sh` runs the second test in hold mode
 (`RASPUTIN_CONSOLE_RIG=hold`) in a container with systemd as PID 1, signs the fixture in with

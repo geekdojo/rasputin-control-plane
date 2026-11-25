@@ -55,7 +55,8 @@ func Person(s Subject) Submitter {
 }
 
 // RepairSession is a break-glass repair session (geekdojo/geekdojo-brain#321):
-// it holds Repair only. Nothing constructs it yet.
+// it holds Repair only. Only package breakglass constructs it
+// (breakglass.Session.Submitter; specargs_test.go pins this).
 func RepairSession() Submitter {
 	return Submitter{kind: kindRepair, caps: Set{}.with(Repair), createdBy: "break-glass"}
 }
@@ -76,6 +77,11 @@ func (s Submitter) CreatedBy() string { return s.createdBy }
 
 // IsSystem reports whether s is the system.
 func (s Submitter) IsSystem() bool { return s.kind == kindSystem }
+
+// Capabilities is what s holds, for a router deciding a route's floor for a
+// submitter that is not a person (a repair session's routes,
+// geekdojo/geekdojo-brain#321). The zero Submitter holds nothing.
+func (s Submitter) Capabilities() Set { return s.caps }
 
 // KindRefusal is a submission the kind table refuses: a stable code and the
 // sentence the person reads.
