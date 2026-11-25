@@ -387,7 +387,8 @@ func (r *resetRig) tc35(t *testing.T) {
 			realm.Attributes["rasputin.reset-app-url"], r.resetHome, r.resetApp)
 	}
 	for _, c := range []struct{ what, auth, start string }{
-		{"rasputin-console", r.homeAuth(baselineConsole, nil), r.resetHome},
+		// The console's own sign-in starts at its launcher route.
+		{"rasputin-console", "https://" + ConsoleHost + "/api/auth/signin", r.resetHome},
 		{"rasputin-mesh", r.homeAuth(baselineMesh, nil), r.resetHome},
 		{"an app-door client", r.appAuth(doorTestApp, nil), r.resetApp},
 	} {
@@ -600,7 +601,7 @@ func (r *resetRig) tc33(t *testing.T) {
 	codes, _ := r.enrol(t, id, "reset-held", pw, false)
 	g := r.fresh(t)
 	r.settle(t)
-	g.signIn(r.homeAuth(baselineConsole, nil), "reset-held", secret.New([]byte("not the password at all")))
+	g.signIn(r.homeAuth(baselineMesh, nil), "reset-held", secret.New([]byte("not the password at all")))
 	r.settle(t)
 	before := r.passwordCreated(t, id)
 	a := r.code(t, g, r.chooseUser(t, g, r.resetHome, "reset-held"), codes[0])

@@ -113,9 +113,24 @@ func NewResetDone(d ResetDoneDeps) (*ResetDone, error) {
 // ServeHTTP answers the console's reset return: a 303 to the launcher with
 // the outcome's key, and no cookie.
 func (rd *ResetDone) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	outcome, _ := rd.Finish(r.Context(), r.URL.Query())
-	http.Redirect(w, r, launcherPath+"?signin="+outcome, http.StatusSeeOther)
+	// Each answer is a constant: nothing the request carries reaches the
+	// Location.
+	switch outcome, _ := rd.Finish(r.Context(), r.URL.Query()); outcome {
+	case ResetOutcomeDone:
+		http.Redirect(w, r, resetDoneLocation, http.StatusSeeOther)
+	case ResetOutcomeIncomplete:
+		http.Redirect(w, r, resetIncompleteLocation, http.StatusSeeOther)
+	default:
+		http.Redirect(w, r, resetFailedLocation, http.StatusSeeOther)
+	}
 }
+
+// The console's answers to a reset return: the launcher with the outcome.
+const (
+	resetDoneLocation       = launcherPath + "?signin=" + ResetOutcomeDone
+	resetIncompleteLocation = launcherPath + "?signin=" + ResetOutcomeIncomplete
+	resetFailedLocation     = launcherPath + "?signin=" + ResetOutcomeFailed
+)
 
 // Finish decides one reset return from its query: the outcome's key and its
 // sentence. The app door renders the sentence on its own page.

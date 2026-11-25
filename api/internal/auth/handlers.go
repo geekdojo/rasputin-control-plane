@@ -138,7 +138,7 @@ func (s *Service) handleSignin(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleResetDone(w http.ResponseWriter, r *http.Request) {
 	rd := s.reset()
 	if rd == nil {
-		http.Redirect(w, r, launcherPath+"?signin="+ResetOutcomeFailed, http.StatusSeeOther)
+		http.Redirect(w, r, resetFailedLocation, http.StatusSeeOther)
 		return
 	}
 	rd.ServeHTTP(w, r)
