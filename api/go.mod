@@ -3,8 +3,8 @@ module github.com/geekdojo/rasputin-control-plane/api
 go 1.26.0
 
 require (
-	github.com/chromedp/cdproto v0.159.0
-	github.com/chromedp/chromedp v0.22.1
+	github.com/chromedp/cdproto v0.160.8
+	github.com/chromedp/chromedp v0.24.0
 	github.com/coder/websocket v1.8.15
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/geekdojo/rasputin-control-plane/artifactsig v0.0.0-00010101000000-000000000000
@@ -15,24 +15,24 @@ require (
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/google/uuid v1.6.0
-	github.com/klauspost/compress v1.20.3
+	github.com/klauspost/compress v1.20.4
 	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/miekg/dns v1.1.73
 	github.com/nats-io/jwt/v2 v2.8.3
-	github.com/nats-io/nats-server/v2 v2.15.2
-	github.com/nats-io/nats.go v1.55.0
+	github.com/nats-io/nats-server/v2 v2.15.3
+	github.com/nats-io/nats.go v1.56.0
 	github.com/nats-io/nkeys v0.4.17
 	github.com/oklog/ulid/v2 v2.1.2
-	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.62.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
-	golang.org/x/tools v0.52.0
+	golang.org/x/tools v0.53.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.62.0
 )
 
 require (
-	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.9.0-default-no-op // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -51,10 +51,10 @@ require (
 	github.com/smallstep/pkcs7 v0.2.3 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
-	golang.org/x/mod v0.42.0 // indirect
+	golang.org/x/mod v0.43.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	modernc.org/libc v1.80.1 // indirect

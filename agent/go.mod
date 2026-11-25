@@ -8,20 +8,20 @@ require (
 	github.com/geekdojo/rasputin-control-plane/logkit v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/proto v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
-	github.com/nats-io/nats-server/v2 v2.15.2
-	github.com/nats-io/nats.go v1.55.0
+	github.com/nats-io/nats-server/v2 v2.15.3
+	github.com/nats-io/nats.go v1.56.0
 	github.com/shirou/gopsutil/v4 v4.26.10
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	golang.org/x/sys v0.50.0
 )
 
 require (
-	github.com/antithesishq/antithesis-sdk-go v0.8.0-default-no-op // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.9.0-default-no-op // indirect
 	github.com/ebitengine/purego v0.11.2 // indirect
 	github.com/geekdojo/rasputin-control-plane/secret v0.0.0-00010101000000-000000000000 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/klauspost/compress v1.20.3 // indirect
+	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/nats-io/jwt/v2 v2.8.3 // indirect
@@ -32,7 +32,7 @@ require (
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
 
