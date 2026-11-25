@@ -629,6 +629,26 @@ func (s *consoleStack) fixture(t *testing.T, admin *idclient.Session) string {
 		t.Fatalf("create the fixture: %v", err)
 	}
 	id := resp.Location[strings.LastIndex(resp.Location, "/")+1:]
+	// The stack is at first run, so the identity service gives every new
+	// account the recovery codes' default action (T133, Identity 4.8) and
+	// a create does not remove a default action its body leaves out. The
+	// fixture is no first-run sign-up: clear its required actions so the
+	// sign-in ends at the console.
+	userPath := "/admin/realms/" + baselineRealm + "/users/" + id
+	var rep map[string]any
+	if _, err := admin.Admin(ctx, http.MethodGet, userPath, nil, &rep); err != nil {
+		t.Fatalf("read the fixture: %v", err)
+	}
+	rep["requiredActions"] = []string{}
+	if _, err := admin.Admin(ctx, http.MethodPut, userPath, rep, nil); err != nil {
+		t.Fatalf("clear the fixture's required actions: %v", err)
+	}
+	var after struct {
+		RequiredActions []string `json:"requiredActions"`
+	}
+	if _, err := admin.Admin(ctx, http.MethodGet, userPath, nil, &after); err != nil || len(after.RequiredActions) != 0 {
+		t.Fatalf("the fixture's required actions are %v (%v), want none", after.RequiredActions, err)
+	}
 	var clients []struct {
 		ID string `json:"id"`
 	}
@@ -797,7 +817,7 @@ func (s *consoleStack) signInBrowser(ctx context.Context, pw secret.Value) strin
 	}
 	signIn(tb, consoleFixture, pw)
 	if status := fetchStatus(tb, "/api/auth/me"); status != http.StatusOK {
-		t.Fatalf("/api/auth/me in the browser answered %v after the sign-in", status)
+		t.Fatalf("/api/auth/me in the browser answered %v after the sign-in, on %s", status, evalT[string](tb, `location.host + location.pathname`))
 	}
 	tb.navigate("https://" + consoleCID + ".local/")
 	if path := evalT[string](tb, `location.pathname`); path == "/login" {
