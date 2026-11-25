@@ -318,7 +318,7 @@ func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string
 	if rec.action.method != "" {
 		s.log.LogAttrs(r.Context(), slog.LevelInfo, "A person started adding a sign-in method.",
 			slog.String("event", "signin.method_started"), slog.String("method", string(rec.action.method)),
-			slog.String("kind", kind), slog.String("sub", p.Sub))
+			slog.String("kind", rec.action.kind), slog.String("sub", p.Sub))
 	}
 	s.begin(w, r, rec.action, c.Value, promptLogin)
 }

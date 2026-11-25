@@ -33,24 +33,24 @@ func methodRequest(sub, path string, cookies ...*http.Cookie) *http.Request {
 	return req
 }
 
-// prepareMethod runs PrepareMethod for sub and returns next, the error and
-// the pending cookie it set (nil when none).
-func (r *signinRig) prepareMethod(sub string, m Method, cookies ...*http.Cookie) (string, error, *http.Cookie) {
+// prepareMethod runs PrepareMethod for sub and returns next, the pending
+// cookie it set (nil when none) and the error.
+func (r *signinRig) prepareMethod(sub string, m Method, cookies ...*http.Cookie) (string, *http.Cookie, error) {
 	w := recorder()
 	next, err := r.si.PrepareMethod(w, methodRequest(sub, "/api/me/sign-in-methods", cookies...), m)
 	for _, c := range w.Result().Cookies() {
 		if c.Name == pendingCookieName && c.Value != "" {
-			return next, err, c
+			return next, c, err
 		}
 	}
-	return next, err, nil
+	return next, nil, err
 }
 
 // startMethod prepares m for sub and starts its fresh sign-in, and returns
 // the begun sign-in.
 func (r *signinRig) startMethod(t *testing.T, sub string, m Method) begun {
 	t.Helper()
-	next, err, pending := r.prepareMethod(sub, m)
+	next, pending, err := r.prepareMethod(sub, m)
 	if err != nil || pending == nil {
 		t.Fatalf("PrepareMethod(%s) = %q, %v", m, next, err)
 	}
@@ -138,7 +138,7 @@ func TestPrepareMethod_TC1150_02(t *testing.T) {
 	r := newSigninRig(t)
 	t.Run("no principal", func(t *testing.T) {
 		before := r.si.pending.size()
-		if _, err, c := r.prepareMethod("", MethodPasskey); !errors.Is(err, ErrNoAction) || c != nil || r.si.pending.size() != before {
+		if _, c, err := r.prepareMethod("", MethodPasskey); !errors.Is(err, ErrNoAction) || c != nil || r.si.pending.size() != before {
 			t.Errorf("err %v cookie %v size %d->%d", err, c, before, r.si.pending.size())
 		}
 	})
@@ -146,7 +146,7 @@ func TestPrepareMethod_TC1150_02(t *testing.T) {
 		before := r.si.pending.size()
 		a := &http.Cookie{Name: pendingCookieName, Value: "one"}
 		b := &http.Cookie{Name: pendingCookieName, Value: "two"}
-		if _, err, c := r.prepareMethod(rigSub, MethodPasskey, a, b); !errors.Is(err, ErrNoAction) || c != nil || r.si.pending.size() != before {
+		if _, c, err := r.prepareMethod(rigSub, MethodPasskey, a, b); !errors.Is(err, ErrNoAction) || c != nil || r.si.pending.size() != before {
 			t.Errorf("err %v cookie %v size %d->%d", err, c, before, r.si.pending.size())
 		}
 	})
@@ -185,16 +185,16 @@ func TestPrepareMethod_TC1150_03_Clock(t *testing.T) {
 	r := newSigninRig(t)
 	r.clock.synced.Store(false)
 	before := r.si.pending.size()
-	if _, err, c := r.prepareMethod(rigSub, MethodAuthenticatorApp); !errors.Is(err, ErrClockNotSet) || c != nil || r.si.pending.size() != before {
+	if _, c, err := r.prepareMethod(rigSub, MethodAuthenticatorApp); !errors.Is(err, ErrClockNotSet) || c != nil || r.si.pending.size() != before {
 		t.Errorf("clock off: err %v cookie %v size %d->%d", err, c, before, r.si.pending.size())
 	}
 	for _, m := range []Method{MethodPasskey, MethodSecurityKey, MethodRecoveryCodes} {
-		if _, err, c := r.prepareMethod(rigSub, m); err != nil || c == nil {
+		if _, c, err := r.prepareMethod(rigSub, m); err != nil || c == nil {
 			t.Errorf("clock off: %s: %v %v", m, err, c)
 		}
 	}
 	r.clock.synced.Store(true)
-	next, err, c := r.prepareMethod(rigSub, MethodAuthenticatorApp)
+	next, c, err := r.prepareMethod(rigSub, MethodAuthenticatorApp)
 	if err != nil || next != "/api/auth/signin?action=add_authenticator_app" || c == nil {
 		t.Fatalf("clock on: %q %v %v", next, err, c)
 	}
@@ -240,7 +240,7 @@ func TestStartMethod_TC1150_04(t *testing.T) {
 		}
 	})
 	t.Run("started by another person", func(t *testing.T) {
-		_, _, pending := r.prepareMethod(rigSub, MethodPasskey)
+		_, pending, _ := r.prepareMethod(rigSub, MethodPasskey)
 		w := recorder()
 		r.si.StartAction(w, methodRequest(bobSub, "/api/auth/signin?action=add_passkey", pending), "add_passkey")
 		if w.Code != http.StatusSeeOther || w.Header().Get("Location") != signinActionFailed {
@@ -295,7 +295,7 @@ func TestIssued_TC1150_06_Binding(t *testing.T) {
 			return consoleAction(flows.ActionPasskeyRegister, "")
 		},
 		"a prepared, not begun record": func(t *testing.T, r *signinRig) policy.ActionRequest {
-			if _, err, c := r.prepareMethod(rigSub, MethodPasskey); err != nil || c == nil {
+			if _, c, err := r.prepareMethod(rigSub, MethodPasskey); err != nil || c == nil {
 				t.Fatal(err)
 			}
 			return consoleAction(flows.ActionPasskeyRegister, "")

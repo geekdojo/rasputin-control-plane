@@ -371,6 +371,10 @@ func (r *methodsRig) tc16(t *testing.T) {
 		t.Error("the return replaced the console session cookie")
 	}
 	r.granted(t, id, before)
+	// First run is over: converge's next run drops the recovery codes as a
+	// default action (TC-990-24), so the accounts the later cases create
+	// carry no required action besides their own.
+	r.converge(t)
 }
 
 // TC-1150-17: a designated account with codes alone cancels the passkey
