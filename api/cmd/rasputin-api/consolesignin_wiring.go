@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/idtoken"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
@@ -127,8 +128,11 @@ type consoleSignInDeps struct {
 	firstRun auth.FirstRunner
 	claimer  auth.Claimer
 	observer auth.Observer
-	now      func() time.Time
-	log      *slog.Logger
+	// clock is the one clock-sync fact main builds, shared with converge
+	// (geekdojo/geekdojo-brain#1150).
+	clock auth.ClockFact
+	now   func() time.Time
+	log   *slog.Logger
 }
 
 // consoleSignIn is what consoleSignInWiring built: the sign-in, and the
@@ -162,6 +166,16 @@ func (w consoleSignIn) install(svc interface {
 	}
 }
 
+// doorActions is the sign-in as the doors' issued-action set, or nil when
+// none was built: the door policy then refuses to build, which keeps the
+// doors closed (geekdojo/geekdojo-brain#1150).
+func (w consoleSignIn) doorActions() policy.Actions {
+	if w.signIn == nil {
+		return nil
+	}
+	return w.signIn
+}
+
 // appResetDone is the app door's reset return, or nil when none was built
 // (the doors then refuse to build, which keeps them closed).
 func (w consoleSignIn) appResetDone() door.ResetDone {
@@ -179,7 +193,7 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 		return consoleSignIn{}, nil
 	}
 	if d.client == nil || d.session == nil || d.ready == nil || d.sessions == nil || d.identity == nil || d.now == nil || d.log == nil || d.host == "" ||
-		d.firstRun == nil || d.claimer == nil || d.observer == nil {
+		d.firstRun == nil || d.claimer == nil || d.observer == nil || d.clock == nil {
 		return consoleSignIn{}, errors.New("console sign-in: a collaborator is nil under keycloak with the doors on")
 	}
 	home := d.table.Home
@@ -191,7 +205,7 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 		Door: home, ConsoleHost: d.host, ClientID: flows.ConsoleClient, Realm: identityRealm,
 		Exchanger: d.client, Verifier: verifier, Ender: sidEnder{session: d.session}, Ready: d.ready,
 		Sessions: d.sessions, FirstRun: d.firstRun, Claimer: d.claimer, Observer: d.observer,
-		Actions: d.actions, Now: d.now, Rand: rand.Reader, Log: d.log,
+		Actions: d.actions, Clock: d.clock, Now: d.now, Rand: rand.Reader, Log: d.log,
 	})
 	if err != nil {
 		return consoleSignIn{}, fmt.Errorf("console sign-in: %w", err)

@@ -392,7 +392,8 @@ func TestSignIn_Action(t *testing.T) {
 	t.Run("another person", func(t *testing.T) {
 		r := newSigninRig(t)
 		w := run(t, r, start(t, r), func(c map[string]any) { c["sub"] = "someone-else" })
-		assertRefused(t, r, w, "/login?signin=failed")
+		// TC-1150-09: another person's return is the action-failed sentence.
+		assertRefused(t, r, w, "/login?signin=action-failed")
 		if r.action.count() != 0 {
 			t.Error("the action ran for another person")
 		}

@@ -56,6 +56,7 @@ func convergeDeps(t *testing.T, mode string, mon *identityState) identityConverg
 		createArmed: func(string, []byte) error { return nil },
 		stat:        func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist },
 		firstRun:    func(context.Context) (bool, error) { return true, nil },
+		clock:       &clockSyncFact{read: readClockSync, log: slog.New(slog.DiscardHandler)},
 		now:         time.Now, log: slog.New(slog.DiscardHandler),
 	}
 }

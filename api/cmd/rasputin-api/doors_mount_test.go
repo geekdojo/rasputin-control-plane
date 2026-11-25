@@ -155,7 +155,7 @@ func newMountFixture(t *testing.T) *mountFixture {
 		dirty:       events.NewSignal(time.Now), now: time.Now, ids: func() string { return "corr" }, log: log,
 		removed: removednames.Unavailable{Err: errors.New("no list in this fixture")},
 		network: mountRegistration{}, waiting: mountRegistration{}, emails: mountRegistration{},
-		resetDone: mountResetDone{},
+		resetDone: mountResetDone{}, actions: policy.NoActionsIssued{},
 	}}
 }
 

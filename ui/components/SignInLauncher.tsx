@@ -25,7 +25,8 @@ export type SignInReturn =
   | 'reset-done'
   | 'reset-incomplete'
   | 'reset-failed'
-  | 'action-failed';
+  | 'action-failed'
+  | 'method-cancelled';
 
 /** One sentence for each reason. */
 export const SIGN_IN_SENTENCES: Record<SignInReturn, string> = {
@@ -41,6 +42,8 @@ export const SIGN_IN_SENTENCES: Record<SignInReturn, string> = {
     "Rasputin couldn't confirm the password reset. If you chose a new password, sign in with it. Otherwise start the reset again.",
   // A fresh-sign-in action that ran and failed, or could not start.
   'action-failed': "Rasputin couldn't finish the change you signed in again for. Try it again.",
+  // A sign-in method the person cancelled adding (geekdojo/geekdojo-brain#1150).
+  'method-cancelled': "Nothing was added to your account. You can add a sign-in method when you're ready.",
 };
 
 /** The create-account link's label: the first account at first run. */

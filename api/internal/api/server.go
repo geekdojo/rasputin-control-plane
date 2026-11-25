@@ -392,6 +392,8 @@ func (s *Server) routes() *routeMux {
 
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
 	gate("POST /api/accounts/{id}/reset-password", needs(authz.NeedControl(authz.IAM)), s.handleResetPassword)
+	// A person adds a sign-in method to their own account (#1150).
+	gate("POST /api/me/sign-in-methods", needs(authz.NeedSelf()), s.handleAddSignInMethod)
 	// Every account change (#994): the request names its kind, so the
 	// router checks Self and the runner decides the kind.
 	gate("POST /api/accounts/jobs", anyJob(), s.handleAccountJob)

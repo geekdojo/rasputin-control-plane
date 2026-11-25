@@ -301,6 +301,26 @@ type signinRig struct {
 	first    *fakeFirstRun
 	claimer  *fakeClaimer
 	observer *fakeObserver
+	// clock is the clock-sync fact (geekdojo/geekdojo-brain#1150); it holds
+	// unless a test turns it off.
+	clock *fakeClockFact
+}
+
+// fakeClockFact is the clock-sync fact, switchable, counting its reads.
+type fakeClockFact struct {
+	synced atomic.Bool
+	reads  atomic.Int64
+}
+
+func newFakeClockFact(synced bool) *fakeClockFact {
+	c := &fakeClockFact{}
+	c.synced.Store(synced)
+	return c
+}
+
+func (c *fakeClockFact) Synced(context.Context) bool {
+	c.reads.Add(1)
+	return c.synced.Load()
 }
 
 // fakeFirstRun answers first run.
@@ -369,12 +389,12 @@ func newSigninRig(t *testing.T) *signinRig {
 	}
 	log, rec := logkittest.New()
 	r := &signinRig{f: f, door: table.Home, app: table.App, is: is, ex: &fakeExchanger{}, ender: &fakeEnder{}, action: &fakeAction{}, log: rec,
-		first: &fakeFirstRun{}, claimer: &fakeClaimer{sub: "sub-earliest"}, observer: &fakeObserver{}}
+		first: &fakeFirstRun{}, claimer: &fakeClaimer{sub: "sub-earliest"}, observer: &fakeObserver{}, clock: newFakeClockFact(true)}
 	r.si, err = NewSignIn(SignInDeps{
 		Door: table.Home, ConsoleHost: rigConsole, ClientID: "rasputin-console", Realm: "rasputin",
 		Exchanger: r.ex, Verifier: v, Ender: r.ender, Ready: fakeReady{}, Sessions: f.sessions,
 		FirstRun: r.first, Claimer: r.claimer, Observer: r.observer,
-		Actions: map[string]Action{"test-action": r.action}, Now: f.clock.Now, Rand: rand.Reader, Log: log,
+		Actions: map[string]Action{"test-action": r.action}, Clock: r.clock, Now: f.clock.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)

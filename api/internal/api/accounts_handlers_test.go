@@ -77,7 +77,7 @@ func resetRoute(t *testing.T, listed bool) (*apiFixture, string) {
 	si, err := auth.NewSignIn(auth.SignInDeps{Door: table.Home, ConsoleHost: "ci.local", ClientID: flows.ConsoleClient, Realm: "rasputin",
 		Exchanger: unusedExchange{}, Verifier: unusedTokens{}, Ender: unusedEnder{}, Ready: readyNow{}, Sessions: f.sessions,
 		FirstRun: f.authSvc, Claimer: unusedClaimer{}, Observer: unusedObserver{},
-		Actions: map[string]auth.Action{accounts.ResetKind: noopAction{}}, Now: time.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
+		Actions: map[string]auth.Action{accounts.ResetKind: noopAction{}}, Clock: syncedClock{}, Now: time.Now, Rand: rand.Reader, Log: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +202,11 @@ func TestResetPassword_TC992_18(t *testing.T) {
 type unusedClaimer struct{}
 
 func (unusedClaimer) Earliest(context.Context) (string, error) { return "", errors.New("unused") }
+
+// syncedClock is a clock-sync fact that holds.
+type syncedClock struct{}
+
+func (syncedClock) Synced(context.Context) bool { return true }
 
 type unusedObserver struct{}
 

@@ -41,6 +41,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -123,7 +124,17 @@ type consoleRig struct {
 	// rig's fixed ones.
 	claim lateClaim
 	reg   lateRegistration
+	// signIn is the console's sign-in, which the home door's policy reads as
+	// its issued actions, as main wires it (geekdojo/geekdojo-brain#1150);
+	// clock is its clock-sync fact, which holds unless a case turns it off.
+	signIn *auth.SignIn
+	clock  *switchClock
 }
+
+// switchClock is the api's clock-sync fact, switchable per case.
+type switchClock struct{ synced atomic.Bool }
+
+func (c *switchClock) Synced(context.Context) bool { return c.synced.Load() }
 
 // lateClaim is the sign-in's first-run predicate, claimer and observer, set
 // after the sign-in is built. Unset, first run is off and the observer is
@@ -404,7 +415,9 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	r := &consoleRig{
 		doorRig:  &doorRig{env: env, sink: &eventSink{}, passes: newPassWatch(), actions: &doorActions{}, cookiesIn: map[string][]string{}},
 		settings: &memSettings{m: map[string]string{}},
+		clock:    &switchClock{},
 	}
+	r.clock.synced.Store(true)
 	log, rec := logkittest.New()
 	r.apiRec = rec
 	apiLeaf, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-api"})
@@ -447,13 +460,14 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		Door: table.Home, ConsoleHost: ConsoleHost, ClientID: baselineConsole, Realm: baselineRealm,
 		Exchanger: recordingExchanger{inner: client, r: r}, Verifier: verifier, Ender: adminEnder{s: r.session},
 		Ready: doorReady{}, Sessions: r.sessions, FirstRun: &r.claim, Claimer: &r.claim, Observer: &r.claim,
-		Actions: r.signInActions(),
-		Now:     time.Now, Rand: rand.Reader, Log: log,
+		Actions: r.signInActions(), Clock: r.clock,
+		Now: time.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.authSvc.SetSignIn(si)
+	r.signIn = si
 	// The reset returns, as main wires them (#992): each door's own
 	// verifier, #991's ender and the console sessions.
 	ender := sessions.Ender{Admin: r.session}
@@ -496,7 +510,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: consoleApps{},
-		Actions: r.actions, Network: &r.reg, Waiting: &r.reg, Removed: &r.reg, Emails: &r.reg, Now: time.Now, Bindings: r.conv})
+		Actions: si, Network: &r.reg, Waiting: &r.reg, Removed: &r.reg, Emails: &r.reg, Now: time.Now, Bindings: r.conv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,7 +533,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	}
 	t.Cleanup(relay.CloseIdleConnections)
 	r.home, r.app, err = door.Build(table, door.Shared{
-		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
+		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: countingTransport{inner: relay, n: &r.upstream},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return consoleInstall, nil }, Dirty: r.drainer,
 		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, ResetDone: appReset, Log: log,

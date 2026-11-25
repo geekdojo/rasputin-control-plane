@@ -43,6 +43,11 @@ type noObserver struct{}
 
 func (noObserver) SignedIn(context.Context, string) {}
 
+// syncedClock is a clock-sync fact that holds.
+type syncedClock struct{}
+
+func (syncedClock) Synced(context.Context) bool { return true }
+
 type readyNow struct{}
 
 func (readyNow) Ready(context.Context) error { return nil }
@@ -85,7 +90,7 @@ func TestConsoleSignInWiring_OnlyUnderKeycloakWithDoors(t *testing.T) {
 			w, err := consoleSignInWiring(t.Context(), consoleSignInDeps{mode: mode, doorsOn: doorsOn, table: table, host: "ci.local",
 				client: idclient.Disabled{Kind: idclient.ErrDisabled}, session: &recordingAdmin{}, ready: readyNow{},
 				sessions: sessions, identity: sessionsEnder(), firstRun: notFirstRun{}, claimer: noClaimer{}, observer: noObserver{},
-				now: time.Now, log: slog.New(slog.DiscardHandler)})
+				clock: syncedClock{}, now: time.Now, log: slog.New(slog.DiscardHandler)})
 			if err != nil {
 				t.Fatalf("%s doors=%v: %v", mode, doorsOn, err)
 			}
