@@ -762,9 +762,10 @@ func (r *resetRig) tc30(t *testing.T) {
 	}
 }
 
-// TC-992-32 (T202): Keycloak answers set_temporary's Admin API reset with
-// 500 for a listed and for a 14-character password; the step fails with the
-// rule's sentence and the credential is unchanged.
+// TC-992-32 (T202): our Keycloak build (features-disabled=admin, finding
+// F-1145-41) answers set_temporary's Admin API reset with 500 for a listed
+// and for a 14-character password; the step fails with the rule's sentence
+// and the credential is unchanged.
 func (r *resetRig) tc32(t *testing.T) {
 	id, _ := r.household(t, "reset-classify")
 	listed, _ := listedEntries(t, r.env.kcHome)

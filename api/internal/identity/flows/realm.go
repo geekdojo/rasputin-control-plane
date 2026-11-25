@@ -71,6 +71,15 @@ const (
 	// not the username, not the email, and not on the deny list, a pinned
 	// third-party list of common and breached passwords.
 	PasswordPolicy = "length(15) and maxLength(128) and notUsername(undefined) and notEmail(undefined) and passwordBlacklist(" + DenylistFile + ")"
+	// DenylistFalsePositiveProbability is the false-positive probability of
+	// the Bloom filter Keycloak checks the deny list through, its runtime
+	// option spi-password-policy--password-blacklist--false-positive-probability.
+	// Keycloak's default, 1.0E-4, refused about 1 in 10,000 passwords that
+	// are not on the list (finding F-1145-40, geekdojo/geekdojo-brain#1145,
+	// record dev-records/geekdojo/geekdojo-brain/1145/verification/flake-rca-2026-11-25.md).
+	// A Bloom filter has no false negatives, so every listed password is
+	// still refused; the filter grows from about 300 KB to about 670 KB.
+	DenylistFalsePositiveProbability = "1e-9"
 )
 
 func seconds(d time.Duration) int { return int(d / time.Second) }

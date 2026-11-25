@@ -341,6 +341,23 @@ func TestRenderKeycloakConf(t *testing.T) {
 	}
 }
 
+// Finding F-1145-40: keycloak.conf sets the deny list's Bloom filter
+// false-positive probability to flows.DenylistFalsePositiveProbability, in
+// the front's form and in door mode, and the value is far below Keycloak's
+// default 1.0E-4, which refused about 1 in 10,000 unlisted passwords.
+func TestRenderKeycloakConf_DenylistFalsePositiveProbability(t *testing.T) {
+	want := "spi-password-policy--password-blacklist--false-positive-probability=" + flows.DenylistFalsePositiveProbability
+	for _, hostname := range []string{"https://127.0.0.1:19000", ""} {
+		conf := string(renderKeycloakConf(kcPaths{}, kcPorts{}, hostname, secret.New([]byte("pw"))))
+		if !strings.Contains("\n"+conf, "\n"+want+"\n") {
+			t.Errorf("hostname %q: keycloak.conf lacks the line %q:\n%s", hostname, want, conf)
+		}
+	}
+	if p, err := strconv.ParseFloat(flows.DenylistFalsePositiveProbability, 64); err != nil || p <= 0 || p > 1e-8 {
+		t.Errorf("DenylistFalsePositiveProbability = %q (%v, %v); want a number in (0, 1e-8]", flows.DenylistFalsePositiveProbability, p, err)
+	}
+}
+
 // TC-966-07: the realm is valid JSON with realm harness, the public client
 // with the standard flow, S256 PKCE and the one redirect URI, and one enabled
 // user with the given password and no required actions. A password with
