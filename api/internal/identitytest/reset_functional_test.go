@@ -118,11 +118,6 @@ func newResetRig(t *testing.T, env *Env) *resetRig {
 	return r
 }
 
-// name is a fresh account name for one case.
-func (r *resetRig) name(what string) string {
-	return "reset-" + what + "-" + string(rune('a'+r.n.Add(1)%26))
-}
-
 // household is an account with a password and app access, and its id.
 func (r *resetRig) household(t *testing.T, name string) (string, secret.Value) {
 	t.Helper()
