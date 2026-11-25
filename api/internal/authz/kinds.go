@@ -62,8 +62,8 @@ func RepairSession() Submitter {
 }
 
 // BridgeGrant is a live bridge grant for accountID (Identity 5.2): it holds
-// Self only, and passes only the bridge rule for its own account. Nothing
-// constructs it yet. An empty accountID is the zero Submitter.
+// Self only, and passes only the bridge rule for its own account. Only
+// package auth's bridge constructs it. An empty accountID is the zero Submitter.
 func BridgeGrant(accountID string) Submitter {
 	if accountID == "" {
 		return Submitter{}

@@ -8,8 +8,10 @@ package identitytest
 // kind table decides with the move's state. A fixture rasputin.db is built
 // here by auth.Store with five pre-update operators, each with a passkey
 // row (a soft P-256 authenticator's COSE key, its private key kept by the
-// fixture) and a session row. A synthetic password set through the Admin
-// API stands in for Identity 5.2's bridge.
+// fixture) and a session row. Identity 5.2's bridge (geekdojo/geekdojo-brain#1005,
+// TC-1005-29 to -32; TS-31's bridge leg) sets each moved operator's first
+// password and email through auth.Service's real routes, from the
+// fixture's old soft passkey, and the old sessions are read after the move.
 //
 // It starts an Env of its own, closed with proof in its cleanup. It skips
 // without RASPUTIN_IDENTITY_HOME or RASPUTIN_IDENTITY_THEME and fails instead
@@ -23,7 +25,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -35,10 +42,12 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/passkeytest"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/move"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/pwpolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -70,6 +79,13 @@ type moveRig struct {
 	removedID string // the moved person accounts.delete removed (TC-1004-06)
 	ids       map[string]string
 	created   map[string]int64
+	// codes are each moved operator's saved recovery codes, by id.
+	codes map[string][]string
+	// passwords are the first passwords the bridge set, by id.
+	passwords map[string]secret.Value
+	// beforeKept is the old tables' dump taken after the fixture, without
+	// the rows of the person TC-1004-06 removes.
+	beforeKept map[string]string
 }
 
 func newMoveRig(t *testing.T, env *Env) *moveRig {
@@ -107,18 +123,40 @@ func newMoveRig(t *testing.T, env *Env) *moveRig {
 		t.Fatal(err)
 	}
 	r.moveRunner.Register(mover.Workflow())
+	r.installBridge(t, log)
+	r.codes, r.passwords = map[string][]string{}, map[string]secret.Value{}
 	return r
 }
 
-// coseP256 is key's public half as a COSE_Key (RFC 9053: kty EC2, alg
-// ES256, crv P-256, x, y), as a WebAuthn authenticator registers it.
-func coseP256(key *ecdsa.PrivateKey) []byte {
-	pub, _ := key.PublicKey.ECDH()
-	raw := pub.Bytes() // 0x04 || x || y
-	out := []byte{0xa5, 0x01, 0x02, 0x03, 0x26, 0x20, 0x01, 0x21, 0x58, 0x20}
-	out = append(out, raw[1:33]...)
-	out = append(out, 0x22, 0x58, 0x20)
-	return append(out, raw[33:65]...)
+// installBridge installs the move's bridge on the console's auth service
+// as main wires it (identitymove_wiring.go): move.Accounts over the
+// record, the old store and the designations; accounts.set_first_password
+// on the move's authorized runner, so the kind table decides its bridge
+// grant; the real password policy over a staged deny list.
+func (r *moveRig) installBridge(t *testing.T, log *slog.Logger) {
+	t.Helper()
+	accts, err := move.NewAccounts(r.moveStore, r.state, r.store, r.designations)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, flows.DenylistFile), []byte("correcthorsebatterystaple\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	checker, err := pwpolicy.New(dir, flows.PasswordPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp, err := accounts.NewFirstPassword(accounts.FirstPasswordDeps{Users: r.users, Checker: checker, Removed: r.removed, Facts: r.moveStore,
+		Runner: r.moveRunner, Passwords: accounts.NewHeld(), Emails: accounts.NewHeld(), Lock: &sync.Mutex{}, Log: log, StepTimeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.moveRunner.Register(fp.Workflow())
+	if err := r.authSvc.InstallBridge(auth.BridgeDeps{Accounts: accts, FirstPassword: fp, SignInOrigin: "https://" + r.sites.Table.Home.Host,
+		NewCorrelationID: rand.Text, Now: time.Now, Rand: rand.Reader, Log: log}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // seed writes the five pre-update operators with a passkey row and a
@@ -142,7 +180,7 @@ func (r *moveRig) seed(t *testing.T) {
 		if err := r.store.CreateUser(ctx, &auth.User{ID: h, Name: o.name, DisplayName: "Old " + o.name, CreatedAt: at}); err != nil {
 			t.Fatal(err)
 		}
-		if err := r.store.CreateCredential(ctx, &auth.Credential{ID: append([]byte("pk-"), h...), UserID: h, PublicKey: coseP256(key),
+		if err := r.store.CreateCredential(ctx, &auth.Credential{ID: append([]byte("pk-"), h...), UserID: h, PublicKey: passkeytest.COSE(key),
 			AttestationType: "none", CreatedAt: at}); err != nil {
 			t.Fatal(err)
 		}
@@ -332,23 +370,199 @@ func (r *moveRig) assertMoved(t *testing.T, o oldOp) {
 	}
 }
 
-// setPassword is the synthetic password that stands in for 5.2's bridge.
-func (r *moveRig) setPassword(t *testing.T, id string) secret.Value {
+// authenticator is o's old soft passkey, as the fixture registered it.
+func (o oldOp) authenticator() *passkeytest.Authenticator {
+	return &passkeytest.Authenticator{Key: o.key, CredentialID: append([]byte("pk-"), o.handle...), UserHandle: o.handle}
+}
+
+// consoleURL is path on the console.
+func consoleURL(path string) string { return "https://" + ConsoleHost + path }
+
+// postJSON posts body as JSON to the console's path from g, its cookies
+// included.
+func postJSON(t *testing.T, g *goClient, path string, body []byte) doorAnswer {
 	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, consoleURL(path), strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := g.c.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s: %v", path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doorAnswer{status: resp.StatusCode, header: resp.Header, body: raw, at: req.URL}
+}
+
+// codeIn is a coded body's code.
+func codeIn(a doorAnswer) string {
+	var b struct{ Code string }
+	_ = json.Unmarshal(a.body, &b)
+	return b.Code
+}
+
+// ceremony runs the bridge's ceremony from g with o's old passkey and
+// returns finish's answer.
+func (r *moveRig) ceremony(t *testing.T, g *goClient, o oldOp) doorAnswer {
+	t.Helper()
+	begin := postJSON(t, g, "/api/auth/bridge/begin", nil)
+	if begin.status != http.StatusOK {
+		t.Fatalf("%s: begin %d %s", o.want, begin.status, begin.body)
+	}
+	ch, err := passkeytest.ChallengeOf(begin.body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertion, err := o.authenticator().Assert(passkeytest.Request{Challenge: ch, RPID: ConsoleHost, Origin: "https://" + ConsoleHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return postJSON(t, g, "/api/auth/bridge/finish", assertion)
+}
+
+// hasConsoleSession reports whether g holds a console session cookie.
+func hasConsoleSession(g *goClient) bool {
+	u, _ := url.Parse(consoleURL("/"))
+	for _, c := range g.jar.Cookies(u) {
+		if c.Name == auth.SessionCookieName {
+			return true
+		}
+	}
+	return false
+}
+
+// bridge sets o's first password and email through the bridge
+// (TC-1005-29, TC-1005-30): the grant is single-use, acts only for its own
+// account and opens no session; the account reads back an unconfirmed
+// email and a password that is not temporary; the job's spec holds only
+// the account id; a second ceremony is refused has_password.
+func (r *moveRig) bridge(t *testing.T, o oldOp, email string) secret.Value {
+	t.Helper()
+	id := auth.MovedAccountID(o.handle)
 	pw, err := randomSecret(r.env.h.cfg.Rand)
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.top.Cleanup(pw.Destroy)
-	r.admin(t).must(http.StatusNoContent, http.MethodPut, "/users/"+id+"/reset-password",
-		map[string]any{"type": "password", "value": string(pw.Reveal()), "temporary": false})
+	r.passwords[id] = pw
+	g, _ := r.next(t)
+	sessions := r.countRows(t, "console_sessions")
+	if fin := r.ceremony(t, g, o); fin.status != http.StatusOK {
+		t.Fatalf("%s: finish %d %s", o.want, fin.status, fin.body)
+	}
+	var grant struct {
+		Name         string `json:"name"`
+		PreviousName string `json:"previousName"`
+	}
+	st := g.send(http.MethodGet, consoleURL("/api/auth/bridge"), nil, nil)
+	if err := json.Unmarshal(st.body, &grant); err != nil || grant.Name != o.want || (o.name != o.want && grant.PreviousName != o.name) {
+		t.Errorf("%s: the grant reads %s", o.want, st.body)
+	}
+	body, _ := json.Marshal(map[string]string{"password": string(pw.Reveal()), "email": email})
+	if a := postJSON(t, g, "/api/auth/bridge/password", body); a.status != http.StatusOK {
+		t.Fatalf("%s: password %d %s", o.want, a.status, a.body)
+	}
+	if a := postJSON(t, g, "/api/auth/bridge/password", body); a.status != http.StatusConflict || codeIn(a) != auth.BridgeCodeGrantUsed {
+		t.Errorf("%s: the grant's second use: %d %s", o.want, a.status, a.body)
+	}
+	if hasConsoleSession(g) || r.countRows(t, "console_sessions") != sessions {
+		t.Errorf("%s: the bridge opened a console session", o.want)
+	}
+	js, err := r.ledger.ListJobsByKind(t.Context(), accounts.FirstPasswordKind, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := 0
+	for _, j := range js {
+		if strings.Contains(string(j.Spec), id) {
+			mine++
+			if string(j.Spec) != `{"accountId":"`+id+`"}` || j.CreatedBy != id || j.Status != jobs.StatusSucceeded {
+				t.Errorf("%s: the job %s by %q, %s", o.want, j.Spec, j.CreatedBy, j.Status)
+			}
+		} else if j.CreatedBy == id {
+			t.Errorf("%s: a job for another account: %s", o.want, j.Spec)
+		}
+	}
+	if mine != 1 {
+		t.Errorf("%s: %d first-password jobs, want 1", o.want, mine)
+	}
+	rep := r.rep(t, id)
+	attrs, _ := rep["attributes"].(map[string]any)
+	actions, _ := rep["requiredActions"].([]any)
+	if rep["email"] != strings.ToLower(email) || attrs[flows.AttrConfirmedEmail] != nil || slices.Contains(actions, any("UPDATE_PASSWORD")) {
+		t.Errorf("%s: email %v, confirmed %v, required actions %v", o.want, rep["email"], attrs[flows.AttrConfirmedEmail], actions)
+	}
+	if !slices.Contains(r.credTypes(t, id), "password") {
+		t.Errorf("%s: credentials %v, want a password", o.want, r.credTypes(t, id))
+	}
+	g2, _ := r.next(t)
+	if again := r.ceremony(t, g2, o); again.status != http.StatusConflict || codeIn(again) != auth.BridgeCodeHasPassword {
+		t.Errorf("%s: a second bridge: %d %s", o.want, again.status, again.body)
+	}
 	return pw
+}
+
+// countRows counts table's rows in rasputin.db.
+func (r *moveRig) countRows(t *testing.T, table string) int {
+	t.Helper()
+	db := r.db(t)
+	defer func() { _ = db.Close() }()
+	var n int
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// oldMe is /api/auth/me for o's pre-update session cookie alone.
+func (r *moveRig) oldMe(t *testing.T, o oldOp) (int, map[string]any) {
+	t.Helper()
+	g, _ := r.next(t)
+	a := g.send(http.MethodGet, consoleURL("/api/auth/me"), nil, http.Header{"Cookie": {"rasputin-session=" + fmt.Sprintf("old-session-%x", o.handle)}})
+	var m map[string]any
+	_ = json.Unmarshal(a.body, &m)
+	return a.status, m
+}
+
+// dumpKept is the old tables without the rows of handle.
+func (r *moveRig) dumpKept(t *testing.T, handle []byte) map[string]string {
+	t.Helper()
+	db := r.db(t)
+	defer func() { _ = db.Close() }()
+	out := map[string]string{}
+	for table, col := range map[string]string{"users": "id", "credentials": "user_id", "sessions": "user_id"} {
+		rows, err := db.QueryContext(t.Context(), "SELECT * FROM "+table+" WHERE "+col+" <> ? ORDER BY 1", handle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cols, _ := rows.Columns()
+		var b strings.Builder
+		for rows.Next() {
+			vals := make([]any, len(cols))
+			ptrs := make([]any, len(cols))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			if err := rows.Scan(ptrs...); err != nil {
+				t.Fatal(err)
+			}
+			fmt.Fprintf(&b, "%#v\n", vals)
+		}
+		_ = rows.Close()
+		out[table] = b.String()
+	}
+	return out
 }
 
 // drive answers the sign-in's pages until the console: the profile page
 // (the email the person sets first), the recovery codes (atCodes runs on
 // the page, before they are saved) and the authenticator app.
-func (r *moveRig) drive(t *testing.T, p person, a doorAnswer, atCodes func()) {
+func (r *moveRig) drive(t *testing.T, p person, a doorAnswer, atCodes func(doorAnswer)) {
 	t.Helper()
 	for range 6 {
 		switch a.pageID() {
@@ -357,7 +571,7 @@ func (r *moveRig) drive(t *testing.T, p person, a doorAnswer, atCodes func()) {
 			a = p.g.submit(a, "kc-update-profile-form", map[string]string{"firstName": "Moved", "email": p.email})
 		case "login-login-recovery-authn-code-config":
 			if atCodes != nil {
-				atCodes()
+				atCodes(a)
 			}
 			a = r.saveCodes(t, p, a)
 		case "login-login-config-totp":
@@ -380,19 +594,23 @@ func (r *moveRig) requireTOTP(t *testing.T, id string) {
 	r.admin(t).must(http.StatusNoContent, http.MethodPut, "/users/"+id, rep)
 }
 
-// complete signs the moved operator in with a password, saves recovery
+// complete sets the moved operator's first password and email through the
+// bridge, signs in with the password (no console role), saves recovery
 // codes, then enrols an authenticator app at the next sign-in, checking
-// the console roles after each.
+// the console roles after each (TC-1005-31).
 func (r *moveRig) complete(t *testing.T, o oldOp) (string, []string) {
 	t.Helper()
 	id := auth.MovedAccountID(o.handle)
-	pw := r.setPassword(t, id)
+	email := o.want + "@move.invalid"
+	pw := r.bridge(t, o, email)
 	g, _ := r.next(t)
-	p := person{name: o.want, email: o.want + "@move.invalid", pw: pw, g: g}
-	r.drive(t, p, g.signIn(consoleSignin(), o.want, pw), func() {
+	p := person{name: o.want, email: email, pw: pw, g: g}
+	r.drive(t, p, g.signIn(consoleSignin(), o.want, pw), func(a doorAnswer) {
 		if c := r.consoleRoles(t, id); len(c) != 0 {
 			t.Errorf("%s: after a password-only sign-in, console roles %v", o.want, c)
 		}
+		fields, _ := g.form(a, "kc-recovery-codes-settings-form")
+		r.codes[id] = strings.Split(fields.Get("generatedRecoveryAuthnCodes"), ",")
 	})
 	r.runner.Wait()
 	afterCodes := r.consoleRoles(t, id)
@@ -431,11 +649,16 @@ func TestMove_AgainstPinnedKeycloak(t *testing.T) {
 	var before map[string]string
 	t.Run("TC-1004-01 TC-1004-08 the fixture and a door account that took bryce", func(t *testing.T) { before = r.tcFixture(t) })
 	t.Run("TC-1004-04 TC-1004-06 TC-1004-08 the move", func(t *testing.T) { r.tcMove(t, before) })
+	t.Run("TC-1005-32 old sessions after the move", func(t *testing.T) { r.tc1005_32(t) })
 	t.Run("TC-1004-02 a re-run creates no second account", func(t *testing.T) { r.tc02(t, before) })
 	t.Run("TC-1004-02 F-1004-10 a re-run whose mapping changed keeps the held names", func(t *testing.T) { r.tc02Remapped(t) })
-	t.Run("TC-1004-04 C29 the first to finish becomes administrator", func(t *testing.T) { r.tc04(t) })
-	t.Run("TC-1004-05 C25 the second to finish waits", func(t *testing.T) { r.tc05(t) })
+	t.Run("TC-1004-04 TC-1005-29 TC-1005-30 TC-1005-31 C29 the first to finish, through the bridge, becomes administrator", func(t *testing.T) {
+		r.tc04(t)
+		r.tc1005_31(t)
+	})
+	t.Run("TC-1004-05 TC-1005-32 C25 the second to finish waits", func(t *testing.T) { r.tc05(t) })
 	t.Run("TC-1004-06 C15 deleting a moved person", func(t *testing.T) { r.tc06(t) })
+	t.Run("TC-1005-32 the old tables after the bridge", func(t *testing.T) { r.tc1005_32Tables(t) })
 	var token string
 	t.Run("TC-1004-20 the repair re-run's refusals", func(t *testing.T) { token = r.tc20(t) })
 	t.Run("TC-1004-07 the repair re-run leaves the removed person out", func(t *testing.T) { r.tc07(t, token) })
@@ -511,6 +734,7 @@ func (r *moveRig) tcFixture(t *testing.T) map[string]string {
 	if _, ok := r.designation(t, r.door); ok || len(r.consoleRoles(t, r.door)) != 0 {
 		t.Errorf("the door account was designated or given a role")
 	}
+	r.beforeKept = r.dumpKept(t, r.ops[4].handle)
 	return r.dump(t)
 }
 
@@ -671,6 +895,11 @@ func (r *moveRig) tc05(t *testing.T) {
 	if x, _ := r.designation(t, id); x.Reason != accounts.ReasonWaiting {
 		t.Fatalf("after the first administrator, %s is %q, want waiting", o.want, x.Reason)
 	}
+	// TC-1005-32: once the first account is administrator, b-1's old
+	// session holds no console role and still needs a password.
+	if code, m := r.oldMe(t, o); code != http.StatusOK || fmt.Sprint(m["roles"]) != "[]" || fmt.Sprint(m["preUpdate"]) != "map[needsPassword:true]" {
+		t.Errorf("b-1's old session after the first administrator: %d %v", code, m)
+	}
 	_, _ = r.complete(t, o)
 	if c := r.consoleRoles(t, id); len(c) != 0 {
 		t.Errorf("the second to finish holds %v", c)
@@ -805,4 +1034,61 @@ func (r *moveRig) tc07(t *testing.T, token string) {
 		}
 	}
 	r.status(t, "after the repair re-run")
+}
+
+// TC-1005-32 (issue TC-05): after the move, a fixture old session is an
+// administrator session of its moved account that needs a password.
+func (r *moveRig) tc1005_32(t *testing.T) {
+	for _, o := range []oldOp{r.ops[0], r.ops[2]} {
+		code, m := r.oldMe(t, o)
+		if code != http.StatusOK || m["sub"] != auth.MovedAccountID(o.handle) || m["name"] != o.want ||
+			fmt.Sprint(m["roles"]) != "[admin]" || fmt.Sprint(m["preUpdate"]) != "map[needsPassword:true]" {
+			t.Errorf("%s's old session after the move: %d %v", o.want, code, m)
+		}
+	}
+}
+
+// TC-1005-31 (issue TC-04), the end: with the authenticator app enrolled,
+// the password alone no longer reaches the console, and the password with
+// a saved recovery code standing in for the second step does.
+func (r *moveRig) tc1005_31(t *testing.T) {
+	o := r.ops[0]
+	id := auth.MovedAccountID(o.handle)
+	codes := r.codes[id]
+	if len(codes) < 2 {
+		t.Fatalf("%d recovery codes saved", len(codes))
+	}
+	pw := r.passwords[id]
+	g, _ := r.next(t)
+	a := g.signIn(consoleSignin(), o.want, pw)
+	if !isSecondStep(a.pageID()) {
+		t.Fatalf("the password alone reached %q, want a second step", a.pageID())
+	}
+	rec := recoveryInstead(t, r.settle, g, a)
+	if rec.pageID() != "login-login-recovery-authn-code-input" {
+		t.Fatalf("want the recovery-code page, got %q", rec.pageID())
+	}
+	r.settle(t)
+	done := g.submit(rec, "kc-recovery-code-login-form", map[string]string{"recoveryCodeInput": codes[0]})
+	r.atConsole(t, person{name: o.want, g: g}, done)
+	if !slices.Contains(r.consoleRoles(t, id), string(authz.Admin)) {
+		t.Errorf("console roles %v", r.consoleRoles(t, id))
+	}
+}
+
+// tc1005_32Tables: the old tables are byte-equal to the fixture's except
+// for the removed person's credentials and sessions rows (C15): the
+// bridge wrote none of them.
+func (r *moveRig) tc1005_32Tables(t *testing.T) {
+	if got := r.dumpKept(t, r.ops[4].handle); !mapsEqual(got, r.beforeKept) {
+		t.Errorf("the old tables changed beyond C15's rows")
+	}
+	db := r.db(t)
+	defer func() { _ = db.Close() }()
+	for _, table := range []string{"credentials", "sessions"} {
+		var n int
+		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM "+table+" WHERE user_id = ?", r.ops[4].handle).Scan(&n); err != nil || n != 0 {
+			t.Errorf("the removed person's %s: %d (%v)", table, n, err)
+		}
+	}
 }

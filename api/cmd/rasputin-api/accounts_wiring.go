@@ -117,6 +117,9 @@ type accountsWiring struct {
 	grantWaiting jobs.Workflow
 	lock         sync.Locker
 	facts        accessFacts
+	// checker is the password policy, which the move's bridge checks a
+	// first password against too (#1005).
+	checker *pwpolicy.Checker
 }
 
 // wireAccounts builds the accounts under keycloak. A removed-name list that
@@ -238,7 +241,7 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 		resetter: resetter, resetAction: action, reset: reset,
 		users: users, first: first, waiting: waiting, observer: observer, granter: granter,
 		requests: requests, freshAction: freshAction, changes: changes,
-		grantWaiting: grantWaiting, lock: lock, facts: facts}, nil
+		grantWaiting: grantWaiting, lock: lock, facts: facts, checker: checker}, nil
 }
 
 // register registers identity.revoke, accounts.reset_password,

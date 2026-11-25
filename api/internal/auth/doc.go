@@ -5,8 +5,9 @@
 // back-channel logout route and the role-change sink that end sessions, the
 // first-run predicate and its claim (geekdojo/geekdojo-brain#990: the
 // account created first is designated the first administrator, in its
-// session's transaction), and the pre-update passkey store Identity 5.2
-// reads.
+// session's transaction), and the move's bridge over the pre-update
+// passkeys with the pre-update session (geekdojo/geekdojo-brain#1005,
+// Identity 5.2: bridge.go, preupdate.go).
 //
 // See projects/rasputin/design/control-plane/architecture.md §7.7
 // in the geekdojo-brain.

@@ -391,8 +391,9 @@ func TestRouteClasses_TC1002_14_SigninIsClosed(t *testing.T) {
 	m := newRouteMux()
 	f.srv.auth.RegisterRoutes(signinRegistrar{m})
 	signin := m.SigninPatterns()
-	if len(signin) != 10 {
-		t.Errorf("auth.RegisterRoutes registered %d patterns, want 10", len(signin))
+	// 14 since the move's bridge's four (geekdojo/geekdojo-brain#1005).
+	if len(signin) != 14 {
+		t.Errorf("auth.RegisterRoutes registered %d patterns, want 14", len(signin))
 	}
 	for p := range signin {
 		why, ok := openRoutes[p]

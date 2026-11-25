@@ -455,21 +455,30 @@ func (r *rulesRig) saveCodes(t *testing.T, g *goClient, a doorAnswer) (doorAnswe
 	return r.post(t, g, a, "kc-recovery-codes-settings-form", nil), codes
 }
 
-// tryAnotherWay asks for the other ways from a second-step page and picks
+// recoveryInstead asks for the other ways from a second-step page and picks
 // the recovery code.
 func (r *rulesRig) recoveryInstead(t *testing.T, g *goClient, a doorAnswer) doorAnswer {
+	t.Helper()
+	return recoveryInstead(t, r.settle, g, a)
+}
+
+// recoveryInstead is the "try another way" walk to the recovery-code page,
+// shared by the rules rig and the move rig (geekdojo/geekdojo-brain#1005).
+// settle drains the source's last credential post before each post.
+func recoveryInstead(t *testing.T, settle func(*testing.T), g *goClient, a doorAnswer) doorAnswer {
 	t.Helper()
 	if a.pageID() == "login-login-recovery-authn-code-input" {
 		return a
 	}
-	sel := r.post(t, g, a, "kc-select-try-another-way-form", nil)
+	settle(t)
+	sel := g.submit(a, "kc-select-try-another-way-form", nil)
 	if sel.pageID() != "login-select-authenticator" {
 		t.Fatalf("try another way opened %q, want the chooser", sel.pageID())
 	}
 	_, action := g.form(sel, "kc-select-credential-form")
 	for _, m := range regexp.MustCompile(`(?s)<button[^>]*name="authenticationExecution"[^>]*value="([^"]+)"[^>]*>(.*?)</button>`).FindAllSubmatch(sel.body, -1) {
 		if strings.Contains(strings.ToLower(string(m[2])), "recovery") {
-			r.settle(t)
+			settle(t)
 			b := g.send(http.MethodPost, action, url.Values{"authenticationExecution": {string(m[1])}}, nil)
 			if b.status >= 300 && b.status < 400 && b.loc != nil {
 				return g.follow(b.at.ResolveReference(b.loc).String())
