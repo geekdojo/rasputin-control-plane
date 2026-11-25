@@ -154,6 +154,11 @@ type consoleStackOpts struct {
 	// runner's primary address, the break-glass LAN origin
 	// (geekdojo/geekdojo-brain#321, F-321-03).
 	allAddrs bool
+	// clockSynced puts systemd-timesyncd's synchronized marker in place
+	// before the api starts, so the clock-sync fact holds and converge
+	// enables the authenticator app (geekdojo/geekdojo-brain#987). The
+	// runner has no timesyncd, so without it CONFIGURE_TOTP is disabled.
+	clockSynced bool
 }
 
 // startConsoleStack starts the api built from this tree and the pinned
@@ -212,6 +217,9 @@ func startConsoleStack(t *testing.T, opts consoleStackOpts) (*consoleStack, cont
 	}
 	if s.kcMgmt, err = proctest.FreePort(); err != nil {
 		t.Fatal(err)
+	}
+	if opts.clockSynced {
+		markClockSynced(t)
 	}
 	s.startAPI(apiBin)
 	s.awaitFiles(ctx, "the api minted the identity CA and its leaves",

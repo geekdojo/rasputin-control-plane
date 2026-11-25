@@ -52,6 +52,10 @@ const (
 	repairSocket    = "/run/rasputin-repair/repair-code.sock"
 	repairCookie    = "__Host-rasputin-repair"
 	breakGlassAdmin = "break-glass-admin-fixture"
+	// clockSyncDir and clockSyncMarker are systemd-timesyncd's signal, as
+	// the api reads it (cmd/rasputin-api main.go clockSyncDir).
+	clockSyncDir    = "/run/systemd/timesync"
+	clockSyncMarker = clockSyncDir + "/synchronized"
 )
 
 var (
@@ -78,7 +82,7 @@ func TestIdentitySystemd_BreakGlass(t *testing.T) {
 			return
 		}
 	}
-	s, ctx, admin := startConsoleStack(t, consoleStackOpts{allAddrs: true})
+	s, ctx, admin := startConsoleStack(t, consoleStackOpts{allAddrs: true, clockSynced: true})
 	if s == nil {
 		return
 	}
@@ -108,6 +112,33 @@ func TestIdentitySystemd_BreakGlass(t *testing.T) {
 	chrome := bg.tc27ChromeAndTC32Restart()
 	bg.tc33AdminSignIn(chrome)
 	bg.tc34APIRestart()
+}
+
+// markClockSynced makes the clock-sync fact hold on the runner, which runs
+// no systemd-timesyncd: the administrator fixture enrols an authenticator
+// app, which converge enables only while the fact holds (TC-987-05). It
+// writes timesyncd's marker, and its directory when absent, and removes
+// only what it wrote at cleanup. A marker already there is left alone.
+func markClockSynced(t *testing.T) {
+	t.Helper()
+	if _, err := os.Stat(clockSyncMarker); err == nil {
+		return
+	}
+	made := clockSyncMarker
+	if _, err := os.Stat(clockSyncDir); errors.Is(err, os.ErrNotExist) {
+		made = clockSyncDir
+	}
+	if err := os.MkdirAll(clockSyncDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clockSyncMarker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(made); err != nil {
+			t.Errorf("remove %s: %v", made, err)
+		}
+	})
 }
 
 // code runs `rasputin-api repair-code` as root in a pty and returns the code
@@ -462,6 +493,22 @@ func (bg *breakGlass) signInAdmin() {
 		t.Fatal(err)
 	}
 	defer pw.Destroy()
+	// The enrolment needs the authenticator app offered: converge enables
+	// CONFIGURE_TOTP once it reads the clock-sync fact (markClockSynced).
+	err = proctest.Await(bg.ctx, nil, func(ctx context.Context) (bool, string, error) {
+		var a struct {
+			Enabled bool `json:"enabled"`
+		}
+		if _, err := bg.admin.Admin(ctx, http.MethodGet, "/admin/realms/"+baselineRealm+"/authentication/required-actions/"+flows.ActionConfigureTOTP, nil, &a); err != nil {
+			return false, err.Error(), nil
+		}
+		return a.Enabled, "CONFIGURE_TOTP is disabled", nil
+	}, func(last string) {
+		bg.s.cfg.Logger.Info("break-glass: waiting for the authenticator app to be enabled", "last", last)
+	})
+	if err != nil {
+		t.Fatal(errNamed("converge enabled CONFIGURE_TOTP for the administrator fixture", err))
+	}
 	resp, err := bg.admin.Admin(ctx, http.MethodPost, "/admin/realms/"+baselineRealm+"/users", map[string]any{
 		"username": breakGlassAdmin, "enabled": true, "email": breakGlassAdmin + "@console.invalid", "emailVerified": true,
 		"firstName": "Break", "lastName": "Glass", "requiredActions": []string{flows.ActionConfigureTOTP},
@@ -500,11 +547,12 @@ func (bg *breakGlass) signInAdmin() {
 	c := signin.Console{Origin: "https://" + consoleCID + ".local", Transport: admitted{next: bg.local.Transport, log: bg.s.cfg.Logger},
 		Logger: bg.s.cfg.Logger, Steps: steps}
 	var refused *signin.ConsoleRefusedError
-	if _, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw); err != nil && !errors.As(err, &refused) {
+	_, pages, err := signin.ConsoleSignIn(ctx, c, breakGlassAdmin, pw)
+	if err != nil && !errors.As(err, &refused) {
 		t.Fatalf("the administrator fixture's enrolment (pages %v): %v", pages, err)
 	}
 	if secretB32 == "" {
-		t.Fatal("the enrolment sign-in showed no authenticator app setup")
+		t.Fatalf("the enrolment sign-in showed no authenticator app setup (pages %v)", pages)
 	}
 	err = proctest.Await(bg.ctx, nil, func(ctx context.Context) (bool, string, error) {
 		var u struct {
