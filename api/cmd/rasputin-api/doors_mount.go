@@ -66,6 +66,9 @@ type doorMountDeps struct {
 	// (identityConverge.doorBindings, geekdojo/geekdojo-brain#987); nil
 	// pauses every client outside the door table.
 	bindings policy.Bindings
+	// removed is the removed-name list registration checks (#991): the
+	// accounts wiring's store, or Unavailable; nil outside keycloak.
+	removed policy.RemovedNames
 	// identityCA is the identity CA's certificate: the relay trusts it alone
 	// and presents the door's client leaf from dataDir.
 	identityCA    []byte
@@ -152,7 +155,7 @@ func doorPolicyDeps(d doorMountDeps) policy.Deps {
 		// launcher (actions) and Identity 4.8 (registration) wire theirs.
 		AppClients: policy.NoAppClients{}, Actions: policy.NoActionsIssued{},
 		Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{},
-		Now: d.now, Bindings: d.bindings,
+		Removed: d.removed, Now: d.now, Bindings: d.bindings,
 	}
 }
 

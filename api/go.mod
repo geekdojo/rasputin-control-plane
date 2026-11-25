@@ -14,6 +14,7 @@ require (
 	github.com/geekdojo/rasputin-control-plane/secret v0.0.0-00010101000000-000000000000
 	github.com/geekdojo/rasputin-control-plane/tileschema v0.0.0-00010101000000-000000000000
 	github.com/go-webauthn/webauthn v0.18.2
+	github.com/google/uuid v1.6.0
 	github.com/klauspost/compress v1.20.3
 	github.com/makiuchi-d/gozxing v0.1.1
 	github.com/miekg/dns v1.1.73
@@ -41,7 +42,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect

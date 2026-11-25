@@ -357,7 +357,7 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 // refuse renders a policy refusal.
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, st *reqState, d policy.Decision) {
 	st.refused, st.level = d.Reason, slog.LevelInfo
-	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable {
+	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable || d.Reason == policy.ReasonRegistrationPaused {
 		st.level = slog.LevelWarn
 	}
 	if d.NotReady {
