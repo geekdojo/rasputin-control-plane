@@ -39,6 +39,11 @@ func (d Disabled) ExchangeCode(context.Context, CodeExchange) (secret.Value, err
 	return secret.Value{}, &Error{Op: "token", Kind: d.Kind}
 }
 
+// ExchangeAccessToken refuses with Kind.
+func (d Disabled) ExchangeAccessToken(context.Context, CodeExchange) (secret.Value, error) {
+	return secret.Value{}, &Error{Op: "token", Kind: d.Kind}
+}
+
 // Forwarding is a client that refuses every request with Kind.
 func (d Disabled) Forwarding(func(http.Header)) *http.Client {
 	return &http.Client{Transport: refusingTransport{kind: d.Kind}}

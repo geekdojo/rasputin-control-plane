@@ -33,5 +33,6 @@ func Render(in Inputs) Rules {
 	for _, v := range Variants {
 		r.Flows[v.Alias()] = Flow(v)
 	}
+	r.Flows[ResetAlias] = ResetFlow()
 	return r
 }

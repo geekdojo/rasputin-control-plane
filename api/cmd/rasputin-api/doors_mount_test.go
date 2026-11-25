@@ -149,9 +149,15 @@ func newMountFixture(t *testing.T) *mountFixture {
 		identityCA: ca.CertPEM, dataDir: dir, upstream: upURL, themeDir: theme, consoleOrigin: "https://ci.local",
 		installName: func(context.Context) (string, error) { return "CI", nil },
 		dirty:       events.NewSignal(time.Now), now: time.Now, ids: func() string { return "corr" }, log: log,
-		removed: removednames.Unavailable{Err: errors.New("no list in this fixture")},
+		removed:   removednames.Unavailable{Err: errors.New("no list in this fixture")},
+		resetDone: mountResetDone{},
 	}}
 }
+
+// mountResetDone is the app door's reset return; these cases never reach it.
+type mountResetDone struct{}
+
+func (mountResetDone) Finish(context.Context, url.Values) (string, string) { return "reset-failed", "" }
 
 // discovery asks h for the realm's discovery document.
 func discovery(h http.Handler) *httptest.ResponseRecorder {

@@ -83,6 +83,12 @@ const (
 	SentenceAdministering   = "Signing in to this app needs a second step. Add a passkey, security key or authenticator app in Your account, then try again."
 	SentenceAdminsFirst     = "This app is waiting for an administrator to sign in to it first. Try again later."
 	SentenceNoNetworkAccess = "Your account doesn't have access to network devices. Ask an administrator."
+	// SentenceResetNoCodes is the reset flow's answer to an account with no
+	// recovery codes, and to a name no account has, alike (Identity 4.10).
+	SentenceResetNoCodes = "Recovery codes can't be used for this account. Sign in with a passkey, or ask an administrator to reset your password."
+	// SentenceResetPrivileged is the reset flow's answer to a privileged
+	// account that gave no second step besides its recovery code.
+	SentenceResetPrivileged = "An administrator who has lost their password also needs their passkey, security key or authenticator app. Otherwise ask another administrator, or use the repair code on the control plane."
 )
 
 // Node is one execution: an authenticator or condition (Provider set), or a
@@ -233,6 +239,14 @@ func branches(v Variant) []branch {
 	if v == Administering {
 		return []branch{{part: "every-account", sentence: SentenceAdministering}}
 	}
+	return privilegedBranches(v.Door() == DoorApp)
+}
+
+// privilegedBranches are the privileged accounts' conditions (C3), each with
+// SentencePrivileged: console admin and operator, the app administrator when
+// appAdmin, and gear-admin. The sign-in flows and the reset flow
+// (ResetFlow) both build from them.
+func privilegedBranches(appAdmin bool) []branch {
 	role := func(name string) func(builder) Node {
 		return func(b builder) Node {
 			return b.cond(ConditionUserRole, "privileged-"+name+"-role", map[string]string{
@@ -244,7 +258,7 @@ func branches(v Variant) []branch {
 		{part: "privileged-admin", condition: role(consoleRoleAdmin), sentence: SentencePrivileged},
 		{part: "privileged-operator", condition: role(consoleRoleOperator), sentence: SentencePrivileged},
 	}
-	if v.Door() == DoorApp {
+	if appAdmin {
 		out = append(out, branch{part: "privileged-app-admin", sentence: SentencePrivileged, condition: func(b builder) Node {
 			return b.attribute("privileged-app-admin-role", attrAppRole, appAdminPattern, false, true)
 		}})

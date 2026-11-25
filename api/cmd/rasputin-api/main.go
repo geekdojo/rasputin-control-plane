@@ -1290,7 +1290,7 @@ func main() {
 	// identity.revoke, the app-access grant and the removed-name list
 	// (#991), under keycloak only: a System job, so POST /api/jobs refuses it.
 	acct, err := wireAccounts(ctx, accountsDeps{mode: identityW.mode, admin: identityW.session, dbPath: dbPath, mac: mac,
-		console: consoleSessions, moved: authStore, log: logger})
+		console: consoleSessions, moved: authStore, kinds: kindPolicy, runner: runner, listDir: identityDenylists, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: accounts", "err", err.Error())
 		os.Exit(1)
@@ -1324,7 +1324,7 @@ func main() {
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
 		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
-		console: consoleConvergeInputs(doorsOn, consoleHost()), now: time.Now, log: logger})
+		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
 		os.Exit(1)
@@ -1339,7 +1339,7 @@ func main() {
 	}
 	consoleSI, err := consoleSignInWiring(ctx, consoleSignInDeps{mode: identityW.mode, doorsOn: doorsOn, table: doorTable,
 		host: consoleHost(), client: identityW.client, session: identityW.session, ready: consoleReady,
-		sessions: consoleSessions, now: time.Now, log: logger})
+		sessions: consoleSessions, identity: acct.sessions, actions: acct.actions(), now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: console sign-in", "err", err.Error())
 		os.Exit(1)
@@ -1898,6 +1898,9 @@ func main() {
 	// nodes" action. The store hands the api the hash on exactly one path,
 	// the push step's dispatch; nothing the server serves can reach it.
 	srv.SetConsole(consoleStore)
+	if acct.resetter != nil { // the administrator's password reset (#992), under keycloak only
+		srv.SetResetter(acct.resetter)
+	}
 	srv.SetNodeTrust(nodeTrust)
 	srv.SetComposeStash(composeStash)
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
@@ -2240,6 +2243,7 @@ func main() {
 			consoleOrigin: "https://" + consoleHost(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
 			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger, removed: acct.removed,
+			resetDone: consoleSI.appResetDone(),
 		})
 		if doorM != nil {
 			doorM.setDoors(homeDoor, appDoorH, identityState.events.doorThrottle())

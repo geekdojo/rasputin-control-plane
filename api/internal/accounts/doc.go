@@ -6,7 +6,10 @@
 // person's account. Revoker is the identity.revoke job: ending a person's
 // access, in a fixed order, each step a recorded outcome. Access is the
 // giving side of app access. RoleAccounts is what authz.RoleGuard reads
-// accounts through.
+// accounts through. Identity 4.10's administrator reset is Resetter (the
+// request's check), ResetAction (its fresh-sign-in action) and
+// ResetPasswordWorkflow (accounts.reset_password), whose temporary password
+// travels beside the job in Held, never in its spec.
 //
 // Every account change runs under the one accounts lock, which is not
 // re-entrant. No log record, job-log line, step outcome or error sentence

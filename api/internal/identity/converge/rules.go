@@ -1,7 +1,7 @@
 package converge
 
 // The sign-in rules (geekdojo/geekdojo-brain#987, Identity 4.5): converge
-// reads, compares and writes the seven flows, the required actions, the user
+// reads, compares and writes the seven flows and the reset flow, the required actions, the user
 // profile, the console roles, the default roles' composites and the own
 // clients' scopes and bindings, all rendered by package flows.
 
@@ -63,7 +63,7 @@ type role struct {
 type observedRules struct {
 	// flowIDs are the top-level flows' ids, by alias.
 	flowIDs map[string]string
-	// steps are each variant's executions, flattened, by alias; execs the
+	// steps are each owned flow's executions, flattened, by alias; execs the
 	// same as listed.
 	steps map[string][]flows.Step
 	execs map[string][]execution
@@ -88,8 +88,7 @@ func (c *Converger) observeRules(ctx context.Context) (observedRules, error) {
 	for _, f := range top {
 		o.flowIDs[f.Alias] = f.ID
 	}
-	for _, v := range flows.Variants {
-		alias := v.Alias()
+	for _, alias := range flows.Aliases() {
 		var execs []execution
 		if err := c.get(ctx, "/authentication/flows/"+url.PathEscape(alias)+"/executions", &execs); err != nil {
 			return o, err
@@ -191,9 +190,8 @@ type scopeWrite struct {
 // to w, naming each drifted field.
 func diffRules(d Desired, o observed, w *writes) {
 	r := d.Rules
-	// Flows: each variant whose executions differ is rebuilt whole.
-	for _, v := range flows.Variants {
-		alias := v.Alias()
+	// Flows: each owned flow whose executions differ is rebuilt whole.
+	for _, alias := range flows.Aliases() {
 		if _, ok := o.rules.flowIDs[alias]; !ok {
 			w.fields = append(w.fields, "flow."+alias+".missing")
 			continue

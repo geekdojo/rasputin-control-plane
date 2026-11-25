@@ -55,7 +55,9 @@ var openRoutes = map[string]string{
 	"POST /api/auth/login/begin":     "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
 	"POST /api/auth/login/finish":    "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
 	// TC-989-27: the console's sign-in through the home door (#989).
-	"GET /api/auth/signin":                    "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record",
+	"GET /api/auth/signin": "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record; with ?action= it resolves the caller's own session and answers 401 without one",
+	// TC-992-22: the reset clients' return (geekdojo/geekdojo-brain#992).
+	"GET /api/auth/reset-done":                "both reset clients' return; it exchanges the code, ends the person's sessions and mints none",
 	"GET /api/auth/callback":                  "the home door's return; a session is minted only for a verified ID token matching the pending record",
 	"POST /api/identity/backchannel/{client}": "the identity service's back-channel logout; acts only on a logout token verified against the client's issuer",
 
@@ -246,7 +248,16 @@ func TestDoorRoutesAnswerAtTheirOwnDoor(t *testing.T) {
 				(!relayed && !strings.HasPrefix(a.pageID(), "rasputin-door-")) {
 				t.Errorf("%s %s at %s: %d %q (relayed %v), want the door's answer", rt.Methods[0], path, d.host, a.status, a.pageID(), relayed)
 			}
-			if a := r.do(sitesConsole, sitesConsole, http.MethodGet, path, nil); a.status != http.StatusNotFound || a.body != notFound {
+			a = r.do(sitesConsole, sitesConsole, http.MethodGet, path, nil)
+			if _, also := openRoutes["GET "+rt.Pattern]; also {
+				// The console serves the same path for its own door: the home
+				// reset client's return (geekdojo/geekdojo-brain#992).
+				if a.status == http.StatusNotFound || strings.HasPrefix(a.pageID(), "rasputin-door-") {
+					t.Errorf("%s at %s: %d %q, want the console's own route", path, sitesConsole, a.status, a.pageID())
+				}
+				continue
+			}
+			if a.status != http.StatusNotFound || a.body != notFound {
 				t.Errorf("%s at %s: %d, want the console's 404 page", path, sitesConsole, a.status)
 			}
 		}

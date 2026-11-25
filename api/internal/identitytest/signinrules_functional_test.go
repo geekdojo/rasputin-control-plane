@@ -1221,7 +1221,14 @@ const errWriteSentence = "A sign-in setting could not be written back to Rasputi
 // nor a case or whitespace rule can be what refuses it.
 func (r *rulesRig) listed(t *testing.T) (ascii, nonASCII secret.Value) {
 	t.Helper()
-	f, err := os.Open(denylistPath(r.env.kcHome))
+	return listedEntries(t, r.env.kcHome)
+}
+
+// listedEntries are an ASCII and a non-ASCII entry of the staged deny list
+// that the length rule accepts, lowercase and trimmed.
+func listedEntries(t *testing.T, kcHome string) (ascii, nonASCII secret.Value) {
+	t.Helper()
+	f, err := os.Open(denylistPath(kcHome))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -78,9 +78,9 @@ func TestDoor_AllowlistPerDoor(t *testing.T) {
 				switch {
 				case !slices.Contains(rt.Methods, m):
 					f.wantRefused(w, http.StatusMethodNotAllowed, before, what)
-				case rt.Kind == policy.RouteSignin:
+				case rt.Kind == policy.RouteSignin, rt.Kind == policy.RouteResetDone:
 					if w.Code != http.StatusOK || f.up.count() != before {
-						t.Errorf("%s: %d, forwarded %v; want 200 from memory", what, w.Code, f.up.count() != before)
+						t.Errorf("%s: %d, forwarded %v; want 200 from the api", what, w.Code, f.up.count() != before)
 					}
 				default:
 					f.wantForwarded(w, before, what)
@@ -242,5 +242,27 @@ func TestRoutes_CarryReasons(t *testing.T) {
 				t.Errorf("%s %s: reason %q, methods %v, kind %q", k, r.Pattern, r.Reason, r.Methods, r.Kind)
 			}
 		}
+	}
+}
+
+// TC-992-16: the app door serves /api/auth/reset-done through ResetDone,
+// with the query, and never relays it; the home door answers 404 for it.
+// (door.New refusing a nil ResetDone is in TestNew_FailsClosed.)
+func TestDoor_TC992_16_ResetDone(t *testing.T) {
+	f := newFixture(t)
+	before := f.up.count()
+	w := f.do(App, req{target: "/api/auth/reset-done?code=c&iss=x"})
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), fakeResetSentence) || f.up.count() != before {
+		t.Errorf("app door: %d, forwarded %v, body %s", w.Code, f.up.count() != before, w.Body.String())
+	}
+	if f.reset.count() != 1 || f.reset.queries[0].Get("code") != "c" {
+		t.Errorf("ResetDone saw %v", f.reset.queries)
+	}
+	if w.Header().Get("Set-Cookie") != "" {
+		t.Errorf("Set-Cookie %q", w.Header().Get("Set-Cookie"))
+	}
+	w = f.do(Home, req{target: "/api/auth/reset-done?code=c"})
+	if w.Code != http.StatusNotFound || f.reset.count() != 1 || f.up.count() != before {
+		t.Errorf("home door: %d, ResetDone calls %d", w.Code, f.reset.count())
 	}
 }

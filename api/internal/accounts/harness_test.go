@@ -204,6 +204,8 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		delete(k.users, parts[1])
 	case tail == "logout":
 		k.log.add("logout")
+	case tail == "reset-password" && method == http.MethodPut:
+		k.log.add("reset-password")
 	case strings.HasPrefix(tail, "offline-sessions/"):
 		var list []map[string]string
 		for _, s := range x.offline[parts[3]] {
@@ -380,6 +382,7 @@ type harness struct {
 	rec      *logkittest.Recorder
 	sessions sessions.Ender
 	mac      *credmac.Key
+	nc       *nats.Conn
 }
 
 func newHarness(t *testing.T) *harness {
@@ -447,6 +450,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(nc.Close)
+	h.nc = nc
 	h.runner = jobs.NewRunner(h.jobs, nc)
 	h.runner.Register(h.rev.Workflow())
 	return h

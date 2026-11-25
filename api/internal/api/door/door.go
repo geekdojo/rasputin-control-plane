@@ -61,6 +61,13 @@ type Version interface {
 	Stale()
 }
 
+// ResetDone is the app door's reset return (*auth.ResetDone): it decides
+// the return from its query, ends the person's sessions, and gives the
+// sentence the door's page shows.
+type ResetDone interface {
+	Finish(ctx context.Context, q url.Values) (outcome, sentence string)
+}
+
 // Config is one door handler's collaborators. New refuses a missing one.
 type Config struct {
 	// Door is the door's entry in the door table, and Kind which door it is.
@@ -91,7 +98,9 @@ type Config struct {
 	// Breach is the breached-password check a new password is asked of
 	// before it is relayed (breach.go).
 	Breach Breach
-	Log    *slog.Logger
+	// ResetDone answers the app door's reset return (RouteResetDone).
+	ResetDone ResetDone
+	Log       *slog.Logger
 }
 
 // Handler is one door.
@@ -140,6 +149,8 @@ func New(cfg Config) (*Handler, error) {
 		missing = "IDs"
 	case cfg.Breach == nil:
 		missing = "Breach"
+	case cfg.ResetDone == nil:
+		missing = "ResetDone"
 	case cfg.Log == nil:
 		missing = "Log"
 	}
@@ -190,6 +201,7 @@ type Shared struct {
 	Dirty         Dirty
 	IDs           func() string
 	Breach        Breach
+	ResetDone     ResetDone
 	Log           *slog.Logger
 }
 
@@ -198,7 +210,7 @@ func Build(table doors.Table, s Shared) (home, app *Handler, err error) {
 	cfg := func(d doors.Door, k Kind) Config {
 		return Config{Door: d, Kind: k, ConsoleOrigin: s.ConsoleOrigin, Policy: s.Policy, Throttle: s.Throttle,
 			Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets, Version: s.Version,
-			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, Log: s.Log}
+			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, ResetDone: s.ResetDone, Log: s.Log}
 	}
 	if home, err = New(cfg(table.Home, Home)); err != nil {
 		return nil, nil, err
@@ -331,6 +343,10 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 		switch rt.Kind {
 		case policy.RouteSignin:
 			h.serveAsset(w, r, st)
+			return
+		case policy.RouteResetDone:
+			_, sentence := h.cfg.ResetDone.Finish(r.Context(), r.URL.Query())
+			h.InfoPage(w, "Password reset", sentence, st.id)
 			return
 		case policy.RouteTheme:
 			common := strings.Contains(rt.Pattern, "/common/keycloak/")

@@ -362,7 +362,9 @@ func TestSignIn_CallbackSuccess(t *testing.T) {
 func TestSignIn_Action(t *testing.T) {
 	start := func(t *testing.T, r *signinRig) begun {
 		t.Helper()
+		pending := r.prepare(t, rigSub, "test-action", nil)
 		req := httptestRequest(rigConsole, "/settings/act")
+		req.AddCookie(pending)
 		req = req.WithContext(WithPrincipal(req.Context(), Principal{Sub: rigSub, Name: "alice"}))
 		w := recorder()
 		r.si.StartAction(w, req, "test-action")

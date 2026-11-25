@@ -169,6 +169,7 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		Inputs: func(ctx context.Context) (converge.Inputs, error) {
 			name, err := settings.Get(ctx, setup.KeyInstallName)
 			return converge.Inputs{InstallName: name, RedirectURIs: d.console.redirectURIs, BackchannelLogoutURLs: d.console.backchannel,
+				ResetHomeURL: d.console.resetHome, ResetAppURL: d.console.resetApp,
 				ClockSynced: clock.Synced(ctx)}, err
 		},
 		Now: d.now, Ready: d.monitor.Ready, Log: d.log,

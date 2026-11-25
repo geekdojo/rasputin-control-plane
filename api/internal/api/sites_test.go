@@ -258,6 +258,7 @@ func (r *sitesRig) buildDoors(log *slog.Logger) (http.Handler, http.Handler) {
 		InstallName: func(context.Context) (string, error) { return "CI", nil },
 		IDs:         func() string { return "door-" + strconv.FormatInt(r.ids.Add(1), 10) },
 		Breach:      struct{ door.Breach }{}, // never called: no case here posts a new password
+		ResetDone:   sitesResetDone{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -766,3 +767,11 @@ func TestNewSites_RefusesMissingCollaborators(t *testing.T) {
 type sitesRemoved struct{}
 
 func (sitesRemoved) Removed(context.Context, string, string) (bool, error) { return false, nil }
+
+// sitesResetDone is the app door's reset return: route enumeration only
+// needs it to answer.
+type sitesResetDone struct{}
+
+func (sitesResetDone) Finish(context.Context, url.Values) (string, string) {
+	return "reset-failed", "Rasputin couldn't confirm the password reset."
+}

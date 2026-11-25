@@ -697,3 +697,36 @@ identity service posts to 443).
 
 What neither proves: the appliance's own exchange and its sandboxed back-channel POST
 (the bench, `rasputin-identity-test`), and Safari, Firefox and Edge on the cross-site return.
+
+## The forgotten-password paths
+
+[geekdojo-brain#992](https://github.com/geekdojo/geekdojo-brain/issues/992) (Identity 4.10)
+resets a forgotten password with no email: one recovery code at each door's own reset client,
+or an administrator's temporary password run as a job at a fresh sign-in.
+
+- **`TestReset_AgainstPinnedKeycloak`** (`reset_functional_test.go`, TC-992-25 to TC-992-37),
+  in the backend job's identity step. It runs on the revoke rig (the console rig with #991's
+  accounts), with both doors' reset returns as main wires them, the converged `rasputin-reset`
+  flow, and `accounts.reset_password` on a runner the kind table decides. It proves:
+  - a codeless account and an unknown name get the same codeless sentence, and a code-only
+    administrator gets the privileged one, with no password changed (TC-992-25);
+  - a code reset at each door ends every online and offline identity session and every console
+    session, refuses the old offline refresh, mints no session, and leaves the new password
+    working, the old one refused and the code spent (TC-992-26, TC-992-27);
+  - a privileged reset asks for the authenticator code, never a second recovery code
+    (TC-992-28);
+  - the deny list applies at the reset's new password, and the page's hint says 15 characters
+    (TC-992-29, TC-992-36);
+  - a source the door's throttle holds still resets (TC-992-33);
+  - the reset code's token answer carries no ID token and its access token carries the door's
+    `iss`, the reset client's `azp` and the account's `sub` (TC-992-37, row T200);
+  - the administrator's reset submits nothing without the fresh sign-in, and after it ends the
+    target's sessions and forces the target to choose a new password (TC-992-30, TC-992-31);
+  - Keycloak's 500 for a listed or a 14-character password becomes the rule's sentence, with
+    the credential unchanged (TC-992-32, row T202);
+  - both start links are written by converge and each sign-in page's "Forgot your password?"
+    reaches its own door's reset (TC-992-35), and no mail connection is made (TC-992-34).
+
+What it does not prove: the passkey path's change step (Identity 4.10 leaves it to #319), the
+re-designation of a privileged target (#992's second PR), and the appliance itself (the bench,
+`rasputin-identity-test`).

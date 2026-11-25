@@ -36,12 +36,31 @@ type pendingSignin struct {
 	// action, when set, is the fresh sign-in an action asked for: the return
 	// runs the action and mints no session.
 	action *pendingAction
+	// prepared marks a record PrepareAction stored and StartAction has not
+	// begun yet: it has no state, nonce or verifier, so no callback can
+	// complete it.
+	prepared bool
 }
 
-// pendingAction is a fresh sign-in begun by StartAction.
+// pendingAction is a fresh sign-in's action: prepared by PrepareAction,
+// begun by StartAction.
 type pendingAction struct {
 	kind string
 	sub  string
+	// payload is the value the action runs with, held only here until the
+	// callback hands it to the action (geekdojo/geekdojo-brain#992); nil
+	// when the action needs none.
+	payload ActionPayload
+}
+
+// destroy destroys everything rec holds: the PKCE verifier and the
+// action's payload. Every way a record leaves the map but the callback's
+// hand-off calls it: take, replacement, eviction and prune.
+func (rec *pendingSignin) destroy() {
+	rec.verifier.Destroy()
+	if rec.action != nil && rec.action.payload != nil {
+		rec.action.payload.Destroy()
+	}
 }
 
 // pendingSignins is the map of sign-ins in flight, keyed by the pending
@@ -71,7 +90,7 @@ func (p *pendingSignins) put(key string, rec *pendingSignin) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if old, ok := p.m[key]; ok {
-		old.verifier.Destroy()
+		old.destroy()
 	} else if len(p.m) >= maxSigninPending {
 		p.evictLocked()
 	}
@@ -89,7 +108,7 @@ func (p *pendingSignins) evictLocked() {
 	)
 	for k, rec := range p.m {
 		if !now.Before(rec.expires) {
-			rec.verifier.Destroy()
+			rec.destroy()
 			delete(p.m, k)
 			pruned = true
 			continue
@@ -99,13 +118,13 @@ func (p *pendingSignins) evictLocked() {
 		}
 	}
 	if !pruned && oldest != "" {
-		p.m[oldest].verifier.Destroy()
+		p.m[oldest].destroy()
 		delete(p.m, oldest)
 	}
 }
 
 // take removes and returns the record under key, or nil when there is none
-// or it has expired. The caller destroys its verifier.
+// or it has expired. The caller destroys it.
 func (p *pendingSignins) take(key string) *pendingSignin {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -115,7 +134,7 @@ func (p *pendingSignins) take(key string) *pendingSignin {
 	}
 	delete(p.m, key)
 	if !p.now().Before(rec.expires) {
-		rec.verifier.Destroy()
+		rec.destroy()
 		return nil
 	}
 	return rec
@@ -128,7 +147,7 @@ func (p *pendingSignins) prune() {
 	now := p.now()
 	for k, rec := range p.m {
 		if !now.Before(rec.expires) {
-			rec.verifier.Destroy()
+			rec.destroy()
 			delete(p.m, k)
 		}
 	}

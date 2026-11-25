@@ -37,6 +37,10 @@ const (
 	// identityBaseline (scripts/build-release.sh): resource-allowlist.json and
 	// login/resources, whose css/ and img/ the doors serve at /_signin/.
 	identityTheme = "/usr/share/rasputin/identity/theme"
+	// identityDenylists is the password deny list's directory in the api
+	// tarball, the source rasputin-os stages Keycloak's copy from (#992's
+	// pre-check reads it).
+	identityDenylists = "/usr/share/rasputin/identity/password-blacklists"
 	// doorRequestLifetime bounds one door request's I/O: its body read and its
 	// answer written. It decides no state; it only closes a connection that is
 	// far outside normal bounds, so it cannot hold the sign-in history drain's
@@ -80,7 +84,10 @@ type doorMountDeps struct {
 	dirty         *events.Signal
 	now           func() time.Time
 	ids           func() string
-	log           *slog.Logger
+	// resetDone is the app door's reset return (consoleSignIn.appResetDone);
+	// nil keeps the doors closed.
+	resetDone door.ResetDone
+	log       *slog.Logger
 }
 
 // mountDoors builds both door handlers, or none. With the doors off it builds
@@ -143,7 +150,7 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 		ConsoleOrigin: d.consoleOrigin, Policy: pol, Throttle: d.throttle,
 		Transport: idclient.NewTransport(tlsCfg), Upstream: d.upstream,
 		Theme: allow, Assets: os.DirFS(filepath.Join(d.themeDir, "login", "resources")),
-		Version: d.version, InstallName: d.installName, Dirty: d.dirty, IDs: d.ids, Breach: breach, Log: d.log,
+		Version: d.version, InstallName: d.installName, Dirty: d.dirty, IDs: d.ids, Breach: breach, ResetDone: d.resetDone, Log: d.log,
 	})
 }
 

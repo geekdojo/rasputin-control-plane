@@ -16,6 +16,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/sessions"
 )
 
 // recordingAdmin records each Admin API call the ender makes.
@@ -61,13 +62,14 @@ func TestConsoleSignInWiring_OnlyUnderKeycloakWithDoors(t *testing.T) {
 			svc, sessions := consoleAuth(t)
 			w, err := consoleSignInWiring(t.Context(), consoleSignInDeps{mode: mode, doorsOn: doorsOn, table: table, host: "ci.local",
 				client: idclient.Disabled{Kind: idclient.ErrDisabled}, session: &recordingAdmin{}, ready: readyNow{},
-				sessions: sessions, now: time.Now, log: slog.New(slog.DiscardHandler)})
+				sessions: sessions, identity: sessionsEnder(), now: time.Now, log: slog.New(slog.DiscardHandler)})
 			if err != nil {
 				t.Fatalf("%s doors=%v: %v", mode, doorsOn, err)
 			}
 			built := mode == identityModeKeycloak && doorsOn
-			if (w.signIn != nil) != built || (w.sink != nil) != built {
-				t.Errorf("%s doors=%v: built sign-in %v sink %v, want %v", mode, doorsOn, w.signIn != nil, w.sink != nil, built)
+			if (w.signIn != nil) != built || (w.sink != nil) != built || (w.resetHome != nil) != built || (w.appResetDone() != nil) != built {
+				t.Errorf("%s doors=%v: built sign-in %v sink %v resets %v %v, want %v", mode, doorsOn, w.signIn != nil, w.sink != nil,
+					w.resetHome != nil, w.appResetDone() != nil, built)
 			}
 			w.install(svc)
 			mux := http.NewServeMux()
@@ -89,6 +91,13 @@ func TestConsoleSignInWiring_OnlyUnderKeycloakWithDoors(t *testing.T) {
 					t.Errorf("%s doors=%v: signin -> %s", mode, doorsOn, loc)
 				}
 			}
+			// The console's reset return is installed with the sign-in: the
+			// disabled client refuses the exchange, so a built one answers
+			// reset-failed through ResetDone, and an unbuilt one the same
+			// answer from the route itself.
+			if loc := req("/api/auth/reset-done?code=c&iss=" + table.Home.Issuer).Header().Get("Location"); loc != "/login?signin=reset-failed" {
+				t.Errorf("%s doors=%v: reset-done -> %s", mode, doorsOn, loc)
+			}
 			if code := req("/api/nodes").Code; code != http.StatusUnauthorized {
 				t.Errorf("%s doors=%v: gated route %d", mode, doorsOn, code)
 			}
@@ -104,15 +113,28 @@ func TestConsoleSignInWiring_OnlyUnderKeycloakWithDoors(t *testing.T) {
 }
 
 // TC-989-28 (wiring part): converge is given the console's redirect URI and
-// back-channel URL only while the doors are on.
+// back-channel URL only while the doors are on. TC-992-12 (wiring part): the
+// reset clients' redirect URIs and each door's reset start likewise.
 func TestConsoleConvergeInputs(t *testing.T) {
-	on := consoleConvergeInputs(true, "ci.local")
+	table, err := doors.New("ci")
+	if err != nil {
+		t.Fatal(err)
+	}
+	on := consoleConvergeInputs(true, "ci.local", table)
 	if !slices.Equal(on.redirectURIs["rasputin-console"], []string{"https://ci.local/api/auth/callback"}) ||
 		on.backchannel["rasputin-console"] != "https://127.0.0.1/api/identity/backchannel/rasputin-console" {
 		t.Errorf("doors on: %+v", on)
 	}
-	for _, off := range []consoleInputs{consoleConvergeInputs(false, "ci.local"), consoleConvergeInputs(true, "")} {
-		if len(off.redirectURIs) != 0 || len(off.backchannel) != 0 || off.redirectURIs == nil || off.backchannel == nil {
+	appReturn := "https://" + table.App.Host + "/api/auth/reset-done"
+	if !slices.Equal(on.redirectURIs["rasputin-reset-home"], []string{"https://ci.local/api/auth/reset-done"}) ||
+		!slices.Equal(on.redirectURIs["rasputin-reset-app"], []string{appReturn}) ||
+		on.resetHome != auth.ResetStartURL(table.Home, "rasputin-reset-home", "https://ci.local/api/auth/reset-done") ||
+		on.resetApp != auth.ResetStartURL(table.App, "rasputin-reset-app", appReturn) {
+		t.Errorf("doors on, resets: %+v", on)
+	}
+	for _, off := range []consoleInputs{consoleConvergeInputs(false, "ci.local", table), consoleConvergeInputs(true, "", table)} {
+		if len(off.redirectURIs) != 0 || len(off.backchannel) != 0 || off.redirectURIs == nil || off.backchannel == nil ||
+			off.resetHome != "" || off.resetApp != "" {
 			t.Errorf("doors off: %+v, want empty maps", off)
 		}
 	}
@@ -131,3 +153,6 @@ func TestSidEnder(t *testing.T) {
 		t.Error("an empty sid was sent")
 	}
 }
+
+// sessionsEnder is #991's ender over an Admin API that records.
+func sessionsEnder() sessions.Ender { return sessions.Ender{Admin: &recordingAdmin{}} }

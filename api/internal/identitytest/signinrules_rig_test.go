@@ -232,7 +232,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: recordingTransport{inner: relay, r: r},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return rulesInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Breach: r.breach.checker(t), Log: log,
+		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Breach: r.breach.checker(t), ResetDone: noResetReturn{}, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)

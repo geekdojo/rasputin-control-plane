@@ -107,3 +107,54 @@ func TestForwarding(t *testing.T) {
 		t.Error("an admin path was sent")
 	}
 }
+
+// TC-992-06: with NoVerifier the form carries no code_verifier and
+// ExchangeAccessToken returns the answer's access token, ExchangeCode its ID
+// token; an empty verifier without the flag, and the flag with a verifier,
+// are refused with ErrInvalidValue before any request is sent.
+func TestExchange_TC992_06_NoVerifier(t *testing.T) {
+	p := newPKI(t)
+	var form url.Values
+	srv := newServer(t, p, func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		form, _ = url.ParseQuery(string(b))
+		_, _ = w.Write([]byte(`{"access_token":"the-access-token","refresh_token":"rt","id_token":"the-id-token"}`))
+	}, nil)
+	c, rec := newClient(t, p, srv.URL)
+	reset := func() CodeExchange {
+		x := exchange("reset-code")
+		x.ClientID, x.Verifier, x.NoVerifier = "rasputin-reset-home", secret.Value{}, true
+		return x
+	}
+	tok, err := c.ExchangeAccessToken(t.Context(), reset())
+	if err != nil || string(tok.Reveal()) != "the-access-token" {
+		t.Fatalf("ExchangeAccessToken = %v", err)
+	}
+	if form.Has("code_verifier") || form.Get("code") != "reset-code" || form.Get("client_id") != "rasputin-reset-home" {
+		t.Errorf("form %v, want the code and no code_verifier", form)
+	}
+	if tok, err := c.ExchangeCode(t.Context(), reset()); err != nil || string(tok.Reveal()) != "the-id-token" {
+		t.Errorf("ExchangeCode with NoVerifier = %v", err)
+	}
+	before := srv.requests()
+	noFlag := reset()
+	noFlag.NoVerifier = false
+	both := exchange("x")
+	both.NoVerifier = true
+	for name, x := range map[string]CodeExchange{"empty verifier, no flag": noFlag, "flag and a verifier": both} {
+		if _, err := c.ExchangeAccessToken(t.Context(), x); !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("%s: %v, want ErrInvalidValue", name, err)
+		}
+		if _, err := c.ExchangeCode(t.Context(), x); !errors.Is(err, ErrInvalidValue) {
+			t.Errorf("%s: ExchangeCode %v, want ErrInvalidValue", name, err)
+		}
+	}
+	if srv.requests() != before {
+		t.Errorf("%d requests sent for refused exchanges", srv.requests()-before)
+	}
+	for _, n := range []string{"reset-code", "the-access-token"} {
+		if strings.Contains(rec.Text(), n) {
+			t.Errorf("the log holds %q", n)
+		}
+	}
+}

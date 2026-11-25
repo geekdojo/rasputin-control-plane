@@ -188,3 +188,52 @@ func TestVerifier_UnavailableAndLogout(t *testing.T) {
 type roundTrip func(*http.Request) (*http.Response, error)
 
 func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TC-992-07's verifier half (T201): an access token issued to the reset
+// client verifies with any audience and yields iss, azp and sub; one with
+// another azp, a typ other than Bearer (an ID token), no sub, a foreign
+// issuer, a bad signature or an expired exp is ErrInvalid.
+func TestVerifier_AccessToken(t *testing.T) {
+	ks := newKeyServer(t)
+	table, _ := doors.New("ci")
+	now := time.Now()
+	v, err := idtoken.New(t.Context(), table.App.Issuer, "rasputin-reset-app", ks.client(t).Forwarding(table.App.SetForwarded), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := func(edit func(map[string]any)) map[string]any {
+		c := map[string]any{"iss": table.App.Issuer, "aud": "account", "sub": "s-1", "azp": "rasputin-reset-app", "typ": "Bearer",
+			"iat": now.Unix(), "exp": now.Add(time.Minute).Unix()}
+		if edit != nil {
+			edit(c)
+		}
+		return c
+	}
+	c, err := v.AccessToken(t.Context(), ks.sign(t, claims(nil)))
+	if err != nil || c != (idtoken.AccessClaims{Issuer: table.App.Issuer, AuthorizedParty: "rasputin-reset-app", Subject: "s-1"}) {
+		t.Fatalf("AccessToken = %+v, %v", c, err)
+	}
+	for name, edit := range map[string]func(map[string]any){
+		"another client": func(c map[string]any) { c["azp"] = "rasputin-console" },
+		"an ID token":    func(c map[string]any) { c["typ"] = "ID" },
+		"no typ":         func(c map[string]any) { delete(c, "typ") },
+		"no subject":     func(c map[string]any) { delete(c, "sub") },
+		"foreign issuer": func(c map[string]any) { c["iss"] = table.Home.Issuer },
+		"expired":        func(c map[string]any) { c["exp"] = now.Add(-time.Minute).Unix() },
+	} {
+		if _, err := v.AccessToken(t.Context(), ks.sign(t, claims(edit))); !errors.Is(err, idtoken.ErrInvalid) {
+			t.Errorf("%s: %v, want ErrInvalid", name, err)
+		}
+	}
+	forged := ks.sign(t, claims(nil))
+	b := []byte(string(forged.Reveal()))
+	b[len(b)-3] ^= 1
+	if _, err := v.AccessToken(t.Context(), secret.New(b)); !errors.Is(err, idtoken.ErrInvalid) {
+		t.Errorf("a bad signature: %v, want ErrInvalid", err)
+	}
+	down := &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) { return nil, errors.New("connection refused") })}
+	dv, _ := idtoken.New(t.Context(), table.App.Issuer, "rasputin-reset-app", down, func() time.Time { return now })
+	if _, err := dv.AccessToken(t.Context(), ks.sign(t, claims(nil))); !errors.Is(err, idtoken.ErrUnavailable) {
+		t.Errorf("a key set that cannot be fetched: %v, want ErrUnavailable", err)
+	}
+}
