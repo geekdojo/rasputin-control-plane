@@ -773,8 +773,12 @@ func TestChanges_TC994_33_MovedAdministrator(t *testing.T) {
 // only once it is released.
 func TestChanges_TC994_34_SharedLock(t *testing.T) {
 	h := newChangeHarness(t)
-	reset, err := ResetPasswordWorkflow(ResetDeps{Users: h.users, Held: h.held, Checker: acceptAll{}, Revoker: h.rev, Lock: h.lock,
-		Log: slog.New(slog.DiscardHandler), StepTimeout: time.Minute})
+	redes, err := NewRedesignator(RedesignatorDeps{Facts: h.ra, Designations: h.designations, Users: h.users, Lock: h.lock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset, err := ResetPasswordWorkflow(ResetDeps{Users: h.users, Held: h.held, Checker: acceptAll{}, Revoker: h.rev, Redesignate: redes,
+		Lock: h.lock, Log: slog.New(slog.DiscardHandler), StepTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
