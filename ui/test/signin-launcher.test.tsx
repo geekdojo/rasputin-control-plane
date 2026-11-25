@@ -40,7 +40,16 @@ describe('TC-989-31 the launcher', () => {
   });
 
   test('one sentence for each ?signin= value, and none for an unknown one', async () => {
-    const values: SignInReturn[] = ['failed', 'expired', 'unavailable', 'wrong-host'];
+    const values: SignInReturn[] = [
+      'failed',
+      'expired',
+      'unavailable',
+      'wrong-host',
+      'reset-done',
+      'reset-incomplete',
+      'reset-failed',
+      'action-failed',
+    ];
     const seen = new Set<string>();
     for (const v of values) {
       const returned = signInReturn(`?signin=${v}`);
@@ -58,6 +67,20 @@ describe('TC-989-31 the launcher', () => {
     assert.equal(seen.size, values.length, 'each value has its own sentence');
     assert.equal(signInReturn('?signin=bogus'), null);
     assert.equal(signInReturn(''), null);
+  });
+
+  // TC-992-23: the reset and action returns' exact sentences.
+  test('the password reset and action sentences, word for word', () => {
+    assert.equal(SIGN_IN_SENTENCES['reset-done'], 'Your password is changed. Sign in with it and your second step.');
+    assert.equal(
+      SIGN_IN_SENTENCES['reset-incomplete'],
+      "Your password is changed, but Rasputin couldn't end your other sign-ins. Ask an administrator to sign you out everywhere.",
+    );
+    assert.equal(
+      SIGN_IN_SENTENCES['reset-failed'],
+      "Rasputin couldn't confirm the password reset. If you chose a new password, sign in with it. Otherwise start the reset again.",
+    );
+    assert.equal(SIGN_IN_SENTENCES['action-failed'], "Rasputin couldn't finish the change you signed in again for. Try it again.");
   });
 
   test('the not-ready sentence and no SIGN IN while not ready', async () => {

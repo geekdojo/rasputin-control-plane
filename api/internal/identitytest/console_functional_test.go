@@ -58,6 +58,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/sessions"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -102,6 +103,35 @@ type consoleRig struct {
 	adminEvents []events.AdminEvent
 	// cookies are every console session cookie value a client was given.
 	cookies []string
+	// resetHome and resetApp are each door's reset start
+	// (geekdojo/geekdojo-brain#992).
+	resetHome, resetApp string
+	// action is the sign-in's accounts.reset_password action, set by the
+	// reset rig once its runner exists.
+	action lateAction
+}
+
+// lateAction is a fresh-sign-in action set after the sign-in is built: the
+// reset's runner is built on top of this rig.
+type lateAction struct {
+	mu sync.Mutex
+	a  auth.Action
+}
+
+func (l *lateAction) set(a auth.Action) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.a = a
+}
+
+func (l *lateAction) Run(ctx context.Context, p auth.Principal, payload auth.ActionPayload) (string, error) {
+	l.mu.Lock()
+	a := l.a
+	l.mu.Unlock()
+	if a == nil {
+		return "", errors.New("no action is set in this rig")
+	}
+	return a.Run(ctx, p, payload)
 }
 
 // recordingExchanger keeps each ID token the console's exchange returns,
@@ -203,10 +233,12 @@ func (r *consoleRig) inputs() converge.Inputs {
 		AppBindings: map[string]flows.Variant{doorTestApp: flows.AppClients},
 		RedirectURIs: map[string][]string{
 			baselineConsole: {"https://" + ConsoleHost + consoleCallback}, baselineMesh: {callbackOn(ConsoleHost)},
-			"rasputin-reset-home": {callbackOn(ConsoleHost)},
-			"rasputin-account":    {callbackOn(r.sites.Table.App.Host)}, "rasputin-reset-app": {callbackOn(r.sites.Table.App.Host)},
+			"rasputin-reset-home": {"https://" + ConsoleHost + auth.ResetDonePath},
+			"rasputin-account":    {callbackOn(r.sites.Table.App.Host)},
+			"rasputin-reset-app":  {"https://" + r.sites.Table.App.Host + auth.ResetDonePath},
 		},
 		BackchannelLogoutURLs: map[string]string{baselineConsole: r.backchannel},
+		ResetHomeURL:          r.resetHome, ResetAppURL: r.resetApp,
 	}
 }
 
@@ -253,12 +285,33 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	si, err := auth.NewSignIn(auth.SignInDeps{
 		Door: table.Home, ConsoleHost: ConsoleHost, ClientID: baselineConsole, Realm: baselineRealm,
 		Exchanger: recordingExchanger{inner: client, r: r}, Verifier: verifier, Ender: adminEnder{s: r.session},
-		Ready: doorReady{}, Sessions: r.sessions, Now: time.Now, Rand: rand.Reader, Log: log,
+		Ready: doorReady{}, Sessions: r.sessions, Actions: map[string]auth.Action{"accounts.reset_password": &r.action},
+		Now: time.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.authSvc.SetSignIn(si)
+	// The reset returns, as main wires them (#992): each door's own
+	// verifier, #991's ender and the console sessions.
+	ender := sessions.Ender{Admin: r.session}
+	resetDone := func(d doors.Door, name, resetClient, redirect string) *auth.ResetDone {
+		v, err := idtoken.New(t.Context(), d.Issuer, resetClient, client.Forwarding(d.SetForwarded), time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd, err := auth.NewResetDone(auth.ResetDoneDeps{Door: d, DoorName: name, ClientID: resetClient, RedirectURI: redirect,
+			Realm: baselineRealm, Exchanger: client, Verifier: v, Identity: ender, Console: r.sessions, Log: log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rd
+	}
+	homeReturn, appReturn := "https://"+ConsoleHost+auth.ResetDonePath, "https://"+table.App.Host+auth.ResetDonePath
+	r.authSvc.SetResetDone(resetDone(table.Home, "home", "rasputin-reset-home", homeReturn))
+	appReset := resetDone(table.App, "app", "rasputin-reset-app", appReturn)
+	r.resetHome = auth.ResetStartURL(table.Home, "rasputin-reset-home", homeReturn)
+	r.resetApp = auth.ResetStartURL(table.App, "rasputin-reset-app", appReturn)
 	roleSink, err := auth.NewRoleChangeSink(r.sessions, log)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +360,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return consoleInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, Log: log,
+		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, ResetDone: appReset, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -59,6 +59,10 @@ type Service struct {
 	// unavailable.
 	signInMu sync.RWMutex
 	signIn   *SignIn
+	// resetDone is the home door's reset return, installed by SetResetDone
+	// beside the sign-in (geekdojo/geekdojo-brain#992); nil answers
+	// unavailable.
+	resetDone *ResetDone
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -154,6 +158,34 @@ func (s *Service) SetSignIn(si *SignIn) {
 	s.signInMu.Lock()
 	defer s.signInMu.Unlock()
 	s.signIn = si
+}
+
+// SetResetDone installs the home door's reset return, under the same lock
+// as the sign-in.
+func (s *Service) SetResetDone(rd *ResetDone) {
+	s.signInMu.Lock()
+	defer s.signInMu.Unlock()
+	s.resetDone = rd
+}
+
+func (s *Service) reset() *ResetDone {
+	s.signInMu.RLock()
+	defer s.signInMu.RUnlock()
+	return s.resetDone
+}
+
+// PrepareAction is SignIn.PrepareAction on the installed sign-in. It takes
+// payload whatever happens; with no sign-in installed it destroys it and
+// refuses with ErrNoAction.
+func (s *Service) PrepareAction(w http.ResponseWriter, r *http.Request, kind string, payload ActionPayload) (string, error) {
+	si := s.signin()
+	if si == nil {
+		if payload != nil {
+			payload.Destroy()
+		}
+		return "", ErrNoAction
+	}
+	return si.PrepareAction(w, r, kind, payload)
 }
 
 // signin is the installed sign-in, or nil.

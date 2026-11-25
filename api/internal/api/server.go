@@ -86,10 +86,13 @@ type Server struct {
 	// as `backup` (design/storage.md §4.4, #298); nil omits the field.
 	backupStates *storage.BackupStates
 	auth         *auth.Service
-	obs          *obs.Status
-	busTokens    *busauth.Store
-	nc           *nats.Conn
-	uiDir        string
+	// resetter decides an administrator's password reset
+	// (geekdojo/geekdojo-brain#992); nil answers 503 identity_not_ready.
+	resetter  resetChecker
+	obs       *obs.Status
+	busTokens *busauth.Store
+	nc        *nats.Conn
+	uiDir     string
 	// releaseSource discovers the latest releases from the public channel
 	// (Check for Updates). nil when not configured — the endpoints then
 	// return 503. releaseChannel is the default channel ("stable" | "dev").
@@ -382,6 +385,7 @@ func (s *Server) routes() *routeMux {
 	gate("POST /api/repair/restart", repairJob(breakglass.RestartKind), s.handleRepairRestart)
 
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
+	gate("POST /api/accounts/{id}/reset-password", needs(authz.NeedControl(authz.IAM)), s.handleResetPassword)
 	gate("GET /api/jobs", needs(authz.NeedView()), s.handleListJobs)
 	gate("GET /api/jobs/{id}", needs(authz.NeedView()), s.handleGetJob)
 	gate("GET /api/jobs/{id}/steps", needs(authz.NeedView()), s.handleListSteps)

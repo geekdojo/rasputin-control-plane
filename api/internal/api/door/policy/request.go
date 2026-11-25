@@ -60,6 +60,9 @@ const (
 	RouteSAMLDescriptor  RouteKind = "saml/descriptor"
 	RouteTheme           RouteKind = "theme"
 	RouteSignin          RouteKind = "signin"
+	// RouteResetDone is the app door's reset client's return
+	// (geekdojo/geekdojo-brain#992): served by the api, never relayed.
+	RouteResetDone RouteKind = "reset-done"
 )
 
 // Page reports whether the route serves a sign-in page or takes a credential,

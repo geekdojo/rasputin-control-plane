@@ -425,8 +425,8 @@ func TestVariant(t *testing.T) {
 	if b := Bindings(map[string]Variant{"x": AdminsFirst}); b["x"] != AdminsFirst || b["rasputin-console"] != HomeConsole {
 		t.Errorf("Bindings = %v", b)
 	}
-	if len(Render(Inputs{}).Flows) != 7 {
-		t.Error("Render does not render seven flows")
+	if len(Render(Inputs{}).Flows) != 8 {
+		t.Error("Render does not render the seven sign-in flows and the reset flow")
 	}
 }
 

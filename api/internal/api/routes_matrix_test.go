@@ -60,10 +60,12 @@ var idorProbes = map[string]func(t *testing.T){}
 // job:<kinds>, or anyjob.
 var wantClass = map[string]string{
 	// geekdojo/geekdojo-brain#321: the break-glass repair session's routes.
-	"GET /api/repair/state":                  "repair:control:repair",
-	"POST /api/repair/end":                   "repair:control:repair",
-	"POST /api/repair/restart":               "repair:job:identity.restart",
-	"POST /api/jobs":                         "anyjob",
+	"GET /api/repair/state":    "repair:control:repair",
+	"POST /api/repair/end":     "repair:control:repair",
+	"POST /api/repair/restart": "repair:job:identity.restart",
+	"POST /api/jobs":           "anyjob",
+	// TC-992-22: the administrator's password reset (geekdojo/geekdojo-brain#992).
+	"POST /api/accounts/{id}/reset-password": "control:iam",
 	"GET /api/jobs":                          "view",
 	"GET /api/jobs/{id}":                     "view",
 	"GET /api/jobs/{id}/steps":               "view",
@@ -329,8 +331,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 115 {
-		t.Errorf("%d rules recorded, want 115", n)
+	if n := len(real.rules); n != 116 {
+		t.Errorf("%d rules recorded, want 116", n)
 	}
 }
 
@@ -383,8 +385,8 @@ func TestRouteClasses_TC1002_14_SigninIsClosed(t *testing.T) {
 	m := newRouteMux()
 	f.srv.auth.RegisterRoutes(signinRegistrar{m})
 	signin := m.SigninPatterns()
-	if len(signin) != 11 {
-		t.Errorf("auth.RegisterRoutes registered %d patterns, want 11", len(signin))
+	if len(signin) != 12 {
+		t.Errorf("auth.RegisterRoutes registered %d patterns, want 12", len(signin))
 	}
 	for p := range signin {
 		why, ok := openRoutes[p]

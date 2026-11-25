@@ -229,17 +229,42 @@ type fakeReady struct{ err error }
 
 func (r fakeReady) Ready(context.Context) error { return r.err }
 
-// fakeAction counts its runs.
+// fakeAction counts its runs and the payloads it was given; err, when set,
+// fails each run.
 type fakeAction struct {
-	mu   sync.Mutex
-	runs []Principal
+	mu       sync.Mutex
+	runs     []Principal
+	payloads []ActionPayload
+	err      error
 }
 
-func (a *fakeAction) Run(_ context.Context, p Principal) (string, error) {
+func (a *fakeAction) Run(_ context.Context, p Principal, payload ActionPayload) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.runs = append(a.runs, p)
+	a.payloads = append(a.payloads, payload)
+	if a.err != nil {
+		return "", a.err
+	}
 	return "/settings?done=1", nil
+}
+
+// countingPayload counts its Destroy calls.
+type countingPayload struct {
+	mu        sync.Mutex
+	destroyed int
+}
+
+func (c *countingPayload) Destroy() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.destroyed++
+}
+
+func (c *countingPayload) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.destroyed
 }
 
 func (a *fakeAction) count() int {
@@ -297,6 +322,29 @@ func newSigninRig(t *testing.T) *signinRig {
 	f.svc.SetSignIn(r.si)
 	r.h = f.handler()
 	return r
+}
+
+// prepare runs PrepareAction for sub's kind with payload, and returns the
+// pending cookie it set.
+func (r *signinRig) prepare(t *testing.T, sub, kind string, payload ActionPayload, cookies ...*http.Cookie) *http.Cookie {
+	t.Helper()
+	req := httptestRequest(rigConsole, "/api/accounts/x/reset-password")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	req = req.WithContext(WithPrincipal(req.Context(), Principal{Sub: sub, Name: "alice"}))
+	w := recorder()
+	next, err := r.si.PrepareAction(w, req, kind, payload)
+	if err != nil || next != "/api/auth/signin?action="+kind {
+		t.Fatalf("PrepareAction = %q, %v", next, err)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == pendingCookieName {
+			return c
+		}
+	}
+	t.Fatal("PrepareAction set no pending cookie")
+	return nil
 }
 
 // get sends a GET to the console at host with cookies.

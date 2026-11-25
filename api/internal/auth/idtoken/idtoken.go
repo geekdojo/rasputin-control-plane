@@ -57,9 +57,22 @@ type Claims struct {
 	Roles []string
 }
 
+// AccessClaims are the access token claims a reset callback reads
+// (geekdojo/geekdojo-brain#992).
+type AccessClaims struct {
+	Issuer string
+	// AuthorizedParty is azp: the client the token was issued to.
+	AuthorizedParty string
+	Subject         string
+}
+
 // Verifier verifies tokens for one client at one issuer.
 type Verifier struct {
 	v *oidc.IDTokenVerifier
+	// access verifies access tokens: the same key set, issuer and clock,
+	// with no audience check, since an access token's aud is not the client.
+	access   *oidc.IDTokenVerifier
+	clientID string
 }
 
 // New is the verifier for clientID at issuer, whose key set it fetches from
@@ -76,7 +89,12 @@ func New(ctx context.Context, issuer, clientID string, client *http.Client, now 
 	}
 	keyClient := &http.Client{Transport: statusTransport{inner: client.Transport}, CheckRedirect: client.CheckRedirect, Timeout: client.Timeout}
 	remote := oidc.NewRemoteKeySet(oidc.ClientContext(ctx, keyClient), issuer+"/protocol/openid-connect/certs")
-	return &Verifier{v: oidc.NewVerifier(issuer, probedKeys{inner: remote}, &oidc.Config{ClientID: clientID, Now: now})}, nil
+	keys := probedKeys{inner: remote}
+	return &Verifier{
+		v:        oidc.NewVerifier(issuer, keys, &oidc.Config{ClientID: clientID, Now: now}),
+		access:   oidc.NewVerifier(issuer, keys, &oidc.Config{SkipClientIDCheck: true, Now: now}),
+		clientID: clientID,
+	}, nil
 }
 
 // IDToken verifies raw as an ID token and returns its claims. The caller
@@ -103,6 +121,35 @@ func (v *Verifier) IDToken(ctx context.Context, raw secret.Value) (Claims, error
 	}
 	if extra.AuthTime != nil {
 		c.AuthTime = time.Unix(*extra.AuthTime, 0).UTC()
+	}
+	return c, nil
+}
+
+// AccessToken verifies raw as an access token issued to the verifier's
+// client: go-oidc checks the signature, the issuer and the expiry, with no
+// audience check (capability row T201). It then requires typ Bearer, so an
+// ID token is never read as one, azp equal to the client, and a subject.
+func (v *Verifier) AccessToken(ctx context.Context, raw secret.Value) (AccessClaims, error) {
+	ctx, probe := withProbe(ctx)
+	tok, err := v.access.Verify(ctx, string(raw.Reveal()))
+	if err != nil {
+		return AccessClaims{}, classify(probe, err)
+	}
+	var extra struct {
+		Typ string `json:"typ"`
+		AZP string `json:"azp"`
+	}
+	if err := tok.Claims(&extra); err != nil {
+		return AccessClaims{}, fmt.Errorf("%w: its claims do not decode", ErrInvalid)
+	}
+	c := AccessClaims{Issuer: tok.Issuer, AuthorizedParty: extra.AZP, Subject: tok.Subject}
+	switch {
+	case extra.Typ != "Bearer":
+		return c, fmt.Errorf("%w: it is not an access token", ErrInvalid)
+	case extra.AZP != v.clientID:
+		return c, fmt.Errorf("%w: it was issued to another client", ErrInvalid)
+	case tok.Subject == "":
+		return c, fmt.Errorf("%w: it names no subject", ErrInvalid)
 	}
 	return c, nil
 }

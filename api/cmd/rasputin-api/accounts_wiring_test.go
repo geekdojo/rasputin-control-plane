@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
@@ -44,8 +46,25 @@ func accountsFixture(t *testing.T, dbPath string) (accountsDeps, *logkittest.Rec
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	log, rec := logkittest.New()
+	kinds, err := authz.NewKindPolicy(noAppFacts{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return accountsDeps{mode: identityModeKeycloak, admin: refusingAdmin{}, dbPath: dbPath, mac: mac,
-		console: nullConsole{}, moved: store, log: log}, rec
+		console: nullConsole{}, moved: store, kinds: kinds, runner: refusingRunner{}, listDir: t.TempDir(), log: log}, rec
+}
+
+type noAppFacts struct{}
+
+func (noAppFacts) AppFacts(context.Context, string, string) (authz.AppFacts, error) {
+	return authz.AppFacts{}, authz.ErrNoApp
+}
+
+// refusingRunner is a runner no case here submits to.
+type refusingRunner struct{}
+
+func (refusingRunner) SubmitFor(context.Context, authz.Submitter, string, any, func(string) error) (*jobs.Job, error) {
+	return nil, errors.New("not here")
 }
 
 // Outside keycloak nothing is built, nothing registers and no alert rises;
@@ -72,6 +91,14 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	if wf, ok := r.kinds[accounts.Kind]; !ok || !wf.System {
 		t.Errorf("identity.revoke registered %v, System %v", ok, wf.System)
 	}
+	// #992: the reset registers, its action is the fresh sign-in's, and
+	// its check and #991's ender are there for the server and the returns.
+	if wf, ok := r.kinds[accounts.ResetKind]; !ok || wf.Steps[0].Name != accounts.StepSetTemporary || wf.OnTerminal == nil {
+		t.Errorf("accounts.reset_password registered %v", ok)
+	}
+	if w.actions()[accounts.ResetKind] == nil || w.resetter == nil || w.sessions.Admin == nil {
+		t.Error("the reset's action, check or the session ender is missing")
+	}
 	if w.access == nil {
 		t.Error("no access grant")
 	}
@@ -84,6 +111,10 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	d.moved = nil
 	if _, err := wireAccounts(t.Context(), d); err == nil {
 		t.Error("a nil collaborator was accepted")
+	}
+	off, _ := wireAccounts(t.Context(), accountsDeps{mode: identityModeOff})
+	if off.actions() != nil {
+		t.Error("actions outside keycloak")
 	}
 }
 

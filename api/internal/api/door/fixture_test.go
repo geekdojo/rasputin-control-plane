@@ -187,6 +187,29 @@ type fixture struct {
 	ids       atomic.Int64
 	policySvc *policy.Service
 	breach    *fakeBreach
+	reset     *fakeResetDone
+}
+
+// fakeResetDone is the app door's reset return: it records each query it
+// was asked to finish and answers sentence.
+type fakeResetDone struct {
+	mu      sync.Mutex
+	queries []url.Values
+}
+
+const fakeResetSentence = "Your password is changed. Sign in with it and your second step."
+
+func (r *fakeResetDone) Finish(_ context.Context, q url.Values) (string, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.queries = append(r.queries, q)
+	return "reset-done", fakeResetSentence
+}
+
+func (r *fakeResetDone) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.queries)
 }
 
 // fakeBreach is the breach check: it answers listed and err, and records
@@ -225,7 +248,7 @@ func newFixture(t *testing.T) *fixture {
 			Tailnet:     []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")},
 			Nodes:       []netip.Addr{netip.MustParseAddr("192.0.2.50")},
 		}},
-		waiting: &fakeWaiting{}, dirty: &countDirty{}, name: "Hoodoo Home", breach: &fakeBreach{},
+		waiting: &fakeWaiting{}, dirty: &countDirty{}, name: "Hoodoo Home", breach: &fakeBreach{}, reset: &fakeResetDone{},
 	}
 	f.th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: func() time.Time { return f.now }})
 	if err != nil {
@@ -298,6 +321,7 @@ func (f *fixture) shared(t *testing.T) Shared {
 		Dirty:       f.dirty,
 		IDs:         func() string { return "corr-" + strconv.FormatInt(f.ids.Add(1), 10) },
 		Breach:      f.breach,
+		ResetDone:   f.reset,
 		Log:         log,
 	}
 }

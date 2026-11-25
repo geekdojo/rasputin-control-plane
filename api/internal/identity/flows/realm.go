@@ -77,6 +77,10 @@ func RealmRules(in Inputs) map[string]any {
 	rp := RPName(in)
 	return map[string]any{
 		"browserFlow": RealmDefault.Alias(),
+		// The reset entry runs the reset flow; Keycloak refuses the entry
+		// unless resets are allowed (Identity 4.10).
+		"resetCredentialsFlow": ResetAlias,
+		"resetPasswordAllowed": true,
 
 		"ssoSessionIdleTimeout":            seconds(ssoSessionIdleLifetime),
 		"ssoSessionMaxLifespan":            seconds(ssoSessionMaxLifetime),

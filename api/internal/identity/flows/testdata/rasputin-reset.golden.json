@@ -1,0 +1,473 @@
+[
+  {
+    "provider": "reset-credentials-choose-user",
+    "requirement": "REQUIRED"
+  },
+  {
+    "alias": "rasputin-reset-codes",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-configured",
+        "requirement": "REQUIRED"
+      },
+      {
+        "provider": "auth-recovery-authn-code-form",
+        "requirement": "REQUIRED"
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-no-codes",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-no-codes-not-executed",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-codes"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-no-codes-deny",
+        "config": {
+          "denyErrorMessage": "Recovery codes can't be used for this account. Sign in with a passkey, or ask an administrator to reset your password."
+        }
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-admin-second-step",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-role",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-admin-role",
+        "config": {
+          "condUserRole": "rasputin-console.admin",
+          "negate": "false"
+        }
+      },
+      {
+        "provider": "conditional-user-configured",
+        "requirement": "REQUIRED"
+      },
+      {
+        "provider": "webauthn-authenticator-passwordless",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "webauthn-authenticator",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "auth-otp-form",
+        "requirement": "ALTERNATIVE"
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-operator-second-step",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-role",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-operator-role",
+        "config": {
+          "condUserRole": "rasputin-console.operator",
+          "negate": "false"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-operator-after-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-user-configured",
+        "requirement": "REQUIRED"
+      },
+      {
+        "provider": "webauthn-authenticator-passwordless",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "webauthn-authenticator",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "auth-otp-form",
+        "requirement": "ALTERNATIVE"
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-app-admin-second-step",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-attribute",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-app-admin-role",
+        "config": {
+          "attribute_expected_value": "^admin$",
+          "attribute_name": "rasputin_app_role",
+          "include_group_attributes": "false",
+          "not": "false",
+          "regex": "true"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-app-admin-after-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-app-admin-after-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-user-configured",
+        "requirement": "REQUIRED"
+      },
+      {
+        "provider": "webauthn-authenticator-passwordless",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "webauthn-authenticator",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "auth-otp-form",
+        "requirement": "ALTERNATIVE"
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-gear-admin-second-step",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-attribute",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-gear-admin-grant",
+        "config": {
+          "attribute_expected_value": "^gear-admin$",
+          "attribute_name": "rasputin_network",
+          "include_group_attributes": "false",
+          "not": "false",
+          "regex": "true"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-gear-admin-after-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-gear-admin-after-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-second-step-privileged-gear-admin-after-rasputin-reset-privileged-app-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-app-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-user-configured",
+        "requirement": "REQUIRED"
+      },
+      {
+        "provider": "webauthn-authenticator-passwordless",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "webauthn-authenticator",
+        "requirement": "ALTERNATIVE"
+      },
+      {
+        "provider": "auth-otp-form",
+        "requirement": "ALTERNATIVE"
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-admin-deny",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-role",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin-role",
+        "config": {
+          "condUserRole": "rasputin-console.admin",
+          "negate": "false"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin-not-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin-not-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin-not-rasputin-reset-privileged-app-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-app-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin-not-rasputin-reset-privileged-gear-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-gear-admin-second-step"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-admin",
+        "config": {
+          "denyErrorMessage": "An administrator who has lost their password also needs their passkey, security key or authenticator app. Otherwise ask another administrator, or use the repair code on the control plane."
+        }
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-operator-deny",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-role",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator-role",
+        "config": {
+          "condUserRole": "rasputin-console.operator",
+          "negate": "false"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator-not-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator-not-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator-not-rasputin-reset-privileged-app-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-app-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator-not-rasputin-reset-privileged-gear-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-gear-admin-second-step"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-operator",
+        "config": {
+          "denyErrorMessage": "An administrator who has lost their password also needs their passkey, security key or authenticator app. Otherwise ask another administrator, or use the repair code on the control plane."
+        }
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-app-admin-deny",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-attribute",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin-role",
+        "config": {
+          "attribute_expected_value": "^admin$",
+          "attribute_name": "rasputin_app_role",
+          "include_group_attributes": "false",
+          "not": "false",
+          "regex": "true"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin-not-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin-not-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin-not-rasputin-reset-privileged-app-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-app-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin-not-rasputin-reset-privileged-gear-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-gear-admin-second-step"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-app-admin",
+        "config": {
+          "denyErrorMessage": "An administrator who has lost their password also needs their passkey, security key or authenticator app. Otherwise ask another administrator, or use the repair code on the control plane."
+        }
+      }
+    ]
+  },
+  {
+    "alias": "rasputin-reset-privileged-gear-admin-deny",
+    "requirement": "CONDITIONAL",
+    "children": [
+      {
+        "provider": "conditional-user-attribute",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin-grant",
+        "config": {
+          "attribute_expected_value": "^gear-admin$",
+          "attribute_name": "rasputin_network",
+          "include_group_attributes": "false",
+          "not": "false",
+          "regex": "true"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin-not-rasputin-reset-privileged-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin-not-rasputin-reset-privileged-operator-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-operator-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin-not-rasputin-reset-privileged-app-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-app-admin-second-step"
+        }
+      },
+      {
+        "provider": "conditional-sub-flow-executed",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin-not-rasputin-reset-privileged-gear-admin-second-step",
+        "config": {
+          "check_result": "not-executed",
+          "flow_to_check": "rasputin-reset-privileged-gear-admin-second-step"
+        }
+      },
+      {
+        "provider": "deny-access-authenticator",
+        "requirement": "REQUIRED",
+        "configAlias": "rasputin-reset-deny-privileged-gear-admin",
+        "config": {
+          "denyErrorMessage": "An administrator who has lost their password also needs their passkey, security key or authenticator app. Otherwise ask another administrator, or use the repair code on the control plane."
+        }
+      }
+    ]
+  },
+  {
+    "provider": "reset-password",
+    "requirement": "REQUIRED"
+  }
+]

@@ -70,6 +70,11 @@ type Inputs struct {
 	// URL, by client id (geekdojo/geekdojo-brain#989). A client it does not
 	// name has the attribute held absent.
 	BackchannelLogoutURLs map[string]string
+	// ResetHomeURL and ResetAppURL are each door's reset start
+	// (auth.ResetStartURL), which the sign-in pages link "Forgot your
+	// password?" to (geekdojo/geekdojo-brain#992). "" holds the attribute
+	// absent.
+	ResetHomeURL, ResetAppURL string
 }
 
 // The client attributes converge owns: the back-channel logout URL, and,
@@ -102,6 +107,11 @@ type Desired struct {
 	// origin, which the sign-in pages link to (geekdojo/geekdojo-brain#988).
 	// "" holds the attribute absent.
 	ConsoleURL string `json:"consoleUrl"`
+	// ResetHomeURL and ResetAppURL are the realm attributes
+	// rasputin.reset-home-url and rasputin.reset-app-url. "" holds each
+	// absent.
+	ResetHomeURL string `json:"resetHomeUrl"`
+	ResetAppURL  string `json:"resetAppUrl"`
 	// ClientAttributes are the client attributes converge owns, by client id
 	// and then attribute: "" holds an attribute absent. Every other
 	// attribute a client carries is kept as read.
@@ -136,6 +146,7 @@ func NewDesired(in Inputs) Desired {
 		d.RedirectURIs[c] = sorted(in.RedirectURIs[c])
 	}
 	d.ConsoleURL = consoleOrigin(in.RedirectURIs["rasputin-console"])
+	d.ResetHomeURL, d.ResetAppURL = in.ResetHomeURL, in.ResetAppURL
 	d.ClientAttributes = map[string]map[string]string{}
 	for _, c := range RasputinClients {
 		d.ClientAttributes[c] = clientAttributes(in.BackchannelLogoutURLs[c])

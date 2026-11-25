@@ -27,6 +27,7 @@ func (s *Service) RegisterRoutes(mux RouteRegistrar) {
 	mux.HandleFunc("POST /api/auth/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/auth/signin", s.handleSignin)
 	mux.HandleFunc("GET /api/auth/callback", s.handleCallback)
+	mux.HandleFunc("GET "+ResetDonePath, s.handleResetDone)
 	mux.HandleFunc("POST /api/identity/backchannel/{client}", s.handleBackchannel)
 	mux.HandleFunc("POST /api/auth/register/begin", s.handleRegisterBegin)
 	mux.HandleFunc("POST /api/auth/register/step-up", s.handleRegisterStepUp)
@@ -115,14 +116,32 @@ func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/auth/signin — open. Starts a sign-in at the home door, or sends
-// the browser back to the launcher when sign-in is not installed.
+// the browser back to the launcher when sign-in is not installed. With
+// ?action= it starts a prepared action's fresh sign-in instead, for the
+// caller's own console session only: without one it answers 401.
 func (s *Service) handleSignin(w http.ResponseWriter, r *http.Request) {
 	si := s.signin()
 	if si == nil {
 		http.Redirect(w, r, signinUnavailable, http.StatusSeeOther)
 		return
 	}
+	if q := r.URL.Query(); q.Has("action") {
+		kind := q.Get("action")
+		s.RequireSessionFunc(func(w http.ResponseWriter, r *http.Request) { si.StartAction(w, r, kind) })(w, r)
+		return
+	}
 	si.Begin(w, r)
+}
+
+// GET /api/auth/reset-done — open. The home door's reset client returns
+// here: ResetDone ends the person's sessions and mints none.
+func (s *Service) handleResetDone(w http.ResponseWriter, r *http.Request) {
+	rd := s.reset()
+	if rd == nil {
+		http.Redirect(w, r, launcherPath+"?signin="+ResetOutcomeFailed, http.StatusSeeOther)
+		return
+	}
+	rd.ServeHTTP(w, r)
 }
 
 // GET /api/auth/callback — open. The home door's return: SignIn.Complete

@@ -14,7 +14,15 @@ import { DIM, FG, HAIR, HAIR_SOFT, PANEL } from './kit';
 import { ACCENT, MONO } from './ui-theme';
 
 /** The reasons the api sends a sign-in back to the launcher for. */
-export type SignInReturn = 'failed' | 'expired' | 'unavailable' | 'wrong-host';
+export type SignInReturn =
+  | 'failed'
+  | 'expired'
+  | 'unavailable'
+  | 'wrong-host'
+  | 'reset-done'
+  | 'reset-incomplete'
+  | 'reset-failed'
+  | 'action-failed';
 
 /** One sentence for each reason. */
 export const SIGN_IN_SENTENCES: Record<SignInReturn, string> = {
@@ -22,6 +30,14 @@ export const SIGN_IN_SENTENCES: Record<SignInReturn, string> = {
   expired: 'That sign-in took too long, or was started in another window. Sign in again.',
   unavailable: 'Sign-in is not available right now. Try again once Rasputin has finished starting.',
   'wrong-host': "Sign in from this cluster's own address, the name ending in .local, not an IP address or another name.",
+  // A password reset's return (geekdojo/geekdojo-brain#992).
+  'reset-done': 'Your password is changed. Sign in with it and your second step.',
+  'reset-incomplete':
+    "Your password is changed, but Rasputin couldn't end your other sign-ins. Ask an administrator to sign you out everywhere.",
+  'reset-failed':
+    "Rasputin couldn't confirm the password reset. If you chose a new password, sign in with it. Otherwise start the reset again.",
+  // A fresh-sign-in action that ran and failed, or could not start.
+  'action-failed': "Rasputin couldn't finish the change you signed in again for. Try it again.",
 };
 
 /** The sentence shown while sign-in is not ready. */

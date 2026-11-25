@@ -29,6 +29,11 @@ type CodeExchange struct {
 	RedirectURI string
 	// Forward writes the door's forwarded headers (doors.Door.SetForwarded).
 	Forward func(http.Header)
+	// NoVerifier marks a code issued with no PKCE challenge: the
+	// reset-credentials entry's (geekdojo/geekdojo-brain#992), which takes
+	// none. The form then carries no code_verifier, and Verifier must be
+	// empty.
+	NoVerifier bool
 }
 
 // ExchangeCode posts x to the token endpoint and returns the answer's ID
@@ -37,14 +42,29 @@ type CodeExchange struct {
 // (tokenField): a spent, forged or mismatched code is ErrProtocol with OAuth
 // error invalid_grant, and a service that does not answer is ErrUnreachable.
 func (c *Client) ExchangeCode(ctx context.Context, x CodeExchange) (secret.Value, error) {
+	return c.exchange(ctx, x, "id_token")
+}
+
+// ExchangeAccessToken is ExchangeCode for a code whose answer carries no ID
+// token: the reset-credentials entry's, whose authentication session has no
+// scope note (capability row T200). It returns the access token, which the
+// caller verifies (idtoken.Verifier.AccessToken); every other field is read
+// only to be cleared.
+func (c *Client) ExchangeAccessToken(ctx context.Context, x CodeExchange) (secret.Value, error) {
+	return c.exchange(ctx, x, "access_token")
+}
+
+// exchange checks x, posts it, and returns the answer's field.
+func (c *Client) exchange(ctx context.Context, x CodeExchange, field string) (secret.Value, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	path := "/realms/" + url.PathEscape(x.Realm) + "/protocol/openid-connect/token"
-	if x.Realm == "" || x.ClientID == "" || x.RedirectURI == "" || x.Code.Len() == 0 || x.Verifier.Len() == 0 || x.Forward == nil {
+	if x.Realm == "" || x.ClientID == "" || x.RedirectURI == "" || x.Code.Len() == 0 || x.Forward == nil ||
+		(x.Verifier.Len() == 0) != x.NoVerifier {
 		return secret.Value{}, c.failed(ctx, &Error{Op: "token", Path: path, Kind: ErrInvalidValue,
-			Err: errors.New("the exchange is missing its realm, client, redirect URI, code, verifier or door")})
+			Err: errors.New("the exchange is missing its realm, client, redirect URI, code or door, or its verifier does not match NoVerifier")})
 	}
-	tok, e := c.tokenField(ctx, path, codeForm(x), "id_token", x.Forward)
+	tok, e := c.tokenField(ctx, path, codeForm(x), field, x.Forward)
 	if e != nil {
 		return secret.Value{}, c.failed(ctx, e)
 	}
@@ -57,7 +77,10 @@ func codeForm(x CodeExchange) []byte {
 	id, redirect := url.QueryEscape(x.ClientID), url.QueryEscape(x.RedirectURI)
 	const head = "grant_type=authorization_code&client_id="
 	size := len(head) + len(id) + len("&redirect_uri=") + len(redirect) +
-		len("&code=") + 3*x.Code.Len() + len("&code_verifier=") + 3*x.Verifier.Len()
+		len("&code=") + 3*x.Code.Len()
+	if !x.NoVerifier {
+		size += len("&code_verifier=") + 3*x.Verifier.Len()
+	}
 	b := make([]byte, 0, size)
 	b = append(b, head...)
 	b = append(b, id...)
@@ -65,6 +88,9 @@ func codeForm(x CodeExchange) []byte {
 	b = append(b, redirect...)
 	b = append(b, "&code="...)
 	b = appendQueryEscaped(b, x.Code.Reveal())
+	if x.NoVerifier {
+		return b
+	}
 	b = append(b, "&code_verifier="...)
 	b = appendQueryEscaped(b, x.Verifier.Reveal())
 	return b

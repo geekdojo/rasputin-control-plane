@@ -321,7 +321,7 @@ func newDoorRig(t *testing.T, env *Env) *doorRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: countingTransport{inner: relay, n: &r.upstream},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return doorInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("door-%d", r.ids.Add(1)) }, Breach: neverListed{}, Log: env.log,
+		IDs: func() string { return fmt.Sprintf("door-%d", r.ids.Add(1)) }, Breach: neverListed{}, ResetDone: noResetReturn{}, Log: env.log,
 	})
 	if err != nil {
 		t.Fatal(err)
