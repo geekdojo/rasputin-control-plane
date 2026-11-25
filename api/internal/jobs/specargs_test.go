@@ -28,7 +28,8 @@ import (
 //  4. the Submitter pins (geekdojo/geekdojo-brain#1001, F-1001-02): any use
 //     of authz.SystemSubmitter outside package jobs, of authz.Person outside
 //     package auth, of authz.RepairSession outside package breakglass
-//     (geekdojo/geekdojo-brain#321), and of authz.BridgeGrant anywhere;
+//     (geekdojo/geekdojo-brain#321), and of authz.BridgeGrant outside
+//     package auth (geekdojo/geekdojo-brain#1005);
 //  5. the person path: in package api, a Submitter argument to
 //     (*jobs.Runner).SubmitFor or SubmitOperatorSpec or to
 //     storage.SubmitClaim that is not the expression submitter(r), and any
@@ -52,14 +53,15 @@ const (
 )
 
 // constructorOwners is the one package allowed to use each Submitter
-// constructor in non-test code; "" is none. Identity 5.2 adds the owner of
-// BridgeGrant. TC-321-26: RepairSession's owner is package breakglass
+// constructor in non-test code; "" is none. Identity 5.2 made package auth
+// the owner of BridgeGrant (the bridge, geekdojo/geekdojo-brain#1005).
+// TC-321-26: RepairSession's owner is package breakglass
 // (breakglass.Session.Submitter).
 var constructorOwners = map[string]string{
 	"SystemSubmitter": jobsPath,
 	"Person":          authPath,
 	"RepairSession":   modulePath + "/internal/breakglass",
-	"BridgeGrant":     "",
+	"BridgeGrant":     authPath,
 }
 
 // personPath is a package whose jobs are a person's: the declarations in it
@@ -455,7 +457,7 @@ func TestSpecArgs_FixtureSystemSubmitter(t *testing.T) {
 		"systemsubmitter.go:29", // SubmitFor given authz.Person: not submitter(r)
 		"systemsubmitter.go:29", // ... and Person outside package auth
 		"systemsubmitter.go:34", // RepairSession outside package breakglass (TC-321-26)
-		"systemsubmitter.go:35", // BridgeGrant, likewise
+		"systemsubmitter.go:35", // BridgeGrant outside package auth
 	})
 }
 

@@ -1,10 +1,16 @@
 const BASE = process.env.NEXT_PUBLIC_API_BASE ?? '';
 
-/** The signed-in person (GET /api/auth/me): their account's subject, sign-in name and console roles. */
+/**
+ * The signed-in person (GET /api/auth/me): their account's subject, sign-in
+ * name and console roles. preUpdate is set only for a session from before
+ * the sign-in update (geekdojo/geekdojo-brain#1005); needsPassword says its
+ * account has not chosen its first password yet.
+ */
 export interface CurrentUser {
   sub: string;
   name: string;
   roles: string[];
+  preUpdate?: { needsPassword: boolean };
 }
 
 /**

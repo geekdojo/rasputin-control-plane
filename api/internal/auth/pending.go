@@ -2,7 +2,6 @@ package auth
 
 import (
 	"crypto/subtle"
-	"sync"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -72,77 +71,31 @@ func (rec *pendingSignin) destroy() {
 }
 
 // pendingSignins is the map of sign-ins in flight, keyed by the pending
-// cookie's value. It is safe for concurrent use.
+// cookie's value: an expiring map (expiring.go) capped at maxSigninPending,
+// each record expiring signinPendingLifetime after it began. It is safe for
+// concurrent use.
 type pendingSignins struct {
-	mu  sync.Mutex
-	m   map[string]*pendingSignin
-	now func() time.Time
+	*expiring[*pendingSignin]
 }
 
 func newPendingSignins(now func() time.Time) *pendingSignins {
-	return &pendingSignins{m: map[string]*pendingSignin{}, now: now}
-}
-
-// live reports whether key names a record that has not expired.
-func (p *pendingSignins) live(key string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rec, ok := p.m[key]
-	return ok && p.now().Before(rec.expires)
+	return &pendingSignins{newExpiring(now, maxSigninPending,
+		func(rec *pendingSignin) time.Time { return rec.expires },
+		func(rec *pendingSignin) { rec.destroy() })}
 }
 
 // put stores rec under key, replacing any record there, with its expiry set
 // signinPendingLifetime after its begin.
 func (p *pendingSignins) put(key string, rec *pendingSignin) {
 	rec.expires = rec.begin.Add(signinPendingLifetime)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if old, ok := p.m[key]; ok {
-		old.destroy()
-	} else if len(p.m) >= maxSigninPending {
-		p.evictLocked()
-	}
-	p.m[key] = rec
-}
-
-// evictLocked makes room for one record: every expired one goes, and when
-// none had expired, the one closest to expiry. The caller holds p.mu.
-func (p *pendingSignins) evictLocked() {
-	now := p.now()
-	var (
-		oldest    string
-		oldestExp time.Time
-		pruned    bool
-	)
-	for k, rec := range p.m {
-		if !now.Before(rec.expires) {
-			rec.destroy()
-			delete(p.m, k)
-			pruned = true
-			continue
-		}
-		if oldest == "" || rec.expires.Before(oldestExp) {
-			oldest, oldestExp = k, rec.expires
-		}
-	}
-	if !pruned && oldest != "" {
-		p.m[oldest].destroy()
-		delete(p.m, oldest)
-	}
+	p.expiring.put(key, rec)
 }
 
 // take removes and returns the record under key, or nil when there is none
 // or it has expired. The caller destroys it.
 func (p *pendingSignins) take(key string) *pendingSignin {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rec, ok := p.m[key]
+	rec, ok := p.expiring.take(key)
 	if !ok {
-		return nil
-	}
-	delete(p.m, key)
-	if !p.now().Before(rec.expires) {
-		rec.destroy()
 		return nil
 	}
 	return rec
@@ -157,41 +110,19 @@ func (p *pendingSignins) forward(state, kcAction string) bool {
 	if state == "" || kcAction == "" {
 		return false
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	for _, rec := range p.m {
-		if rec.prepared || rec.action == nil || rec.action.kcAction == "" || !now.Before(rec.expires) {
-			continue
-		}
-		if subtle.ConstantTimeCompare([]byte(rec.state), []byte(state)) != 1 {
-			continue
-		}
-		if rec.action.forwarded || rec.action.kcAction != kcAction {
+	ok := false
+	p.each(func(rec *pendingSignin) bool {
+		if rec.prepared || rec.action == nil || rec.action.kcAction == "" {
 			return false
 		}
-		rec.action.forwarded = true
-		return true
-	}
-	return false
-}
-
-// prune drops every expired record (the janitor's sweep).
-func (p *pendingSignins) prune() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	for k, rec := range p.m {
-		if !now.Before(rec.expires) {
-			rec.destroy()
-			delete(p.m, k)
+		if subtle.ConstantTimeCompare([]byte(rec.state), []byte(state)) != 1 {
+			return false
 		}
-	}
-}
-
-// size is the number of records held.
-func (p *pendingSignins) size() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.m)
+		if !rec.action.forwarded && rec.action.kcAction == kcAction {
+			rec.action.forwarded = true
+			ok = true
+		}
+		return true
+	})
+	return ok
 }

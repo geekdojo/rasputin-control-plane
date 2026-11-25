@@ -55,6 +55,12 @@ var openRoutes = map[string]string{
 	"GET /api/auth/signup":        "starts account creation at the home door (prompt=create), whose return is a sign-in at the callback; it only redirects and stores a pending record, and the door decides who may create an account",
 	"POST /api/auth/login/begin":  "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
 	"POST /api/auth/login/finish": "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	// TC-1005-24: the move's bridge (geekdojo/geekdojo-brain#1005), open
+	// because its person holds no credential the identity service knows.
+	"POST /api/auth/bridge/begin":    "starts a pre-update passkey ceremony; stores only its challenge under a fresh host-only cookie, capped and bounded",
+	"POST /api/auth/bridge/finish":   "verifies a pre-update passkey with user verification; yields only a single-use grant for that account's first password, never a session",
+	"GET /api/auth/bridge":           "whether /login offers the bridge, and the caller's own grant's names; no count and no other account",
+	"POST /api/auth/bridge/password": "needs the caller's own live grant; submits only accounts.set_first_password for that account, which the kind table decides",
 	// TC-989-27: the console's sign-in through the home door (#989).
 	"GET /api/auth/signin": "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record; with ?action= it resolves the caller's own session and answers 401 without one",
 	// TC-992-22: the reset clients' return (geekdojo/geekdojo-brain#992).

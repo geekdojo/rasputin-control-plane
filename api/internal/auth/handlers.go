@@ -28,6 +28,11 @@ func (s *Service) RegisterRoutes(mux RouteRegistrar) {
 	mux.HandleFunc("POST /api/identity/backchannel/{client}", s.handleBackchannel)
 	mux.HandleFunc("POST /api/auth/login/begin", s.handleLoginGone)
 	mux.HandleFunc("POST /api/auth/login/finish", s.handleLoginGone)
+	// The move's bridge (geekdojo/geekdojo-brain#1005), 404 until installed.
+	mux.HandleFunc("POST /api/auth/bridge/begin", s.bridged((*Bridge).begin))
+	mux.HandleFunc("POST /api/auth/bridge/finish", s.bridged((*Bridge).finish))
+	mux.HandleFunc("GET /api/auth/bridge", s.bridged((*Bridge).state))
+	mux.HandleFunc("POST /api/auth/bridge/password", s.bridged((*Bridge).password))
 }
 
 // ----- status / me / logout -----------------------------------------------
@@ -40,10 +45,23 @@ type meView struct {
 	Name         string   `json:"name"`
 	Roles        []string `json:"roles"`
 	Capabilities []string `json:"capabilities"`
+	// PreUpdate is set only for a pre-update session
+	// (geekdojo/geekdojo-brain#1005): the console then prompts for the
+	// first password while NeedsPassword holds.
+	PreUpdate *preUpdateView `json:"preUpdate,omitempty"`
+}
+
+// preUpdateView is a pre-update session as the console reads it.
+type preUpdateView struct {
+	NeedsPassword bool `json:"needsPassword"`
 }
 
 func viewOf(p Principal) meView {
-	return meView{Sub: p.Sub, Name: p.Name, Roles: nonNil(p.Roles), Capabilities: p.Capabilities().List()}
+	v := meView{Sub: p.Sub, Name: p.Name, Roles: nonNil(p.Roles), Capabilities: p.Capabilities().List()}
+	if p.Session.PreUpdate {
+		v.PreUpdate = &preUpdateView{NeedsPassword: p.Session.NeedsPassword}
+	}
+	return v
 }
 
 // GET /api/auth/status — open. firstRun drives the launcher's CREATE THE
@@ -78,8 +96,8 @@ func (s *Service) handleMe(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
-	case outcome == sessionDuplicate:
-		writeDuplicateCookie(w, SessionCookieName)
+	case outcome == sessionDuplicate, outcome == sessionDuplicateOld:
+		writeDuplicateCookie(w, outcome.duplicateName())
 		return
 	case outcome != sessionFound:
 		writeErr(w, http.StatusUnauthorized, "auth required")
@@ -90,9 +108,20 @@ func (s *Service) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/auth/logout — ends the console session, clears its cookie, then
-// ends the identity session it was signed in under. It answers 200 even
-// when that last step fails (SignIn.EndSession logs it).
+// ends the identity session it was signed in under. A pre-update session
+// cookie the request carries is ended and cleared too, both when both are
+// present (geekdojo/geekdojo-brain#1005). It answers 200 even when the
+// identity session's end fails (SignIn.EndSession logs it).
 func (s *Service) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if old := r.CookiesNamed(legacySessionCookieName); len(old) > 0 {
+		for _, c := range old {
+			if err := s.store.DeleteSession(r.Context(), c.Value); err != nil {
+				writeErr(w, http.StatusInternalServerError, "The session could not be ended.")
+				return
+			}
+		}
+		clearCookie(w, legacySessionCookieName)
+	}
 	sid := ""
 	if c, err := oneCookie(r, SessionCookieName); err == nil && s.sessions != nil {
 		cookie := secret.New([]byte(c.Value))
@@ -183,6 +212,9 @@ func (s *Service) handleCallback(w http.ResponseWriter, r *http.Request) {
 		}
 		setSessionCookie(w, res.Cookie)
 		res.Cookie.Destroy()
+		// A new console session replaces a pre-update one in this browser
+		// (register row E3).
+		clearCookie(w, legacySessionCookieName)
 	}
 	http.Redirect(w, r, res.Location, http.StatusSeeOther)
 }

@@ -12,6 +12,7 @@ import { DIM, FG, HAIR, PANEL } from '../../components/kit';
 import { MONO } from '../../components/ui-theme';
 import { SignInLauncher, signInReturn, type SignInReturn } from '../../components/SignInLauncher';
 import { RepairLink } from '../../components/RepairLink';
+import { BridgeOffer } from '../../components/profile/PreUpdateSignIn';
 import { repairSessionLive } from '../../lib/repair';
 
 async function postAuthDestination(): Promise<string> {
@@ -90,6 +91,8 @@ export default function LoginPage() {
         ) : (
           <>
             <SignInLauncher ready={status.ready} firstRun={status.firstRun} returned={returned} />
+            {/* The move's bridge (#1005): shown only while it is offered. */}
+            <BridgeOffer />
             <RepairLink ready={status.ready} hostname={window.location.hostname} />
           </>
         )}

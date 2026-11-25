@@ -1355,9 +1355,17 @@ func main() {
 	identityConv.register(runner)
 	// identity.move (#1004), under keycloak only: a System job its trigger
 	// submits, and a repair session's re-run in C9's state.
+	// The move's bridge (#1005) sends its person on to the home door, so it
+	// is installed only with the doors on.
+	bridgeOrigin := ""
+	if doorsOn {
+		bridgeOrigin = "https://" + doorTable.Home.Host
+	}
 	identityMv, err := identityMoveWiring(ctx, identityMoveDeps{mode: identityW.mode, dbPath: dbPath, session: identityW.session,
 		oldUsers: authStore, acct: acct, designations: designations, monitor: identityState.monitor,
-		converger: identityConv.converger, ledger: jobStore, holder: moveHolder, now: time.Now, log: logger})
+		converger: identityConv.converger, ledger: jobStore, holder: moveHolder,
+		auth: authSvc, runner: runner, signInOrigin: bridgeOrigin, newCorrelationID: cryptorand.Text, rand: cryptorand.Reader,
+		now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity move", "err", err.Error())
 		os.Exit(1)

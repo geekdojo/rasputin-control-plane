@@ -58,6 +58,11 @@ type Service struct {
 	// beside the sign-in (geekdojo/geekdojo-brain#992); nil answers
 	// unavailable.
 	resetDone *ResetDone
+	// bridge and preUpdate are the move's bridge and the pre-update
+	// session, installed by InstallBridge under keycloak
+	// (geekdojo/geekdojo-brain#1005); nil until then.
+	bridge    *Bridge
+	preUpdate *preUpdate
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -267,8 +272,8 @@ func (s *Service) janitor() {
 }
 
 // sweep is one janitor pass: legacy session rows (so #745's plaintext rows are gone within sessionLifetime,
-// and nothing writes new ones), expired console sessions and expired
-// pending sign-ins. Each is a tidy-up of state its own reader already
+// and nothing writes new ones), expired console sessions, expired pending
+// sign-ins and the bridge's expired ceremonies and grants. Each is a tidy-up of state its own reader already
 // refuses once expired, so a failed delete changes no decision.
 func (s *Service) sweep(ctx context.Context, now time.Time) {
 	_ = s.store.DeleteExpiredSessions(ctx, now.UTC())
@@ -277,6 +282,9 @@ func (s *Service) sweep(ctx context.Context, now time.Time) {
 	}
 	if si := s.signin(); si != nil {
 		si.prune()
+	}
+	if b := s.bridgeOf(); b != nil {
+		b.prune()
 	}
 }
 
@@ -308,17 +316,31 @@ const (
 	sessionNone sessionOutcome = iota
 	sessionFound
 	sessionDuplicate
+	// sessionDuplicateOld is the pre-update cookie sent twice.
+	sessionDuplicateOld
 )
 
-// resolve reads the request's console session cookie and resolves it. A
-// legacy rasputin-session cookie is never read: the legacy sessions table no
-// longer authenticates anything (geekdojo/geekdojo-brain#989).
+// duplicateName is the cookie a duplicate outcome names.
+func (o sessionOutcome) duplicateName() string {
+	if o == sessionDuplicateOld {
+		return legacySessionCookieName
+	}
+	return SessionCookieName
+}
+
+// resolve reads the request's console session cookie and resolves it. Only
+// when the request carries none is the pre-update rasputin-session cookie
+// read (preupdate.go), and only once InstallBridge has installed its
+// resolver (geekdojo/geekdojo-brain#1005); a console cookie that resolves to
+// nothing never falls back to it.
 func (s *Service) resolve(r *http.Request) (Principal, secret.Value, sessionOutcome, error) {
 	c, err := oneCookie(r, SessionCookieName)
 	switch {
 	case errors.Is(err, errDuplicateCookie):
 		return Principal{}, secret.Value{}, sessionDuplicate, nil
-	case err != nil, s.sessions == nil:
+	case err != nil:
+		return s.resolvePreUpdate(r)
+	case s.sessions == nil:
 		return Principal{}, secret.Value{}, sessionNone, nil
 	}
 	cookie := secret.New([]byte(c.Value))
@@ -328,6 +350,30 @@ func (s *Service) resolve(r *http.Request) (Principal, secret.Value, sessionOutc
 		return Principal{}, secret.Value{}, sessionNone, err
 	}
 	return p, cookie, sessionFound, nil
+}
+
+// resolvePreUpdate resolves the request's pre-update session cookie, when
+// the resolver is installed. Its outcome carries no cookie value: a
+// pre-update session is never touched.
+func (s *Service) resolvePreUpdate(r *http.Request) (Principal, secret.Value, sessionOutcome, error) {
+	s.signInMu.RLock()
+	pu := s.preUpdate
+	s.signInMu.RUnlock()
+	if pu == nil {
+		return Principal{}, secret.Value{}, sessionNone, nil
+	}
+	c, err := oneCookie(r, legacySessionCookieName)
+	switch {
+	case errors.Is(err, errDuplicateCookie):
+		return Principal{}, secret.Value{}, sessionDuplicateOld, nil
+	case err != nil:
+		return Principal{}, secret.Value{}, sessionNone, nil
+	}
+	p, ok, err := pu.resolve(r.Context(), c.Value)
+	if err != nil || !ok {
+		return Principal{}, secret.Value{}, sessionNone, err
+	}
+	return p, secret.Value{}, sessionFound, nil
 }
 
 // RequireSession wraps an http.Handler so it answers 403 when the request
@@ -355,8 +401,8 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 		case err != nil:
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
-		case outcome == sessionDuplicate:
-			writeDuplicateCookie(w, SessionCookieName)
+		case outcome == sessionDuplicate, outcome == sessionDuplicateOld:
+			writeDuplicateCookie(w, outcome.duplicateName())
 			return
 		case outcome != sessionFound:
 			w.Header().Set("Content-Type", "application/json")
@@ -368,7 +414,9 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 		if s.controlLocked(w, r) {
 			return
 		}
-		_ = s.sessions.Touch(r.Context(), cookie) // last-active is display only; a failed write changes no decision
+		if !p.Session.PreUpdate {
+			_ = s.sessions.Touch(r.Context(), cookie) // last-active is display only; a failed write changes no decision
+		}
 		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 	})
 }

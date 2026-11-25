@@ -20,6 +20,9 @@
 //     node (geekdojo/geekdojo-brain#246).
 //   • Passkeys are not here: they are managed at the sign-in page's "Your
 //     account" (geekdojo/geekdojo-brain#319).
+//   • A session from before the sign-in update whose account has no password
+//     yet gets the move's prompt first (geekdojo/geekdojo-brain#1005); it
+//     lives here until #319's Profile exists.
 // The Settings icon in the sidebar routes here.
 
 import { Check, Settings as SettingsIcon } from 'lucide-react';
@@ -30,6 +33,7 @@ import { THEMES, useTheme, type ThemeMeta } from '../../../lib/theme';
 import { DeploymentModePicker, MODES } from '../../../components/DeploymentModePicker';
 import { ConsoleRootPassword } from '../../../components/ConsoleRootPassword';
 import { ConfirmModal } from '../../../components/ConfirmModal';
+import { PreUpdateSignIn } from '../../../components/profile/PreUpdateSignIn';
 import {
   disableObs,
   enableObs,
@@ -59,6 +63,7 @@ export default function SettingsPage() {
     <PageShell>
       <PageHeader icon={SettingsIcon} title="SETTINGS" />
       <PageBody>
+        <PreUpdateSignIn />
         <SectionLabel>APPEARANCE / THEME</SectionLabel>
         <Hint style={{ marginBottom: 16 }}>
           Choose how the control plane looks. Applies instantly and is remembered on this device.

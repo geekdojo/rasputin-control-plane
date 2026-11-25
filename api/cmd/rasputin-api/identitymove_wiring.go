@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -23,7 +24,10 @@ import (
 // the identity check's cadence (storeAuditCheckEvery, K03). The kind table
 // is built long before the accounts exist, so it reads the move's state
 // through moveStateHolder, filled here; while it is empty every repair
-// submission of the move is refused.
+// submission of the move is refused. Identity 5.2 (#1005) adds the move's
+// bridge: the moved accounts' local facts, accounts.set_first_password, and
+// their install on the auth service, which also turns on the pre-update
+// session.
 
 // errMoveUnwired is the move's state read before it was wired, or outside
 // keycloak.
@@ -54,8 +58,16 @@ type identityMoveDeps struct {
 	converger    *converge.Converger
 	ledger       *jobs.Store
 	holder       *moveStateHolder
-	now          func() time.Time
-	log          *slog.Logger
+	// auth is the service the bridge is installed on; runner submits the
+	// first password; signInOrigin is the home door's origin, "" while the
+	// doors are off; newCorrelationID and rand are the bridge's (#1005).
+	auth             *auth.Service
+	runner           accounts.Submitter
+	signInOrigin     string
+	newCorrelationID func() string
+	rand             io.Reader
+	now              func() time.Time
+	log              *slog.Logger
 }
 
 // identityMove is what identityMoveWiring built; empty outside keycloak.
@@ -63,12 +75,18 @@ type identityMove struct {
 	workflow *jobs.Workflow
 	entry    *scheduler.Entry
 	store    *move.Store
+	// firstPassword is accounts.set_first_password, the bridge's job.
+	firstPassword *jobs.Workflow
 }
 
-// register registers identity.move, under keycloak only.
+// register registers identity.move and accounts.set_first_password, under
+// keycloak only.
 func (w identityMove) register(r interface{ Register(jobs.Workflow) }) {
 	if w.workflow != nil {
 		r.Register(*w.workflow)
+	}
+	if w.firstPassword != nil {
+		r.Register(*w.firstPassword)
 	}
 }
 
@@ -87,8 +105,8 @@ func identityMoveWiring(ctx context.Context, d identityMoveDeps) (identityMove, 
 		return identityMove{}, nil
 	}
 	if d.dbPath == "" || d.session == nil || d.oldUsers == nil || d.acct.users == nil || d.acct.lock == nil || d.acct.facts == nil ||
-		d.acct.removed == nil || d.designations == nil || d.monitor == nil || d.converger == nil || d.ledger == nil ||
-		d.holder == nil || d.now == nil || d.log == nil {
+		d.acct.removed == nil || d.acct.checker == nil || d.designations == nil || d.monitor == nil || d.converger == nil || d.ledger == nil ||
+		d.holder == nil || d.auth == nil || d.runner == nil || d.newCorrelationID == nil || d.rand == nil || d.now == nil || d.log == nil {
 		return identityMove{}, errors.New("identity move: a collaborator is nil under keycloak")
 	}
 	store, err := move.OpenStore(ctx, d.dbPath)
@@ -123,7 +141,41 @@ func buildMove(d identityMoveDeps, store *move.Store) (identityMove, error) {
 	if err != nil {
 		return identityMove{}, fmt.Errorf("identity move: %w", err)
 	}
+	fp, err := installBridge(d, store, state)
+	if err != nil {
+		return identityMove{}, err
+	}
 	wf := mover.Workflow()
 	d.holder.p.Store(state)
-	return identityMove{workflow: &wf, entry: &scheduler.Entry{Kind: move.Kind, Interval: storeAuditCheckEvery, Due: trig.Due}, store: store}, nil
+	return identityMove{workflow: &wf, entry: &scheduler.Entry{Kind: move.Kind, Interval: storeAuditCheckEvery, Due: trig.Due}, store: store,
+		firstPassword: fp}, nil
+}
+
+// installBridge builds the move's bridge (#1005) and installs it, with the
+// pre-update session, on the auth service, and returns its job. With the
+// doors off there is no home door to send the person on to, so nothing is
+// installed: the bridge's routes answer 404 and no pre-update session
+// resolves.
+func installBridge(d identityMoveDeps, store *move.Store, state *move.State) (*jobs.Workflow, error) {
+	if d.signInOrigin == "" {
+		d.log.Info("The move's bridge is off: the sign-in doors are off.", "component", "identity.move", "event", "bridge.off")
+		return nil, nil
+	}
+	accts, err := move.NewAccounts(store, state, d.oldUsers, d.designations)
+	if err != nil {
+		return nil, fmt.Errorf("identity move: %w", err)
+	}
+	fp, err := accounts.NewFirstPassword(accounts.FirstPasswordDeps{
+		Users: d.acct.users, Checker: d.acct.checker, Removed: d.acct.removed, Facts: store, Runner: d.runner,
+		Passwords: accounts.NewHeld(), Emails: accounts.NewHeld(), Lock: d.acct.lock, Log: d.log, StepTimeout: identityRealmStepTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("identity move: %w", err)
+	}
+	if err := d.auth.InstallBridge(auth.BridgeDeps{Accounts: accts, FirstPassword: fp, SignInOrigin: d.signInOrigin,
+		NewCorrelationID: d.newCorrelationID, Now: d.now, Rand: d.rand, Log: d.log}); err != nil {
+		return nil, fmt.Errorf("identity move: %w", err)
+	}
+	wf := fp.Workflow()
+	return &wf, nil
 }
