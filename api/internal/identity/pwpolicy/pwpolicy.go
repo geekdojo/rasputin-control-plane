@@ -1,9 +1,11 @@
 // Package pwpolicy checks a password against the realm's password policy
 // before the api hands it to the identity service
-// (geekdojo/geekdojo-brain#992, Identity 4.10). Keycloak 26.8.2's Admin API
-// answers a policy refusal at reset-password with a 500, the same status as a
-// fault (capability rows T170 and T202), so the administrator's reset checks
-// first and shows the rule's sentence.
+// (geekdojo/geekdojo-brain#992, Identity 4.10). Our Keycloak build's Admin
+// API answers a policy refusal at reset-password with a 500, the same status
+// as a fault (capability rows T170 and T202): keycloak-build.conf's
+// features-disabled names admin, so no admin theme exists and building the
+// 400's message fails (finding F-1145-41, geekdojo/geekdojo-brain#1145). The
+// administrator's reset therefore checks first and shows the rule's sentence.
 //
 // It mirrors Keycloak's own rules for the policy flows.PasswordPolicy
 // names, parsed from that one string: length and maxLength count UTF-16

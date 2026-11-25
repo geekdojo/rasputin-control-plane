@@ -1468,7 +1468,8 @@ func (r *rulesRig) tc1145temporary(t *testing.T) {
 // TC-1145-18 (T171): the Admin API reset refuses a listed ASCII entry and a
 // listed non-ASCII entry, and the old password still signs in after each;
 // an unlisted 15-character password is then accepted with 204, so the list,
-// not the length rule, is what refused.
+// not the length rule, is what refused, and so is a password only the
+// default Bloom filter falsely matches (finding F-1145-40).
 //
 // The refusal answers 500 unknown_error at this pin, not 400 with
 // invalidPasswordBlacklistedMessage: Keycloak logs "Could not update
@@ -1494,7 +1495,22 @@ func (r *rulesRig) tc1145reset(t *testing.T) {
 	if status, body := set("quokka-tangelo7"); status != http.StatusNoContent {
 		t.Errorf("an unlisted 15-character password answered %d %.300s; want 204", status, body)
 	}
+	// Finding F-1145-40: this password is on no line of the pinned list, in
+	// any case, yet the list's Bloom filter matches it at Keycloak's default
+	// false-positive probability, 1.0E-4 (measured 2026-11-25 against the
+	// pinned list: refused at the default, accepted at
+	// flows.DenylistFalsePositiveProbability). Accepted here, it shows the
+	// harness's keycloak.conf option took effect, while the listed entries
+	// above are still refused.
+	if status, body := set(bloomFalsePositive); status != http.StatusNoContent {
+		t.Errorf("a password the default filter falsely matches answered %d %.300s; want 204", status, body)
+	}
 }
+
+// bloomFalsePositive is a password not on the deny list that the list's Bloom
+// filter matches at Keycloak's default false-positive probability (finding
+// F-1145-40, geekdojo/geekdojo-brain#1145).
+const bloomFalsePositive = "TaQQMBVKkZkF6v6d-wfLoeSFF4917cWi"
 
 // TC-1145-20: with the policy converged, a run with no input change repairs
 // nothing and logs no drift, and passwordPolicy reads back byte-equal.

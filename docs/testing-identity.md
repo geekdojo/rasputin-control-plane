@@ -722,7 +722,8 @@ or an administrator's temporary password run as a job at a fresh sign-in.
     `iss`, the reset client's `azp` and the account's `sub` (TC-992-37, row T200);
   - the administrator's reset submits nothing without the fresh sign-in, and after it ends the
     target's sessions and forces the target to choose a new password (TC-992-30, TC-992-31);
-  - Keycloak's 500 for a listed or a 14-character password becomes the rule's sentence, with
+  - the 500 our Keycloak build answers for a listed or a 14-character password (its
+    `features-disabled=admin` leaves no admin theme for the 400's message) becomes the rule's sentence, with
     the credential unchanged (TC-992-32, row T202);
   - both start links are written by converge and each sign-in page's "Forgot your password?"
     reaches its own door's reset (TC-992-35), and no mail connection is made (TC-992-34).

@@ -15,9 +15,11 @@ import (
 // SetTemporaryPassword sets the account's password to pw, marked temporary,
 // so its next sign-in must choose a new one: PUT /users/{id}/reset-password
 // (geekdojo/geekdojo-brain#992; #321's accounts.repair_reset can reuse it).
-// It returns the Admin API's status, 0 when none was received. Keycloak
-// answers a policy refusal here with 500 (capability rows T170 and T202),
-// which the caller tells apart from a fault.
+// It returns the Admin API's status, 0 when none was received. Our Keycloak
+// build answers a policy refusal here with 500, since features-disabled=admin
+// leaves no admin theme to build the 400's message from (capability rows
+// T170 and T202; finding F-1145-41, geekdojo/geekdojo-brain#1145); the caller
+// tells it apart from a fault.
 func (u *Users) SetTemporaryPassword(ctx context.Context, sub string, pw secret.Value) (int, error) {
 	if sub == "" || pw.Len() == 0 {
 		return 0, errors.New("accounts: no account id or no password")
