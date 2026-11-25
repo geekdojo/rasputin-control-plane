@@ -563,7 +563,7 @@ func TestWireIdentity_DirtySignalUnderKeycloakOnly(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		st.startEvents(t.Context(), w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, convergeSinks{}, slog.New(slog.DiscardHandler))
+		st.startEvents(t.Context(), w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, convergeSinks{}, nil, slog.New(slog.DiscardHandler))
 		if !want && st.events != nil {
 			t.Errorf("backend %q: an events holder was built", backend)
 		}
@@ -622,7 +622,7 @@ func TestStartEvents_KeycloakMarksOnceAndBinds(t *testing.T) {
 	w := identityWiring{mode: identityModeKeycloak, session: session, dirty: sig, version: versions}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	st.startEvents(ctx, w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, convergeSinks{}, slog.New(slog.DiscardHandler))
+	st.startEvents(ctx, w, &memMarks{m: map[string]string{}}, doorsTable(t), nil, convergeSinks{}, nil, slog.New(slog.DiscardHandler))
 	for _, want := range []string{"/admin/realms/rasputin/events?", "/admin/realms/rasputin/admin-events?"} {
 		if got := <-admin.gets; !strings.HasPrefix(got, want) {
 			t.Fatalf("the start's pass read %q, want %q...", got, want)
@@ -686,7 +686,7 @@ func TestStartEvents_NoDoorsNoThrottle(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	st.startEvents(ctx, identityWiring{mode: identityModeKeycloak, session: session, dirty: newIdentityDirty()},
-		&memMarks{m: map[string]string{}}, doors.Table{}, doors.ErrNoClusterID, convergeSinks{}, slog.New(slog.DiscardHandler))
+		&memMarks{m: map[string]string{}}, doors.Table{}, doors.ErrNoClusterID, convergeSinks{}, nil, slog.New(slog.DiscardHandler))
 	<-admin.gets
 	if st.events.throttle.Load() != nil || st.events.drainer.Load() == nil {
 		t.Error("with no door table: a throttle was built, or no drainer")

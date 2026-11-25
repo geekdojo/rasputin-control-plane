@@ -81,6 +81,10 @@ type kcUser struct {
 	directAdmin bool
 	realm       []string
 	offline     map[string][]string
+	// roles are the console roles held directly besides admin (each
+	// role's users read lists them); creds are the credential types.
+	roles []string
+	creds []string
 }
 
 // request is one write's method, path (realm-relative) and body.
@@ -100,6 +104,10 @@ type fakeKC struct {
 	adminRows int
 	// fail returns an error for a call, by method and realm-relative path.
 	fail func(method, path string) error
+	// gets are every GET's realm-relative path, query included.
+	gets []string
+	// noID leaves the id out of the user list.
+	noID bool
 }
 
 func notFound(path string) error {
@@ -132,6 +140,8 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	}
 	if method != http.MethodGet {
 		k.reqs = append(k.reqs, request{method: method, path: rel, body: body})
+	} else {
+		k.gets = append(k.gets, rel)
 	}
 	u, _ := url.Parse(rel)
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -143,6 +153,9 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			answer(out, []map[string]string{{"id": consoleUUID}, {"id": appUUID}})
 		}
 		return idclient.Response{Status: 200}, nil
+	case parts[0] == "clients" && len(parts) == 4 && parts[2] == "roles":
+		answer(out, map[string]any{"id": "role-" + parts[3], "name": parts[3]})
+		return idclient.Response{Status: 200}, nil
 	case parts[0] == "clients" && len(parts) == 5 && parts[4] == "users":
 		var list []map[string]any
 		if k.fullPage {
@@ -151,8 +164,8 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			}
 		}
 		for _, x := range k.users {
-			if x.directAdmin {
-				list = append(list, map[string]any{"enabled": x.rep["enabled"]})
+			if (parts[3] == "admin" && x.directAdmin) || slices.Contains(x.roles, parts[3]) {
+				list = append(list, map[string]any{"id": x.rep["id"], "enabled": x.rep["enabled"]})
 			}
 		}
 		// Honour max= as the identity service does: never more rows than asked.
@@ -175,6 +188,9 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		return idclient.Response{Status: 204}, nil
 	case parts[0] != "users":
 		return idclient.Response{}, errors.New("fake: unknown path " + rel)
+	case len(parts) == 1:
+		k.list(u.Query(), out)
+		return idclient.Response{Status: 200}, nil
 	}
 	x := k.users[parts[1]]
 	if x == nil {
@@ -218,6 +234,20 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			list = append(list, map[string]string{"name": r})
 		}
 		answer(out, list)
+	case tail == "credentials" && method == http.MethodGet:
+		var list []map[string]string
+		for _, c := range x.creds {
+			list = append(list, map[string]string{"type": c})
+		}
+		answer(out, list)
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodPost:
+		var reps []map[string]any
+		_ = json.Unmarshal(body, &reps)
+		for _, r := range reps {
+			name, _ := r["name"].(string)
+			k.log.add("add-console:" + name)
+			x.console = append(x.console, name)
+		}
 	case tail == "role-mappings/realm" && method == http.MethodGet:
 		var list []map[string]string
 		for _, r := range x.realm {
@@ -236,6 +266,29 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	return idclient.Response{Status: 200}, nil
 }
 
+// list answers the users listing: by exact email, or every account in
+// creation order with createdTimestamp, as the identity service does.
+func (k *fakeKC) list(q url.Values, out any) {
+	var list []map[string]any
+	for _, x := range k.users {
+		if e := q.Get("email"); q.Has("email") && !strings.EqualFold(e, x.rep["email"].(string)) {
+			continue
+		}
+		rep := map[string]any{}
+		for key, v := range x.rep {
+			rep[key] = v
+		}
+		if k.noID {
+			delete(rep, "id")
+		}
+		list = append(list, rep)
+	}
+	if m, err := strconv.Atoi(q.Get("max")); err == nil && len(list) > m {
+		list = list[:m]
+	}
+	answer(out, list)
+}
+
 func roleOf(attrs any) string {
 	m, _ := attrs.(map[string]any)
 	vs, _ := m[AttrAppRole].([]any)
@@ -252,9 +305,16 @@ type person struct {
 	enabled          bool
 	console          []string
 	directAdmin      bool
-	appRole          string
-	offlineRole      bool
-	offline          map[string][]string
+	// roles are direct console roles besides admin; creds the credential
+	// types; created the createdTimestamp; actions the required actions
+	// (nil seeds CONFIGURE_TOTP).
+	roles       []string
+	creds       []string
+	created     int64
+	actions     []any
+	appRole     string
+	offlineRole bool
+	offline     map[string][]string
 }
 
 func (k *fakeKC) add(p person) {
@@ -264,9 +324,13 @@ func (k *fakeKC) add(p person) {
 	if p.appRole != "" {
 		attrs[AttrAppRole] = []any{p.appRole}
 	}
+	actions := p.actions
+	if actions == nil {
+		actions = []any{"CONFIGURE_TOTP"}
+	}
 	u := &kcUser{rep: map[string]any{"id": p.sub, "username": p.name, "email": p.email, "firstName": "Test",
-		"enabled": p.enabled, "attributes": attrs, "requiredActions": []any{"CONFIGURE_TOTP"}},
-		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}}
+		"enabled": p.enabled, "attributes": attrs, "requiredActions": actions, "createdTimestamp": p.created},
+		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}, roles: p.roles, creds: p.creds}
 	if p.offlineRole {
 		u.realm = []string{offlineAccess}
 	}
@@ -366,23 +430,24 @@ func (h *recHook) Revoke(_ context.Context, _ string, _ RevokeKind) (Outcome, er
 // ---- the harness -----------------------------------------------------------
 
 type harness struct {
-	kc       *fakeKC
-	log      *callLog
-	users    *Users
-	rev      *Revoker
-	access   *Access
-	runner   *jobs.Runner
-	jobs     *jobs.Store
-	auth     *auth.Store
-	console  *auth.ConsoleSessions
-	removed  *removednames.Store
-	list     *recList
-	facts    *recFacts
-	hooks    map[string]*recHook
-	rec      *logkittest.Recorder
-	sessions sessions.Ender
-	mac      *credmac.Key
-	nc       *nats.Conn
+	kc           *fakeKC
+	log          *callLog
+	users        *Users
+	rev          *Revoker
+	access       *Access
+	runner       *jobs.Runner
+	jobs         *jobs.Store
+	auth         *auth.Store
+	console      *auth.ConsoleSessions
+	designations *Designations
+	removed      *removednames.Store
+	list         *recList
+	facts        *recFacts
+	hooks        map[string]*recHook
+	rec          *logkittest.Recorder
+	sessions     sessions.Ender
+	mac          *credmac.Key
+	nc           *nats.Conn
 }
 
 func newHarness(t *testing.T) *harness {
@@ -399,7 +464,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.auth.Close() })
-	if h.console, err = auth.NewConsoleSessions(h.auth, time.Now, rand.Reader); err != nil {
+	if h.designations, err = OpenDesignations(t.Context(), filepath.Join(dir, "rasputin.db"), time.Now); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.designations.Close() })
+	if h.console, err = auth.NewConsoleSessions(h.auth, time.Now, rand.Reader, h.designations); err != nil {
 		t.Fatal(err)
 	}
 	if h.mac, err = credmac.New(secret.New([]byte(testKey))); err != nil {

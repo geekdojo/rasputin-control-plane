@@ -36,6 +36,9 @@ import (
 // Policy is the door policy service, as the endpoint calls it.
 type Policy interface {
 	Check(ctx context.Context, r policy.Request) policy.Decision
+	// ReleaseRegistration releases the registration slot an allowed
+	// Decision holds (RegistrationHeld).
+	ReleaseRegistration()
 }
 
 // Throttle is the throttle's answer hook: the endpoint reports when the
@@ -359,6 +362,11 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 			}
 		}
 		d := h.cfg.Policy.Check(r.Context(), parse(r, h.cfg.Kind, rt.Kind))
+		if d.RegistrationHeld {
+			// Every way out releases the slot once the identity service has
+			// answered the post, so the next post counts this one's account.
+			defer h.cfg.Policy.ReleaseRegistration()
+		}
 		if !d.Allow {
 			h.refuse(w, r, st, d)
 			return
@@ -373,7 +381,8 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 // refuse renders a policy refusal.
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, st *reqState, d policy.Decision) {
 	st.refused, st.level = d.Reason, slog.LevelInfo
-	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable || d.Reason == policy.ReasonRegistrationPaused {
+	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable || d.Reason == policy.ReasonRegistrationPaused ||
+		d.Reason == policy.ReasonRegistrationUnknown {
 		st.level = slog.LevelWarn
 	}
 	if d.NotReady {

@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
@@ -922,9 +923,17 @@ func main() {
 	// ceremony gets its secure context without any tunnel.
 	ignored, why := secureCookies()
 	warnSecureCookiesNotHonoured(logger, ignored, why)
+	// The designations (geekdojo/geekdojo-brain#990): opened here, in every
+	// identity mode, because the console sessions record the first-run
+	// claim's designation in the claim's own transaction.
+	designations, err := accounts.OpenDesignations(ctx, dbPath, time.Now)
+	if err != nil {
+		log.Fatalf("rasputin-api: designations: %v", err)
+	}
+	defer designations.Close()
 	// The console's sessions (geekdojo/geekdojo-brain#989): rows in this
 	// same database, minted only by a sign-in through the home door.
-	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, cryptorand.Reader)
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, cryptorand.Reader, designations)
 	if err != nil {
 		log.Fatalf("rasputin-api: console sessions: %v", err)
 	}
@@ -1289,8 +1298,12 @@ func main() {
 	identityW.register(runner)
 	// identity.revoke, the app-access grant and the removed-name list
 	// (#991), under keycloak only: a System job, so POST /api/jobs refuses it.
+	// The one second-step marker writer: the drain's sink and the
+	// designated-role grant's (#990).
+	markersW := markerWriter(ctx, identityW, doorTable, doorErr, logger)
 	acct, err := wireAccounts(ctx, accountsDeps{mode: identityW.mode, admin: identityW.session, dbPath: dbPath, mac: mac,
-		console: consoleSessions, moved: authStore, kinds: kindPolicy, runner: runner, listDir: identityDenylists, log: logger})
+		console: consoleSessions, moved: authStore, kinds: kindPolicy, runner: runner, listDir: identityDenylists,
+		designations: designations, markers: markersW, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: accounts", "err", err.Error())
 		os.Exit(1)
@@ -1324,7 +1337,7 @@ func main() {
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
 		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
-		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), now: time.Now, log: logger})
+		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), firstRun: authStore.FirstRun, now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
 		os.Exit(1)
@@ -1339,7 +1352,8 @@ func main() {
 	}
 	consoleSI, err := consoleSignInWiring(ctx, consoleSignInDeps{mode: identityW.mode, doorsOn: doorsOn, table: doorTable,
 		host: consoleHost(), client: identityW.client, session: identityW.session, ready: consoleReady,
-		sessions: consoleSessions, identity: acct.sessions, actions: acct.actions(), now: time.Now, log: logger})
+		sessions: consoleSessions, identity: acct.sessions, actions: acct.actions(),
+		firstRun: authStore, claimer: acct.claimer(), observer: acct.signInObserver(), now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: console sign-in", "err", err.Error())
 		os.Exit(1)
@@ -1843,7 +1857,7 @@ func main() {
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
-	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, consoleSI.adminSinks(identityConv.eventSinks()), logger) // the sign-in history drain, marked for this start (#985)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, consoleSI.adminSinks(identityConv.eventSinks()), markersW, logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -1901,6 +1915,7 @@ func main() {
 	if acct.resetter != nil { // the administrator's password reset (#992), under keycloak only
 		srv.SetResetter(acct.resetter)
 	}
+	acct.installWaiting(srv) // how many people wait for access (#990), under keycloak only
 	srv.SetNodeTrust(nodeTrust)
 	srv.SetComposeStash(composeStash)
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
@@ -2233,6 +2248,11 @@ func main() {
 		}); err != nil {
 			log.Fatalf("rasputin-api: leaf sweep: %v", err)
 		}
+		// Registration's network facts (#990), read per request.
+		doorNet, err := doorNetwork(lanWatch.Snapshot, invStore)
+		if err != nil {
+			log.Fatalf("rasputin-api: sign-in door network: %v", err)
+		}
 		// The sign-in doors (#986): built here and served beside the console
 		// on this one listener, chosen by SNI (doors_mount.go).
 		homeDoor, appDoorH := mountDoors(ctx, doorMountDeps{
@@ -2243,6 +2263,7 @@ func main() {
 			consoleOrigin: "https://" + consoleHost(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
 			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger, removed: acct.removed,
+			network: doorNet, waiting: acct.doorWaiting(), emails: acct.doorEmails(),
 			resetDone: consoleSI.appResetDone(),
 		})
 		if doorM != nil {

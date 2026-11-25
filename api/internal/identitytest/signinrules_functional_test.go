@@ -36,6 +36,7 @@ import (
 	"unicode/utf16"
 	"unicode/utf8"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
@@ -516,12 +517,18 @@ type lockSession struct {
 
 func (r *rulesRig) lockSession(t *testing.T) lockSession {
 	t.Helper()
-	store, err := auth.OpenStore(t.Context(), filepath.Join(t.TempDir(), "auth.db"))
+	path := filepath.Join(t.TempDir(), "auth.db")
+	store, err := auth.OpenStore(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	sessions, err := auth.NewConsoleSessions(store, time.Now, rand.Reader)
+	designations, err := accounts.OpenDesignations(t.Context(), path, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = designations.Close() })
+	sessions, err := auth.NewConsoleSessions(store, time.Now, rand.Reader, designations)
 	if err != nil {
 		t.Fatal(err)
 	}

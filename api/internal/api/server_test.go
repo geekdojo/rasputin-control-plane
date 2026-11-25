@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
@@ -260,7 +261,12 @@ func newAPIFixture(t *testing.T) *apiFixture {
 	}
 	setupSvc := setup.NewService(setupStore, probes, "self-node", "test1.local", "test1")
 
-	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader)
+	designations, err := accounts.OpenDesignations(ctx, open("auth.db"), time.Now)
+	if err != nil {
+		t.Fatalf("designations: %v", err)
+	}
+	t.Cleanup(func() { _ = designations.Close() })
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader, designations)
 	if err != nil {
 		t.Fatalf("console sessions: %v", err)
 	}

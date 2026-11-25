@@ -507,7 +507,6 @@ func TestCookies_ShapesAndDuplicates(t *testing.T) {
 	w := recorder()
 	setCookie(w, SessionCookieName, "v", time.Hour)
 	setCookie(w, pendingCookieName, "v", time.Hour)
-	setCookie(w, ceremonyCookieName, "v", time.Hour)
 	clearCookie(w, SessionCookieName)
 	for _, c := range w.Result().Cookies() {
 		if !strings.HasPrefix(c.Name, "__Host-rasputin-") || !c.Secure || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Path != "/" || c.Domain != "" {
@@ -528,12 +527,12 @@ func TestCookies_ShapesAndDuplicates(t *testing.T) {
 			t.Errorf("%s: %d %s, want 400 duplicate_cookie with a sentence", name, w.Code, w.Body.String())
 		}
 	}
-	h := http.Header{"Cookie": {SessionCookieName + "=a; " + pendingCookieName + "=b; " + ceremonyCookieName + "=c; grafana_session=g"}}
+	h := http.Header{"Cookie": {SessionCookieName + "=a; " + pendingCookieName + "=b; " + "__Host-rasputin-ceremony" + "=c; grafana_session=g"}}
 	StripCookies(h)
 	if got := h.Get("Cookie"); got != "grafana_session=g" {
 		t.Errorf("StripCookies left %q", got)
 	}
-	for _, n := range []string{SessionCookieName, pendingCookieName, ceremonyCookieName} {
+	for _, n := range []string{SessionCookieName, pendingCookieName, "__Host-rasputin-ceremony"} {
 		if !IsOwnCookie(n) {
 			t.Errorf("IsOwnCookie(%s) = false", n)
 		}

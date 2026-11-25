@@ -206,7 +206,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: rulesApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Now: time.Now, Bindings: r.conv})
+		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Emails: noEmails{}, Now: time.Now, Bindings: r.conv})
 	if err != nil {
 		t.Fatal(err)
 	}

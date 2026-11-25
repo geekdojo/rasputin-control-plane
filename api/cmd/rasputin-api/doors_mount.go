@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,10 +21,13 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/lanaddr"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/metrics"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/obs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
+	"github.com/geekdojo/rasputin-control-plane/proto"
 )
 
 // The sign-in doors' mount (geekdojo/geekdojo-brain#986, Identity 4.4): main
@@ -73,6 +77,12 @@ type doorMountDeps struct {
 	// removed is the removed-name list registration checks (#991): the
 	// accounts wiring's store, or Unavailable; nil outside keycloak.
 	removed policy.RemovedNames
+	// network, waiting and emails are registration's facts
+	// (geekdojo/geekdojo-brain#990): doorNetwork's source, and the accounts
+	// wiring's waiting count and in-use email check; nil outside keycloak.
+	network policy.Network
+	waiting policy.Waiting
+	emails  policy.Emails
 	// identityCA is the identity CA's certificate: the relay trusts it alone
 	// and presents the door's client leaf from dataDir.
 	identityCA    []byte
@@ -105,7 +115,8 @@ func mountDoors(ctx context.Context, d doorMountDeps) (home, app *door.Handler) 
 		d.log.InfoContext(ctx, "sign-in doors not served: no identity service", "mode", d.mode)
 		return nil, nil
 	}
-	if d.readiness == nil || d.throttle == nil || d.version == nil || d.dirty == nil || d.upstream == nil {
+	if d.readiness == nil || d.throttle == nil || d.version == nil || d.dirty == nil || d.upstream == nil ||
+		d.network == nil || d.waiting == nil || d.emails == nil {
 		return nil, nil
 	}
 	home, app, err := buildDoors(d)
@@ -158,12 +169,42 @@ func buildDoors(d doorMountDeps) (home, app *door.Handler, err error) {
 func doorPolicyDeps(d doorMountDeps) policy.Deps {
 	return policy.Deps{
 		Table: d.table, Readiness: d.readiness, Throttle: d.throttle,
-		// The fail-closed stand-ins until Identity 7.3 (app clients), the
-		// launcher (actions) and Identity 4.8 (registration) wire theirs.
+		// The fail-closed stand-ins until Identity 7.3 (app clients) and the
+		// launcher (actions) wire theirs.
 		AppClients: policy.NoAppClients{}, Actions: policy.NoActionsIssued{},
-		Network: policy.RegistrationClosed{}, Waiting: policy.RegistrationClosed{},
+		Network: d.network, Waiting: d.waiting, Emails: d.emails,
 		Removed: d.removed, Now: d.now, Bindings: d.bindings,
 	}
+}
+
+// nodeLister is the inventory's node list (*inventory.Store).
+type nodeLister interface {
+	List(ctx context.Context) ([]*proto.Node, error)
+}
+
+// doorNetwork is registration's network facts (geekdojo/geekdojo-brain#990):
+// the home subnets from the LAN watcher's snapshot, the tailnet's prefixes
+// from the mesh, and every node's LAN address from the inventory, each read
+// afresh per request.
+func doorNetwork(lan func() lanaddr.Snapshot, nodes nodeLister) (*policy.NetworkSource, error) {
+	if lan == nil || nodes == nil {
+		return nil, errors.New("door network: a collaborator is nil")
+	}
+	return policy.NewNetworkSource(policy.NetworkSourceDeps{
+		LAN:     func() []netip.Prefix { return lan().Subnets() },
+		Tailnet: mesh.TailnetPrefixes,
+		Nodes: func(ctx context.Context) ([]string, error) {
+			ns, err := nodes.List(ctx)
+			if err != nil {
+				return nil, err
+			}
+			out := make([]string, 0, len(ns))
+			for _, n := range ns {
+				out = append(out, n.LANIP)
+			}
+			return out, nil
+		},
+	})
 }
 
 // doorThrottle is startEvents' throttle, nil outside keycloak or before

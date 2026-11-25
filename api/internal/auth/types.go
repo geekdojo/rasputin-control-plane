@@ -77,21 +77,6 @@ func (c *Credential) toWebAuthn() webauthn.Credential {
 	}
 }
 
-func fromWebAuthn(cred *webauthn.Credential, userID []byte) *Credential {
-	return &Credential{
-		ID:              cred.ID,
-		UserID:          userID,
-		PublicKey:       cred.PublicKey,
-		AttestationType: cred.AttestationType,
-		Transports:      cred.Transport,
-		AAGUID:          cred.Authenticator.AAGUID,
-		SignCount:       cred.Authenticator.SignCount,
-		CloneWarning:    cred.Authenticator.CloneWarning,
-		BackupEligible:  cred.Flags.BackupEligible,
-		BackupState:     cred.Flags.BackupState,
-	}
-}
-
 func encodeTransports(t []protocol.AuthenticatorTransport) string {
 	if len(t) == 0 {
 		return "[]"

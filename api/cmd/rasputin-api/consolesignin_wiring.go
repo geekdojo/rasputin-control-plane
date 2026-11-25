@@ -121,6 +121,12 @@ type consoleSignInDeps struct {
 	// accounts.reset_password).
 	identity auth.IdentitySessions
 	actions  map[string]auth.Action
+	// firstRun is the first-run predicate (authStore); claimer and observer
+	// are the accounts wiring's first account and designation observer
+	// (#990).
+	firstRun auth.FirstRunner
+	claimer  auth.Claimer
+	observer auth.Observer
 	now      func() time.Time
 	log      *slog.Logger
 }
@@ -172,7 +178,8 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 	if d.mode != identityModeKeycloak || !d.doorsOn {
 		return consoleSignIn{}, nil
 	}
-	if d.client == nil || d.session == nil || d.ready == nil || d.sessions == nil || d.identity == nil || d.now == nil || d.log == nil || d.host == "" {
+	if d.client == nil || d.session == nil || d.ready == nil || d.sessions == nil || d.identity == nil || d.now == nil || d.log == nil || d.host == "" ||
+		d.firstRun == nil || d.claimer == nil || d.observer == nil {
 		return consoleSignIn{}, errors.New("console sign-in: a collaborator is nil under keycloak with the doors on")
 	}
 	home := d.table.Home
@@ -183,7 +190,8 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 	si, err := auth.NewSignIn(auth.SignInDeps{
 		Door: home, ConsoleHost: d.host, ClientID: flows.ConsoleClient, Realm: identityRealm,
 		Exchanger: d.client, Verifier: verifier, Ender: sidEnder{session: d.session}, Ready: d.ready,
-		Sessions: d.sessions, Actions: d.actions, Now: d.now, Rand: rand.Reader, Log: d.log,
+		Sessions: d.sessions, FirstRun: d.firstRun, Claimer: d.claimer, Observer: d.observer,
+		Actions: d.actions, Now: d.now, Rand: rand.Reader, Log: d.log,
 	})
 	if err != nil {
 		return consoleSignIn{}, fmt.Errorf("console sign-in: %w", err)

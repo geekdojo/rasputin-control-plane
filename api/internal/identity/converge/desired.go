@@ -75,6 +75,11 @@ type Inputs struct {
 	// password?" to (geekdojo/geekdojo-brain#992). "" holds the attribute
 	// absent.
 	ResetHomeURL, ResetAppURL string
+	// FirstRun is the first-run predicate: the recovery-codes action is a
+	// default action only while it holds, so a committed claim changes the
+	// desired hash and converge's next run clears it
+	// (geekdojo/geekdojo-brain#990).
+	FirstRun bool
 }
 
 // The client attributes converge owns: the back-channel logout URL, and,
@@ -151,7 +156,7 @@ func NewDesired(in Inputs) Desired {
 	for _, c := range RasputinClients {
 		d.ClientAttributes[c] = clientAttributes(in.BackchannelLogoutURLs[c])
 	}
-	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings}
+	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings, FirstRun: in.FirstRun}
 	d.Rules = flows.Render(d.flowsIn)
 	return d
 }

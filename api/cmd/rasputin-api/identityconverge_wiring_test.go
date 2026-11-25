@@ -55,6 +55,7 @@ func convergeDeps(t *testing.T, mode string, mon *identityState) identityConverg
 		mode: mode, session: sess, monitor: mon.monitor, ledger: openJobStore(t), settings: openSetupStore(t),
 		createArmed: func(string, []byte) error { return nil },
 		stat:        func(string) (fs.FileInfo, error) { return nil, fs.ErrNotExist },
+		firstRun:    func(context.Context) (bool, error) { return true, nil },
 		now:         time.Now, log: slog.New(slog.DiscardHandler),
 	}
 }
@@ -192,5 +193,28 @@ func TestIdentityAdminTrigger_NotBlockedByTheFeaturesCheck(t *testing.T) {
 	}
 	if ident.n.Load() == 0 {
 		t.Error("the trigger never probed the admin login")
+	}
+}
+
+// TC-990-23 (wiring part): converge's inputs carry C03's predicate, and its
+// read error fails the inputs, so converge writes nothing.
+func TestIdentityConvergeInputs_TC990_23_FirstRun(t *testing.T) {
+	d := convergeDeps(t, identityModeKeycloak, &identityState{})
+	synced := func(context.Context) bool { return false }
+	in, err := d.inputs(synced)(t.Context())
+	if err != nil || !in.FirstRun {
+		t.Errorf("first run: %+v, %v", in.FirstRun, err)
+	}
+	d.firstRun = func(context.Context) (bool, error) { return false, nil }
+	if in, err := d.inputs(synced)(t.Context()); err != nil || in.FirstRun {
+		t.Errorf("after the claim: %v, %v", in.FirstRun, err)
+	}
+	d.firstRun = func(context.Context) (bool, error) { return false, errors.New("unreadable") }
+	if _, err := d.inputs(synced)(t.Context()); err == nil {
+		t.Error("a first-run read error did not fail the inputs")
+	}
+	d.firstRun = nil
+	if _, err := identityConvergeWiring(d); err == nil {
+		t.Error("no first-run predicate was accepted under keycloak")
 	}
 }

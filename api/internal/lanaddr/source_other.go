@@ -40,6 +40,7 @@ func (ifaceSource) List() ([]Addr, error) {
 			}
 			out = append(out, Addr{
 				IP:       ipn.IP.To4(),
+				Bits:     maskBits(ipn.Mask),
 				Link:     ifc.Name,
 				Index:    ifc.Index,
 				Loopback: ifc.Flags&net.FlagLoopback != 0,

@@ -10,10 +10,13 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
+	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -50,8 +53,35 @@ func accountsFixture(t *testing.T, dbPath string) (accountsDeps, *logkittest.Rec
 	if err != nil {
 		t.Fatal(err)
 	}
+	designations, err := accounts.OpenDesignations(t.Context(), filepath.Join(t.TempDir(), "rasputin.db"), time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = designations.Close() })
+	mw, err := markers.New(markers.Deps{Admin: refusingAdmin{}, Realm: identityRealm,
+		DoorOf: func(string) (flows.Door, bool) { return "", false }, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return accountsDeps{mode: identityModeKeycloak, admin: refusingAdmin{}, dbPath: dbPath, mac: mac,
-		console: nullConsole{}, moved: store, kinds: kinds, runner: refusingRunner{}, listDir: t.TempDir(), log: log}, rec
+		console: nullConsole{}, moved: store, kinds: kinds, runner: refusingRunner{}, listDir: t.TempDir(),
+		designations: designations, markers: mw, log: log}, rec
+}
+
+// waitingSink counts SetWaiting calls.
+type waitingSink struct{ n int }
+
+func (s *waitingSink) SetWaiting(apipkg.WaitingCounter) { s.n++ }
+
+// store is a fresh auth store.
+func store(t *testing.T) *auth.Store {
+	t.Helper()
+	st, err := auth.OpenStore(t.Context(), filepath.Join(t.TempDir(), "auth.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
 }
 
 type noAppFacts struct{}
@@ -64,6 +94,10 @@ func (noAppFacts) AppFacts(context.Context, string, string) (authz.AppFacts, err
 type refusingRunner struct{}
 
 func (refusingRunner) SubmitFor(context.Context, authz.Submitter, string, any, func(string) error) (*jobs.Job, error) {
+	return nil, errors.New("not here")
+}
+
+func (refusingRunner) Submit(context.Context, string, any, string) (*jobs.Job, error) {
 	return nil, errors.New("not here")
 }
 
@@ -102,6 +136,15 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	if w.access == nil {
 		t.Error("no access grant")
 	}
+	// TC-990-28: the designated-role grant registers as a System kind, and
+	// the claim's first account, the count, the email check and the
+	// observer are there for the sign-in, the door and the server.
+	if wf, ok := r.kinds[accounts.GrantKind]; !ok || !wf.System || len(wf.Steps) != 3 {
+		t.Errorf("accounts.grant_designated_role registered %v", ok)
+	}
+	if w.claimer() == nil || w.signInObserver() == nil || w.doorWaiting() == nil || w.doorEmails() == nil {
+		t.Error("the first account, the observer, the count or the email check is missing")
+	}
 	if a := w.alerts(t.Context(), time.Now()); len(a) != 0 {
 		t.Errorf("alerts %+v", a)
 	}
@@ -112,9 +155,23 @@ func TestWireAccounts_ByMode(t *testing.T) {
 	if _, err := wireAccounts(t.Context(), d); err == nil {
 		t.Error("a nil collaborator was accepted")
 	}
+	d.moved = store(t)
+	d.designations = nil
+	if _, err := wireAccounts(t.Context(), d); err == nil {
+		t.Error("no designations was accepted under keycloak")
+	}
 	off, _ := wireAccounts(t.Context(), accountsDeps{mode: identityModeOff})
 	if off.actions() != nil {
 		t.Error("actions outside keycloak")
+	}
+	if off.claimer() != nil || off.signInObserver() != nil || off.doorWaiting() != nil || off.doorEmails() != nil {
+		t.Error("the #990 collaborators exist outside keycloak")
+	}
+	srv := &waitingSink{}
+	off.installWaiting(srv)
+	w.installWaiting(srv)
+	if srv.n != 1 {
+		t.Errorf("SetWaiting called %d times, want once (keycloak only)", srv.n)
 	}
 }
 

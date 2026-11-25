@@ -5,7 +5,10 @@
 // the browser to the cluster's sign-in page and back. What it shows besides
 // that one link is a sentence for why the last sign-in came back (the
 // ?signin= value the api sends the browser to), a sentence while sign-in is
-// not ready, and at first run the way to restore from a backup.
+// not ready, the way to create an account (/api/auth/signup, which opens the
+// cluster's sign-up page; geekdojo/geekdojo-brain#990): CREATE THE FIRST
+// ACCOUNT at first run and CREATE ACCOUNT after, and at first run the way to
+// restore from a backup.
 //
 // It is a component of its own, apart from app/login/page.tsx, so the page's
 // router and fetches stay out of what the DOM tests render.
@@ -39,6 +42,11 @@ export const SIGN_IN_SENTENCES: Record<SignInReturn, string> = {
   // A fresh-sign-in action that ran and failed, or could not start.
   'action-failed': "Rasputin couldn't finish the change you signed in again for. Try it again.",
 };
+
+/** The create-account link's label: the first account at first run. */
+export function createAccountLabel(firstRun: boolean): string {
+  return firstRun ? 'CREATE THE FIRST ACCOUNT' : 'CREATE ACCOUNT';
+}
 
 /** The sentence shown while sign-in is not ready. */
 export const NOT_READY_SENTENCE = 'Sign-in is not ready yet. Rasputin is still setting up its sign-in service.';
@@ -85,6 +93,24 @@ export function SignInLauncher({
         </a>
       ) : (
         <p style={{ color: DIM, fontSize: 11, lineHeight: 1.6, margin: 0 }}>{NOT_READY_SENTENCE}</p>
+      )}
+      {ready && (
+        <a
+          href="/api/auth/signup"
+          style={{
+            display: 'block',
+            textAlign: 'center',
+            padding: '10px 14px',
+            border: `1px solid ${HAIR}`,
+            color: FG,
+            fontFamily: MONO,
+            fontSize: 11,
+            letterSpacing: '0.12em',
+            textDecoration: 'none',
+          }}
+        >
+          {createAccountLabel(firstRun)}
+        </a>
       )}
       {firstRun && (
         <div style={{ borderTop: `1px solid ${HAIR_SOFT}`, paddingTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>

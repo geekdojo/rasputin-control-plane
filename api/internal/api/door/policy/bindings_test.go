@@ -24,7 +24,7 @@ func (a someApps) AppClient(_ context.Context, id string) (AppClient, bool, erro
 func TestCheck_PausedClient(t *testing.T) {
 	th, _ := newThrottle(t)
 	deps := Deps{Table: table(t), Readiness: okReady{}, Throttle: th, AppClients: someApps{"strict": true, "plain": true},
-		Actions: NoActionsIssued{}, Network: RegistrationClosed{}, Waiting: RegistrationClosed{}, Removed: noneRemoved{}, Now: time.Now,
+		Actions: NoActionsIssued{}, Network: closedNetwork{}, Waiting: closedNetwork{}, Removed: noneRemoved{}, Emails: noEmails{}, Now: time.Now,
 		Bindings: pausedSet{"strict": true}}
 	svc, err := New(deps)
 	if err != nil {

@@ -295,6 +295,64 @@ type signinRig struct {
 	si     *SignIn
 	log    *logkittest.Recorder
 	h      http.Handler
+	// first, claimer and observer are the first-run claim's fakes
+	// (geekdojo/geekdojo-brain#990); first run is off unless a test turns
+	// it on.
+	first    *fakeFirstRun
+	claimer  *fakeClaimer
+	observer *fakeObserver
+}
+
+// fakeFirstRun answers first run.
+type fakeFirstRun struct {
+	mu    sync.Mutex
+	first bool
+	err   error
+}
+
+func (f *fakeFirstRun) set(first bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.first, f.err = first, err
+}
+
+func (f *fakeFirstRun) FirstRun(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.first, f.err
+}
+
+// fakeClaimer names sub, or fails with err.
+type fakeClaimer struct {
+	mu    sync.Mutex
+	sub   string
+	err   error
+	calls int
+}
+
+func (c *fakeClaimer) Earliest(context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return c.sub, c.err
+}
+
+// fakeObserver records every sign-in it is told of.
+type fakeObserver struct {
+	mu   sync.Mutex
+	subs []string
+}
+
+func (o *fakeObserver) SignedIn(_ context.Context, sub string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.subs = append(o.subs, sub)
+}
+
+func (o *fakeObserver) seen() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.subs...)
 }
 
 func newSigninRig(t *testing.T) *signinRig {
@@ -310,10 +368,12 @@ func newSigninRig(t *testing.T) *signinRig {
 		t.Fatal(err)
 	}
 	log, rec := logkittest.New()
-	r := &signinRig{f: f, door: table.Home, app: table.App, is: is, ex: &fakeExchanger{}, ender: &fakeEnder{}, action: &fakeAction{}, log: rec}
+	r := &signinRig{f: f, door: table.Home, app: table.App, is: is, ex: &fakeExchanger{}, ender: &fakeEnder{}, action: &fakeAction{}, log: rec,
+		first: &fakeFirstRun{}, claimer: &fakeClaimer{sub: "sub-earliest"}, observer: &fakeObserver{}}
 	r.si, err = NewSignIn(SignInDeps{
 		Door: table.Home, ConsoleHost: rigConsole, ClientID: "rasputin-console", Realm: "rasputin",
 		Exchanger: r.ex, Verifier: v, Ender: r.ender, Ready: fakeReady{}, Sessions: f.sessions,
+		FirstRun: r.first, Claimer: r.claimer, Observer: r.observer,
 		Actions: map[string]Action{"test-action": r.action}, Now: f.clock.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
@@ -369,7 +429,13 @@ type begun struct {
 
 func (r *signinRig) begin(t *testing.T, cookies ...*http.Cookie) begun {
 	t.Helper()
-	w := r.get("/api/auth/signin", rigConsole, cookies...)
+	return r.beginAt(t, "/api/auth/signin", cookies...)
+}
+
+// beginAt is begin through path: the sign-in, or the sign-up.
+func (r *signinRig) beginAt(t *testing.T, path string, cookies ...*http.Cookie) begun {
+	t.Helper()
+	w := r.get(path, rigConsole, cookies...)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("signin: %d %s", w.Code, w.Body.String())
 	}

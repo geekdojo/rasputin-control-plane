@@ -7,12 +7,18 @@ import (
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 )
 
+// typeRecoveryCodes is Keycloak 26.8.2's recovery-codes credential type.
+const typeRecoveryCodes = "recovery-authn-codes"
+
 // RoleAccounts is authz.RoleAccounts over Users: what the guard reads to
-// decide a disable or a delete. Facts carries the subject, the console
-// roles and the enabled state only; the designation facts are Identity
-// 4.12's (geekdojo/geekdojo-brain#994).
+// decide a disable or a delete, and what the designated-role grant reads to
+// decide C29. Facts carries the subject, the sign-in name, the console
+// roles, the enabled state, and the designation facts: a second step
+// (markers.IsSecondStep), recovery codes and a pending required action
+// (geekdojo/geekdojo-brain#990).
 type RoleAccounts struct{ users *Users }
 
 var _ authz.RoleAccounts = RoleAccounts{}
@@ -42,7 +48,17 @@ func (a RoleAccounts) Facts(ctx context.Context, sub string) (authz.AccountFacts
 	if err != nil {
 		return authz.AccountFacts{}, fmt.Errorf("accounts: facts: %w", err)
 	}
-	return authz.AccountFacts{Sub: sub, Roles: roles, Enabled: p.Enabled}, nil
+	creds, err := a.users.Credentials(ctx, sub)
+	if err != nil {
+		return authz.AccountFacts{}, fmt.Errorf("accounts: facts: %w", err)
+	}
+	f := authz.AccountFacts{Sub: sub, Username: p.Username, Roles: roles, Enabled: p.Enabled,
+		RequiredActionPending: len(p.RequiredActions) > 0}
+	for _, c := range creds {
+		f.HoldsSecondStep = f.HoldsSecondStep || markers.IsSecondStep(c)
+		f.HoldsRecoveryCodes = f.HoldsRecoveryCodes || c == typeRecoveryCodes
+	}
+	return f, nil
 }
 
 // EnabledAdmins counts the enabled administrators.

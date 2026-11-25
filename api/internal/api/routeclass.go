@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
@@ -127,6 +128,16 @@ func (r routeRule) check(caps authz.Set) error {
 // codeRouteNotPermittedMsg is the sentence a route refusal answers with.
 const codeRouteNotPermittedMsg = "You don't have permission to do this."
 
+// codeNoRoleMsg is the sentence a route refusal answers a person who holds
+// no console role yet with: every account after the first starts with none
+// (geekdojo/geekdojo-brain#990).
+const codeNoRoleMsg = "An administrator needs to give you access."
+
+// roleless reports whether p holds none of the console's roles.
+func roleless(p auth.Principal) bool {
+	return !slices.ContainsFunc(p.Roles, func(r string) bool { return slices.Contains(authz.RoleNames(), r) })
+}
+
 // gate registers h at pattern behind the session and rule, and records rule
 // on mux. It is the only way a session route is registered. A repair rule's
 // session is the repair session (RequireRepair); every other route's is the
@@ -149,12 +160,16 @@ func (s *Server) gate(mux *routeMux, pattern string, rule routeRule, h http.Hand
 func (s *Server) authorize(rule routeRule, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var caps authz.Set
+		msg := codeRouteNotPermittedMsg
 		if rule.repair {
 			if sess, ok := breakglass.SessionFrom(r.Context()); ok {
 				caps = sess.Capabilities()
 			}
 		} else if p, ok := auth.PrincipalFrom(r.Context()); ok {
 			caps = p.Capabilities()
+			if roleless(p) {
+				msg = codeNoRoleMsg
+			}
 		}
 		err := rule.check(caps)
 		if err == nil {
@@ -164,7 +179,7 @@ func (s *Server) authorize(rule routeRule, next http.Handler) http.Handler {
 		if s.refusedSubmit(w, r, strings.Join(rule.kinds, ","), err) {
 			return
 		}
-		s.writeCodedError(w, r, http.StatusForbidden, codeRouteNotPermitted, codeRouteNotPermittedMsg,
+		s.writeCodedError(w, r, http.StatusForbidden, codeRouteNotPermitted, msg,
 			slog.String("need", rule.label()))
 	})
 }

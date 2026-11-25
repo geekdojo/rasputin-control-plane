@@ -33,6 +33,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bus"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
@@ -455,7 +456,12 @@ func startAPI(t *testing.T, o apiOpts) (a *apiProc, pin string) {
 		t.Fatal(err)
 	}
 	// The current api reads only a console session (geekdojo/geekdojo-brain#989).
-	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader)
+	designations, err := accounts.OpenDesignations(ctx, dbPath, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = designations.Close() })
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, rand.Reader, designations)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -3,7 +3,9 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,36 @@ type authFixture struct {
 	svc      *Service
 	clock    *testClock
 	sessions *ConsoleSessions
+	// des is the designator the sessions record a claim's designation
+	// through: a row in test_designations, written in the claim's
+	// transaction.
+	des *txDesignator
+}
+
+// txDesignator writes the designation into test_designations inside the
+// claim's transaction, so a rollback is visible; err makes it fail.
+type txDesignator struct {
+	mu  sync.Mutex
+	err error
+}
+
+func newTxDesignator(t *testing.T, store *Store) *txDesignator {
+	t.Helper()
+	if _, err := store.db.Exec(`CREATE TABLE test_designations (sub TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	return &txDesignator{}
+}
+
+func (d *txDesignator) DesignateFirstAdmin(ctx context.Context, tx *sql.Tx, sub string) error {
+	d.mu.Lock()
+	err := d.err
+	d.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO test_designations (sub) VALUES (?)`, sub)
+	return err
 }
 
 func newAuthFixture(t *testing.T) *authFixture {
@@ -33,7 +65,8 @@ func newAuthFixture(t *testing.T) *authFixture {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	clock := newTestClock()
-	sessions, err := NewConsoleSessions(store, clock.Now, rand.Reader)
+	des := newTxDesignator(t, store)
+	sessions, err := NewConsoleSessions(store, clock.Now, rand.Reader, des)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,17 +79,18 @@ func newAuthFixture(t *testing.T) *authFixture {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	return &authFixture{ctx: ctx, dir: dir, store: store, svc: svc, clock: clock, sessions: sessions}
+	return &authFixture{ctx: ctx, dir: dir, store: store, svc: svc, clock: clock, sessions: sessions, des: des}
 }
 
 // mintUser creates and persists a User with a synthetic 16-byte id. Returns
 // the created user; the credentials slice is empty.
 func (f *authFixture) mintUser(t *testing.T, name string) *User {
 	t.Helper()
-	u, err := makeUser(name, name+" Display")
-	if err != nil {
-		t.Fatalf("makeUser: %v", err)
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		t.Fatal(err)
 	}
+	u := &User{ID: id, Name: name, DisplayName: name + " Display", CreatedAt: time.Now().UTC()}
 	if err := f.store.CreateUser(f.ctx, u); err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
@@ -182,7 +216,7 @@ func TestStore_ListUsers_EmptyAndOrdered(t *testing.T) {
 		t.Fatalf("want 0 users, got %d", len(got))
 	}
 
-	// CreateUser writes time.Now()-derived created_at via makeUser; sleep a
+	// CreateUser writes time.Now()-derived created_at via mintUser; sleep a
 	// millisecond between mints so the ORDER BY created_at has distinct keys.
 	alice := f.mintUser(t, "alice")
 	time.Sleep(2 * time.Millisecond)

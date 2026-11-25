@@ -730,3 +730,39 @@ or an administrator's temporary password run as a job at a fresh sign-in.
 What it does not prove: the passkey path's change step (Identity 4.10 leaves it to #319), the
 re-designation of a privileged target (#992's second PR), and the appliance itself (the bench,
 `rasputin-identity-test`).
+
+## First run and open sign-up
+
+[geekdojo-brain#990](https://github.com/geekdojo/geekdojo-brain/issues/990) (Identity 4.8)
+opens sign-up at the home door and designates the account created first as the first
+administrator.
+
+- **`TestFirstRun_AgainstPinnedKeycloak`** (`firstrun_functional_test.go`), in the backend
+  job's identity step. It runs on the console rig with the claim's real collaborators (the
+  auth store's first-run predicate, `accounts.FirstAccount`, `accounts.Observer` and
+  `accounts.grant_designated_role` on a job runner) and registration's real waiting count,
+  in-use email check and removed-name list. CI connects from loopback, so the network facts
+  are injected at the policy's `Network`; the real `NetworkSource` is proved by its unit
+  tests (TC-990-15) and on the bench. It proves:
+  - a sign-up from a node or a tailnet address is the door's 403 and Keycloak serves no
+    registration page (TC-990-29);
+  - with a pre-update operator, status says `firstRun:false` and a sign-up claims nothing
+    (TC-990-04);
+  - of two first-run sign-ups, the account created first is the one designee even when it
+    finishes second, and both sessions hold `self` only (TC-990-01);
+  - a role-less account's app and private-network sign-ins are refused (TC-990-05);
+  - the designation is granted only once the account holds an authenticator app as well as
+    recovery codes, after which its sessions are gone, a password alone gets no code, and a
+    second-step sign-in holds the administrator capabilities (TC-990-03);
+  - the recovery codes are a default action during first run only (TC-990-24);
+  - the unfiltered user listing, `prompt=create` and the exact email lookup behave as rows
+    T250 to T252 record (TC-990-11);
+  - a removed and an in-use email get byte-identical answers (TC-990-19);
+  - a listed password is refused at sign-up (TC-990-20);
+  - the 21st waiting account is refused (TC-990-13).
+
+What it does not prove: the designee's own path to a second step (Identity 6.5's chooser; the
+rig sets the authenticator-app required action through the Admin API), the "N people waiting"
+copy (Identity 6.2), a truly simultaneous pair of callbacks (the unit test TC-990-08 proves
+the claim's transaction under concurrency), and the appliance itself (the bench,
+`rasputin-identity-test`, TC-990-30).
