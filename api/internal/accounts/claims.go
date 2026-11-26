@@ -28,7 +28,8 @@ var claimName = regexp.MustCompile(`^[a-z0-9_]{2,40}$`)
 // Connect ID token and standard claims (Core §2, §3.1.3.6, §5.1, §5.6.2,
 // §7.4; Front- and Back-Channel Logout), the names the identity service
 // puts in every token, and the ones that carry access: groups, roles,
-// realm_access and resource_access. A name starting rasputin is refused
+// realm_access, resource_access, entitlements (RFC 9068 §7.2.1),
+// authorization_details (RFC 9396) and upn (MicroProfile JWT). A name starting rasputin is refused
 // too (reservedClaim).
 var reservedClaims = func() map[string]bool {
 	m := map[string]bool{}
@@ -38,7 +39,7 @@ var reservedClaims = func() map[string]bool {
 		name given_name family_name middle_name nickname preferred_username profile picture website
 		email email_verified gender birthdate zoneinfo locale phone_number phone_number_verified address updated_at
 		typ session_state
-		groups roles realm_access resource_access`) {
+		groups roles realm_access resource_access entitlements authorization_details upn`) {
 		m[n] = true
 	}
 	return m
@@ -58,6 +59,7 @@ const (
 	sentenceClaimNumber   = "Each allowed value of a number claim is a whole number."
 	sentenceClaimBoolean  = "A boolean claim is true or false, so it takes no allowed values."
 	sentenceClaimClients  = "Rasputin can't send a claim to chosen apps yet, so this claim wasn't defined."
+	sentenceClaimHeld     = "Some people hold values this definition wouldn't allow, so the claim wasn't changed. Change or clear their values first."
 )
 
 // claimNameRefusal is the refusal of a claim name, nil for a valid one.
@@ -133,7 +135,11 @@ func (c *Changes) defineClaim(ctx context.Context, _ *jobs.StepCtx, users Defini
 	if err != nil {
 		return nil, err
 	}
-	if err := users.DefineClaim(ctx, d); err != nil {
+	err = users.DefineClaim(ctx, d)
+	switch {
+	case errors.Is(err, ErrClaimHeld):
+		return nil, refusal(StepChange, "claim_held", sentenceClaimHeld)
+	case err != nil:
 		return nil, definitionWritten(err)
 	}
 	return map[string]any{"outcome": outcomeDefined}, nil

@@ -147,6 +147,7 @@ func TestDefinitions_TC994_43_Claims(t *testing.T) {
 		"sub": sentenceClaimReserved, "iss": sentenceClaimReserved, "email": sentenceClaimReserved, "preferred_username": sentenceClaimReserved,
 		"azp": sentenceClaimReserved, "groups": sentenceClaimReserved, "roles": sentenceClaimReserved,
 		"realm_access": sentenceClaimReserved, "resource_access": sentenceClaimReserved,
+		"entitlements": sentenceClaimReserved, "authorization_details": sentenceClaimReserved, "upn": sentenceClaimReserved,
 		"rasputin": sentenceClaimReserved, "rasputin_app_role": sentenceClaimReserved, "rasputinx": sentenceClaimReserved,
 	}
 	for name, want := range refused {
@@ -264,6 +265,54 @@ func TestDefinitions_TC994_43_Claims(t *testing.T) {
 	}
 	if r := h.run(t, adminSubmitter, KindDeleteClaim, ClaimNameSpec{Name: "tier"}, false, ""); r.job.Status != jobs.StatusSucceeded {
 		t.Errorf("deleting a claim already gone: %s %q", r.job.Status, r.job.Error)
+	}
+	if free := w.unlocked(); len(free) != 0 {
+		t.Errorf("calls made with the accounts lock free: %v", free)
+	}
+}
+
+// F-994-25: a redefinition is refused, changing nothing, unless every
+// account's values of the claim fit the new definition, since a value its
+// validators refuse would make every later write of that whole account a
+// 400. One every holder fits is written.
+func TestDefinitions_F994_25_RedefinitionOverHeldValues(t *testing.T) {
+	h := claimHarness(t)
+	w := h.watchLock()
+	if r := h.run(t, adminSubmitter, KindDefineClaim, ClaimSpec{Name: "tags", Kind: ClaimList}, false, ""); r.job.Status != jobs.StatusSucceeded {
+		t.Fatalf("define_claim tags: %s %q", r.job.Status, r.job.Error)
+	}
+	h.run(t, adminSubmitter, KindSetClaims, AccountSpec{AccountID: target}, false, `{"tags":["a","b"],"tier":["gold"]}`)
+	if h.attr(target, "claim_tags") != "a,b" || h.attr(target, "claim_tier") != "gold" {
+		t.Fatalf("the held values: tags %q, tier %q", h.attr(target, "claim_tags"), h.attr(target, "claim_tier"))
+	}
+	writes := func() int { return len(h.log.only("put-profile", "create-scope", "put-mapper", "add-mapper")) }
+	refused := []struct {
+		name string
+		spec ClaimSpec
+		attr string
+	}{
+		{"a list made single-valued over two values", ClaimSpec{Name: "tags", Kind: ClaimText}, "claim_tags"},
+		{"an allowed value a holder holds dropped", ClaimSpec{Name: "tier", Kind: ClaimText, Values: []string{"silver"}}, "claim_tier"},
+		{"text made a number over a word", ClaimSpec{Name: "tier", Kind: ClaimNumber}, "claim_tier"},
+	}
+	for _, c := range refused {
+		before, attr := writes(), h.kc.profileAttr(c.attr)
+		r := h.run(t, adminSubmitter, KindDefineClaim, c.spec, false, "")
+		if r.job.Status == jobs.StatusSucceeded || r.job.Error != sentenceClaimHeld {
+			t.Errorf("%s: %s %q, want %q", c.name, r.job.Status, r.job.Error, sentenceClaimHeld)
+		}
+		if writes() != before || !flows.SameJSON(h.kc.profileAttr(c.attr), attr) {
+			t.Errorf("%s: wrote %d, attribute %v (was %v)", c.name, writes()-before, h.kc.profileAttr(c.attr), attr)
+		}
+	}
+	if h.attr(target, "claim_tags") != "a,b" || h.attr(target, "claim_tier") != "gold" {
+		t.Errorf("a refusal changed the values: tags %q, tier %q", h.attr(target, "claim_tags"), h.attr(target, "claim_tier"))
+	}
+	r := h.run(t, adminSubmitter, KindDefineClaim, ClaimSpec{Name: "tier", Kind: ClaimList, Values: []string{"gold", "bronze"}}, false, "")
+	opts, _ := h.kc.profileAttr("claim_tier")["validations"].(map[string]any)["options"].(map[string]any)
+	if r.job.Status != jobs.StatusSucceeded || h.kc.profileAttr("claim_tier")["multivalued"] != true ||
+		!flows.SameJSON(opts["options"], []any{"gold", "bronze"}) || h.attr(target, "claim_tier") != "gold" {
+		t.Errorf("a redefinition every holder fits: %s %q, attribute %v", r.job.Status, r.job.Error, h.kc.profileAttr("claim_tier"))
 	}
 	if free := w.unlocked(); len(free) != 0 {
 		t.Errorf("calls made with the accounts lock free: %v", free)
@@ -404,5 +453,35 @@ func TestDefinitions_IdentityServiceFailures(t *testing.T) {
 	}
 	if r := h.run(t, adminSubmitter, KindDeleteClaim, ClaimNameSpec{Name: "No"}, false, ""); r.job.Error != sentenceClaimName {
 		t.Errorf("delete_claim with a bad name: %q", r.job.Error)
+	}
+}
+
+// F-994-25: fits is the kinds' validators over one account's values.
+func TestClaimDef_Fits(t *testing.T) {
+	long := strings.Repeat("é", maxText)
+	cases := []struct {
+		d    ClaimDef
+		vs   []string
+		want bool
+	}{
+		{ClaimDef{Kind: ClaimText}, nil, true},
+		{ClaimDef{Kind: ClaimText}, []string{long}, true},
+		{ClaimDef{Kind: ClaimText}, []string{long + "e"}, false},
+		{ClaimDef{Kind: ClaimText}, []string{""}, false},
+		{ClaimDef{Kind: ClaimText}, []string{"a", "b"}, false},
+		{ClaimDef{Kind: ClaimList}, []string{"a", "b"}, true},
+		{ClaimDef{Kind: ClaimList, Values: []string{"a"}}, []string{"a", "b"}, false},
+		{ClaimDef{Kind: ClaimBoolean}, []string{"true"}, true},
+		{ClaimDef{Kind: ClaimBoolean}, []string{"false"}, true},
+		{ClaimDef{Kind: ClaimBoolean}, []string{"yes"}, false},
+		{ClaimDef{Kind: ClaimNumber}, []string{"-12"}, true},
+		{ClaimDef{Kind: ClaimNumber}, []string{"1.5"}, false},
+		{ClaimDef{Kind: ClaimNumber, Values: []string{"1", "2"}}, []string{"2"}, true},
+		{ClaimDef{Kind: ClaimNumber, Values: []string{"1", "2"}}, []string{"3"}, false},
+	}
+	for _, c := range cases {
+		if got := c.d.fits(c.vs); got != c.want {
+			t.Errorf("%+v fits %q: %v, want %v", c.d, c.vs, got, c.want)
+		}
 	}
 }

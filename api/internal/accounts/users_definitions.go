@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
@@ -187,6 +188,61 @@ func (d ClaimDef) profileAttribute() map[string]any {
 		"multivalued": d.Kind == ClaimList, "validations": v}
 }
 
+// fits reports whether vs, one account's values of the claim, pass d's
+// validators: one value at most unless d is a list; each true or false for
+// a boolean, a whole number for a number, 1 to 255 characters otherwise;
+// and each one of d's allowed values when it has any.
+func (d ClaimDef) fits(vs []string) bool {
+	if len(vs) > 1 && d.Kind != ClaimList {
+		return false
+	}
+	for _, v := range vs {
+		ok := true
+		switch d.Kind {
+		case ClaimBoolean:
+			ok = v == "true" || v == "false"
+		case ClaimNumber:
+			_, err := strconv.ParseInt(v, 10, 64)
+			ok = err == nil
+		default:
+			n := utf8.RuneCountInString(v)
+			ok = n >= 1 && n <= maxText
+		}
+		if !ok || len(d.Values) > 0 && !slices.Contains(d.Values, v) {
+			return false
+		}
+	}
+	return true
+}
+
+// ErrClaimHeld is a redefinition of a claim whose values some account holds
+// that the new definition would refuse (F-994-25).
+var ErrClaimHeld = errors.New("accounts: an account holds values the claim's new definition refuses")
+
+// holdersFit returns ErrClaimHeld unless every account's values of the
+// claim, when the profile already declares it, fit d. A value the new
+// validators refuse would make every later write of that whole account a
+// 400.
+func (u *Users) holdersFit(ctx context.Context, d ClaimDef) error {
+	defined, err := u.Claims(ctx)
+	if err != nil {
+		return err
+	}
+	if !slices.Contains(defined, d.Name) {
+		return nil
+	}
+	reps, err := u.listed(ctx)
+	if err != nil {
+		return err
+	}
+	for _, rep := range reps {
+		if !d.fits(attrValues(rep, claimAttr(d.Name))) {
+			return ErrClaimHeld
+		}
+	}
+	return nil
+}
+
 // mappers are the claim's two protocol mappers: a User Attribute mapper
 // putting it in the ID token, the access token and userinfo, and a SAML
 // attribute mapper (register row T282).
@@ -268,10 +324,14 @@ func (u *Users) Claims(ctx context.Context) ([]string, error) {
 // DefineClaim writes d: the user-profile attribute claim_<name>, replaced
 // when the profile holds it, then the client scope claim-<name> (an
 // existing one kept) with its two mappers, each replaced when the scope
-// holds one of that name.
+// holds one of that name. A redefinition some account's values don't fit
+// is ErrClaimHeld, and changes nothing.
 func (u *Users) DefineClaim(ctx context.Context, d ClaimDef) error {
 	if d.Name == "" {
 		return errors.New("accounts: no claim name")
+	}
+	if err := u.holdersFit(ctx, d); err != nil {
+		return err
 	}
 	attr := d.profileAttribute()
 	if err := u.editProfile(ctx, func(attrs []any) []any {
