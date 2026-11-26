@@ -136,6 +136,13 @@ func newChangeHarness(t *testing.T) *changeHarness {
 	for _, wf := range c.changes.Workflows() {
 		c.runner.Register(wf)
 	}
+	defs, err := c.changes.DefinitionWorkflows(h.users)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, wf := range defs {
+		c.runner.Register(wf)
+	}
 	gw, err := c.changes.GrantWaitingWorkflow(h.designations)
 	if err != nil {
 		t.Fatal(err)

@@ -258,7 +258,9 @@ func TestWireAccounts_TC994_AccountChanges(t *testing.T) {
 	for _, k := range []string{accounts.KindSetRoles, accounts.KindGrantAccess, accounts.KindRevokeAccess, accounts.KindSetNetwork,
 		accounts.KindDisable, accounts.KindEnable, accounts.KindDelete, accounts.KindDecline, accounts.KindUnlock,
 		accounts.KindSignOut, accounts.KindSetEmail, accounts.KindConfirmEmail, accounts.KindSetDisplayName,
-		accounts.KindRemoveSecondSteps, accounts.KindRemoveCredential, accounts.KindRenameCredential} {
+		accounts.KindRemoveSecondSteps, accounts.KindRemoveCredential, accounts.KindRenameCredential,
+		accounts.KindDefineGroup, accounts.KindDeleteGroup, accounts.KindSetGroups,
+		accounts.KindDefineClaim, accounts.KindDeleteClaim, accounts.KindSetClaims} {
 		wf, ok := r.kinds[k]
 		if !ok || wf.System || wf.OnTerminal == nil || !authz.Known(k) {
 			t.Errorf("%s registered %v, System %v", k, ok, wf.System)

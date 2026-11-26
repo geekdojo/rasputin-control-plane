@@ -98,6 +98,21 @@ type requestSpec struct {
 	Grants       *[]string `json:"grants"`
 	CredentialID *string   `json:"credentialId"`
 	KeepSID      *string   `json:"keepSid"`
+	// The definitions' fields (PR 2): a group's or a claim's name, a
+	// claim's kind, allowed values and chosen clients, and group ids.
+	Name     *string   `json:"name"`
+	Kind     *string   `json:"kind"`
+	Values   *[]string `json:"values"`
+	Clients  *[]string `json:"clients"`
+	GroupID  *string   `json:"groupId"`
+	GroupIDs *[]string `json:"groupIds"`
+}
+
+// fields is which of s's fields are present, accountId aside.
+func (s requestSpec) fields() map[string]bool {
+	return map[string]bool{"role": s.Role != nil, "level": s.Level != nil, "grants": s.Grants != nil,
+		"credentialId": s.CredentialID != nil, "keepSid": s.KeepSID != nil, "name": s.Name != nil, "kind": s.Kind != nil,
+		"values": s.Values != nil, "clients": s.Clients != nil, "groupId": s.GroupID != nil, "groupIds": s.GroupIDs != nil}
 }
 
 // valueRule is what a kind's value must be.
@@ -107,6 +122,8 @@ const (
 	valueNone valueRule = iota
 	valueEmail
 	valueText
+	// valueClaims is set_claims' values, a JSON object (parseClaimValues).
+	valueClaims
 )
 
 // freshRule is when a kind needs a fresh sign-in.
@@ -119,15 +136,18 @@ const (
 )
 
 // kindRule is one kind's request rule: the fields its spec takes beside
-// accountId (each required), its value, when it needs a fresh sign-in, and
-// whether the request's own session is kept.
+// accountId (each required, or optional), whether it names no account,
+// its value, when it needs a fresh sign-in, and whether the request's own
+// session is kept.
 type kindRule struct {
-	fields []string
-	value  valueRule
-	fresh  freshRule
-	keep   bool
-	op     authz.Op
-	build  func(s requestSpec, keep string) any
+	fields    []string
+	optional  []string
+	noAccount bool
+	value     valueRule
+	fresh     freshRule
+	keep      bool
+	op        authz.Op
+	build     func(s requestSpec, keep string) any
 }
 
 func account(s requestSpec, _ string) any { return AccountSpec{AccountID: *s.AccountID} }
@@ -162,6 +182,28 @@ var requestKinds = map[string]kindRule{
 		build: func(s requestSpec, _ string) any {
 			return CredentialSpec{AccountID: *s.AccountID, CredentialID: *s.CredentialID}
 		}},
+	KindDefineGroup: {fields: []string{"name"}, noAccount: true,
+		build: func(s requestSpec, _ string) any { return GroupSpec{Name: *s.Name} }},
+	KindDeleteGroup: {fields: []string{"groupId"}, noAccount: true,
+		build: func(s requestSpec, _ string) any { return GroupIDSpec{GroupID: *s.GroupID} }},
+	KindSetGroups: {fields: []string{"groupIds"},
+		build: func(s requestSpec, _ string) any {
+			return GroupsSpec{AccountID: *s.AccountID, GroupIDs: append([]string{}, *s.GroupIDs...)}
+		}},
+	KindDefineClaim: {fields: []string{"name", "kind"}, optional: []string{"values", "clients"}, noAccount: true,
+		build: func(s requestSpec, _ string) any {
+			c := ClaimSpec{Name: *s.Name, Kind: *s.Kind}
+			if s.Values != nil {
+				c.Values = *s.Values
+			}
+			if s.Clients != nil {
+				c.Clients = *s.Clients
+			}
+			return c
+		}},
+	KindDeleteClaim: {fields: []string{"name"}, noAccount: true,
+		build: func(s requestSpec, _ string) any { return ClaimNameSpec{Name: *s.Name} }},
+	KindSetClaims: {value: valueClaims, build: account},
 }
 
 // ErrUnknownRequest is a kind POST /api/accounts/jobs does not take.
@@ -263,7 +305,7 @@ func (rq *Requests) Request(ctx context.Context, by authz.Submitter, sid string,
 		}
 	}
 	keep := ""
-	if rule.keep && *raw.AccountID == by.CreatedBy() {
+	if rule.keep && raw.AccountID != nil && *raw.AccountID == by.CreatedBy() {
 		keep = sid
 	}
 	spec := rule.build(raw, keep)
@@ -335,9 +377,10 @@ func tableKind(kind string) string {
 }
 
 // decodeRequestSpec decodes raw strictly: a JSON object with no unknown
-// field, no field the kind does not take, a non-empty accountId and every
-// field the kind needs. keepSid is taken and ignored where the kind keeps a
-// session: it is Request's to set.
+// field, no field the kind does not take, a non-empty accountId (none for a
+// kind naming no account) and every field the kind needs, an id among them
+// not empty. keepSid is taken and ignored where the kind keeps a session:
+// it is Request's to set.
 func decodeRequestSpec(raw json.RawMessage, rule kindRule) (requestSpec, error) {
 	if t := bytes.TrimSpace(raw); len(t) == 0 || bytes.Equal(t, []byte("null")) {
 		return requestSpec{}, invalid("spec_missing")
@@ -351,10 +394,8 @@ func decodeRequestSpec(raw json.RawMessage, rule kindRule) (requestSpec, error) 
 	if dec.More() {
 		return requestSpec{}, invalid("spec_not_json")
 	}
-	present := map[string]bool{"role": s.Role != nil, "level": s.Level != nil, "grants": s.Grants != nil,
-		"credentialId": s.CredentialID != nil, "keepSid": s.KeepSID != nil}
-	for field, there := range present {
-		takes := slices.Contains(rule.fields, field) || field == "keepSid" && rule.keep
+	for field, there := range s.fields() {
+		takes := slices.Contains(rule.fields, field) || slices.Contains(rule.optional, field) || field == "keepSid" && rule.keep
 		switch {
 		case there && !takes:
 			return requestSpec{}, invalid("spec_field")
@@ -362,7 +403,11 @@ func decodeRequestSpec(raw json.RawMessage, rule kindRule) (requestSpec, error) 
 			return requestSpec{}, invalid("spec_field")
 		}
 	}
-	if s.AccountID == nil || *s.AccountID == "" || s.CredentialID != nil && *s.CredentialID == "" {
+	switch {
+	case rule.noAccount && s.AccountID != nil:
+		return requestSpec{}, invalid("spec_field")
+	case !rule.noAccount && (s.AccountID == nil || *s.AccountID == ""),
+		s.CredentialID != nil && *s.CredentialID == "", s.GroupID != nil && *s.GroupID == "":
 		return requestSpec{}, invalid("spec_target")
 	}
 	return s, nil
@@ -384,10 +429,20 @@ func validValue(rule valueRule, v secret.Value) string {
 			return "value_email"
 		}
 	case valueText:
-		n := utf8.RuneCount(b)
-		if !utf8.Valid(b) || n < 1 || n > maxText || bytes.ContainsFunc(b, unicode.IsControl) {
+		if !validText(b) {
 			return "value_text"
+		}
+	case valueClaims:
+		if _, ok := parseClaimValues(b); !ok {
+			return "value_claims"
 		}
 	}
 	return ""
+}
+
+// validText reports whether b is 1 to 255 characters of valid UTF-8 with
+// no control character: a display name, a label or a claim value.
+func validText(b []byte) bool {
+	n := utf8.RuneCount(b)
+	return utf8.Valid(b) && n >= 1 && n <= maxText && !bytes.ContainsFunc(b, unicode.IsControl)
 }

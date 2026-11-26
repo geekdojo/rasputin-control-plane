@@ -200,15 +200,23 @@ type changeSpec struct {
 // jobs.ErrStopWorkflow to end the job there successfully.
 type changeDo func(ctx context.Context, sc *jobs.StepCtx, spec changeSpec) (map[string]any, error)
 
-// step is the workflow step running do: it decodes the spec, runs do,
-// writes the step's one log line and records the outcome.
+// step is the workflow step running do on the account spec it decodes: a
+// spec naming no account fails it (stepOf).
 func (c *Changes) step(kind, name string, do changeDo) jobs.WorkflowStep {
-	return jobs.WorkflowStep{Name: name, Timeout: c.d.StepTimeout, Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
+	return c.stepOf(kind, name, func(sc *jobs.StepCtx) (map[string]any, error) {
 		var spec changeSpec
 		if err := json.Unmarshal(sc.Spec, &spec); err != nil || spec.AccountID == "" {
-			return nil, c.failed(sc, kind, name, failStep(name, sentenceSpec, errors.New("the spec names no account")))
+			return nil, failStep(name, sentenceSpec, errors.New("the spec names no account"))
 		}
-		out, err := do(sc.Ctx, sc, spec)
+		return do(sc.Ctx, sc, spec)
+	})
+}
+
+// stepOf is the workflow step running do, which reads its own spec: it
+// runs do, writes the step's one log line and records the outcome.
+func (c *Changes) stepOf(kind, name string, do func(sc *jobs.StepCtx) (map[string]any, error)) jobs.WorkflowStep {
+	return jobs.WorkflowStep{Name: name, Timeout: c.d.StepTimeout, Do: func(sc *jobs.StepCtx) (json.RawMessage, error) {
+		out, err := do(sc)
 		stop := errors.Is(err, jobs.ErrStopWorkflow)
 		if err != nil && !stop {
 			return nil, c.failed(sc, kind, name, err)

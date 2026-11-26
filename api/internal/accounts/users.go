@@ -379,20 +379,13 @@ const peoplePage = 1000
 // createdTimestamp and leaves service accounts out (register row T250). A
 // full page, or an account with no id, is an error.
 func (u *Users) People(ctx context.Context) ([]Account, error) {
-	var reps []map[string]any
-	path := u.realmPath() + "/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(peoplePage)
-	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &reps); err != nil {
-		return nil, fmt.Errorf("accounts: list the accounts: %w", err)
-	}
-	if len(reps) >= peoplePage {
-		return nil, fmt.Errorf("accounts: the accounts fill a page of %d, so the list would be short", peoplePage)
+	reps, err := u.listed(ctx)
+	if err != nil {
+		return nil, err
 	}
 	out := make([]Account, 0, len(reps))
 	for _, rep := range reps {
 		id, _ := rep["id"].(string)
-		if id == "" {
-			return nil, errors.New("accounts: an account in the list has no id")
-		}
 		a := Account{ID: id, AppRole: appRoleOf(rep)}
 		a.Username, _ = rep["username"].(string)
 		a.Enabled, _ = rep["enabled"].(bool)
@@ -404,6 +397,26 @@ func (u *Users) People(ctx context.Context) ([]Account, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+// listed is every account's representation, attributes included, from the
+// unfiltered listing People describes. A full page, or an account with no
+// id, is an error.
+func (u *Users) listed(ctx context.Context) ([]map[string]any, error) {
+	var reps []map[string]any
+	path := u.realmPath() + "/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(peoplePage)
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &reps); err != nil {
+		return nil, fmt.Errorf("accounts: list the accounts: %w", err)
+	}
+	if len(reps) >= peoplePage {
+		return nil, fmt.Errorf("accounts: the accounts fill a page of %d, so the list would be short", peoplePage)
+	}
+	for _, rep := range reps {
+		if id, _ := rep["id"].(string); id == "" {
+			return nil, errors.New("accounts: an account in the list has no id")
+		}
+	}
+	return reps, nil
 }
 
 // ConsoleRoleHolders is the ids of every account holding one of the

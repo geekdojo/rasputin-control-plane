@@ -795,9 +795,17 @@ makes every change to a person's account one job, submitted through
     an account attack detection holds signs in after `unlock`, and a taken email gets the
     duplicate sentence (TC-994-40, rows T270 to T275);
   - an app-only designation completes at an app-door sign-in with no console sign-in
-    (TC-994-41).
+    (TC-994-41);
+  - a claim `define_claim` writes is admin-only: `set_claims` sets its value, a value
+    outside its allowed ones is refused, a self profile update posting `claim_<name>` leaves
+    it unchanged, its client scope carries a user-attribute mapper and a SAML attribute
+    mapper, and `delete_claim` removes all of it (`definitions_functional_test.go`,
+    TC-994-44, rows T281 and T282);
+  - a second `define_group` of one name reads the same group back, `set_groups` joins and
+    leaves, and `delete_group` removes the group (rows T279 and T280).
 
 What it does not prove: the screens (Identity 6.2, 6.3 and 9.6, and #319), the app relay
-(Identity 7.5) and the RADIUS hook (Identity 9.5), and the appliance itself. The unit tests
-(`api/internal/accounts`, TC-994-01 to TC-994-34) prove the guard's decisions, the lock, the
-designations and every kind's steps over a fake Admin API.
+(Identity 7.5) and the RADIUS hook (Identity 9.5), claims reaching chosen apps (Identity 6.3
+and 7.4), and the appliance itself. The unit tests (`api/internal/accounts`, TC-994-01 to
+TC-994-34, TC-994-42 and TC-994-43) prove the guard's decisions, the lock, the designations
+and every kind's steps over a fake Admin API.

@@ -111,6 +111,8 @@ type accountsWiring struct {
 	requests    *accounts.Requests
 	freshAction *accounts.FreshAction
 	changes     *accounts.Changes
+	// definitions are the groups' and claims' workflows (#994 PR 2).
+	definitions []jobs.Workflow
 	// grantWaiting is the one-action grant of a waiting entry; lock is the
 	// one accounts lock and facts the app-access fact, which the move
 	// shares (#1004).
@@ -241,6 +243,10 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	if err != nil {
 		return accountsWiring{}, err
 	}
+	definitions, err := changes.DefinitionWorkflows(users)
+	if err != nil {
+		return accountsWiring{}, err
+	}
 	repairResets, err := accounts.NewRepairResets(accounts.RepairResetsDeps{Admins: users, Designations: d.designations, Users: users,
 		Checker: checker, Runner: d.runner, Held: held, Log: d.log})
 	if err != nil {
@@ -253,20 +259,23 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	return accountsWiring{revoker: rev, access: access, removed: removed, sessions: ender,
 		resetter: resetter, resetAction: action, reset: reset,
 		users: users, first: first, waiting: waiting, observer: observer, granter: granter,
-		requests: requests, freshAction: freshAction, changes: changes,
+		requests: requests, freshAction: freshAction, changes: changes, definitions: definitions,
 		grantWaiting: grantWaiting, lock: lock, facts: facts, checker: checker,
 		repairResets: repairResets, repairReset: repairReset}, nil
 }
 
 // register registers identity.revoke, accounts.reset_password,
-// accounts.grant_designated_role, every account change's workflow and
-// accounts.repair_reset, under keycloak only.
+// accounts.grant_designated_role, every account change's workflow, the
+// definitions' and accounts.repair_reset, under keycloak only.
 func (w accountsWiring) register(r interface{ Register(jobs.Workflow) }) {
 	if w.revoker != nil {
 		r.Register(w.revoker.Workflow())
 		r.Register(w.reset)
 		r.Register(w.granter.Workflow())
 		for _, wf := range w.changes.Workflows() {
+			r.Register(wf)
+		}
+		for _, wf := range w.definitions {
 			r.Register(wf)
 		}
 		r.Register(w.grantWaiting)

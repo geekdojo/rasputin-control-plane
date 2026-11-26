@@ -323,14 +323,14 @@ func TestApplyProfile(t *testing.T) {
 		t.Errorf("username validations %v", v)
 	}
 	for name := range AdminOnlyAttributes {
-		if !SameJSON(byName[name]["permissions"], adminOnly()) {
+		if !SameJSON(byName[name]["permissions"], AdminOnlyPermissions()) {
 			t.Errorf("%s permissions %v", name, byName[name]["permissions"])
 		}
 	}
 	if byName["pet"] == nil || p["groups"] == nil {
 		t.Error("an attribute or the groups the rules do not own was dropped")
 	}
-	if !SameJSON(byName["claim_x"]["permissions"], adminOnly()) {
+	if !SameJSON(byName["claim_x"]["permissions"], AdminOnlyPermissions()) {
 		t.Error("claim_x was not made admin-only")
 	}
 	var integrity []string
