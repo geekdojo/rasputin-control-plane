@@ -91,10 +91,18 @@ func (rs *Resetter) Check(ctx context.Context, by authz.Submitter, target string
 	case err != nil:
 		return fmt.Errorf("%w: %w", ErrIdentityUnavailable, err)
 	}
-	ref, err := rs.d.Checker.Check(pw, p.Username, p.Email)
+	return checkPassword(ctx, rs.log, rs.d.Checker, pw, p.Username, p.Email)
+}
+
+// checkPassword runs the policy on pw for the account named username with
+// email. It returns nil, *PasswordRefused with the rule's sentence, or
+// ErrPasswordCheckUnavailable when the check could not finish; an unreadable
+// deny list is one ERROR record.
+func checkPassword(ctx context.Context, log *slog.Logger, checker PasswordChecker, pw secret.Value, username, email string) error {
+	ref, err := checker.Check(pw, username, email)
 	switch {
 	case errors.Is(err, pwpolicy.ErrListUnreadable):
-		rs.log.LogAttrs(ctx, slog.LevelError, "The password deny list could not be read, so a password reset was refused.",
+		log.LogAttrs(ctx, slog.LevelError, "The password deny list could not be read, so a password reset was refused.",
 			slog.String("event", "pwpolicy.list_unreadable"), slog.String("err", err.Error()))
 		return ErrPasswordCheckUnavailable
 	case err != nil:

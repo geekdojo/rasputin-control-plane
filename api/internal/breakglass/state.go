@@ -3,6 +3,7 @@ package breakglass
 import (
 	"context"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 )
@@ -10,8 +11,13 @@ import (
 // What the repair page lists. The page renders only these: a power that is
 // not listed here does not exist in a repair session.
 
-// RestartKind is the one job a repair session submits in this release.
+// RestartKind is the sign-in service's restart, a job a repair session
+// submits.
 const RestartKind = "identity.restart"
+
+// MoveKind is identity.move (move.Kind), which a repair session re-runs
+// (C9). This package can't import identity/move, whose tests import it.
+const MoveKind = "identity.move"
 
 // The sentences the repair page reads.
 const (
@@ -19,11 +25,23 @@ const (
 	sentenceNoIdentity  = "Sign-in isn't installed on this control plane."
 	sentenceStateUnread = "The sign-in service's state couldn't be read."
 	reasonNoIdentity    = "Sign-in isn't installed on this control plane, so there is nothing to restart."
+
+	labelReset        = "RESET THIS ADMIN'S SIGN-IN"
+	reasonResetUsed   = "This repair session has already reset a sign-in. Make a new repair code to reset another."
+	reasonResetUnread = "The accounts couldn't be read, so no sign-in can be reset now. If sign-in isn't running, restart it first."
+	reasonNoTargets   = "No administrator or designated account exists on this cluster, so there is no sign-in to reset."
+	labelMove         = "BRING BACK THE ACCOUNTS FROM BEFORE THE UPDATE…"
 )
+
+// Target is an account the reset may act on: its id and its sign-in name.
+type Target struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 // Action is one thing the session may do now.
 type Action struct {
-	// ID names the action to the page: "restart".
+	// ID names the action to the page: "restart", "reset" or "move".
 	ID string `json:"id"`
 	// Kind is the job it submits.
 	Kind    string `json:"kind"`
@@ -31,6 +49,8 @@ type Action struct {
 	Enabled bool   `json:"enabled"`
 	// Reason is why it is disabled; empty when enabled.
 	Reason string `json:"reason,omitempty"`
+	// Targets are the accounts the reset may act on.
+	Targets []Target `json:"targets,omitempty"`
 }
 
 // JobView is one job the session submitted.
@@ -82,6 +102,12 @@ func (s *Service) State(ctx context.Context, sess Session) StateView {
 		}
 	}
 	v.Actions = []Action{restart}
+	if a, ok := s.resetAction(ctx, sess); ok {
+		v.Actions = append(v.Actions, a)
+	}
+	if a, ok := s.moveAction(ctx); ok {
+		v.Actions = append(v.Actions, a)
+	}
 	for _, id := range s.sessionJobs(sess) {
 		j, err := s.d.Jobs.GetJob(ctx, id)
 		if err != nil || j == nil {
@@ -123,4 +149,49 @@ func (s *Service) Ways() Ways {
 	w = append(w, Way{ID: "ssh", Text: "From a computer that holds the control plane's SSH key, run:",
 		Command: "ssh -t root@" + s.d.Facts.ConsoleHost + " " + cmd})
 	return Ways{SignInAt: "https://" + s.d.Facts.ConsoleHost, Ways: w, URLs: s.RepairURLs()}
+}
+
+// resetAction is the reset (C1), listed whenever it is wired: disabled once
+// the session has reset one, when the accounts can't be read, or when there
+// is none to reset.
+func (s *Service) resetAction(ctx context.Context, sess Session) (Action, bool) {
+	if s.d.Resets == nil {
+		return Action{}, false
+	}
+	a := Action{ID: "reset", Kind: accounts.RepairResetKind, Label: labelReset}
+	if s.resetUsed(sess) {
+		a.Reason = reasonResetUsed
+		return a, true
+	}
+	ts, err := s.d.Resets.Targets(ctx)
+	switch {
+	case err != nil:
+		s.log.WarnContext(ctx, "The reset's accounts couldn't be read for the repair page.", "event", "breakglass.targets_unread", "err", err.Error())
+		a.Reason = reasonResetUnread
+	case len(ts) == 0:
+		a.Reason = reasonNoTargets
+	default:
+		a.Enabled = true
+		for _, t := range ts {
+			a.Targets = append(a.Targets, Target{ID: t.ID, Name: t.Username})
+		}
+	}
+	return a, true
+}
+
+// moveAction is the move's re-run (C9), listed only while C9's state
+// holds. A state that can't be read lists nothing (ERR-CLOSED), with a WARN.
+func (s *Service) moveAction(ctx context.Context) (Action, bool) {
+	if s.d.Move == nil {
+		return Action{}, false
+	}
+	r, err := s.d.Move.Repair(ctx)
+	if err != nil {
+		s.log.WarnContext(ctx, "The accounts from before the update couldn't be read for the repair page.", "event", "breakglass.move_unread", "err", err.Error())
+		return Action{}, false
+	}
+	if !r.Holds {
+		return Action{}, false
+	}
+	return Action{ID: "move", Kind: MoveKind, Label: labelMove, Enabled: true}, true
 }

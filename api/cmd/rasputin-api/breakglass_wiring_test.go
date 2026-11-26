@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"os"
@@ -9,15 +10,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/pwpolicy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
+	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
 type nopAlerts struct{}
 
 func (nopAlerts) RaiseBreakGlassIssued(context.Context, string) error   { return nil }
 func (nopAlerts) RaiseBreakGlassRedeemed(context.Context, string) error { return nil }
+func (nopAlerts) RaiseBreakGlassReset(context.Context, string, string) error {
+	return nil
+}
 
 type nopJobs struct{}
 
@@ -122,5 +130,76 @@ func TestLastResortAlerts_TC321_23(t *testing.T) {
 	}
 	if _, err := authorizedKeyLines(dir)(); err == nil {
 		t.Error("reading a directory as authorized_keys gave no error")
+	}
+}
+
+// downAdmins is an administrators read that fails.
+type downAdmins struct{}
+
+func (downAdmins) Administrators(context.Context) ([]accounts.Account, error) {
+	return nil, errors.New("identity down")
+}
+func (downAdmins) List(context.Context) ([]accounts.Designation, error) { return nil, nil }
+func (downAdmins) Read(context.Context, string) (accounts.Person, error) {
+	return accounts.Person{}, errors.New("identity down")
+}
+func (downAdmins) Check(secret.Value, string, string) (pwpolicy.Refusal, error) {
+	return pwpolicy.Refusal{}, nil
+}
+func (downAdmins) SubmitFor(context.Context, authz.Submitter, string, any, func(string) error) (*jobs.Job, error) {
+	return nil, errors.New("not here")
+}
+
+// TC-321-52: under keycloak the service gets the reset and the move's state
+// (the reset listed, the move read); off keycloak, or given nil pointers,
+// neither is wired and the reset is never listed. The lost-accounts alert
+// over an empty holder raises nothing.
+func TestWireBreakglass_TC321_52_ResetAndMove(t *testing.T) {
+	resets, err := accounts.NewRepairResets(accounts.RepairResetsDeps{Admins: downAdmins{}, Designations: downAdmins{},
+		Users: downAdmins{}, Checker: downAdmins{}, Runner: downAdmins{}, Held: accounts.NewHeld(), Log: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	holder := &moveStateHolder{}
+	wire := func(mode string, r *accounts.RepairResets, m *moveStateHolder) (breakglass.StateView, *logkittest.Recorder) {
+		t.Helper()
+		log, rec := logkittest.New()
+		w, err := wireBreakglass(context.Background(), breakglassDeps{alerts: nopAlerts{}, jobs: nopJobs{}, host: "ci.local",
+			primaryIP: func() net.IP { return nil }, dataDir: t.TempDir(), log: log, resets: r, move: m, mode: mode})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w.svc.State(context.Background(), breakglass.Session{}), rec
+	}
+	listed := func(st breakglass.StateView, id string) *breakglass.Action {
+		for i := range st.Actions {
+			if st.Actions[i].ID == id {
+				return &st.Actions[i]
+			}
+		}
+		return nil
+	}
+	st, rec := wire(identityModeKeycloak, resets, holder)
+	if a := listed(st, "reset"); a == nil || a.Enabled || a.Reason == "" {
+		t.Errorf("keycloak: reset %+v, want it listed and disabled by the failed read", a)
+	}
+	if listed(st, "move") != nil || len(rec.Matching(slog.LevelWarn, "")) == 0 {
+		t.Errorf("keycloak: the move was listed, or its unwired read not logged:\n%s", rec.Text())
+	}
+	for name, c := range map[string]struct {
+		mode string
+		r    *accounts.RepairResets
+		m    *moveStateHolder
+	}{
+		"off keycloak": {identityModeOff, resets, holder},
+		"nil pointers": {identityModeKeycloak, nil, nil},
+	} {
+		st, rec := wire(c.mode, c.r, c.m)
+		if listed(st, "reset") != nil || listed(st, "move") != nil || len(rec.Matching(slog.LevelWarn, "")) != 0 {
+			t.Errorf("%s: actions %+v", name, st.Actions)
+		}
+	}
+	if got := lostAccountsAlerts(holder)(context.Background(), time.Now()); len(got) != 0 {
+		t.Errorf("an empty holder raised %+v", got)
 	}
 }

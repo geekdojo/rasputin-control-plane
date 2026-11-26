@@ -120,6 +120,10 @@ type accountsWiring struct {
 	// checker is the password policy, which the move's bridge checks a
 	// first password against too (#1005).
 	checker *pwpolicy.Checker
+	// repairResets decides a break-glass repair session's reset, and
+	// repairReset is its job (#321, C1).
+	repairResets *accounts.RepairResets
+	repairReset  jobs.Workflow
 }
 
 // wireAccounts builds the accounts under keycloak. A removed-name list that
@@ -237,16 +241,26 @@ func wireAccounts(ctx context.Context, d accountsDeps) (accountsWiring, error) {
 	if err != nil {
 		return accountsWiring{}, err
 	}
+	repairResets, err := accounts.NewRepairResets(accounts.RepairResetsDeps{Admins: users, Designations: d.designations, Users: users,
+		Checker: checker, Runner: d.runner, Held: held, Log: d.log})
+	if err != nil {
+		return accountsWiring{}, err
+	}
+	repairReset, err := changes.RepairResetWorkflow(users, checker)
+	if err != nil {
+		return accountsWiring{}, err
+	}
 	return accountsWiring{revoker: rev, access: access, removed: removed, sessions: ender,
 		resetter: resetter, resetAction: action, reset: reset,
 		users: users, first: first, waiting: waiting, observer: observer, granter: granter,
 		requests: requests, freshAction: freshAction, changes: changes,
-		grantWaiting: grantWaiting, lock: lock, facts: facts, checker: checker}, nil
+		grantWaiting: grantWaiting, lock: lock, facts: facts, checker: checker,
+		repairResets: repairResets, repairReset: repairReset}, nil
 }
 
 // register registers identity.revoke, accounts.reset_password,
-// accounts.grant_designated_role and every account change's workflow,
-// under keycloak only.
+// accounts.grant_designated_role, every account change's workflow and
+// accounts.repair_reset, under keycloak only.
 func (w accountsWiring) register(r interface{ Register(jobs.Workflow) }) {
 	if w.revoker != nil {
 		r.Register(w.revoker.Workflow())
@@ -256,6 +270,7 @@ func (w accountsWiring) register(r interface{ Register(jobs.Workflow) }) {
 			r.Register(wf)
 		}
 		r.Register(w.grantWaiting)
+		r.Register(w.repairReset)
 	}
 }
 

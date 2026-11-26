@@ -55,6 +55,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/looptls"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/proctest"
@@ -159,6 +160,10 @@ type consoleStackOpts struct {
 	// enables the authenticator app (geekdojo/geekdojo-brain#987). The
 	// runner has no timesyncd, so without it CONFIGURE_TOTP is disabled.
 	clockSynced bool
+	// seedDB, when set, writes the api's rasputin.db at dbPath before the api
+	// first starts: the pre-update operators the identity move imports
+	// (geekdojo/geekdojo-brain#321, C9).
+	seedDB func(t *testing.T, dbPath string)
 }
 
 // startConsoleStack starts the api built from this tree and the pinned
@@ -221,6 +226,12 @@ func startConsoleStack(t *testing.T, opts consoleStackOpts) (*consoleStack, cont
 	if opts.clockSynced {
 		markClockSynced(t)
 	}
+	if opts.seedDB != nil {
+		if err := atrest.EnsureSecretDir(s.dataDir); err != nil {
+			t.Fatal(err)
+		}
+		opts.seedDB(t, filepath.Join(s.dataDir, "rasputin.db"))
+	}
 	s.startAPI(apiBin)
 	s.awaitFiles(ctx, "the api minted the identity CA and its leaves",
 		filepath.Join(s.dataDir, "trust", "identity-ca.pem"), filepath.Join(s.dataDir, "trust", "mesh-ca.pem"),
@@ -266,7 +277,12 @@ func (s *consoleStack) layOut(uiDir, theme string) {
 		}
 	})
 	share := "/usr/share/rasputin/identity"
-	for _, d := range []string{share, "/var/lib/rasputin/identity", "/run/rasputin-identity-exits", "/run/rasputin-identity-start-hold"} {
+	// The password deny list, at the place the api tarball installs it
+	// (rasputin-os package/rasputin-api/rasputin-api.mk copies identity/,
+	// password-blacklists/ included, to /usr/share/rasputin/identity), which
+	// is where the api's password check reads it (identityDenylists).
+	denylists := filepath.Join(share, "password-blacklists")
+	for _, d := range []string{share, denylists, "/var/lib/rasputin/identity", "/run/rasputin-identity-exits", "/run/rasputin-identity-start-hold"} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -275,6 +291,9 @@ func (s *consoleStack) layOut(uiDir, theme string) {
 		if err := copyFile(filepath.Join("..", "..", "..", "identity", f), filepath.Join(share, f)); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := copyFile(filepath.Join(s.cfg.DenylistDir, flows.DenylistFile), filepath.Join(denylists, flows.DenylistFile)); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.Symlink(theme, filepath.Join(share, "theme")); err != nil {
 		t.Fatal(err)

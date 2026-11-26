@@ -197,7 +197,7 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		}
 		for _, x := range k.users {
 			if (parts[3] == "admin" && x.directAdmin) || slices.Contains(x.roles, parts[3]) {
-				list = append(list, map[string]any{"id": x.rep["id"], "enabled": x.rep["enabled"]})
+				list = append(list, map[string]any{"id": x.rep["id"], "username": x.rep["username"], "enabled": x.rep["enabled"]})
 			}
 		}
 		// Honour max= as the identity service does: never more rows than asked.
@@ -273,6 +273,10 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		if e, ok := b["enabled"].(bool); ok && e && x.rep["enabled"] == false {
 			k.log.add("enable")
 			x.rep["enabled"] = true
+		}
+		if ra, ok := b["requiredActions"].([]any); ok {
+			k.log.add("set-actions")
+			x.rep["requiredActions"] = ra
 		}
 		if n, ok := b["firstName"].(string); ok && n != x.rep["firstName"] {
 			k.log.add("set-name")

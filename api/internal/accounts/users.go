@@ -161,6 +161,12 @@ func attrValues(rep map[string]any, name string) []string {
 // goes back with one value (markers.CollapseSingleValued), which the
 // identity service would otherwise refuse (geekdojo/geekdojo-brain#994).
 func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map[string]any)) error {
+	return u.writeFrom(ctx, sub, func(_, body, attrs map[string]any) { edit(body, attrs) })
+}
+
+// writeFrom is write with edit also given the representation as read, for
+// a change made from a field the PUT does not carry back.
+func (u *Users) writeFrom(ctx context.Context, sub string, edit func(rep, body, attrs map[string]any)) error {
 	rep, err := u.raw(ctx, sub)
 	if err != nil {
 		return err
@@ -176,7 +182,7 @@ func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map
 			body[k] = v
 		}
 	}
-	edit(body, attrs)
+	edit(rep, body, attrs)
 	body["attributes"] = attrs
 	if _, err := u.d.Admin.Admin(ctx, http.MethodPut, u.userPath(sub), body, nil); err != nil {
 		return fmt.Errorf("accounts: write the account: %w", err)
@@ -300,29 +306,51 @@ func (u *Users) ConsoleRoles(ctx context.Context, sub string) ([]string, error) 
 }
 
 // EnabledAdmins counts the enabled accounts holding the console's admin
-// role. A page that comes back full is an error: the count would be short.
+// role (Administrators). A page that comes back full is an error: the count
+// would be short.
 func (u *Users) EnabledAdmins(ctx context.Context) (int, error) {
-	id, err := u.consoleClientID(ctx)
+	admins, err := u.Administrators(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var users []struct {
-		Enabled bool `json:"enabled"`
-	}
-	path := u.realmPath() + "/clients/" + url.PathEscape(id) + "/roles/admin/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(adminPage)
-	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &users); err != nil {
-		return 0, fmt.Errorf("accounts: read the administrators: %w", err)
-	}
-	if len(users) >= adminPage {
-		return 0, fmt.Errorf("accounts: the administrators fill a page of %d, so the count would be short", adminPage)
-	}
 	n := 0
-	for _, x := range users {
-		if x.Enabled {
+	for _, a := range admins {
+		if a.Enabled {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// Administrators is every account holding the console's admin role
+// directly, enabled or not, with its id, sign-in name and enabled state. A
+// page that comes back full, or a holder with no id, is an error, never a
+// short list.
+func (u *Users) Administrators(ctx context.Context) ([]Account, error) {
+	id, err := u.consoleClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var reps []map[string]any
+	path := u.realmPath() + "/clients/" + url.PathEscape(id) + "/roles/admin/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(adminPage)
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &reps); err != nil {
+		return nil, fmt.Errorf("accounts: read the administrators: %w", err)
+	}
+	if len(reps) >= adminPage {
+		return nil, fmt.Errorf("accounts: the administrators fill a page of %d, so the count would be short", adminPage)
+	}
+	out := make([]Account, 0, len(reps))
+	for _, rep := range reps {
+		a := Account{}
+		a.ID, _ = rep["id"].(string)
+		if a.ID == "" {
+			return nil, errors.New("accounts: an administrator has no id")
+		}
+		a.Username, _ = rep["username"].(string)
+		a.Enabled, _ = rep["enabled"].(bool)
+		out = append(out, a)
+	}
+	return out, nil
 }
 
 // Account is one person in the realm as People lists them.

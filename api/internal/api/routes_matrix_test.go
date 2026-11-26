@@ -64,7 +64,10 @@ var wantClass = map[string]string{
 	"GET /api/repair/state":    "repair:control:repair",
 	"POST /api/repair/end":     "repair:control:repair",
 	"POST /api/repair/restart": "repair:job:identity.restart",
-	"POST /api/jobs":           "anyjob",
+	// TC-321-48: C1's reset and C9's move re-run (PR 2).
+	"POST /api/repair/reset": "repair:job:accounts.repair_reset",
+	"POST /api/repair/move":  "repair:job:identity.move",
+	"POST /api/jobs":         "anyjob",
 	// TC-992-22: the administrator's password reset (geekdojo/geekdojo-brain#992).
 	"POST /api/accounts/{id}/reset-password": "control:iam",
 	"POST /api/accounts/jobs":                "anyjob",
@@ -252,9 +255,15 @@ func ruleProblems(p string, rule routeRule, admin authz.Set) []string {
 		if len(rule.kinds) == 0 {
 			out = append(out, p+": a job rule with no kinds")
 		}
+		// A repair route serves the repair session alone, so its kinds are
+		// judged on that session's capabilities (geekdojo/geekdojo-brain#321).
+		who, caps := "an administrator", admin
+		if rule.repair {
+			who, caps = "the repair session", breakglass.Session{}.Capabilities()
+		}
 		for _, k := range rule.kinds {
-			if err := admin.PermitsKindRoute(k); err != nil {
-				out = append(out, fmt.Sprintf("%s: job kind %s refuses even an administrator (%v)", p, k, err))
+			if err := caps.PermitsKindRoute(k); err != nil {
+				out = append(out, fmt.Sprintf("%s: job kind %s refuses even %s (%v)", p, k, who, err))
 			}
 		}
 	}
@@ -325,7 +334,7 @@ func mentions(problems []string, pattern string) bool {
 }
 
 // TC-1002-02: an unclassified route is reported; the real routes() has none,
-// and a rule is recorded for all 115 gated patterns (112, and #321's three
+// and a rule is recorded for all 121 gated patterns (116, and #321's five
 // repair routes).
 func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	f := routeFixture(t)
@@ -337,8 +346,8 @@ func TestRouteClasses_TC1002_02_EveryRouteIsClassified(t *testing.T) {
 	if got := classProblems(real, openRoutes, signinSessionRoutes); len(got) != 0 {
 		t.Errorf("routes() class problems:\n%s", strings.Join(got, "\n"))
 	}
-	if n := len(real.rules); n != 119 {
-		t.Errorf("%d rules recorded, want 119", n)
+	if n := len(real.rules); n != 121 {
+		t.Errorf("%d rules recorded, want 121", n)
 	}
 }
 
@@ -603,8 +612,8 @@ func TestRouteClasses_TC1002_04_PerRoleMatrix(t *testing.T) {
 		passed++
 		repairRoutes++
 	}
-	if repairRoutes != 3 {
-		t.Errorf("the repair session reached %d repair routes, want 3", repairRoutes)
+	if repairRoutes != 5 {
+		t.Errorf("the repair session reached %d repair routes, want 5", repairRoutes)
 	}
 	if refused == 0 || passed == 0 {
 		t.Fatalf("%d refused and %d passed cells; the matrix is vacuous", refused, passed)

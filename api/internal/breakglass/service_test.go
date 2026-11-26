@@ -24,7 +24,16 @@ import (
 type fakeAlerts struct {
 	mu               sync.Mutex
 	issued, redeemed []string
-	err              error
+	// resets are "<event>/<account>" per reset alert.
+	resets []string
+	err    error
+}
+
+func (a *fakeAlerts) RaiseBreakGlassReset(_ context.Context, id, account string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.resets = append(a.resets, id+"/"+account)
+	return a.err
 }
 
 func (a *fakeAlerts) RaiseBreakGlassIssued(_ context.Context, id string) error {
@@ -333,6 +342,8 @@ func TestStateAndWays_TC321_21(t *testing.T) {
 	if st := r.svc.State(context.Background(), sess); !st.Ready {
 		t.Errorf("ready: %+v", st)
 	}
+	// Reset and move are unwired here, so neither is listed (TC-321-45
+	// lists them); restore is never listed.
 	for _, st := range []StateView{r.svc.State(context.Background(), sess)} {
 		for _, a := range st.Actions {
 			for _, never := range []string{"reset", "restore", "move"} {

@@ -37,7 +37,7 @@ func TestPermitsKindRoute_TC1002_15_Shapes(t *testing.T) {
 		{"identity.restart", "admin repair", CodeNotPermitted},                         // repairOr(IAM)
 		{"accounts.set_first_password", "", CodeNotPermitted},                          // bridge
 		{"identity.migrate", "", CodeSystemOnly},                                       // sysOnly
-		{"identity.move", "", CodeSystemOnly},                                          // move
+		{"identity.move", "repair", CodeSystemOnly},                                    // move (TC-321-48)
 		{"os.identity_rollback", "", CodeNotSubmittable},                               // never
 		{"no.such.kind", "", CodeUnknownKind},                                          // unmapped
 	}

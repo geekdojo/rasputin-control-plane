@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/restart"
@@ -54,6 +55,11 @@ type breakglassDeps struct {
 	// exists.
 	identityCA bool
 	log        *slog.Logger
+	// resets is the repair reset and move C9's state (#321 C1, C9): nil
+	// off keycloak, and only given to the service under keycloak.
+	resets *accounts.RepairResets
+	move   *moveStateHolder
+	mode   string
 }
 
 // breakglassWiring is what wireBreakglass built: both nil when break-glass
@@ -84,6 +90,13 @@ func wireBreakglass(ctx context.Context, d breakglassDeps) (breakglassWiring, er
 	// A nil *Monitor in the interface would read as a sign-in service.
 	if d.monitor != nil && d.restarter != nil {
 		deps.Identity, deps.Busy = d.monitor, d.restarter.Busy
+	}
+	// Likewise a nil *RepairResets or *moveStateHolder would read as wired.
+	if d.mode == identityModeKeycloak && d.resets != nil {
+		deps.Resets = d.resets
+	}
+	if d.mode == identityModeKeycloak && d.move != nil {
+		deps.Move = breakglassMove{h: d.move}
 	}
 	svc, err := breakglass.New(deps)
 	if err != nil {
@@ -133,4 +146,21 @@ func authorizedKeyLines(path string) func() ([]string, error) {
 		}
 		return setup.AuthorizedKeyLines(data), nil
 	}
+}
+
+// breakglassMove is the move's state as the break-glass service reads it.
+type breakglassMove struct{ h *moveStateHolder }
+
+// Repair is the held state's C9 state.
+func (m breakglassMove) Repair(ctx context.Context) (breakglass.MoveRepair, error) {
+	r, err := m.h.Repair(ctx)
+	return breakglass.MoveRepair{Holds: r.Holds, Accounts: r.Accounts, Token: r.Token}, err
+}
+
+// lostAccountsAlerts is C9's lost-accounts alert over the move's state.
+func lostAccountsAlerts(m *moveStateHolder) func(ctx context.Context, now time.Time) []proto.Alert {
+	return alerts.LostAccounts{Repair: func(ctx context.Context) (bool, error) {
+		r, err := m.Repair(ctx)
+		return r.Holds, err
+	}}.Alerts
 }

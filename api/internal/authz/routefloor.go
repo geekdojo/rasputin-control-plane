@@ -36,8 +36,13 @@ func (s Set) permitsRule(r rule) error {
 	case bridge:
 		// A bridge grant never holds a console session.
 		return refuseKind(CodeNotPermitted)
-	case sysOnly, move:
+	case sysOnly:
 		return refuseKind(CodeSystemOnly)
+	case move:
+		// A repair session re-runs the move (geekdojo/geekdojo-brain#321);
+		// the runner's moveRule decides C9's state. Everyone else, as the
+		// system's job.
+		return allowIf(s.Permits(NeedControl(Repair)), CodeSystemOnly)
 	case never:
 		return refuseKind(CodeNotSubmittable)
 	}

@@ -8,10 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"strconv"
 	"strings"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/move"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
@@ -41,6 +45,8 @@ type repairService interface {
 	State(ctx context.Context, sess breakglass.Session) breakglass.StateView
 	Ways() breakglass.Ways
 	RecordJob(sess breakglass.Session, id string)
+	Reset(ctx context.Context, sess breakglass.Session, by authz.Submitter, id, token string, pw secret.Value) (*jobs.Job, error)
+	MoveState(ctx context.Context) (breakglass.MoveRepair, error)
 }
 
 // SetRepair wires the break-glass service. Unset, the repair routes answer
@@ -62,7 +68,20 @@ const (
 	sentenceRepairFailed       = "The repair session couldn't be opened. Try again."
 	sentenceJobUnavailable     = "This job can't run on this control plane."
 	sentenceJobStartFailed     = "The job couldn't be started. Try again."
+	sentenceRepairActionBody   = "The request body must be a small JSON object with the fields this action takes."
+	sentenceRepairNoPassword   = "Type a temporary password for this person, then confirm."
+	sentenceRepairResetTarget  = "Only an administrator's or a designated account's sign-in can be reset here."
+	sentenceRepairResetUsed    = "This repair session has already reset a sign-in. Make a new repair code to reset another."
+	sentenceRepairResetOff     = "Resetting a sign-in isn't available on this control plane."
+	sentenceRepairMoveUnread   = "The accounts from before the update couldn't be read. Try again."
+	// sentenceRepairResetNext follows the account's name in the reset's
+	// confirmation.
+	sentenceRepairResetNext = "They sign in with it, choose a new password, add a passkey, security key or authenticator app " +
+		"and save new recovery codes, then they are an administrator again. This is recorded and raises an alert."
 )
+
+// maxRepairActionBody bounds the reset's and the move's bodies.
+const maxRepairActionBody = 8 << 10
 
 // repairAttrs are the fields every break-glass refusal record carries.
 func repairAttrs(event string, extra ...slog.Attr) []slog.Attr {
@@ -280,28 +299,166 @@ func (s *Server) handleRepairEnd(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleRepairRestart is POST /api/repair/restart: submits identity.restart
-// for the session. The runner's kind policy decides it. A kind this runner
-// has no workflow for is 503 job_unavailable; any other failure to start the
-// job is 500 job_start_failed, under one ERROR record.
+// for the session. The runner's kind policy decides it (repairSubmitFailed).
 func (s *Server) handleRepairRestart(w http.ResponseWriter, r *http.Request) {
 	sess, _ := breakglass.SessionFrom(r.Context()) // RequireRepair put it there
 	job, err := s.runner.SubmitFor(r.Context(), submitter(r), breakglass.RestartKind, nil, nil)
 	if err != nil {
-		if s.refusedSubmit(w, r, breakglass.RestartKind, err) {
-			return
-		}
-		if errors.Is(err, jobs.ErrUnknownKind) {
-			s.writeCodedError(w, r, http.StatusServiceUnavailable, codeJobUnavailable, sentenceJobUnavailable,
-				slog.String("kind", breakglass.RestartKind), slog.String("err", err.Error()))
-			return
-		}
-		id := s.newCorrelationID()
-		s.log.LogAttrs(r.Context(), slog.LevelError, "api: a repair job could not be started",
-			append(repairAttrs("breakglass.job_failed"), slog.String("correlation_id", id),
-				slog.String("kind", breakglass.RestartKind), slog.String("err", err.Error()))...)
-		writeCodedBody(w, http.StatusInternalServerError, codeJobStartFailed, sentenceJobStartFailed, id)
+		s.repairSubmitFailed(w, r, breakglass.RestartKind, err)
 		return
 	}
 	s.repair.RecordJob(sess, job.ID)
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+// repairConfirm is a 409 repair_confirm's body: what the action would do,
+// and the token a confirmed request carries back.
+type repairConfirm struct {
+	codedError
+	StateToken string             `json:"stateToken"`
+	Account    *breakglass.Target `json:"account,omitempty"`
+	Accounts   *int               `json:"accounts,omitempty"`
+}
+
+// writeRepairConfirm answers 409 repair_confirm. It is the normal flow, so
+// it writes no refusal record.
+func (s *Server) writeRepairConfirm(w http.ResponseWriter, body repairConfirm) {
+	body.Code, body.CorrelationID = codeRepairConfirm, s.newCorrelationID()
+	writeJSON(w, http.StatusConflict, body)
+}
+
+// repairResetBody is POST /api/repair/reset's body. The password is copied
+// into a secret.Value at once and never logged.
+type repairResetBody struct {
+	AccountID  string  `json:"accountId"`
+	StateToken string  `json:"stateToken"`
+	Password   *string `json:"password"`
+}
+
+// handleRepairReset is POST /api/repair/reset: the session's one reset of
+// an administrator's or designated account's sign-in (C1). Without the
+// current token it answers 409 with the account and the token; confirmed,
+// it takes the temporary password and submits accounts.repair_reset, 202.
+// breakglass.Service decides it; this maps its answers.
+func (s *Server) handleRepairReset(w http.ResponseWriter, r *http.Request) {
+	sess, _ := breakglass.SessionFrom(r.Context()) // RequireRepair put it there
+	var body repairResetBody
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRepairActionBody)).Decode(&body)
+	if err != nil || body.AccountID == "" {
+		// The decoder's own text can quote the body, which may hold the
+		// password, so only a fixed cause is logged.
+		cause := "no_account"
+		if err != nil {
+			cause = bodyCause(err)
+		}
+		s.writeCodedError(w, r, http.StatusBadRequest, codeInvalidRequest, sentenceRepairActionBody, slog.String("cause", cause))
+		return
+	}
+	var pw secret.Value
+	if body.Password != nil {
+		pw = secret.New([]byte(*body.Password))
+		body.Password = nil
+	}
+	defer pw.Destroy()
+	job, err := s.repair.Reset(r.Context(), sess, submitter(r), body.AccountID, body.StateToken, pw)
+	var confirm *breakglass.ResetConfirm
+	var refused *accounts.PasswordRefused
+	switch {
+	case err == nil:
+		writeJSON(w, http.StatusAccepted, job)
+	case errors.As(err, &confirm):
+		s.writeRepairConfirm(w, repairConfirm{
+			codedError: codedError{Error: "This resets " + confirm.Target.Name + "'s sign-in: it removes their passkeys, security keys, " +
+				"authenticator apps, recovery codes and roles, and sets the temporary password you type. " + sentenceRepairResetNext},
+			StateToken: confirm.Token, Account: &confirm.Target})
+	case errors.Is(err, breakglass.ErrNoPassword):
+		s.writeCodedError(w, r, http.StatusBadRequest, codeInvalidRequest, sentenceRepairNoPassword, slog.String("cause", "no_password"))
+	case errors.Is(err, breakglass.ErrSessionEnded):
+		s.noRepairSession(w)
+	case errors.Is(err, accounts.ErrNotRepairTarget):
+		s.writeCodedError(w, r, http.StatusForbidden, codeRepairResetTarget, sentenceRepairResetTarget, repairAttrs("breakglass.reset_refused")...)
+	case errors.Is(err, breakglass.ErrResetUsed):
+		s.writeCodedError(w, r, http.StatusForbidden, codeRepairResetUsed, sentenceRepairResetUsed, repairAttrs("breakglass.reset_refused")...)
+	case errors.Is(err, breakglass.ErrResetUnavailable):
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeJobUnavailable, sentenceRepairResetOff, slog.String("kind", accounts.RepairResetKind))
+	case errors.As(err, &refused):
+		s.writeCodedError(w, r, http.StatusBadRequest, codePasswordRefused, refused.Sentence, slog.String("rule", refused.Rule))
+	case errors.Is(err, accounts.ErrPasswordCheckUnavailable):
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codePasswordCheckUnavailable, msgPasswordCheckUnavailable)
+	case errors.Is(err, accounts.ErrIdentityUnavailable):
+		// The identity error names the account in its path: a fixed cause.
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeIdentityNotReady, msgIdentityNotReady, slog.String("cause", "identity"))
+	default:
+		s.repairSubmitFailed(w, r, accounts.RepairResetKind, err)
+	}
+}
+
+// handleRepairMove is POST /api/repair/move: the re-run of identity.move
+// for the session (C9). The runner's kind table decides it on C9's state:
+// a missing or stale token answers 409 with how many accounts come back and
+// the current token; a confirmed one submits the job, 202.
+func (s *Server) handleRepairMove(w http.ResponseWriter, r *http.Request) {
+	sess, _ := breakglass.SessionFrom(r.Context()) // RequireRepair put it there
+	var body struct {
+		StateToken string `json:"stateToken"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRepairActionBody)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		s.writeCodedError(w, r, http.StatusBadRequest, codeInvalidRequest, sentenceRepairActionBody, slog.String("cause", bodyCause(err)))
+		return
+	}
+	job, err := s.runner.SubmitFor(r.Context(), submitter(r), move.Kind, move.Spec{Repair: true, StateToken: body.StateToken}, nil)
+	var kr *authz.KindRefusal
+	switch {
+	case err == nil:
+		s.repair.RecordJob(sess, job.ID)
+		s.log.LogAttrs(r.Context(), slog.LevelWarn, "A repair session brought back the accounts from before the update.",
+			repairAttrs("breakglass.move_submitted", slog.String("job_id", job.ID))...)
+		writeJSON(w, http.StatusAccepted, job)
+	case errors.As(err, &kr) && kr.Code == authz.CodeStateChanged:
+		st, serr := s.repair.MoveState(r.Context())
+		switch {
+		case serr != nil:
+			s.writeCodedError(w, r, http.StatusServiceUnavailable, codeIdentityNotReady, sentenceRepairMoveUnread,
+				slog.String("cause", "move_state"), slog.String("err", serr.Error()))
+		case !st.Holds:
+			s.writeCodedError(w, r, http.StatusForbidden, "job_"+authz.CodeMoveState, authz.KindSentence(authz.CodeMoveState),
+				slog.String("kind", move.Kind))
+		default:
+			n := st.Accounts
+			s.writeRepairConfirm(w, repairConfirm{codedError: codedError{Error: moveConfirmSentence(n)}, StateToken: st.Token, Accounts: &n})
+		}
+	default:
+		s.repairSubmitFailed(w, r, move.Kind, err)
+	}
+}
+
+// moveConfirmSentence is the move's confirmation for n accounts.
+func moveConfirmSentence(n int) string {
+	what := "the " + strconv.Itoa(n) + " accounts"
+	if n == 1 {
+		what = "the 1 account"
+	}
+	return "This brings back " + what + " this cluster had before its sign-in update, with no passwords: each person sets one " +
+		"with their old passkey. Accounts and sign-in methods made since then are not in it, so if a backup from this version " +
+		"exists, restore that instead."
+}
+
+// repairSubmitFailed answers a repair job's failed submission: the kind
+// table's refusal (refusedSubmit); 503 job_unavailable for a kind this
+// runner has no workflow for; any other failure 500 job_start_failed, under
+// one ERROR record.
+func (s *Server) repairSubmitFailed(w http.ResponseWriter, r *http.Request, kind string, err error) {
+	if s.refusedSubmit(w, r, kind, err) {
+		return
+	}
+	if errors.Is(err, jobs.ErrUnknownKind) {
+		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeJobUnavailable, sentenceJobUnavailable,
+			slog.String("kind", kind), slog.String("err", err.Error()))
+		return
+	}
+	id := s.newCorrelationID()
+	s.log.LogAttrs(r.Context(), slog.LevelError, "api: a repair job could not be started",
+		append(repairAttrs("breakglass.job_failed"), slog.String("correlation_id", id),
+			slog.String("kind", kind), slog.String("err", err.Error()))...)
+	writeCodedBody(w, http.StatusInternalServerError, codeJobStartFailed, sentenceJobStartFailed, id)
 }

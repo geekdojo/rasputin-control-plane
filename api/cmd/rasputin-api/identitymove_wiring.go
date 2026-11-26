@@ -46,6 +46,16 @@ func (h *moveStateHolder) RepairToken(ctx context.Context) (string, bool, error)
 	return s.RepairToken(ctx)
 }
 
+// Repair is the held state's C9 state, or errMoveUnwired: the break-glass
+// repair page and the lost-accounts alert read it (#321).
+func (h *moveStateHolder) Repair(ctx context.Context) (move.Repair, error) {
+	s := h.p.Load()
+	if s == nil {
+		return move.Repair{}, errMoveUnwired
+	}
+	return s.Repair(ctx)
+}
+
 // identityMoveDeps is what the wiring takes from main.
 type identityMoveDeps struct {
 	mode         string

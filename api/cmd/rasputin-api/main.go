@@ -2147,6 +2147,7 @@ func main() {
 	breakglassW, err := wireBreakglass(ctx, breakglassDeps{
 		monitor: identityState.monitor, restarter: identityRestart, alerts: alertsSvc, jobs: jobStore,
 		host: consoleHost(), primaryIP: lanWatch.PrimaryIP, dataDir: dataDir, identityCA: identityCA != nil, log: logger,
+		resets: acct.repairResets, move: moveHolder, mode: identityW.mode,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: break-glass", "err", err.Error())
@@ -2158,6 +2159,9 @@ func main() {
 		breakglassW.socket.Start(ctx)
 	}
 	alertsSvc.SetLastResortAlerts(lastResortAlerts(consoleStore, akPath))
+	if identityW.mode == identityModeKeycloak {
+		alertsSvc.SetLostAccountsAlerts(lostAccountsAlerts(moveHolder))
+	}
 	// The inventory hook installed before Start can raise alerts from here on.
 	nodeKeyAlerts.Store(alertsSvc)
 

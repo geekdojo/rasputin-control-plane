@@ -132,6 +132,15 @@ const (
 	// codeRepairOnly: a console route was asked for with a live repair
 	// session, which can only repair sign-in.
 	codeRepairOnly = "repair_only"
+	// codeRepairConfirm: a repair action that changes accounts was asked for
+	// without the current confirmation token; the body carries what it
+	// would do and the token (geekdojo/geekdojo-brain#321, C1 and C9).
+	codeRepairConfirm = "repair_confirm"
+	// codeRepairResetUsed: the repair session has already reset a sign-in.
+	codeRepairResetUsed = "repair_reset_used"
+	// codeRepairResetTarget: the account is neither an administrator nor
+	// designated, so a repair session can't reset it.
+	codeRepairResetTarget = "repair_reset_target"
 	// codeJobUnavailable: the runner has no workflow for the job's kind on
 	// this control plane, so no job was created.
 	codeJobUnavailable = "job_unavailable"

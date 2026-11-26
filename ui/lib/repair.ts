@@ -43,6 +43,12 @@ export interface RepairWays {
   urls: string[];
 }
 
+/** An account the reset may act on. */
+export interface RepairTarget {
+  id: string;
+  name: string;
+}
+
 /** One thing the session may do now. */
 export interface RepairAction {
   id: string;
@@ -50,6 +56,8 @@ export interface RepairAction {
   label: string;
   enabled: boolean;
   reason?: string;
+  /** The reset's accounts. */
+  targets?: RepairTarget[];
 }
 
 /** One job the session submitted. */
@@ -70,13 +78,28 @@ export interface RepairState {
   jobs: RepairJob[];
 }
 
-/** A refused call's sentence. */
+/** A refused call's body: its sentence and code, and a 409's confirmation. */
+export interface RepairErrorBody {
+  error?: string;
+  code?: string;
+  stateToken?: string;
+  account?: RepairTarget;
+  accounts?: number;
+}
+
+/** A refused call's sentence, with its body. */
 export class RepairError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly body: RepairErrorBody = {},
   ) {
     super(message);
+  }
+
+  /** Whether this is the api asking to confirm (409 repair_confirm). */
+  get confirm(): boolean {
+    return this.status === 409 && this.body.code === 'repair_confirm' && typeof this.body.stateToken === 'string';
   }
 }
 
@@ -89,13 +112,15 @@ async function call<T>(method: string, path: string, body?: unknown): Promise<T>
   });
   if (!res.ok) {
     let msg = `The control plane answered ${res.status}.`;
+    let body: RepairErrorBody = {};
     try {
       const b = await res.json();
+      if (b && typeof b === 'object') body = b as RepairErrorBody;
       if (typeof b?.error === 'string') msg = b.error;
     } catch {
       // the status sentence stands
     }
-    throw new RepairError(msg, res.status);
+    throw new RepairError(msg, res.status, body);
   }
   return (await res.json()) as T;
 }
@@ -135,4 +160,24 @@ export async function endRepairSession(): Promise<void> {
 /** Submits identity.restart for the session. */
 export async function restartSignIn(): Promise<void> {
   await call('POST', '/api/repair/restart');
+}
+
+/**
+ * Resets one administrator's or designated account's sign-in. Without the
+ * current token the api answers 409 repair_confirm with the sentence and
+ * the token; confirmed, it takes the temporary password.
+ */
+export async function resetSignIn(accountId: string, stateToken?: string, password?: string): Promise<void> {
+  const body: Record<string, string> = { accountId };
+  if (stateToken !== undefined) body.stateToken = stateToken;
+  if (password !== undefined) body.password = password;
+  await call('POST', '/api/repair/reset', body);
+}
+
+/**
+ * Brings back the accounts from before the sign-in update. Without the
+ * current token the api answers 409 repair_confirm with how many.
+ */
+export async function bringBackAccounts(stateToken?: string): Promise<void> {
+  await call('POST', '/api/repair/move', stateToken === undefined ? {} : { stateToken });
 }

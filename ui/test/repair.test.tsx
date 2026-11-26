@@ -145,3 +145,108 @@ describe('/repair', () => {
     assert.ok((r.container.textContent ?? '').includes('Busy now.'));
   });
 });
+
+// TC-321-51: the reset and the move on /repair (geekdojo/geekdojo-brain#321 PR 2).
+describe('TC-321-51 /repair renders the reset and the move', () => {
+  const RESET_SENTENCE = "This resets alice's sign-in: … This is recorded and raises an alert.";
+  const MOVE_SENTENCE = 'This brings back the 3 accounts this cluster had before its sign-in update, with no passwords: …';
+  const withActions = (actions: RepairState['actions']): RepairState => ({ ...STATE, actions });
+  const RESET = {
+    id: 'reset',
+    kind: 'accounts.repair_reset',
+    label: "RESET THIS ADMIN'S SIGN-IN",
+    enabled: true,
+    targets: [
+      { id: 'sub-alice', name: 'alice' },
+      { id: 'sub-dora', name: 'dora' },
+    ],
+  };
+  const MOVE = { id: 'move', kind: 'identity.move', label: 'BRING BACK THE ACCOUNTS FROM BEFORE THE UPDATE…', enabled: true };
+
+  test('each target has a reset; its 409 opens the panel; CONFIRM posts the token and the password, and empties the field', async () => {
+    let refuse = true;
+    const f = stubFetch(({ method, url, body }) => {
+      if (url.endsWith('/api/repair/state')) return json(200, withActions([STATE.actions[0], RESET]));
+      if (method === 'POST' && url.endsWith('/api/repair/reset')) {
+        const b = JSON.parse(body ?? '{}');
+        if (!b.stateToken) {
+          return json(409, { error: RESET_SENTENCE, code: 'repair_confirm', correlationId: 'c', stateToken: 'T1', account: { id: b.accountId, name: 'alice' } });
+        }
+        if (refuse) return json(400, { error: 'That password is too common. Choose another.', code: 'password_refused' });
+        return json(202, { id: 'J2' });
+      }
+      return undefined;
+    });
+    cleanups.push(f.restore);
+    const r = await render(<RepairPage />);
+    cleanups.push(r.unmount);
+    const resets = Array.from(r.container.querySelectorAll('button')).filter((b) => (b.textContent ?? '').trim() === RESET.label);
+    assert.equal(resets.length, 2, 'one reset per target');
+    await click(resets[0]);
+    assert.deepEqual(JSON.parse(f.calls.filter((c) => c.method === 'POST').at(-1)?.body ?? '{}'), { accountId: 'sub-alice' });
+    assert.ok((r.container.textContent ?? '').includes(RESET_SENTENCE), 'the api sentence shows');
+    const field = r.container.querySelector('#repair-temp-password') as HTMLInputElement;
+    assert.ok(field, 'the password field shows');
+    assert.equal(field.getAttribute('type'), 'password');
+    assert.equal(field.getAttribute('autocomplete'), 'new-password');
+
+    // A refused password: the field is emptied, and the refusal shows.
+    await type(field, 'correcthorsebatterystaple');
+    await click(button(r.container, 'CONFIRM'));
+    assert.deepEqual(JSON.parse(f.calls.filter((c) => c.method === 'POST').at(-1)?.body ?? '{}'), {
+      accountId: 'sub-alice',
+      stateToken: 'T1',
+      password: 'correcthorsebatterystaple',
+    });
+    assert.equal((r.container.querySelector('#repair-temp-password') as HTMLInputElement).value, '');
+    assert.ok((r.container.textContent ?? '').includes('That password is too common. Choose another.'));
+
+    // Accepted: the field is emptied and the panel closes.
+    refuse = false;
+    await type(r.container.querySelector('#repair-temp-password') as HTMLInputElement, 'a long unlisted passphrase');
+    await click(button(r.container, 'CONFIRM'));
+    assert.equal(JSON.parse(f.calls.filter((c) => c.method === 'POST').at(-1)?.body ?? '{}').password, 'a long unlisted passphrase');
+    assert.equal(r.container.querySelector('#repair-temp-password'), null, 'the panel closed');
+  });
+
+  test('a disabled reset shows its reason', async () => {
+    const reason = 'This repair session has already reset a sign-in. Make a new repair code to reset another.';
+    const f = stubFetch(({ url }) =>
+      url.endsWith('/api/repair/state') ? json(200, withActions([{ ...RESET, enabled: false, targets: undefined, reason }])) : undefined,
+    );
+    cleanups.push(f.restore);
+    const r = await render(<RepairPage />);
+    cleanups.push(r.unmount);
+    assert.equal(button(r.container, RESET.label).disabled, true);
+    assert.ok((r.container.textContent ?? '').includes(reason));
+  });
+
+  test('the move shows its 409 sentence and CONFIRM posts the token', async () => {
+    const f = stubFetch(({ method, url, body }) => {
+      if (url.endsWith('/api/repair/state')) return json(200, withActions([STATE.actions[0], MOVE]));
+      if (method === 'POST' && url.endsWith('/api/repair/move')) {
+        const b = JSON.parse(body ?? '{}');
+        if (!b.stateToken) return json(409, { error: MOVE_SENTENCE, code: 'repair_confirm', correlationId: 'c', stateToken: 'M1', accounts: 3 });
+        return json(202, { id: 'J3' });
+      }
+      return undefined;
+    });
+    cleanups.push(f.restore);
+    const r = await render(<RepairPage />);
+    cleanups.push(r.unmount);
+    await click(button(r.container, MOVE.label));
+    assert.ok((r.container.textContent ?? '').includes(MOVE_SENTENCE));
+    assert.equal(r.container.querySelector('#repair-temp-password'), null, 'the move takes no password');
+    await click(button(r.container, 'CONFIRM'));
+    assert.deepEqual(JSON.parse(f.calls.filter((c) => c.method === 'POST').at(-1)?.body ?? '{}'), { stateToken: 'M1' });
+  });
+
+  test('neither renders when the state does not list it', async () => {
+    const f = stubFetch(({ url }) => (url.endsWith('/api/repair/state') ? json(200, STATE) : undefined));
+    cleanups.push(f.restore);
+    const r = await render(<RepairPage />);
+    cleanups.push(r.unmount);
+    assert.throws(() => button(r.container, RESET.label));
+    assert.throws(() => button(r.container, MOVE.label));
+  });
+});
