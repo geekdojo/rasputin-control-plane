@@ -1,0 +1,278 @@
+{
+  "realm": "rasputin",
+  "enabled": true,
+  "sslRequired": "all",
+  "editUsernameAllowed": false,
+  "internationalizationEnabled": false,
+  "defaultRole": {
+    "name": "default-roles-rasputin",
+    "composite": false,
+    "clientRole": false
+  },
+  "bruteForceProtected": true,
+  "failureFactor": 100,
+  "maxDeltaTimeSeconds": 43200,
+  "quickLoginCheckMilliSeconds": 0,
+  "accessCodeLifespanLogin": 1800,
+  "accessCodeLifespanUserAction": 1800,
+  "webAuthnPolicyRpId": "",
+  "webAuthnPolicyUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessRpId": "",
+  "webAuthnPolicyPasswordlessUserVerificationRequirement": "required",
+  "webAuthnPolicyPasswordlessResidentKey": "required",
+  "eventsEnabled": true,
+  "eventsListeners": [],
+  "attributes": {
+    "CreateDefaultClientScopes": "true"
+  },
+  "roles": {
+    "client": {
+      "rasputin-console": [
+        { "name": "admin", "composite": false, "clientRole": true },
+        { "name": "operator", "composite": false, "clientRole": true },
+        { "name": "viewer", "composite": false, "clientRole": true }
+      ]
+    }
+  },
+  "authenticationFlows": [
+    { "alias": "rasputin-signin-home-console", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-home-mesh", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-app-account", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-app-clients", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-administering", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-admins-first", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-signin-network-devices", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] },
+    { "alias": "rasputin-reset", "providerId": "basic-flow", "topLevel": true, "builtIn": false, "authenticationExecutions": [] }
+  ],
+  "clientScopes": [
+    {
+      "name": "rasputin-console-roles",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "false",
+        "display.on.consent.screen": "false"
+      },
+      "protocolMappers": [
+        {
+          "name": "console roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "usermodel.clientRoleMapping.clientId": "rasputin-console",
+            "claim.name": "rasputin_roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "rasputin-console",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-x509",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["basic", "profile", "rasputin-console-roles"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "x509.subjectdn": "CN=rasputin-api,O=Rasputin",
+        "x509.allow.regex.pattern.comparison": "false"
+      }
+    },
+    {
+      "clientId": "rasputin-account",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-x509",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["basic", "profile"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "x509.subjectdn": "CN=rasputin-api,O=Rasputin",
+        "x509.allow.regex.pattern.comparison": "false"
+      }
+    },
+    {
+      "clientId": "rasputin-reset-home",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-x509",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "x509.subjectdn": "CN=rasputin-api,O=Rasputin",
+        "x509.allow.regex.pattern.comparison": "false"
+      }
+    },
+    {
+      "clientId": "rasputin-reset-app",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-x509",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["basic"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "x509.subjectdn": "CN=rasputin-api,O=Rasputin",
+        "x509.allow.regex.pattern.comparison": "false"
+      }
+    },
+    {
+      "clientId": "rasputin-mesh",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["basic", "profile", "email"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "pkce.code.challenge.method": "S256"
+      },
+      "protocolMappers": [
+        {
+          "name": "groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "rasputin_app_role",
+            "claim.name": "groups",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "rasputin-admin",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-x509",
+      "redirectUris": [],
+      "webOrigins": [],
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "fullScopeAllowed": false,
+      "consentRequired": false,
+      "frontchannelLogout": false,
+      "defaultClientScopes": ["kc-admin-api"],
+      "optionalClientScopes": [],
+      "attributes": {
+        "x509.subjectdn": "CN=rasputin-api,O=Rasputin",
+        "x509.allow.regex.pattern.comparison": "false"
+      }
+    },
+    { "clientId": "account", "enabled": false },
+    { "clientId": "account-console", "enabled": false },
+    { "clientId": "admin-cli", "enabled": false },
+    { "clientId": "broker", "enabled": false },
+    { "clientId": "security-admin-console", "enabled": false }
+  ],
+  "clientScopeMappings": {
+    "realm-management": [
+      {
+        "client": "rasputin-admin",
+        "roles": [
+          "manage-users",
+          "view-users",
+          "query-users",
+          "query-groups",
+          "manage-clients",
+          "view-realm",
+          "manage-realm",
+          "view-events"
+        ]
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "service-account-rasputin-admin",
+      "enabled": true,
+      "serviceAccountClientId": "rasputin-admin",
+      "realmRoles": [],
+      "clientRoles": {
+        "realm-management": [
+          "manage-users",
+          "view-users",
+          "query-users",
+          "query-groups",
+          "manage-clients",
+          "view-realm",
+          "manage-realm",
+          "view-events"
+        ]
+      }
+    }
+  ],
+  "components": {
+    "org.keycloak.keys.KeyProvider": [
+      { "name": "rsa-generated", "providerId": "rsa-generated", "subComponents": {}, "config": { "priority": ["100"] } },
+      { "name": "rsa-enc-generated", "providerId": "rsa-enc-generated", "subComponents": {}, "config": { "priority": ["100"], "algorithm": ["RSA-OAEP"] } },
+      { "name": "hmac-generated-hs512", "providerId": "hmac-generated", "subComponents": {}, "config": { "priority": ["100"], "algorithm": ["HS512"] } },
+      { "name": "aes-generated", "providerId": "aes-generated", "subComponents": {}, "config": { "priority": ["100"] } }
+    ]
+  }
+}

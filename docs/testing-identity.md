@@ -487,6 +487,55 @@ What it does not prove:
 The walk runs on `https://localhost:<port>` (`Config.FrontHost`), because WebAuthn refuses an IP
 address as its relying party.
 
+## A realm from the last stable release
+
+Keycloak's import skips a realm that already exists, so a cluster updated from a stable release
+keeps the realm that release's baseline created. Only converge changes it afterwards: an edit to
+`identity/realm-baseline.json` reaches fresh imports alone unless converge owns the field
+(F-1012-18, where the login theme added to the baseline never reached updated clusters).
+`identity/testdata/realm-baseline-v2026.11.3.json` is the oldest baseline a shipped stable
+imported, byte for byte (`git show v2026.11.3:identity/realm-baseline.json`; its sha256 is the one
+in v2026.11.3's `realm-baseline.lock`).
+
+`TestIdentity_UpgradeFromStableTheme`
+(`api/internal/identitytest/upgrade_from_stable_functional_test.go`) runs in the backend job with
+the theme set, like the theme walk. To run it locally, use the theme command in
+[The sign-in theme walk](#the-sign-in-theme-walk) with
+`-run '^TestIdentity_UpgradeFromStableTheme$'`.
+
+What it proves at the pin:
+
+- The fixture, imported with `kc.sh import`, reads no `loginTheme`, and the console client's sign-in
+  page is `login-login` with no `data-rasputin-theme`: the defect, reproduced.
+- One converge run, with the previous release's stored hash, repairs `realm.loginTheme`. The Admin
+  API then reads `loginTheme=rasputin`, and the same running server serves `login-login` with
+  `data-rasputin-theme="rasputin"`, with no restart (capability row T283). No alert is raised.
+- A second run repairs nothing and writes nothing.
+
+What it does not prove: the real OS update path, with Keycloak's `start --import-realm`, the api's
+scheduler and the door (rasputin-os's update smoke, TC-1012-21); every page of the theme, which
+the theme walk proves once `loginTheme` is set; and the `rasputin-app-email` client scope, which an
+updated realm lacks (an accepted gap until geekdojo/geekdojo-brain#1027 binds it).
+
+Two unit tests in `api/internal/identity/converge/baseline_test.go` hold the rule without the
+identity service. `TestBaseline_ChangesSinceShippedConverge` fails on any top-level baseline key
+that differs from the fixture's unless converge writes the tree baseline's value to a realm
+imported from the fixture, or the key is recorded in `notConverged` with a reason and its current
+value's sha256. `TestBaseline_EveryBoundScopeExistsOnAShippedRealm` fails when the desired state,
+with an app client bound to each variant, binds a client scope that a realm imported from the
+fixture does not have and converge does not create.
+
+| Test case | Where |
+|---|---|
+| TC-988-37 | `TestNewDesired_LoginTheme` (unit) |
+| TC-988-38 | `TestRun_RealmFieldsEachDetected`, subtests `loginTheme absent` and `loginTheme keycloak.v2` (unit) |
+| TC-988-39 | `TestRun_LoginThemeFirstRunIsNotDrift` (unit) |
+| TC-988-40 | `TestRun_LoginThemeDriftPutBack` (unit) |
+| TC-988-41 | `TestDiff_DesiredRealmHasNone` (unit) |
+| TC-988-42 | `TestRun_LoginThemeFailurePaths` (unit) |
+| TC-988-43 | `TestBaseline_ChangesSinceShippedConverge` (unit) |
+| TC-988-44 | `TestIdentity_UpgradeFromStableTheme` (CI) |
+
 ## The sign-in doors
 
 `TestDoor_AgainstPinnedKeycloak` (api/internal/identitytest/door_functional_test.go,

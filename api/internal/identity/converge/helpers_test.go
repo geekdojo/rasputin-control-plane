@@ -58,7 +58,7 @@ type fakeKC struct {
 // "Test Home", as Keycloak answers GET for it.
 func convergedRealm() map[string]any {
 	return map[string]any{
-		"id": "realm-uuid-1", "realm": testRealm, "displayName": "Test Home",
+		"id": "realm-uuid-1", "realm": testRealm, "displayName": "Test Home", "loginTheme": LoginTheme,
 		"eventsEnabled": true, "eventsListeners": []any{}, "enabledEventTypes": toAny(AuditEventTypes),
 		"eventsExpiration": 2592000, "adminEventsEnabled": true, "adminEventsDetailsEnabled": false,
 		"smtpServer":                 map[string]any{},
