@@ -261,6 +261,9 @@ func diff(d Desired, o observed) writes {
 	if str(o.realm, "displayNameHtml") != d.DisplayNameHTML {
 		drift("displayNameHtml", d.DisplayNameHTML)
 	}
+	if str(o.realm, "loginTheme") != d.LoginTheme {
+		drift("loginTheme", d.LoginTheme)
+	}
 	if boolean(o.realm, "eventsEnabled") != d.EventsEnabled {
 		drift("eventsEnabled", d.EventsEnabled)
 	}

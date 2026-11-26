@@ -34,7 +34,8 @@ func realmPUT(t *testing.T, kc *fakeKC) map[string]json.RawMessage {
 }
 
 // TC-981-05: a realm in the desired state yields no diff and Run writes
-// nothing.
+// nothing. TC-988-41: that realm carries loginTheme rasputin, so a themed
+// realm is left alone.
 func TestDiff_DesiredRealmHasNone(t *testing.T) {
 	r := newRig(t)
 	fields, err := r.c.Run(t.Context())
@@ -51,21 +52,30 @@ func TestDiff_DesiredRealmHasNone(t *testing.T) {
 // drifted fields, and no attributes unless an owned attribute changes.
 func TestRun_RealmFieldsEachDetected(t *testing.T) {
 	for _, c := range []struct {
+		name  string // the subtest's name, the field's when ""
 		field string
 		set   any
 		want  string // the field's raw JSON in the PUT
 	}{
-		{"displayName", "Old Name", `"Test Home"`},
-		{"displayNameHtml", "<b>Home</b>", `""`},
-		{"eventsEnabled", false, `true`},
-		{"eventsListeners", []any{"jboss-logging"}, `[]`},
-		{"enabledEventTypes", []any{"LOGIN"}, ""},
-		{"eventsExpiration", nil, `2592000`},
-		{"adminEventsEnabled", false, `true`},
-		{"adminEventsDetailsEnabled", true, `false`},
-		{"smtpServer", map[string]any{"host": "mail.example"}, `{}`},
+		{"", "displayName", "Old Name", `"Test Home"`},
+		{"", "displayNameHtml", "<b>Home</b>", `""`},
+		{"", "eventsEnabled", false, `true`},
+		{"", "eventsListeners", []any{"jboss-logging"}, `[]`},
+		{"", "enabledEventTypes", []any{"LOGIN"}, ""},
+		{"", "eventsExpiration", nil, `2592000`},
+		{"", "adminEventsEnabled", false, `true`},
+		{"", "adminEventsDetailsEnabled", true, `false`},
+		{"", "smtpServer", map[string]any{"host": "mail.example"}, `{}`},
+		// TC-988-38: a realm imported from the v2026.11.3 baseline has no
+		// loginTheme; an administrator's other theme is put back too.
+		{"loginTheme absent", "loginTheme", nil, `"rasputin"`},
+		{"loginTheme keycloak.v2", "loginTheme", "keycloak.v2", `"rasputin"`},
 	} {
-		t.Run(c.field, func(t *testing.T) {
+		name := c.name
+		if name == "" {
+			name = c.field
+		}
+		t.Run(name, func(t *testing.T) {
 			r := newRig(t)
 			if c.set == nil {
 				delete(r.kc.realm, c.field)
@@ -514,4 +524,171 @@ func setConsoleRedirect(kc *fakeKC, uris []string) {
 		list[i] = u
 	}
 	kc.client("rasputin-console")["redirectUris"] = list
+}
+
+// TC-988-37: the desired state owns the login theme: rasputin whatever the
+// inputs, in the canonical JSON, and part of the hash, so a cluster holding
+// the hash of a build without it is re-armed.
+func TestNewDesired_LoginTheme(t *testing.T) {
+	if LoginTheme != "rasputin" {
+		t.Fatalf("LoginTheme = %q, want rasputin", LoginTheme)
+	}
+	for _, in := range []Inputs{{}, {InstallName: "Test Home", ClockSynced: true, FirstRun: true,
+		RedirectURIs: map[string][]string{"rasputin-console": {redirectA}}}} {
+		d := NewDesired(in)
+		if d.LoginTheme != LoginTheme {
+			t.Errorf("NewDesired(%+v).LoginTheme = %q, want %q", in, d.LoginTheme, LoginTheme)
+		}
+		b, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(b), `"loginTheme":"rasputin"`) {
+			t.Errorf("canonical JSON carries no loginTheme rasputin: %s", b)
+		}
+		without := d
+		without.LoginTheme = ""
+		if without.Hash() == d.Hash() {
+			t.Error("a desired state without the login theme hashes the same")
+		}
+	}
+}
+
+// TC-988-39: the first run after an update, on a realm without loginTheme,
+// is a repair and not drift: one INFO naming realm.loginTheme, no alert, the
+// new hash stored and the control gate open.
+func TestRun_LoginThemeFirstRunIsNotDrift(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		stored func(r *rig)
+	}{
+		{"no stored hash", func(*rig) {}},
+		{"the previous release's hash", func(r *rig) { r.settings.m[HashKey] = "the-previous-release" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			c.stored(r)
+			delete(r.kc.realm, "loginTheme")
+			fields, err := r.c.Run(t.Context())
+			if err != nil || !slices.Contains(fields, "realm.loginTheme") {
+				t.Fatalf("Run = %v, %v; want realm.loginTheme among the fields", fields, err)
+			}
+			var repaired []slog.Record
+			for _, rec := range r.rec.Matching(slog.LevelInfo, "") {
+				if e, _ := logkittest.Attr(rec, "event"); e == "identity.converge.repaired" {
+					repaired = append(repaired, rec)
+				}
+			}
+			if len(repaired) != 1 {
+				t.Fatalf("%d identity.converge.repaired INFO records, want 1:\n%s", len(repaired), r.rec.Text())
+			}
+			if f, _ := logkittest.Attr(repaired[0], "fields"); !strings.Contains(f, "realm.loginTheme") {
+				t.Errorf("fields = %q, want realm.loginTheme", f)
+			}
+			if n := len(r.rec.AtLevel(slog.LevelWarn)) + len(r.rec.AtLevel(slog.LevelError)); n != 0 {
+				t.Errorf("%d WARN or ERROR records, want none:\n%s", n, r.rec.Text())
+			}
+			if a := r.c.Alerts(t.Context(), testNow); len(a) != 0 {
+				t.Errorf("alerts = %+v, want none", a)
+			}
+			if r.settings.m[HashKey] != NewDesired(r.inputs).Hash() {
+				t.Error("the desired hash was not stored")
+			}
+			if err := r.c.ControlGate(t.Context()); err != nil {
+				t.Errorf("ControlGate = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TC-988-40: another login theme set while the stored hash is current is
+// drift: put back alone, one WARN, the drift alert at warn, and the control
+// gate stays open because the theme is not an integrity field.
+func TestRun_LoginThemeDriftPutBack(t *testing.T) {
+	r := newRig(t)
+	r.storeHash()
+	r.kc.realm["loginTheme"] = "keycloak.v2"
+	fields, err := r.c.Run(t.Context())
+	if err != nil || !slices.Equal(fields, []string{"realm.loginTheme"}) {
+		t.Fatalf("Run = %v, %v; want [realm.loginTheme]", fields, err)
+	}
+	put := realmPUT(t, r.kc)
+	if len(put) != 1 || string(put["loginTheme"]) != `"rasputin"` {
+		t.Errorf("realm PUT = %v, want loginTheme rasputin alone", mapKeys(put))
+	}
+	warns := r.rec.Matching(slog.LevelWarn, "")
+	if len(warns) != 1 {
+		t.Fatalf("%d WARN records, want 1:\n%s", len(warns), r.rec.Text())
+	}
+	if e, _ := logkittest.Attr(warns[0], "event"); e != "identity.converge.drift" {
+		t.Errorf("WARN event = %q, want identity.converge.drift", e)
+	}
+	if f, _ := logkittest.Attr(warns[0], "fields"); !strings.Contains(f, "realm.loginTheme") {
+		t.Errorf("fields = %q, want realm.loginTheme", f)
+	}
+	alerts := r.c.Alerts(t.Context(), testNow)
+	if len(alerts) != 1 || alerts[0].ID != DriftAlertID || alerts[0].Severity != "warn" {
+		t.Errorf("alerts = %+v, want %s at warn alone", alerts, DriftAlertID)
+	}
+	if s := r.c.State(); s != Intact {
+		t.Errorf("integrity state = %v, want intact", s)
+	}
+	if err := r.c.ControlGate(t.Context()); err != nil {
+		t.Errorf("ControlGate = %v, want nil", err)
+	}
+}
+
+// TC-988-42: the new field's failure paths are the existing ones: a theme
+// that does not read back, and a realm PUT the identity service refuses,
+// each fail with their job error, one ERROR naming the field, and no stored
+// hash. No record carries the theme value read.
+func TestRun_LoginThemeFailurePaths(t *testing.T) {
+	refused := &idclient.Error{Op: "admin", Path: realmPath, Status: 500, Kind: idclient.ErrProtocol}
+	for _, c := range []struct {
+		name   string
+		set    func(r *rig)
+		want   error
+		detail bool // the ERROR carries the Admin API's status
+	}{
+		{"the theme does not read back", func(r *rig) {
+			delete(r.kc.realm, "loginTheme")
+			r.kc.ignoreWrites = true
+		}, errStillDiffers, false},
+		{"the realm PUT answers 500", func(r *rig) {
+			r.kc.realm["loginTheme"] = "keycloak.v2"
+			r.kc.fail["PUT "+realmPath] = refused
+		}, errWrite, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			r := newRig(t)
+			c.set(r)
+			_, err := r.c.RunJob(t.Context(), "job-988")
+			if !errors.Is(err, c.want) {
+				t.Fatalf("RunJob = %v, want %v", err, c.want)
+			}
+			if _, ok := r.settings.m[HashKey]; ok {
+				t.Error("a hash was stored by a failed run")
+			}
+			errs := r.rec.AtLevel(slog.LevelError)
+			if len(errs) != 1 {
+				t.Fatalf("%d ERROR records, want 1:\n%s", len(errs), r.rec.Text())
+			}
+			rec := errs[0]
+			if e, _ := logkittest.Attr(rec, "event"); e != "identity.converge.failed" {
+				t.Errorf("event = %q, want identity.converge.failed", e)
+			}
+			if j, _ := logkittest.Attr(rec, "job_id"); j != "job-988" {
+				t.Errorf("job_id = %q, want job-988", j)
+			}
+			if f, _ := logkittest.Attr(rec, "fields"); !strings.Contains(f, "realm.loginTheme") {
+				t.Errorf("fields = %q, want realm.loginTheme", f)
+			}
+			if st, _ := logkittest.Attr(rec, "status"); c.detail && st != "500" {
+				t.Errorf("status = %q, want the Admin API's 500", st)
+			}
+			if text := r.rec.Text() + err.Error(); strings.Contains(text, "keycloak.v2") {
+				t.Errorf("a record or the job error carries the theme value read:\n%s", text)
+			}
+		})
+	}
 }

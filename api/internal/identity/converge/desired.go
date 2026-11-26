@@ -36,6 +36,13 @@ var AuditEventTypes = []string{
 	"USER_DISABLED_BY_TEMPORARY_LOCKOUT", "USER_DISABLED_BY_PERMANENT_LOCKOUT", "USER_SESSION_DELETED",
 }
 
+// LoginTheme is the realm's login theme: the Rasputin theme, which converge
+// holds on every realm, including one imported from a baseline that set none
+// (F-1012-18). The name is also the door's resource path
+// (door/theme.go) and the directory rasputin-os links as themes/rasputin;
+// all three must say the same.
+const LoginTheme = "rasputin"
+
 // DefaultClients are the clients the identity service creates in every realm.
 // Converge holds them disabled.
 var DefaultClients = []string{"account", "account-console", "admin-cli", "broker", "security-admin-console"}
@@ -95,6 +102,7 @@ const (
 type Desired struct {
 	DisplayName               string              `json:"displayName"`
 	DisplayNameHTML           string              `json:"displayNameHtml"`
+	LoginTheme                string              `json:"loginTheme"`
 	EventsEnabled             bool                `json:"eventsEnabled"`
 	EventsListeners           []string            `json:"eventsListeners"`
 	EnabledEventTypes         []string            `json:"enabledEventTypes"`
@@ -135,6 +143,7 @@ func NewDesired(in Inputs) Desired {
 	expiry := int(storedEventsExpiry / time.Second)
 	d := Desired{
 		DisplayName:               in.InstallName,
+		LoginTheme:                LoginTheme,
 		EventsEnabled:             true,
 		EventsListeners:           []string{},
 		EnabledEventTypes:         sorted(AuditEventTypes),
