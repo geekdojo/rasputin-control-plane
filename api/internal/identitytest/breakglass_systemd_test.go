@@ -38,6 +38,7 @@ import (
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/functest"
@@ -485,7 +486,7 @@ func (bg *breakGlass) tc33AdminSignIn(sess *http.Cookie) {
 // signInAdmin makes a synthetic administrator with an authenticator app and
 // signs it in through the launcher with its password and a code.
 func (bg *breakGlass) signInAdmin() {
-	a := bg.adminFixture(breakGlassAdmin)
+	a := bg.adminFixture(breakGlassAdmin, false)
 	a.pw.Destroy()
 }
 
@@ -506,8 +507,10 @@ type adminFixture struct {
 // authenticator app and recovery codes, and signs it in through the launcher with its password
 // and a code. The account enrols the app on a first sign-in, holding no
 // role; once the api has marked its second step, it is granted admin and
-// signs in again.
-func (bg *breakGlass) adminFixture(name string) *adminFixture {
+// signs in again. With appAdmin it is given app admin first, as a real
+// administrator holds it: the attribute and offline_access, the identity
+// writes accounts.grant_access makes.
+func (bg *breakGlass) adminFixture(name string, appAdmin bool) *adminFixture {
 	t := bg.t
 	ctx := t.Context()
 	pw, err := randomSecret(bg.s.cfg.Rand)
@@ -565,6 +568,9 @@ func (bg *breakGlass) adminFixture(name string) *adminFixture {
 	if err != nil {
 		t.Fatal(errNamed("the api marked the administrator fixture's second step", err))
 	}
+	if appAdmin {
+		bg.grantAppAdmin(a.id)
+	}
 	var clients []struct {
 		ID string `json:"id"`
 	}
@@ -585,6 +591,26 @@ func (bg *breakGlass) adminFixture(name string) *adminFixture {
 		t.Fatalf("the administrator's sign-in: %v", err)
 	}
 	return a
+}
+
+// grantAppAdmin gives the account id app admin with accounts.Users, the
+// writes accounts.grant_access makes once its sessions are ended: the
+// attribute, then offline_access. The fixture's only sessions then are its
+// enrolment sign-in's, which its next sign-in supersedes. It runs before the
+// console role grant, so awaitGrantDrained's wait on that later event
+// covers these writes' events too.
+func (bg *breakGlass) grantAppAdmin(id string) {
+	t := bg.t
+	users, err := accounts.NewUsers(accounts.UsersDeps{Admin: bg.admin, Realm: baselineRealm, ConsoleClient: baselineConsole})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := users.SetAppRole(t.Context(), id, accounts.AppAdmin); err != nil {
+		t.Fatalf("give the administrator fixture app admin: %v", err)
+	}
+	if _, err := users.AddOfflineAccess(t.Context(), id); err != nil {
+		t.Fatalf("give the administrator fixture offline_access: %v", err)
+	}
 }
 
 // console is the launcher's sign-in for a, answering its authenticator

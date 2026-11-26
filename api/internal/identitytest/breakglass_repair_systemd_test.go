@@ -252,7 +252,9 @@ func (rp *repairs) consoleClientID() string {
 // a repair session lists it, confirms it by name, and resets it.
 func (rp *repairs) tc54Reset() {
 	t := rp.t
-	rp.fixture = rp.adminFixture(repairAdminName)
+	// The fixture holds app admin, so TC-321-55 proves the reset lowers it
+	// to user (F-321-38).
+	rp.fixture = rp.adminFixture(repairAdminName, true)
 	a := rp.fixture
 	var creds []struct {
 		ID   string `json:"id"`
