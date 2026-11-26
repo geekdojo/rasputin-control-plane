@@ -1,7 +1,8 @@
 package identitytest
 
 // Identity 4.12's account changes against the real identity service
-// (geekdojo/geekdojo-brain#994; TC-994-36 to TC-994-41): inside
+// (geekdojo/geekdojo-brain#994; TC-994-36 to TC-994-41, and PR 2's
+// TC-994-44 in definitions_functional_test.go): inside
 // TestConsole_AgainstPinnedKeycloak, the reset rig (the console rig with
 // #991's accounts and #992's runner the kind table decides) layered on the
 // console rig, with accounts.Requests, accounts.Changes, the designated-role
@@ -80,6 +81,7 @@ func newAccountsRig(t *testing.T, c *consoleRig) *accountsRig {
 	for _, wf := range changes.Workflows() {
 		r.runner.Register(wf)
 	}
+	r.definitions(t, changes)
 	granter, err := accounts.NewGranter(accounts.GranterDeps{Designations: r.designations, Facts: r.ra, Markers: mw, Sessions: ender,
 		Roles: r.users, Users: r.users, Access: r.access, Console: r.sessions, Admins: r.ra, Lock: r.race.lock, Log: log, StepTimeout: 2 * time.Minute})
 	if err != nil {
@@ -711,5 +713,7 @@ func accountsCases(t *testing.T, c *consoleRig) {
 	t.Run("TC-994-39 C24 TS-21 privileged changes need a fresh sign-in", r.tc39)
 	t.Run("TC-994-40 T270 to T275", r.tc40)
 	t.Run("TC-994-41 F-994-01 an app-only designation completes at the app door", r.tc41)
+	t.Run("TC-994-44 a defined claim is admin-only", r.tc44)
+	t.Run("T279 T280 group definitions and membership", r.groups)
 	t.Run("GrantRace two overlapping grants for one account", r.grantRace)
 }

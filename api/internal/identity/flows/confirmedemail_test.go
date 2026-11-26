@@ -31,7 +31,7 @@ func TestConfirmedEmail_TC994_35(t *testing.T) {
 	for _, a := range p["attributes"].([]any) {
 		m := a.(map[string]any)
 		if m["name"] == AttrConfirmedEmail {
-			added = SameJSON(m["permissions"], adminOnly()) && m["multivalued"] == false
+			added = SameJSON(m["permissions"], AdminOnlyPermissions()) && m["multivalued"] == false
 		}
 	}
 	if !added {

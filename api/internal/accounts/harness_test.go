@@ -131,6 +131,9 @@ type fakeKC struct {
 	// attribute more than once is refused with a 400, counted in rejected.
 	rows     bool
 	rejected int
+	// defs are the realm's groups, memberships, user profile and client
+	// scopes (geekdojo/geekdojo-brain#994 PR 2).
+	defs fakeDefs
 }
 
 func notFound(path string) error {
@@ -230,6 +233,8 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			}
 		}
 		return idclient.Response{Status: 204}, nil
+	case k.isDefinition(parts):
+		return k.definitions(method, path, parts, body, out)
 	case parts[0] != "users":
 		return idclient.Response{}, errors.New("fake: unknown path " + rel)
 	case len(parts) == 1:
