@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/idtoken"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -24,7 +25,8 @@ import (
 // The console's sign-in (geekdojo/geekdojo-brain#989, Identity 4.7; register
 // row C70): the console is an OIDC client, rasputin-console, of the home
 // door. GET /api/auth/signin starts an authorization-code flow with PKCE
-// S256, a state, a nonce and prompt=login at the door's issuer; the door
+// S256, a state, a nonce and prompt=login at the door's issuer (GET
+// /api/auth/signup the same with prompt=create, Identity 4.8); the door
 // sends the browser back to GET /api/auth/callback, where the code is
 // exchanged on loopback over the api's own leaf, the ID token verified, and
 // an opaque console session minted (ConsoleSessions). No token the identity
@@ -39,7 +41,12 @@ const (
 	signinExpired     = launcherPath + "?signin=expired"
 	signinUnavailable = launcherPath + "?signin=unavailable"
 	signinWrongHost   = launcherPath + "?signin=wrong-host"
-	callbackPath      = "/api/auth/callback"
+	// signinActionFailed is a fresh-sign-in action that ran and failed, or
+	// could not start (ERR-MESSAGE: not the sign-in's own failure).
+	signinActionFailed = launcherPath + "?signin=action-failed"
+	// actionStartPath is where a prepared action's fresh sign-in starts.
+	actionStartPath = "/api/auth/signin?action="
+	callbackPath    = "/api/auth/callback"
 )
 
 // Exchanger is the code exchange: *idclient.Client.
@@ -67,10 +74,42 @@ type Readiness interface {
 
 // Action is a fresh-sign-in action (Identity 9.3, 9.7, #319, 4.10, 4.12):
 // it runs once the person it was started for has signed in again, and
-// returns where the browser goes next. The registry is empty in 4.7.
+// returns where the browser goes next. payload is what PrepareAction held
+// for it, or nil; the action may read it during Run and must copy whatever
+// it keeps, since the sign-in destroys it once Run returns.
 type Action interface {
-	Run(ctx context.Context, p Principal) (redirect string, err error)
+	Run(ctx context.Context, p Principal, payload ActionPayload) (redirect string, err error)
 }
+
+// ActionPayload is a value an action runs with that must not travel through
+// the browser, such as a password (geekdojo/geekdojo-brain#992). The sign-in
+// destroys it exactly once, whatever becomes of the record holding it.
+type ActionPayload interface{ Destroy() }
+
+// FirstRunner is the first-run predicate (*Store, register row C03).
+type FirstRunner interface {
+	FirstRun(ctx context.Context) (bool, error)
+}
+
+// Claimer names the account a first-run claim designates: the realm's
+// earliest-created person (*accounts.FirstAccount,
+// geekdojo/geekdojo-brain#990).
+type Claimer interface {
+	Earliest(ctx context.Context) (string, error)
+}
+
+// Observer is told of every verified console sign-in, so a designated
+// account whose setup is complete gets its role (*accounts.Observer; row
+// B101: the callback is the fact that submits, and resubmits, the grant).
+// It decides and logs on its own and returns nothing.
+type Observer interface {
+	SignedIn(ctx context.Context, sub string)
+}
+
+// ErrNoAction is PrepareAction's refusal of a kind no action is registered
+// under, a request with no signed-in person, or a browser carrying the
+// pending cookie twice.
+var ErrNoAction = errors.New("auth: the action cannot be prepared")
 
 // SignInDeps are SignIn's collaborators. NewSignIn refuses a missing one;
 // Actions may be empty.
@@ -89,10 +128,19 @@ type SignInDeps struct {
 	Ender     SessionEnder
 	Ready     Readiness
 	Sessions  *ConsoleSessions
-	Actions   map[string]Action
-	Now       func() time.Time
-	Rand      io.Reader
-	Log       *slog.Logger
+	// FirstRun, Claimer and Observer are the first-run claim and the
+	// designation's fact (geekdojo/geekdojo-brain#990).
+	FirstRun FirstRunner
+	Claimer  Claimer
+	Observer Observer
+	Actions  map[string]Action
+	// Clock is the api's clock-sync fact: an authenticator app is added, and
+	// its kc_action forwarded, only while it holds
+	// (geekdojo/geekdojo-brain#1150).
+	Clock ClockFact
+	Now   func() time.Time
+	Rand  io.Reader
+	Log   *slog.Logger
 }
 
 // SignIn is the console's OIDC client for the home door.
@@ -121,6 +169,10 @@ func NewSignIn(d SignInDeps) (*SignIn, error) {
 		return nil, errors.New("auth: SignInDeps.Ready is nil")
 	case d.Sessions == nil:
 		return nil, errors.New("auth: SignInDeps.Sessions is nil")
+	case d.FirstRun == nil || d.Claimer == nil || d.Observer == nil:
+		return nil, errors.New("auth: SignInDeps.FirstRun, Claimer or Observer is nil")
+	case d.Clock == nil:
+		return nil, errors.New("auth: SignInDeps.Clock is nil")
 	case d.Now == nil:
 		return nil, errors.New("auth: SignInDeps.Now is nil")
 	case d.Rand == nil:
@@ -150,15 +202,90 @@ func (s *SignIn) consoleHost(r *http.Request) bool {
 // Begin serves GET /api/auth/signin: it stores the sign-in's record (or
 // replaces the browser's live one) and sends the browser to the home door.
 func (s *SignIn) Begin(w http.ResponseWriter, r *http.Request) {
-	s.begin(w, r, nil)
+	s.begin(w, r, nil, "", promptLogin)
 }
 
-// StartAction begins the fresh sign-in an action needs, for the person r is
-// signed in as: the same round trip with prompt=login, whose return runs
-// the action named kind instead of minting a session. It answers 404 for a
-// kind no action is registered under and 401 without a signed-in person.
+// BeginCreate serves GET /api/auth/signup: Begin with prompt=create, which
+// opens the home door's registration form (geekdojo/geekdojo-brain#990).
+// The new account's return is an ordinary sign-in at the callback, so the
+// api sees every account created.
+func (s *SignIn) BeginCreate(w http.ResponseWriter, r *http.Request) {
+	s.begin(w, r, nil, "", promptCreate)
+}
+
+// The prompts a sign-in starts with: a fresh sign-in, or account creation.
+const (
+	promptLogin  = "login"
+	promptCreate = "create"
+)
+
+// PrepareAction holds payload for the action named kind, for the person r
+// is signed in as, under the browser's pending cookie (replacing any record
+// there), and returns where the browser goes to start the action's fresh
+// sign-in: GET /api/auth/signin?action=<kind>. It takes payload whatever
+// happens: on a refusal (ErrNoAction, or no random values) it destroys it.
+func (s *SignIn) PrepareAction(w http.ResponseWriter, r *http.Request, kind string, payload ActionPayload) (string, error) {
+	destroy := func() {
+		if payload != nil {
+			payload.Destroy()
+		}
+	}
+	if _, known := s.d.Actions[kind]; !known {
+		destroy()
+		return "", ErrNoAction
+	}
+	next, err := s.prepare(w, r, kind, &pendingAction{kind: kind, payload: payload})
+	if err != nil {
+		destroy()
+	}
+	return next, err
+}
+
+// prepare stores action, for the person r is signed in as, as a prepared
+// record under the browser's pending cookie (replacing any record there),
+// sets the cookie and returns the fresh sign-in's start. It refuses with
+// ErrNoAction without a signed-in person or with the pending cookie twice;
+// on any refusal it stores nothing and the caller still owns the payload.
+func (s *SignIn) prepare(w http.ResponseWriter, r *http.Request, kind string, action *pendingAction) (string, error) {
+	p, ok := PrincipalFrom(r.Context())
+	if !ok || p.Sub == "" {
+		return "", ErrNoAction
+	}
+	key := ""
+	switch c, err := oneCookie(r, pendingCookieName); {
+	case errors.Is(err, errDuplicateCookie):
+		return "", ErrNoAction
+	case err == nil && s.pending.live(c.Value):
+		key = c.Value
+	}
+	if key == "" {
+		var err error
+		if key, err = s.random(32); err != nil {
+			return "", err
+		}
+	}
+	action.sub = p.Sub
+	s.pending.put(key, &pendingSignin{begin: s.d.Now(), prepared: true, action: action})
+	setCookie(w, pendingCookieName, key, signinPendingLifetime)
+	return actionStartPath + url.QueryEscape(kind), nil
+}
+
+// known reports whether kind names a registered action or a sign-in
+// method.
+func (s *SignIn) known(kind string) bool {
+	_, ok := s.d.Actions[kind]
+	return ok || methodKind(kind)
+}
+
+// StartAction begins the fresh sign-in a prepared action needs, for the
+// person r is signed in as: the same round trip with prompt=login, whose
+// return runs the action named kind instead of minting a session. It
+// answers 404 for a kind no action is registered under and 401 without a
+// signed-in person. It begins only from the browser's live prepared record
+// of that kind for that person; anything else is destroyed and sends the
+// browser to the launcher's action-failed sentence.
 func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string) {
-	if _, ok := s.d.Actions[kind]; !ok {
+	if !s.known(kind) {
 		writeErr(w, http.StatusNotFound, "There is no such action.")
 		return
 	}
@@ -167,23 +294,59 @@ func (s *SignIn) StartAction(w http.ResponseWriter, r *http.Request, kind string
 		writeErr(w, http.StatusUnauthorized, "auth required")
 		return
 	}
-	s.begin(w, r, &pendingAction{kind: kind, sub: p.Sub})
-}
-
-func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAction) {
 	if !s.consoleHost(r) {
 		http.Redirect(w, r, signinWrongHost, http.StatusSeeOther)
 		return
 	}
-	key := ""
-	switch c, err := oneCookie(r, pendingCookieName); {
-	case errors.Is(err, errDuplicateCookie):
+	c, err := oneCookie(r, pendingCookieName)
+	if errors.Is(err, errDuplicateCookie) {
 		writeDuplicateCookie(w, pendingCookieName)
 		return
-	case err == nil && s.pending.live(c.Value):
-		key = c.Value
+	}
+	var rec *pendingSignin
+	if err == nil {
+		rec = s.pending.take(c.Value)
+	}
+	if rec == nil || !rec.prepared || rec.action.kind != kind || rec.action.sub != p.Sub {
+		if rec != nil {
+			rec.destroy()
+		}
+		s.refused(r.Context(), "action_record", p.Sub)
+		http.Redirect(w, r, signinActionFailed, http.StatusSeeOther)
+		return
+	}
+	if rec.action.method != "" {
+		s.log.LogAttrs(r.Context(), slog.LevelInfo, "A person started adding a sign-in method.",
+			slog.String("event", "signin.method_started"), slog.String("method", string(rec.action.method)),
+			slog.String("kind", rec.action.kind), slog.String("sub", p.Sub))
+	}
+	s.begin(w, r, rec.action, c.Value, promptLogin)
+}
+
+// begin starts a sign-in. An action's (StartAction) comes with its
+// prepared record's key and has already left the map; begin owns the
+// action's payload, and destroys it on every answer but the redirect.
+func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAction, key, prompt string) {
+	drop := func() {
+		if action != nil && action.payload != nil {
+			action.payload.Destroy()
+		}
+	}
+	if action == nil {
+		if !s.consoleHost(r) {
+			http.Redirect(w, r, signinWrongHost, http.StatusSeeOther)
+			return
+		}
+		switch c, err := oneCookie(r, pendingCookieName); {
+		case errors.Is(err, errDuplicateCookie):
+			writeDuplicateCookie(w, pendingCookieName)
+			return
+		case err == nil && s.pending.live(c.Value):
+			key = c.Value
+		}
 	}
 	if err := s.d.Ready.Ready(r.Context()); err != nil {
+		drop()
 		s.log.LogAttrs(r.Context(), slog.LevelWarn, "A console sign-in could not start: the sign-in service is not ready.",
 			slog.String("event", "signin.unavailable"))
 		http.Redirect(w, r, signinUnavailable, http.StatusSeeOther)
@@ -194,6 +357,7 @@ func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAc
 		key, err = s.random(32)
 	}
 	if err != nil {
+		drop()
 		s.log.LogAttrs(r.Context(), slog.LevelError, "A console sign-in could not start: no random values.",
 			slog.String("event", "signin.begin_failed"), slog.String("err", err.Error()))
 		writeErr(w, http.StatusInternalServerError, "The sign-in could not start.")
@@ -210,7 +374,10 @@ func (s *SignIn) begin(w http.ResponseWriter, r *http.Request, action *pendingAc
 		"nonce":                 {rec.nonce},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
-		"prompt":                {"login"},
+		"prompt":                {prompt},
+	}
+	if action != nil && action.kcAction != "" {
+		q.Set("kc_action", action.kcAction)
 	}
 	http.Redirect(w, r, s.d.Door.Issuer+"/protocol/openid-connect/auth?"+q.Encode(), http.StatusSeeOther)
 }
@@ -263,6 +430,9 @@ type CallbackResult struct {
 	// Name is the signed-in account's preferred_username, for the login
 	// hook; set only with Cookie.
 	Name string
+	// Admin reports that the minted session holds the admin role, for the
+	// admin sign-in hook; set only with Cookie.
+	Admin bool
 }
 
 // refusal is one callback refusal: the class logged and where the browser
@@ -280,7 +450,11 @@ func (s *SignIn) Complete(ctx context.Context, in CallbackInput) CallbackResult 
 	if rec == nil {
 		return CallbackResult{Status: http.StatusSeeOther, Location: signinExpired}
 	}
-	defer rec.verifier.Destroy()
+	defer rec.destroy()
+	if rec.prepared {
+		s.refused(ctx, "state", "")
+		return CallbackResult{Status: http.StatusSeeOther, Location: signinFailed}
+	}
 	claims, ref := s.verify(ctx, rec, in.Query)
 	if ref != nil {
 		s.refused(ctx, ref.reason, claims.Subject)
@@ -289,17 +463,57 @@ func (s *SignIn) Complete(ctx context.Context, in CallbackInput) CallbackResult 
 	p := Principal{Sub: claims.Subject, Name: claims.PreferredUsername, Roles: claims.Roles,
 		Session: SessionRef{SID: claims.SessionID, CreatedAt: s.d.Now()}}
 	if rec.action != nil {
-		return s.runAction(ctx, rec, claims, p)
+		res := s.runAction(ctx, rec, claims, p, in.Query)
+		s.d.Observer.SignedIn(ctx, p.Sub)
+		return res
 	}
-	cookie, err := s.d.Sessions.Create(ctx, p)
+	claim := s.claim(ctx)
+	cookie, claimed, err := s.d.Sessions.CreateWithClaim(ctx, p, claim)
 	if err != nil {
 		s.log.LogAttrs(ctx, slog.LevelError, "A console sign-in could not store its session.",
 			slog.String("event", "signin.store_failed"), slog.String("sub", p.Sub), slog.String("err", err.Error()))
 		return CallbackResult{Status: http.StatusInternalServerError}
 	}
+	if claimed {
+		s.log.LogAttrs(ctx, slog.LevelInfo, "First run is over: the account created first is designated the first administrator.",
+			slog.String("event", "firstrun.claimed"), slog.String("sub", claim.Sub))
+	}
 	s.log.LogAttrs(ctx, slog.LevelInfo, "A person signed in to the console.",
 		slog.String("event", "signin.succeeded"), slog.String("sub", p.Sub))
-	return CallbackResult{Status: http.StatusSeeOther, Location: launcherPath, Cookie: cookie, Name: p.Name}
+	s.d.Observer.SignedIn(ctx, p.Sub)
+	return CallbackResult{Status: http.StatusSeeOther, Location: launcherPath, Cookie: cookie, Name: p.Name,
+		Admin: p.HasRole(string(authz.Admin))}
+}
+
+// claim is the first-run claim a callback tries, or nil: while first run
+// holds, the realm's earliest-created person, whoever is signing in (D13:
+// the first account created, not the first to finish). A first-run read
+// error is not first run, and an Earliest error claims nothing; either way
+// the session is minted with the roles its token carries, and a later
+// callback tries again.
+func (s *SignIn) claim(ctx context.Context) *Claim {
+	first, err := s.d.FirstRun.FirstRun(ctx)
+	if err != nil {
+		s.log.LogAttrs(ctx, slog.LevelWarn, "First run could not be read, so this sign-in claims nothing.",
+			slog.String("event", "firstrun.unreadable"), slog.String("err", err.Error()))
+		return nil
+	}
+	if !first {
+		return nil
+	}
+	sub, err := s.d.Claimer.Earliest(ctx)
+	if err != nil {
+		// The Admin API's error names the account in its path, so only its
+		// status and kind are logged, never person data.
+		attrs := []slog.Attr{slog.String("event", "firstrun.claim_aborted"), slog.String("kind", kindOf(err))}
+		var ie *idclient.Error
+		if errors.As(err, &ie) {
+			attrs = append(attrs, slog.Int("status", ie.Status))
+		}
+		s.log.LogAttrs(ctx, slog.LevelWarn, "The first account could not be read, so this sign-in claims nothing.", attrs...)
+		return nil
+	}
+	return &Claim{Sub: sub}
 }
 
 // verify runs every check of the callback in order, and returns the
@@ -309,26 +523,20 @@ func (s *SignIn) verify(ctx context.Context, rec *pendingSignin, q url.Values) (
 	if q.Has("error") {
 		return idtoken.Claims{}, failed("door_error")
 	}
-	if len(q["state"]) != 1 || len(q["code"]) != 1 || q.Get("code") == "" ||
-		subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(rec.state)) != 1 {
+	if len(q["state"]) != 1 || subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(rec.state)) != 1 {
 		return idtoken.Claims{}, failed("state")
 	}
-	// RFC 9207: the issuer that answered must be the home door's, exactly.
-	if len(q["iss"]) != 1 || q.Get("iss") != s.d.Door.Issuer {
-		return idtoken.Claims{}, failed("iss")
-	}
-	code := secret.New([]byte(q.Get("code")))
-	defer code.Destroy()
-	raw, err := s.d.Exchanger.ExchangeCode(ctx, idclient.CodeExchange{
-		Realm: s.d.Realm, ClientID: s.d.ClientID, Code: code, Verifier: rec.verifier,
-		RedirectURI: s.redirectURI(), Forward: s.d.Door.SetForwarded,
-	})
-	if err != nil {
-		if errors.Is(err, idclient.ErrUnreachable) || errors.Is(err, idclient.ErrDenied) {
-			s.unavailable(ctx, kindOf(err))
-			return idtoken.Claims{}, &refusal{location: signinUnavailable}
-		}
-		return idtoken.Claims{}, failed("exchange")
+	x := idclient.CodeExchange{Realm: s.d.Realm, ClientID: s.d.ClientID, Verifier: rec.verifier,
+		RedirectURI: s.redirectURI(), Forward: s.d.Door.SetForwarded}
+	raw, reason, err := exchangeReturn(ctx, q, s.d.Door.Issuer, x, s.d.Exchanger.ExchangeCode)
+	switch {
+	case reason == "code":
+		return idtoken.Claims{}, failed("state")
+	case reason == "exchange" && err != nil:
+		s.unavailable(ctx, kindOf(err))
+		return idtoken.Claims{}, &refusal{location: signinUnavailable}
+	case reason != "":
+		return idtoken.Claims{}, failed(reason)
 	}
 	defer raw.Destroy()
 	c, err := s.d.Verifier.IDToken(ctx, raw)
@@ -356,24 +564,61 @@ func (s *SignIn) verify(ctx context.Context, rec *pendingSignin, q url.Values) (
 	return c, nil
 }
 
+// exchangeReturn is the checks a door's return shares (SignIn.verify and
+// ResetDone): exactly one iss, the door's own (RFC 9207); exactly one
+// non-empty code; then the exchange through ex with x, the code added. It
+// returns the token, or the refusal's reason: "iss", "code" or "exchange".
+// An exchange the identity service did not answer is reason "exchange" with
+// its error, for the caller's unavailable record; one it refused is
+// "exchange" with none.
+func exchangeReturn(ctx context.Context, q url.Values, issuer string, x idclient.CodeExchange,
+	ex func(context.Context, idclient.CodeExchange) (secret.Value, error)) (secret.Value, string, error) {
+	if len(q["iss"]) != 1 || q.Get("iss") != issuer {
+		return secret.Value{}, "iss", nil
+	}
+	if len(q["code"]) != 1 || q.Get("code") == "" {
+		return secret.Value{}, "code", nil
+	}
+	x.Code = secret.New([]byte(q.Get("code")))
+	defer x.Code.Destroy()
+	raw, err := ex(ctx, x)
+	switch {
+	case err == nil:
+		return raw, "", nil
+	case errors.Is(err, idclient.ErrUnreachable) || errors.Is(err, idclient.ErrDenied):
+		return secret.Value{}, "exchange", err
+	}
+	return secret.Value{}, "exchange", nil
+}
+
 // runAction runs a fresh sign-in's action when the same person signed in
-// again after it began, and mints no session.
-func (s *SignIn) runAction(ctx context.Context, rec *pendingSignin, c idtoken.Claims, p Principal) CallbackResult {
-	if c.Subject != rec.action.sub || c.AuthTime.Before(rec.begin.Truncate(time.Second)) {
+// again after it began, and mints no session. The record's payload goes to
+// the action; Complete destroys it afterwards. Another person's return is
+// the action-failed sentence; a sign-in method's return is methodReturn,
+// which reads q.
+func (s *SignIn) runAction(ctx context.Context, rec *pendingSignin, c idtoken.Claims, p Principal, q url.Values) CallbackResult {
+	if c.Subject != rec.action.sub {
+		s.refused(ctx, "action", c.Subject)
+		return CallbackResult{Status: http.StatusSeeOther, Location: signinActionFailed}
+	}
+	if c.AuthTime.Before(rec.begin.Truncate(time.Second)) {
 		s.refused(ctx, "action", c.Subject)
 		return CallbackResult{Status: http.StatusSeeOther, Location: signinFailed}
+	}
+	if rec.action.method != "" {
+		return s.methodReturn(ctx, rec, p, q)
 	}
 	act, ok := s.d.Actions[rec.action.kind]
 	if !ok {
 		s.refused(ctx, "action", c.Subject)
 		return CallbackResult{Status: http.StatusSeeOther, Location: signinFailed}
 	}
-	next, err := act.Run(ctx, p)
+	next, err := act.Run(ctx, p, rec.action.payload)
 	if err != nil {
 		s.log.LogAttrs(ctx, slog.LevelError, "A fresh-sign-in action failed.",
 			slog.String("event", "signin.action_failed"), slog.String("kind", rec.action.kind),
 			slog.String("sub", p.Sub), slog.String("err", err.Error()))
-		return CallbackResult{Status: http.StatusSeeOther, Location: signinFailed}
+		return CallbackResult{Status: http.StatusSeeOther, Location: signinActionFailed}
 	}
 	return CallbackResult{Status: http.StatusSeeOther, Location: next}
 }

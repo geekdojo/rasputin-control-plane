@@ -17,17 +17,26 @@ const (
 	// displayNameFirst is how the profile shows firstName: the person's
 	// one name field.
 	displayNameFirst = "Name"
-	claimPrefix      = "claim_"
+	// ClaimPrefix begins the name of the user attribute that holds an
+	// administrator's claim (identity-authz.md §3.4): claim_<name>.
+	ClaimPrefix = "claim_"
 )
 
 // AdminOnlyAttributes are the user attributes only an administrator sees or
 // edits, by name, with whether each holds more than one value: the app role,
-// the network grants and the five markers. The flows' conditions read them.
+// the network grants, the confirmed email and the five markers. The flows'
+// conditions read them.
 var AdminOnlyAttributes = map[string]bool{
-	attrAppRole: false, attrNetwork: true,
+	attrAppRole: false, attrNetwork: true, AttrConfirmedEmail: false,
 	MarkerWebAuthnHome: false, MarkerWebAuthnApp: false,
 	MarkerSecondStepHome: false, MarkerSecondStepApp: false, MarkerSecondStepAny: false,
 }
+
+// AttrConfirmedEmail is the confirmed email (geekdojo/geekdojo-brain#994):
+// the address an administrator confirmed, which the rasputin-app-email
+// client scope gives app tokens as email. The profile's own email is never
+// given to apps.
+const AttrConfirmedEmail = "rasputin_email"
 
 // ProfileDiff is one owned part of the user profile that differs.
 type ProfileDiff struct {
@@ -39,7 +48,9 @@ type ProfileDiff struct {
 // rules keep beside their length and pattern.
 var keptUsernameValidators = []string{"username-prohibited-characters", "up-username-not-idn-homograph"}
 
-func adminOnly() map[string]any {
+// AdminOnlyPermissions are the user-profile permissions of an attribute
+// only an administrator sees or edits.
+func AdminOnlyPermissions() map[string]any {
 	return map[string]any{"view": []any{"admin"}, "edit": []any{"admin"}}
 }
 
@@ -105,16 +116,16 @@ func ApplyProfile(raw []byte) (map[string]any, []ProfileDiff, error) {
 				differ("firstName.displayName", false)
 				m["displayName"] = displayNameFirst
 			}
-		case strings.HasPrefix(name, claimPrefix):
-			if !SameJSON(m["permissions"], adminOnly()) {
+		case strings.HasPrefix(name, ClaimPrefix):
+			if !SameJSON(m["permissions"], AdminOnlyPermissions()) {
 				differ("claim."+name, true)
-				m["permissions"] = adminOnly()
+				m["permissions"] = AdminOnlyPermissions()
 			}
 		default:
 			if multi, owned := AdminOnlyAttributes[name]; owned {
-				if !SameJSON(m["permissions"], adminOnly()) || m["multivalued"] != multi {
+				if !SameJSON(m["permissions"], AdminOnlyPermissions()) || m["multivalued"] != multi {
 					differ("attribute."+name, true)
-					m["permissions"], m["multivalued"] = adminOnly(), multi
+					m["permissions"], m["multivalued"] = AdminOnlyPermissions(), multi
 				}
 			}
 		}
@@ -123,7 +134,7 @@ func ApplyProfile(raw []byte) (map[string]any, []ProfileDiff, error) {
 	for _, name := range sortedKeys(AdminOnlyAttributes) {
 		if !seen[name] {
 			differ("attribute."+name, true)
-			out = append(out, map[string]any{"name": name, "displayName": name, "permissions": adminOnly(),
+			out = append(out, map[string]any{"name": name, "displayName": name, "permissions": AdminOnlyPermissions(),
 				"multivalued": AdminOnlyAttributes[name]})
 		}
 	}

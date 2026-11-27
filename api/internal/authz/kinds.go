@@ -55,14 +55,15 @@ func Person(s Subject) Submitter {
 }
 
 // RepairSession is a break-glass repair session (geekdojo/geekdojo-brain#321):
-// it holds Repair only. Nothing constructs it yet.
+// it holds Repair only. Only package breakglass constructs it
+// (breakglass.Session.Submitter; specargs_test.go pins this).
 func RepairSession() Submitter {
 	return Submitter{kind: kindRepair, caps: Set{}.with(Repair), createdBy: "break-glass"}
 }
 
 // BridgeGrant is a live bridge grant for accountID (Identity 5.2): it holds
-// Self only, and passes only the bridge rule for its own account. Nothing
-// constructs it yet. An empty accountID is the zero Submitter.
+// Self only, and passes only the bridge rule for its own account. Only
+// package auth's bridge constructs it. An empty accountID is the zero Submitter.
 func BridgeGrant(accountID string) Submitter {
 	if accountID == "" {
 		return Submitter{}
@@ -76,6 +77,11 @@ func (s Submitter) CreatedBy() string { return s.createdBy }
 
 // IsSystem reports whether s is the system.
 func (s Submitter) IsSystem() bool { return s.kind == kindSystem }
+
+// Capabilities is what s holds, for a router deciding a route's floor for a
+// submitter that is not a person (a repair session's routes,
+// geekdojo/geekdojo-brain#321). The zero Submitter holds nothing.
+func (s Submitter) Capabilities() Set { return s.caps }
 
 // KindRefusal is a submission the kind table refuses: a stable code and the
 // sentence the person reads.
@@ -98,6 +104,11 @@ const (
 	CodeNoTarget       = "no_target"
 	CodeNoApp          = "no_app"
 	CodeUnknownTier    = "unknown_tier"
+	// CodeMoveState and CodeStateChanged are a repair session's re-run of
+	// identity.move outside C9's state, or on a state that changed since it
+	// was confirmed (geekdojo/geekdojo-brain#1004).
+	CodeMoveState    = "move_state"
+	CodeStateChanged = "state_changed"
 )
 
 // sentences is each code's own sentence (ERR-MESSAGE).
@@ -111,9 +122,16 @@ var sentences = map[string]string{
 	CodeNoTarget:       "This job doesn't say which account or app it acts on.",
 	CodeNoApp:          "That app doesn't exist.",
 	CodeUnknownTier:    "This app's privilege tier isn't one this control plane recognises, so the job wasn't started.",
+	CodeMoveState:      "Bringing back the accounts from before the update is only possible while sign-in has lost its accounts and this cluster still has them.",
+	CodeStateChanged:   "What this would bring back changed since you confirmed it. Review it and confirm again.",
 }
 
 func refuseKind(code string) *KindRefusal { return &KindRefusal{Code: code, Sentence: sentences[code]} }
+
+// KindSentence is code's sentence, "" for a code the table does not have: a
+// job that re-checks a rule at run time fails with the same words
+// (identity.move's repair re-run).
+func KindSentence(code string) string { return sentences[code] }
 
 // ErrNoApp is what AppReader.AppFacts returns for an app that does not exist.
 var ErrNoApp = errors.New("authz: no such app")
@@ -184,7 +202,8 @@ var kindTable = func() map[string]rule {
 		"accounts.grant_access", "accounts.revoke_access", "accounts.set_roles", "accounts.set_network",
 		"accounts.set_claims", "accounts.set_groups", "accounts.set_email", "accounts.confirm_email",
 		"accounts.disable", "accounts.enable", "accounts.delete", "accounts.decline", "accounts.unlock",
-		"accounts.reset_password", "accounts.remove_second_steps", "accounts.clear_network_password")
+		"accounts.reset_password", "accounts.remove_second_steps", "accounts.clear_network_password",
+		"accounts.grant_waiting")
 	add(rule{shape: selfOrOthers, cap: IAM},
 		"accounts.sign_out", "accounts.set_display_name", "accounts.revoke_device_certificate", "accounts.remove_mesh_device")
 	add(rule{shape: self},
@@ -235,23 +254,53 @@ func Known(kind string) bool {
 }
 
 // SystemOnly reports whether only the system may submit kind: a kind every
-// non-system submitter is refused.
+// non-system submitter is refused. identity.move is not: a repair session
+// may re-run it in C9's state.
 func SystemOnly(kind string) bool {
 	r, ok := kindTable[kind]
-	return ok && (r.shape == sysOnly || r.shape == move)
+	return ok && r.shape == sysOnly
+}
+
+// SystemOrRepair reports whether kind is the system's, and a repair
+// session's only in C9's state: identity.move, the one System workflow a
+// non-system submitter may start (geekdojo/geekdojo-brain#1004).
+func SystemOrRepair(kind string) bool {
+	r, ok := kindTable[kind]
+	return ok && r.shape == move
+}
+
+// MoveState is C9's state as the move rule reads it
+// (move.State.RepairToken): the current state token, and whether the state
+// holds.
+type MoveState interface {
+	RepairToken(ctx context.Context) (token string, holds bool, err error)
 }
 
 // KindPolicy decides job submissions by kind.
 type KindPolicy struct {
 	apps AppReader
+	move MoveState
+}
+
+// KindOption is an optional collaborator of NewKindPolicy.
+type KindOption func(*KindPolicy)
+
+// WithMoveState gives the move rule C9's state. Without it every repair
+// submission of identity.move is refused.
+func WithMoveState(m MoveState) KindOption {
+	return func(p *KindPolicy) { p.move = m }
 }
 
 // NewKindPolicy returns the policy reading apps through apps. It refuses nil.
-func NewKindPolicy(apps AppReader) (*KindPolicy, error) {
+func NewKindPolicy(apps AppReader, opts ...KindOption) (*KindPolicy, error) {
 	if apps == nil {
 		return nil, errors.New("authz: NewKindPolicy: apps is nil")
 	}
-	return &KindPolicy{apps: apps}, nil
+	p := &KindPolicy{apps: apps}
+	for _, o := range opts {
+		o(p)
+	}
+	return p, nil
 }
 
 // Authorize decides whether by may submit a job of kind with spec, the bytes
@@ -269,10 +318,10 @@ func (p *KindPolicy) Authorize(ctx context.Context, kind string, spec []byte, by
 		return refuseKind(CodeNotPermitted)
 	}
 	switch r.shape {
-	case sysOnly, move:
-		// move widens with the repair session's C9 allowance in
-		// geekdojo/geekdojo-brain#1004; until then it is the system's alone.
+	case sysOnly:
 		return allowIf(by.IsSystem(), CodeSystemOnly)
+	case move:
+		return p.moveRule(ctx, spec, by)
 	case control:
 		return allowIf(by.IsSystem() || by.caps.Permits(NeedControl(r.cap)), CodeNotPermitted)
 	case repairOnly:
@@ -319,6 +368,36 @@ func (p *KindPolicy) Authorize(ctx context.Context, kind string, spec []byte, by
 	}
 	// A shape this switch does not know is refused (ERR-CLOSED).
 	return refuseKind(CodeNotPermitted)
+}
+
+// moveTarget is the spec field a repair re-run of identity.move carries:
+// the state token the person confirmed.
+const moveTarget = "stateToken"
+
+// moveRule is identity.move's shape (geekdojo/geekdojo-brain#1004): the
+// system; or a repair session while C9's state holds and the spec's state
+// token is the current one. A state that can't be read, or no state wired,
+// is an error wrapping ErrCheckFailed (ERR-CLOSED).
+func (p *KindPolicy) moveRule(ctx context.Context, spec []byte, by Submitter) error {
+	switch {
+	case by.IsSystem():
+		return nil
+	case by.kind != kindRepair:
+		return refuseKind(CodeSystemOnly)
+	case p.move == nil:
+		return fmt.Errorf("%w: identity.move: no move state is wired", ErrCheckFailed)
+	}
+	want, _ := SpecTarget(spec, moveTarget)
+	token, holds, err := p.move.RepairToken(ctx)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: read the move state: %w", ErrCheckFailed, err)
+	case !holds:
+		return refuseKind(CodeMoveState)
+	case want == "" || want != token:
+		return refuseKind(CodeStateChanged)
+	}
+	return nil
 }
 
 // selfRule is the self shape: Self, on the submitter's own account, and never

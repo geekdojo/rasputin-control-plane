@@ -48,14 +48,23 @@ import (
 var openRoutes = map[string]string{
 	"GET /healthz": "liveness probe; part of the documented install contract (AGENTS.md)",
 
-	"GET /api/auth/status":           "drives the launcher before anyone signs in: firstRun and ready, and the caller's own user; never a count",
-	"POST /api/auth/logout":          "clears the caller's own session cookie; nothing to protect",
-	"POST /api/auth/register/begin":  "first-run registration of the pre-update operator; 401 once one exists (auth/handlers.go)",
-	"POST /api/auth/register/finish": "completes a ceremony begin already gated; needs the ceremony cookie begin issued",
-	"POST /api/auth/login/begin":     "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
-	"POST /api/auth/login/finish":    "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	"GET /api/auth/status":  "drives the launcher before anyone signs in: firstRun and ready, and the caller's own user; never a count",
+	"POST /api/auth/logout": "clears the caller's own session cookie; nothing to protect",
+	// TC-990-06 and TC-990-26: account creation at the home door (#990);
+	// register/* is gone.
+	"GET /api/auth/signup":        "starts account creation at the home door (prompt=create), whose return is a sign-in at the callback; it only redirects and stores a pending record, and the door decides who may create an account",
+	"POST /api/auth/login/begin":  "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	"POST /api/auth/login/finish": "the pre-update passkey sign-in, gone: answers 410 and does no ceremony work (geekdojo/geekdojo-brain#989)",
+	// TC-1005-24: the move's bridge (geekdojo/geekdojo-brain#1005), open
+	// because its person holds no credential the identity service knows.
+	"POST /api/auth/bridge/begin":    "starts a pre-update passkey ceremony; stores only its challenge under a fresh host-only cookie, capped and bounded",
+	"POST /api/auth/bridge/finish":   "verifies a pre-update passkey with user verification; yields only a single-use grant for that account's first password, never a session",
+	"GET /api/auth/bridge":           "whether /login offers the bridge, and the caller's own grant's names; no count and no other account",
+	"POST /api/auth/bridge/password": "needs the caller's own live grant; submits only accounts.set_first_password for that account, which the kind table decides",
 	// TC-989-27: the console's sign-in through the home door (#989).
-	"GET /api/auth/signin":                    "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record",
+	"GET /api/auth/signin": "starts the home-door sign-in, the way a session is obtained; it only redirects and stores a pending record; with ?action= it resolves the caller's own session and answers 401 without one",
+	// TC-992-22: the reset clients' return (geekdojo/geekdojo-brain#992).
+	"GET /api/auth/reset-done":                "both reset clients' return; it exchanges the code, ends the person's sessions and mints none",
 	"GET /api/auth/callback":                  "the home door's return; a session is minted only for a verified ID token matching the pending record",
 	"POST /api/identity/backchannel/{client}": "the identity service's back-channel logout; acts only on a logout token verified against the client's issuer",
 
@@ -73,6 +82,10 @@ var openRoutes = map[string]string{
 	"GET /api/bundles/{sha}":          "content-addressed update bundle fetched by node agents, which carry no session; the SHA-256 is the capability",
 	"GET /api/bundles/{sha}/sig":      "detached signature for the content-addressed bundle above; public by construction",
 	"/":                               "static web UI export; pages hold no data and fetch everything through gated /api routes",
+
+	// geekdojo/geekdojo-brain#321: break-glass, open because sign-in is what is broken.
+	"POST /api/auth/break-glass": "redeems a one-time repair code from the body; the code is the authentication; two-origin check; five wrong per source refuse it",
+	"GET /api/repair/ways":       "the ways to get a repair code on this control plane (screen, serial only without the BMC-host marker, the ssh command); no secret, no session",
 }
 
 // probePathFor overrides the placeholder path for a route whose own parser
@@ -242,7 +255,16 @@ func TestDoorRoutesAnswerAtTheirOwnDoor(t *testing.T) {
 				(!relayed && !strings.HasPrefix(a.pageID(), "rasputin-door-")) {
 				t.Errorf("%s %s at %s: %d %q (relayed %v), want the door's answer", rt.Methods[0], path, d.host, a.status, a.pageID(), relayed)
 			}
-			if a := r.do(sitesConsole, sitesConsole, http.MethodGet, path, nil); a.status != http.StatusNotFound || a.body != notFound {
+			a = r.do(sitesConsole, sitesConsole, http.MethodGet, path, nil)
+			if _, also := openRoutes["GET "+rt.Pattern]; also {
+				// The console serves the same path for its own door: the home
+				// reset client's return (geekdojo/geekdojo-brain#992).
+				if a.status == http.StatusNotFound || strings.HasPrefix(a.pageID(), "rasputin-door-") {
+					t.Errorf("%s at %s: %d %q, want the console's own route", path, sitesConsole, a.status, a.pageID())
+				}
+				continue
+			}
+			if a.status != http.StatusNotFound || a.body != notFound {
 				t.Errorf("%s at %s: %d, want the console's 404 page", path, sitesConsole, a.status)
 			}
 		}

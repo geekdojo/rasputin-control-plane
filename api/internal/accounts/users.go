@@ -9,12 +9,20 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 )
 
 // AttrAppRole is the account attribute that holds a person's app access:
 // "user" or "admin".
 const AttrAppRole = "rasputin_app_role"
+
+// AttrNetwork is the account attribute that holds a person's network
+// grants: any of join, gear-read and gear-admin.
+const AttrNetwork = "rasputin_network"
 
 // offlineAccess is the realm role that lets an app keep an offline session.
 const offlineAccess = "offline_access"
@@ -69,9 +77,17 @@ func NewUsers(d UsersDeps) (*Users, error) {
 // Person is what Read returns about an account.
 type Person struct {
 	Username, Email string
-	Enabled         bool
+	// DisplayName is the account's one name field (firstName).
+	DisplayName string
+	// ConfirmedEmail is the rasputin_email attribute, the address apps get.
+	ConfirmedEmail string
+	Enabled        bool
 	// AppRole is the rasputin_app_role attribute, "" when absent.
 	AppRole AppLevel
+	// Network is the rasputin_network attribute's grants.
+	Network []string
+	// RequiredActions are the account's pending required actions.
+	RequiredActions []string
 }
 
 func (u *Users) realmPath() string { return "/admin/realms/" + url.PathEscape(u.d.Realm) }
@@ -101,18 +117,56 @@ func (u *Users) Read(ctx context.Context, sub string) (Person, error) {
 	p := Person{}
 	p.Username, _ = rep["username"].(string)
 	p.Email, _ = rep["email"].(string)
+	p.DisplayName, _ = rep["firstName"].(string)
 	p.Enabled, _ = rep["enabled"].(bool)
-	attrs, _ := rep["attributes"].(map[string]any)
-	if vs, _ := attrs[AttrAppRole].([]any); len(vs) > 0 {
-		s, _ := vs[0].(string)
-		p.AppRole = AppLevel(s)
+	p.AppRole = appRoleOf(rep)
+	p.Network = attrValues(rep, AttrNetwork)
+	if vs := attrValues(rep, flows.AttrConfirmedEmail); len(vs) > 0 {
+		p.ConfirmedEmail = vs[0]
+	}
+	ras, _ := rep["requiredActions"].([]any)
+	for _, a := range ras {
+		if s, ok := a.(string); ok && s != "" {
+			p.RequiredActions = append(p.RequiredActions, s)
+		}
 	}
 	return p, nil
 }
 
+// appRoleOf is a representation's rasputin_app_role, "" when absent.
+func appRoleOf(rep map[string]any) AppLevel {
+	attrs, _ := rep["attributes"].(map[string]any)
+	if vs, _ := attrs[AttrAppRole].([]any); len(vs) > 0 {
+		s, _ := vs[0].(string)
+		return AppLevel(s)
+	}
+	return ""
+}
+
+// attrValues is a representation's attribute name, its string values.
+func attrValues(rep map[string]any, name string) []string {
+	attrs, _ := rep["attributes"].(map[string]any)
+	vs, _ := attrs[name].([]any)
+	var out []string
+	for _, v := range vs {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // write re-reads the account and writes back its profile fields and
-// attributes as read, changed by edit.
+// attributes as read, changed by edit. An admin-only attribute stored twice
+// goes back with one value (markers.CollapseSingleValued), which the
+// identity service would otherwise refuse (geekdojo/geekdojo-brain#994).
 func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map[string]any)) error {
+	return u.writeFrom(ctx, sub, func(_, body, attrs map[string]any) { edit(body, attrs) })
+}
+
+// writeFrom is write with edit also given the representation as read, for
+// a change made from a field the PUT does not carry back.
+func (u *Users) writeFrom(ctx context.Context, sub string, edit func(rep, body, attrs map[string]any)) error {
 	rep, err := u.raw(ctx, sub)
 	if err != nil {
 		return err
@@ -121,13 +175,14 @@ func (u *Users) write(ctx context.Context, sub string, edit func(body, attrs map
 	if attrs == nil {
 		attrs = map[string]any{}
 	}
+	markers.CollapseSingleValued(attrs)
 	body := map[string]any{}
 	for _, k := range profileFields {
 		if v, ok := rep[k]; ok {
 			body[k] = v
 		}
 	}
-	edit(body, attrs)
+	edit(rep, body, attrs)
 	body["attributes"] = attrs
 	if _, err := u.d.Admin.Admin(ctx, http.MethodPut, u.userPath(sub), body, nil); err != nil {
 		return fmt.Errorf("accounts: write the account: %w", err)
@@ -251,27 +306,221 @@ func (u *Users) ConsoleRoles(ctx context.Context, sub string) ([]string, error) 
 }
 
 // EnabledAdmins counts the enabled accounts holding the console's admin
-// role. A page that comes back full is an error: the count would be short.
+// role (Administrators). A page that comes back full is an error: the count
+// would be short.
 func (u *Users) EnabledAdmins(ctx context.Context) (int, error) {
-	id, err := u.consoleClientID(ctx)
+	admins, err := u.Administrators(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var users []struct {
-		Enabled bool `json:"enabled"`
-	}
-	path := u.realmPath() + "/clients/" + url.PathEscape(id) + "/roles/admin/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(adminPage)
-	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &users); err != nil {
-		return 0, fmt.Errorf("accounts: read the administrators: %w", err)
-	}
-	if len(users) >= adminPage {
-		return 0, fmt.Errorf("accounts: the administrators fill a page of %d, so the count would be short", adminPage)
-	}
 	n := 0
-	for _, x := range users {
-		if x.Enabled {
+	for _, a := range admins {
+		if a.Enabled {
 			n++
 		}
 	}
 	return n, nil
+}
+
+// Administrators is every account holding the console's admin role
+// directly, enabled or not, with its id, sign-in name and enabled state. A
+// page that comes back full, or a holder with no id, is an error, never a
+// short list.
+func (u *Users) Administrators(ctx context.Context) ([]Account, error) {
+	id, err := u.consoleClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var reps []map[string]any
+	path := u.realmPath() + "/clients/" + url.PathEscape(id) + "/roles/admin/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(adminPage)
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &reps); err != nil {
+		return nil, fmt.Errorf("accounts: read the administrators: %w", err)
+	}
+	if len(reps) >= adminPage {
+		return nil, fmt.Errorf("accounts: the administrators fill a page of %d, so the count would be short", adminPage)
+	}
+	out := make([]Account, 0, len(reps))
+	for _, rep := range reps {
+		a := Account{}
+		a.ID, _ = rep["id"].(string)
+		if a.ID == "" {
+			return nil, errors.New("accounts: an administrator has no id")
+		}
+		a.Username, _ = rep["username"].(string)
+		a.Enabled, _ = rep["enabled"].(bool)
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// Account is one person in the realm as People lists them.
+type Account struct {
+	ID string
+	// Username is the sign-in name.
+	Username string
+	Enabled  bool
+	// Created is the identity service's createdTimestamp, unix milliseconds.
+	Created int64
+	// AppRole is the rasputin_app_role attribute, "" when absent.
+	AppRole AppLevel
+	// Email is the account's email in removednames.Normal form, "" when
+	// absent.
+	Email string
+}
+
+// peoplePage is how many accounts one People read asks for. A page that
+// comes back full is an error, never a truncated list.
+const peoplePage = 1000
+
+// People lists every person in the realm, with each one's enabled state,
+// createdTimestamp and app access. The listing is unfiltered (first, max
+// and briefRepresentation only): any search parameter changes which
+// accounts Keycloak returns, and the unfiltered listing carries
+// createdTimestamp and leaves service accounts out (register row T250). A
+// full page, or an account with no id, is an error.
+func (u *Users) People(ctx context.Context) ([]Account, error) {
+	reps, err := u.listed(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Account, 0, len(reps))
+	for _, rep := range reps {
+		id, _ := rep["id"].(string)
+		a := Account{ID: id, AppRole: appRoleOf(rep)}
+		a.Username, _ = rep["username"].(string)
+		a.Enabled, _ = rep["enabled"].(bool)
+		email, _ := rep["email"].(string)
+		a.Email = removednames.Normal(email)
+		if ts, ok := rep["createdTimestamp"].(float64); ok {
+			a.Created = int64(ts)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+// listed is every account's representation, attributes included, from the
+// unfiltered listing People describes. A full page, or an account with no
+// id, is an error.
+func (u *Users) listed(ctx context.Context) ([]map[string]any, error) {
+	var reps []map[string]any
+	path := u.realmPath() + "/users?briefRepresentation=false&first=0&max=" + strconv.Itoa(peoplePage)
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &reps); err != nil {
+		return nil, fmt.Errorf("accounts: list the accounts: %w", err)
+	}
+	if len(reps) >= peoplePage {
+		return nil, fmt.Errorf("accounts: the accounts fill a page of %d, so the list would be short", peoplePage)
+	}
+	for _, rep := range reps {
+		if id, _ := rep["id"].(string); id == "" {
+			return nil, errors.New("accounts: an account in the list has no id")
+		}
+	}
+	return reps, nil
+}
+
+// ConsoleRoleHolders is the ids of every account holding one of the
+// console's roles directly. A full page of any role's holders is an error.
+func (u *Users) ConsoleRoleHolders(ctx context.Context) (map[string]bool, error) {
+	id, err := u.consoleClientID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]bool{}
+	for _, role := range authz.RoleNames() {
+		var users []struct {
+			ID string `json:"id"`
+		}
+		path := u.realmPath() + "/clients/" + url.PathEscape(id) + "/roles/" + url.PathEscape(role) +
+			"/users?briefRepresentation=true&first=0&max=" + strconv.Itoa(adminPage)
+		if _, err := u.d.Admin.Admin(ctx, http.MethodGet, path, nil, &users); err != nil {
+			return nil, fmt.Errorf("accounts: read the %s role's holders: %w", role, err)
+		}
+		if len(users) >= adminPage {
+			return nil, fmt.Errorf("accounts: the %s role's holders fill a page of %d", role, adminPage)
+		}
+		for _, x := range users {
+			if x.ID == "" {
+				return nil, fmt.Errorf("accounts: a %s role holder has no id", role)
+			}
+			out[x.ID] = true
+		}
+	}
+	return out, nil
+}
+
+// EmailInUse reports whether an account holds email, compared in the one
+// normal form removednames.Normal gives over the People listing (register
+// row T252). The address is never put in a request: the identity client
+// logs a failed call's path, and the address typed at sign-up is the
+// personal data of someone with no account (LOG-SECRETS, F-990-09). An
+// empty email is in use by no one.
+func (u *Users) EmailInUse(ctx context.Context, email string) (bool, error) {
+	n := removednames.Normal(email)
+	if n == "" {
+		return false, nil
+	}
+	all, err := u.People(ctx)
+	if err != nil {
+		return false, fmt.Errorf("accounts: look the email up: %w", err)
+	}
+	for _, a := range all {
+		if a.Email == n {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// Credential is one of an account's credentials: its id and its type.
+type Credential struct {
+	ID   string `json:"id"`
+	Type string `json:"type"`
+}
+
+// CredentialList is the account's credentials, each with its id.
+func (u *Users) CredentialList(ctx context.Context, sub string) ([]Credential, error) {
+	if sub == "" {
+		return nil, errors.New("accounts: no account id")
+	}
+	var creds []Credential
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, u.userPath(sub)+"/credentials", nil, &creds); err != nil {
+		return nil, fmt.Errorf("accounts: read the account's credentials: %w", err)
+	}
+	return creds, nil
+}
+
+// Credentials is the types of the account's credentials.
+func (u *Users) Credentials(ctx context.Context, sub string) ([]string, error) {
+	creds, err := u.CredentialList(ctx, sub)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(creds))
+	for _, c := range creds {
+		out = append(out, c.Type)
+	}
+	return out, nil
+}
+
+// AddConsoleRole gives the account the console role role.
+func (u *Users) AddConsoleRole(ctx context.Context, sub, role string) error {
+	if sub == "" {
+		return errors.New("accounts: no account id")
+	}
+	if !slices.Contains(authz.RoleNames(), role) {
+		return fmt.Errorf("accounts: %q is not a console role", role)
+	}
+	id, err := u.consoleClientID(ctx)
+	if err != nil {
+		return err
+	}
+	var rep map[string]any
+	if _, err := u.d.Admin.Admin(ctx, http.MethodGet, u.realmPath()+"/clients/"+url.PathEscape(id)+"/roles/"+url.PathEscape(role), nil, &rep); err != nil {
+		return fmt.Errorf("accounts: read the %s role: %w", role, err)
+	}
+	if _, err := u.d.Admin.Admin(ctx, http.MethodPost, u.userPath(sub)+"/role-mappings/clients/"+url.PathEscape(id), []any{rep}, nil); err != nil {
+		return fmt.Errorf("accounts: give the account the %s role: %w", role, err)
+	}
+	return nil
 }

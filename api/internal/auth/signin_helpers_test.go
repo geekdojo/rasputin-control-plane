@@ -229,17 +229,42 @@ type fakeReady struct{ err error }
 
 func (r fakeReady) Ready(context.Context) error { return r.err }
 
-// fakeAction counts its runs.
+// fakeAction counts its runs and the payloads it was given; err, when set,
+// fails each run.
 type fakeAction struct {
-	mu   sync.Mutex
-	runs []Principal
+	mu       sync.Mutex
+	runs     []Principal
+	payloads []ActionPayload
+	err      error
 }
 
-func (a *fakeAction) Run(_ context.Context, p Principal) (string, error) {
+func (a *fakeAction) Run(_ context.Context, p Principal, payload ActionPayload) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.runs = append(a.runs, p)
+	a.payloads = append(a.payloads, payload)
+	if a.err != nil {
+		return "", a.err
+	}
 	return "/settings?done=1", nil
+}
+
+// countingPayload counts its Destroy calls.
+type countingPayload struct {
+	mu        sync.Mutex
+	destroyed int
+}
+
+func (c *countingPayload) Destroy() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.destroyed++
+}
+
+func (c *countingPayload) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.destroyed
 }
 
 func (a *fakeAction) count() int {
@@ -270,6 +295,84 @@ type signinRig struct {
 	si     *SignIn
 	log    *logkittest.Recorder
 	h      http.Handler
+	// first, claimer and observer are the first-run claim's fakes
+	// (geekdojo/geekdojo-brain#990); first run is off unless a test turns
+	// it on.
+	first    *fakeFirstRun
+	claimer  *fakeClaimer
+	observer *fakeObserver
+	// clock is the clock-sync fact (geekdojo/geekdojo-brain#1150); it holds
+	// unless a test turns it off.
+	clock *fakeClockFact
+}
+
+// fakeClockFact is the clock-sync fact, switchable, counting its reads.
+type fakeClockFact struct {
+	synced atomic.Bool
+	reads  atomic.Int64
+}
+
+func newFakeClockFact(synced bool) *fakeClockFact {
+	c := &fakeClockFact{}
+	c.synced.Store(synced)
+	return c
+}
+
+func (c *fakeClockFact) Synced(context.Context) bool {
+	c.reads.Add(1)
+	return c.synced.Load()
+}
+
+// fakeFirstRun answers first run.
+type fakeFirstRun struct {
+	mu    sync.Mutex
+	first bool
+	err   error
+}
+
+func (f *fakeFirstRun) set(first bool, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.first, f.err = first, err
+}
+
+func (f *fakeFirstRun) FirstRun(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.first, f.err
+}
+
+// fakeClaimer names sub, or fails with err.
+type fakeClaimer struct {
+	mu    sync.Mutex
+	sub   string
+	err   error
+	calls int
+}
+
+func (c *fakeClaimer) Earliest(context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return c.sub, c.err
+}
+
+// fakeObserver records every sign-in it is told of.
+type fakeObserver struct {
+	mu   sync.Mutex
+	subs []string
+}
+
+func (o *fakeObserver) SignedIn(_ context.Context, sub string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.subs = append(o.subs, sub)
+}
+
+func (o *fakeObserver) seen() []string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.subs...)
 }
 
 func newSigninRig(t *testing.T) *signinRig {
@@ -285,11 +388,13 @@ func newSigninRig(t *testing.T) *signinRig {
 		t.Fatal(err)
 	}
 	log, rec := logkittest.New()
-	r := &signinRig{f: f, door: table.Home, app: table.App, is: is, ex: &fakeExchanger{}, ender: &fakeEnder{}, action: &fakeAction{}, log: rec}
+	r := &signinRig{f: f, door: table.Home, app: table.App, is: is, ex: &fakeExchanger{}, ender: &fakeEnder{}, action: &fakeAction{}, log: rec,
+		first: &fakeFirstRun{}, claimer: &fakeClaimer{sub: "sub-earliest"}, observer: &fakeObserver{}, clock: newFakeClockFact(true)}
 	r.si, err = NewSignIn(SignInDeps{
 		Door: table.Home, ConsoleHost: rigConsole, ClientID: "rasputin-console", Realm: "rasputin",
 		Exchanger: r.ex, Verifier: v, Ender: r.ender, Ready: fakeReady{}, Sessions: f.sessions,
-		Actions: map[string]Action{"test-action": r.action}, Now: f.clock.Now, Rand: rand.Reader, Log: log,
+		FirstRun: r.first, Claimer: r.claimer, Observer: r.observer,
+		Actions: map[string]Action{"test-action": r.action}, Clock: r.clock, Now: f.clock.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -297,6 +402,29 @@ func newSigninRig(t *testing.T) *signinRig {
 	f.svc.SetSignIn(r.si)
 	r.h = f.handler()
 	return r
+}
+
+// prepare runs PrepareAction for sub's kind with payload, and returns the
+// pending cookie it set.
+func (r *signinRig) prepare(t *testing.T, sub, kind string, payload ActionPayload, cookies ...*http.Cookie) *http.Cookie {
+	t.Helper()
+	req := httptestRequest(rigConsole, "/api/accounts/x/reset-password")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	req = req.WithContext(WithPrincipal(req.Context(), Principal{Sub: sub, Name: "alice"}))
+	w := recorder()
+	next, err := r.si.PrepareAction(w, req, kind, payload)
+	if err != nil || next != "/api/auth/signin?action="+kind {
+		t.Fatalf("PrepareAction = %q, %v", next, err)
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == pendingCookieName {
+			return c
+		}
+	}
+	t.Fatal("PrepareAction set no pending cookie")
+	return nil
 }
 
 // get sends a GET to the console at host with cookies.
@@ -321,7 +449,13 @@ type begun struct {
 
 func (r *signinRig) begin(t *testing.T, cookies ...*http.Cookie) begun {
 	t.Helper()
-	w := r.get("/api/auth/signin", rigConsole, cookies...)
+	return r.beginAt(t, "/api/auth/signin", cookies...)
+}
+
+// beginAt is begin through path: the sign-in, or the sign-up.
+func (r *signinRig) beginAt(t *testing.T, path string, cookies ...*http.Cookie) begun {
+	t.Helper()
+	w := r.get(path, rigConsole, cookies...)
 	if w.Code != http.StatusSeeOther {
 		t.Fatalf("signin: %d %s", w.Code, w.Body.String())
 	}

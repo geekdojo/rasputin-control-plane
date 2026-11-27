@@ -16,9 +16,6 @@ const (
 	SessionCookieName = "__Host-rasputin-session"
 	// pendingCookieName names a sign-in in flight (pending.go).
 	pendingCookieName = "__Host-rasputin-pending"
-	// ceremonyCookieName names a pre-update passkey ceremony in flight
-	// (register/*, until Identity 4.8 removes it).
-	ceremonyCookieName = "__Host-rasputin-ceremony"
 )
 
 // errNoCookie and errDuplicateCookie are oneCookie's refusals.

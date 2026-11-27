@@ -36,6 +36,9 @@ import (
 // Policy is the door policy service, as the endpoint calls it.
 type Policy interface {
 	Check(ctx context.Context, r policy.Request) policy.Decision
+	// ReleaseRegistration releases the registration slot an allowed
+	// Decision holds (RegistrationHeld).
+	ReleaseRegistration()
 }
 
 // Throttle is the throttle's answer hook: the endpoint reports when the
@@ -59,6 +62,13 @@ type Dirty interface {
 type Version interface {
 	Current() (v string, known bool)
 	Stale()
+}
+
+// ResetDone is the app door's reset return (*auth.ResetDone): it decides
+// the return from its query, ends the person's sessions, and gives the
+// sentence the door's page shows.
+type ResetDone interface {
+	Finish(ctx context.Context, q url.Values) (outcome, sentence string)
 }
 
 // Config is one door handler's collaborators. New refuses a missing one.
@@ -91,7 +101,9 @@ type Config struct {
 	// Breach is the breached-password check a new password is asked of
 	// before it is relayed (breach.go).
 	Breach Breach
-	Log    *slog.Logger
+	// ResetDone answers the app door's reset return (RouteResetDone).
+	ResetDone ResetDone
+	Log       *slog.Logger
 }
 
 // Handler is one door.
@@ -140,6 +152,8 @@ func New(cfg Config) (*Handler, error) {
 		missing = "IDs"
 	case cfg.Breach == nil:
 		missing = "Breach"
+	case cfg.ResetDone == nil:
+		missing = "ResetDone"
 	case cfg.Log == nil:
 		missing = "Log"
 	}
@@ -190,6 +204,7 @@ type Shared struct {
 	Dirty         Dirty
 	IDs           func() string
 	Breach        Breach
+	ResetDone     ResetDone
 	Log           *slog.Logger
 }
 
@@ -198,7 +213,7 @@ func Build(table doors.Table, s Shared) (home, app *Handler, err error) {
 	cfg := func(d doors.Door, k Kind) Config {
 		return Config{Door: d, Kind: k, ConsoleOrigin: s.ConsoleOrigin, Policy: s.Policy, Throttle: s.Throttle,
 			Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets, Version: s.Version,
-			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, Log: s.Log}
+			InstallName: s.InstallName, Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, ResetDone: s.ResetDone, Log: s.Log}
 	}
 	if home, err = New(cfg(table.Home, Home)); err != nil {
 		return nil, nil, err
@@ -332,6 +347,10 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 		case policy.RouteSignin:
 			h.serveAsset(w, r, st)
 			return
+		case policy.RouteResetDone:
+			_, sentence := h.cfg.ResetDone.Finish(r.Context(), r.URL.Query())
+			h.InfoPage(w, "Password reset", sentence, st.id)
+			return
 		case policy.RouteTheme:
 			common := strings.Contains(rt.Pattern, "/common/keycloak/")
 			// Only the exact version learned from the running service; with
@@ -343,6 +362,11 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 			}
 		}
 		d := h.cfg.Policy.Check(r.Context(), parse(r, h.cfg.Kind, rt.Kind))
+		if d.RegistrationHeld {
+			// Every way out releases the slot once the identity service has
+			// answered the post, so the next post counts this one's account.
+			defer h.cfg.Policy.ReleaseRegistration()
+		}
 		if !d.Allow {
 			h.refuse(w, r, st, d)
 			return
@@ -357,7 +381,8 @@ func (h *Handler) route(rt Route) http.HandlerFunc {
 // refuse renders a policy refusal.
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, st *reqState, d policy.Decision) {
 	st.refused, st.level = d.Reason, slog.LevelInfo
-	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable || d.Reason == policy.ReasonRegistrationPaused {
+	if d.Reason == policy.ReasonAdminAccount || d.Reason == policy.ReasonUnreadable || d.Reason == policy.ReasonRegistrationPaused ||
+		d.Reason == policy.ReasonRegistrationUnknown {
 		st.level = slog.LevelWarn
 	}
 	if d.NotReady {

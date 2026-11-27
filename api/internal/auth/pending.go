@@ -1,7 +1,7 @@
 package auth
 
 import (
-	"sync"
+	"crypto/subtle"
 	"time"
 
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -36,107 +36,93 @@ type pendingSignin struct {
 	// action, when set, is the fresh sign-in an action asked for: the return
 	// runs the action and mints no session.
 	action *pendingAction
+	// prepared marks a record PrepareAction stored and StartAction has not
+	// begun yet: it has no state, nonce or verifier, so no callback can
+	// complete it.
+	prepared bool
 }
 
-// pendingAction is a fresh sign-in begun by StartAction.
+// pendingAction is a fresh sign-in's action: prepared by PrepareAction,
+// begun by StartAction.
 type pendingAction struct {
 	kind string
 	sub  string
+	// payload is the value the action runs with, held only here until the
+	// callback hands it to the action (geekdojo/geekdojo-brain#992); nil
+	// when the action needs none.
+	payload ActionPayload
+	// method and kcAction are a sign-in method's (PrepareMethod,
+	// geekdojo/geekdojo-brain#1150): the method, and the one kc_action its
+	// fresh sign-in carries. Both are empty for every other action.
+	method   Method
+	kcAction string
+	// forwarded marks that the doors forwarded kcAction once (forward).
+	forwarded bool
+}
+
+// destroy destroys everything rec holds: the PKCE verifier and the
+// action's payload. Every way a record leaves the map but the callback's
+// hand-off calls it: take, replacement, eviction and prune.
+func (rec *pendingSignin) destroy() {
+	rec.verifier.Destroy()
+	if rec.action != nil && rec.action.payload != nil {
+		rec.action.payload.Destroy()
+	}
 }
 
 // pendingSignins is the map of sign-ins in flight, keyed by the pending
-// cookie's value. It is safe for concurrent use.
+// cookie's value: an expiring map (expiring.go) capped at maxSigninPending,
+// each record expiring signinPendingLifetime after it began. It is safe for
+// concurrent use.
 type pendingSignins struct {
-	mu  sync.Mutex
-	m   map[string]*pendingSignin
-	now func() time.Time
+	*expiring[*pendingSignin]
 }
 
 func newPendingSignins(now func() time.Time) *pendingSignins {
-	return &pendingSignins{m: map[string]*pendingSignin{}, now: now}
-}
-
-// live reports whether key names a record that has not expired.
-func (p *pendingSignins) live(key string) bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rec, ok := p.m[key]
-	return ok && p.now().Before(rec.expires)
+	return &pendingSignins{newExpiring(now, maxSigninPending,
+		func(rec *pendingSignin) time.Time { return rec.expires },
+		func(rec *pendingSignin) { rec.destroy() })}
 }
 
 // put stores rec under key, replacing any record there, with its expiry set
 // signinPendingLifetime after its begin.
 func (p *pendingSignins) put(key string, rec *pendingSignin) {
 	rec.expires = rec.begin.Add(signinPendingLifetime)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if old, ok := p.m[key]; ok {
-		old.verifier.Destroy()
-	} else if len(p.m) >= maxSigninPending {
-		p.evictLocked()
-	}
-	p.m[key] = rec
-}
-
-// evictLocked makes room for one record: every expired one goes, and when
-// none had expired, the one closest to expiry. The caller holds p.mu.
-func (p *pendingSignins) evictLocked() {
-	now := p.now()
-	var (
-		oldest    string
-		oldestExp time.Time
-		pruned    bool
-	)
-	for k, rec := range p.m {
-		if !now.Before(rec.expires) {
-			rec.verifier.Destroy()
-			delete(p.m, k)
-			pruned = true
-			continue
-		}
-		if oldest == "" || rec.expires.Before(oldestExp) {
-			oldest, oldestExp = k, rec.expires
-		}
-	}
-	if !pruned && oldest != "" {
-		p.m[oldest].verifier.Destroy()
-		delete(p.m, oldest)
-	}
+	p.expiring.put(key, rec)
 }
 
 // take removes and returns the record under key, or nil when there is none
-// or it has expired. The caller destroys its verifier.
+// or it has expired. The caller destroys it.
 func (p *pendingSignins) take(key string) *pendingSignin {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	rec, ok := p.m[key]
+	rec, ok := p.expiring.take(key)
 	if !ok {
-		return nil
-	}
-	delete(p.m, key)
-	if !p.now().Before(rec.expires) {
-		rec.verifier.Destroy()
 		return nil
 	}
 	return rec
 }
 
-// prune drops every expired record (the janitor's sweep).
-func (p *pendingSignins) prune() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	for k, rec := range p.m {
-		if !now.Before(rec.expires) {
-			rec.verifier.Destroy()
-			delete(p.m, k)
-		}
+// forward reports whether the doors may forward kcAction under state: true
+// once, for the live record that has begun (not only been prepared), whose
+// state matches and that carries exactly kcAction; it marks that record so
+// no later request forwards it again. Anything else is false and marks
+// nothing: an empty state or action, and a record carrying no kc_action.
+func (p *pendingSignins) forward(state, kcAction string) bool {
+	if state == "" || kcAction == "" {
+		return false
 	}
-}
-
-// size is the number of records held.
-func (p *pendingSignins) size() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.m)
+	ok := false
+	p.each(func(rec *pendingSignin) bool {
+		if rec.prepared || rec.action == nil || rec.action.kcAction == "" {
+			return false
+		}
+		if subtle.ConstantTimeCompare([]byte(rec.state), []byte(state)) != 1 {
+			return false
+		}
+		if !rec.action.forwarded && rec.action.kcAction == kcAction {
+			rec.action.forwarded = true
+			ok = true
+		}
+		return true
+	})
+	return ok
 }

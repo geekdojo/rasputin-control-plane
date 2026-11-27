@@ -245,9 +245,10 @@ func TestTC1000_04_DesignationSentence(t *testing.T) {
 	maya := AccountFacts{Sub: "maya", Name: "Maya", Username: "maya", Enabled: true}
 	f := newFake(complete("a", "admin"), maya)
 	var rec recorder
-	d, err := guard(t, f).Change(t.Context(), "a", RoleChange{Target: "maya", Op: OpSetRole, Role: "operator"}, rec.apply)
-	want := Decision{Kind: Designate, Role: "operator",
-		Sentence: "This role starts after Maya adds a passkey, security key or authenticator app and saves recovery codes at the next sign-in."}
+	d, err := guard(t, f).Change(t.Context(), "a", RoleChange{Target: "maya", Op: OpSetRole, Role: "operator", Fresh: true}, rec.apply)
+	want := Decision{Kind: Designate, Role: "operator", Raises: true,
+		Sentence: "This role starts after Maya adds a passkey, security key or authenticator app and saves recovery codes at the next sign-in.",
+		Unnamed:  "This role starts after this person adds a passkey, security key or authenticator app and saves recovery codes at the next sign-in."}
 	if err != nil || d != want {
 		t.Fatalf("TC-1000-04: %+v, %v, want %+v", d, err, want)
 	}
@@ -296,8 +297,9 @@ func TestTC1000_15_DesignationVariants(t *testing.T) {
 	} {
 		f := newFake(complete("a", "admin"), complete("b", "admin"), c.target)
 		var rec recorder
-		d, err := guard(t, f).Change(t.Context(), "a", RoleChange{Target: "t", Op: OpSetRole, Role: c.role}, rec.apply)
-		want := Decision{Kind: c.kind, Role: c.role, Sentence: c.sentence}
+		d, err := guard(t, f).Change(t.Context(), "a", RoleChange{Target: "t", Op: OpSetRole, Role: c.role, Fresh: true}, rec.apply)
+		want := Decision{Kind: c.kind, Role: c.role, Sentence: c.sentence, Raises: c.kind == Designate || c.name == "complete",
+			Unnamed: strings.Replace(c.sentence, "maya", "this person", 1)}
 		if err != nil || d != want || rec.got != want {
 			t.Errorf("TC-1000-15 %s: %+v, %v (apply got %+v), want %+v", c.name, d, err, rec.got, want)
 		}

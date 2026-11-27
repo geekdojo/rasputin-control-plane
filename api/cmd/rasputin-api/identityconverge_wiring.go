@@ -69,8 +69,15 @@ type identityConvergeDeps struct {
 	// console is the console client's redirect and back-channel URLs, set
 	// only while the doors are on (consoleConvergeInputs).
 	console consoleInputs
-	now     func() time.Time
-	log     *slog.Logger
+	// firstRun is the first-run predicate (authStore.FirstRun, C03): the
+	// recovery-codes default action follows it (#990).
+	firstRun func(ctx context.Context) (bool, error)
+	// clock is the one clock-sync fact (clockSyncFact), shared with the
+	// console sign-in so an outage has one state and one WARN
+	// (geekdojo/geekdojo-brain#1150).
+	clock auth.ClockFact
+	now   func() time.Time
+	log   *slog.Logger
 }
 
 // identityConverge is what identityConvergeWiring built. Every field is
@@ -109,10 +116,12 @@ func (w identityConverge) doorBindings() policy.Bindings {
 }
 
 // convergeSinks are the converger's sinks on the sign-in history drain: its
-// admin-event recheck. Both are empty outside keycloak.
+// admin-event recheck; and the user sinks others add (the designation
+// observer, #994). All are empty outside keycloak.
 type convergeSinks struct {
 	admin []events.AdminSink
 	pass  []events.PassSink
+	user  []events.UserSink
 }
 
 // eventSinks is the converger as an admin and a pass sink, or none.
@@ -150,7 +159,7 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		return identityConverge{}, nil
 	}
 	if d.session == nil || d.monitor == nil || d.ledger == nil || d.settings == nil || d.createArmed == nil ||
-		d.stat == nil || d.now == nil || d.log == nil {
+		d.stat == nil || d.firstRun == nil || d.clock == nil || d.now == nil || d.log == nil {
 		return identityConverge{}, errors.New("identity converge: a collaborator is nil under keycloak")
 	}
 	lock := &sync.Mutex{}
@@ -159,19 +168,14 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		return identityConverge{}, fmt.Errorf("identity converge: %w", err)
 	}
 	settings := d.settings
-	clock := &clockSyncFact{read: readClockSync, log: d.log}
 	conv, err := converge.New(converge.Deps{
 		Admin: d.session, Settings: settings, Realm: identityRealm, Lock: lock,
 		// The console's redirect and back-channel URLs are set only while
 		// the doors are on (geekdojo/geekdojo-brain#989); otherwise both are
 		// empty, the baseline's own state, so it fails closed. AppBindings
 		// is nil until Identity 7.3 registers app clients.
-		Inputs: func(ctx context.Context) (converge.Inputs, error) {
-			name, err := settings.Get(ctx, setup.KeyInstallName)
-			return converge.Inputs{InstallName: name, RedirectURIs: d.console.redirectURIs, BackchannelLogoutURLs: d.console.backchannel,
-				ClockSynced: clock.Synced(ctx)}, err
-		},
-		Now: d.now, Ready: d.monitor.Ready, Log: d.log,
+		Inputs: d.inputs(d.clock.Synced),
+		Now:    d.now, Ready: d.monitor.Ready, Log: d.log,
 	})
 	if err != nil {
 		return identityConverge{}, fmt.Errorf("identity converge: %w", err)
@@ -210,4 +214,17 @@ func identityConvergeWiring(d identityConvergeDeps) (identityConverge, error) {
 		w.entryList = append(w.entryList, scheduler.Entry{Kind: t.kind, Interval: storeAuditCheckEvery, Due: trig.Due})
 	}
 	return w, nil
+}
+
+// inputs reads converge's inputs on each check: the install name, the
+// console's URLs, the clock-sync fact, and C03's first-run predicate, whose
+// read error fails the inputs, so nothing is written (#990).
+func (d identityConvergeDeps) inputs(synced func(context.Context) bool) func(context.Context) (converge.Inputs, error) {
+	return func(ctx context.Context) (converge.Inputs, error) {
+		name, err := d.settings.Get(ctx, setup.KeyInstallName)
+		first, ferr := d.firstRun(ctx)
+		return converge.Inputs{InstallName: name, RedirectURIs: d.console.redirectURIs, BackchannelLogoutURLs: d.console.backchannel,
+			ResetHomeURL: d.console.resetHome, ResetAppURL: d.console.resetApp,
+			ClockSynced: synced(ctx), FirstRun: first}, errors.Join(err, ferr)
+	}
 }

@@ -60,10 +60,10 @@ type State struct {
 // subsystem's Store) means main wires concrete probes — no import cycles
 // and the setup package stays narrow.
 type Probes struct {
-	// HasUsers reports whether at least one operator passkey has been
-	// registered. main wires it to auth's FirstRun, the one first-run
-	// predicate; an error from it fails GetState rather than reading as
-	// "no users".
+	// HasUsers reports whether first run is over: a first administrator
+	// has been claimed or a pre-update operator exists. main wires it to
+	// auth's FirstRun, the one first-run predicate (register row C03); an
+	// error from it fails GetState rather than reading as "no users".
 	HasUsers func(ctx context.Context) (bool, error)
 	// TrustConfigured reports whether the api was loaded with a real
 	// root CA cert. False means every OS update artifact is refused —

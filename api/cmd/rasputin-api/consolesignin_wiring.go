@@ -10,6 +10,8 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth/idtoken"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
@@ -38,22 +40,46 @@ const (
 // origin and the doors' link back to the console all derive from it.
 func consoleHost() string { return clusterHostname() }
 
-// consoleInputs are the console client's URLs converge writes.
+// The reset clients (geekdojo/geekdojo-brain#992): each door's own.
+const (
+	resetHomeClient = "rasputin-reset-home"
+	resetAppClient  = "rasputin-reset-app"
+)
+
+// consoleInputs are the console's and the reset clients' URLs converge
+// writes.
 type consoleInputs struct {
 	redirectURIs map[string][]string
 	backchannel  map[string]string
+	// resetHome and resetApp are each door's reset start, which the sign-in
+	// pages link "Forgot your password?" to.
+	resetHome, resetApp string
+}
+
+// resetReturns are each reset client's one redirect URI: the home door's
+// return to the console's name, the app door's to its own.
+func resetReturns(table doors.Table, host string) (home, app string) {
+	return "https://" + host + auth.ResetDonePath, "https://" + table.App.Host + auth.ResetDonePath
 }
 
 // consoleConvergeInputs is the console client's redirect URI and back-channel
-// URL while the doors are on, and none otherwise: a client with neither can
-// never complete a sign-in, which is the closed state.
-func consoleConvergeInputs(doorsOn bool, host string) consoleInputs {
+// URL, and the reset clients' redirect URIs and starts, while the doors are
+// on, and none otherwise: a client with neither can never complete a
+// sign-in or a reset, which is the closed state.
+func consoleConvergeInputs(doorsOn bool, host string, table doors.Table) consoleInputs {
 	if !doorsOn || host == "" {
 		return consoleInputs{redirectURIs: map[string][]string{}, backchannel: map[string]string{}}
 	}
+	home, app := resetReturns(table, host)
 	return consoleInputs{
-		redirectURIs: map[string][]string{flows.ConsoleClient: {"https://" + host + consoleCallbackPath}},
-		backchannel:  map[string]string{flows.ConsoleClient: consoleBackchannelURL},
+		redirectURIs: map[string][]string{
+			flows.ConsoleClient: {"https://" + host + consoleCallbackPath},
+			resetHomeClient:     {home},
+			resetAppClient:      {app},
+		},
+		backchannel: map[string]string{flows.ConsoleClient: consoleBackchannelURL},
+		resetHome:   auth.ResetStartURL(table.Home, resetHomeClient, home),
+		resetApp:    auth.ResetStartURL(table.App, resetAppClient, app),
 	}
 }
 
@@ -61,6 +87,7 @@ func consoleConvergeInputs(doorsOn bool, host string) consoleInputs {
 // keys through: *idclient.Client, and Disabled, which refuses both.
 type codeClient interface {
 	auth.Exchanger
+	auth.ResetExchanger
 	Forwarding(forward func(http.Header)) *http.Client
 }
 
@@ -90,8 +117,22 @@ type consoleSignInDeps struct {
 	session  adminSession
 	ready    auth.Readiness
 	sessions *auth.ConsoleSessions
-	now      func() time.Time
-	log      *slog.Logger
+	// identity ends a person's identity sessions after a reset (#991's
+	// sessions.Ender); actions are the fresh-sign-in actions by kind (#992's
+	// accounts.reset_password).
+	identity auth.IdentitySessions
+	actions  map[string]auth.Action
+	// firstRun is the first-run predicate (authStore); claimer and observer
+	// are the accounts wiring's first account and designation observer
+	// (#990).
+	firstRun auth.FirstRunner
+	claimer  auth.Claimer
+	observer auth.Observer
+	// clock is the one clock-sync fact main builds, shared with converge
+	// (geekdojo/geekdojo-brain#1150).
+	clock auth.ClockFact
+	now   func() time.Time
+	log   *slog.Logger
 }
 
 // consoleSignIn is what consoleSignInWiring built: the sign-in, and the
@@ -100,6 +141,9 @@ type consoleSignInDeps struct {
 type consoleSignIn struct {
 	signIn *auth.SignIn
 	sink   *auth.RoleChangeSink
+	// resetHome is the console's reset return and resetApp the app door's
+	// (geekdojo/geekdojo-brain#992).
+	resetHome, resetApp *auth.ResetDone
 }
 
 // adminSinks are the drain sinks the console adds to sinks.
@@ -110,11 +154,35 @@ func (w consoleSignIn) adminSinks(sinks convergeSinks) convergeSinks {
 	return sinks
 }
 
-// install sets the sign-in on the auth service when one was built.
-func (w consoleSignIn) install(svc interface{ SetSignIn(*auth.SignIn) }) {
+// install sets the sign-in and the console's reset return on the auth
+// service when they were built.
+func (w consoleSignIn) install(svc interface {
+	SetSignIn(*auth.SignIn)
+	SetResetDone(*auth.ResetDone)
+}) {
 	if w.signIn != nil {
 		svc.SetSignIn(w.signIn)
+		svc.SetResetDone(w.resetHome)
 	}
+}
+
+// doorActions is the sign-in as the doors' issued-action set, or nil when
+// none was built: the door policy then refuses to build, which keeps the
+// doors closed (geekdojo/geekdojo-brain#1150).
+func (w consoleSignIn) doorActions() policy.Actions {
+	if w.signIn == nil {
+		return nil
+	}
+	return w.signIn
+}
+
+// appResetDone is the app door's reset return, or nil when none was built
+// (the doors then refuse to build, which keeps them closed).
+func (w consoleSignIn) appResetDone() door.ResetDone {
+	if w.resetApp == nil {
+		return nil
+	}
+	return w.resetApp
 }
 
 // consoleSignInWiring builds the sign-in under keycloak with the doors on.
@@ -124,7 +192,8 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 	if d.mode != identityModeKeycloak || !d.doorsOn {
 		return consoleSignIn{}, nil
 	}
-	if d.client == nil || d.session == nil || d.ready == nil || d.sessions == nil || d.now == nil || d.log == nil || d.host == "" {
+	if d.client == nil || d.session == nil || d.ready == nil || d.sessions == nil || d.identity == nil || d.now == nil || d.log == nil || d.host == "" ||
+		d.firstRun == nil || d.claimer == nil || d.observer == nil || d.clock == nil {
 		return consoleSignIn{}, errors.New("console sign-in: a collaborator is nil under keycloak with the doors on")
 	}
 	home := d.table.Home
@@ -135,15 +204,40 @@ func consoleSignInWiring(ctx context.Context, d consoleSignInDeps) (consoleSignI
 	si, err := auth.NewSignIn(auth.SignInDeps{
 		Door: home, ConsoleHost: d.host, ClientID: flows.ConsoleClient, Realm: identityRealm,
 		Exchanger: d.client, Verifier: verifier, Ender: sidEnder{session: d.session}, Ready: d.ready,
-		Sessions: d.sessions, Actions: nil, Now: d.now, Rand: rand.Reader, Log: d.log,
+		Sessions: d.sessions, FirstRun: d.firstRun, Claimer: d.claimer, Observer: d.observer,
+		Actions: d.actions, Clock: d.clock, Now: d.now, Rand: rand.Reader, Log: d.log,
 	})
 	if err != nil {
 		return consoleSignIn{}, fmt.Errorf("console sign-in: %w", err)
+	}
+	homeReturn, appReturn := resetReturns(d.table, d.host)
+	resetHome, err := d.resetDone(ctx, d.table.Home, "home", resetHomeClient, homeReturn)
+	if err != nil {
+		return consoleSignIn{}, err
+	}
+	resetApp, err := d.resetDone(ctx, d.table.App, "app", resetAppClient, appReturn)
+	if err != nil {
+		return consoleSignIn{}, err
 	}
 	sink, err := auth.NewRoleChangeSink(d.sessions, d.log)
 	if err != nil {
 		return consoleSignIn{}, fmt.Errorf("console sign-in: %w", err)
 	}
 	d.log.InfoContext(ctx, "console sign-in wired", "component", "auth", "issuer", home.Issuer, "console", d.host)
-	return consoleSignIn{signIn: si, sink: sink}, nil
+	return consoleSignIn{signIn: si, sink: sink, resetHome: resetHome, resetApp: resetApp}, nil
+}
+
+// resetDone is one door's reset return, with its own verifier: the door's
+// issuer and its reset client, its keys fetched over the door's forwarding.
+func (d consoleSignInDeps) resetDone(ctx context.Context, door doors.Door, name, client, redirect string) (*auth.ResetDone, error) {
+	v, err := idtoken.New(ctx, door.Issuer, client, d.client.Forwarding(door.SetForwarded), d.now)
+	if err != nil {
+		return nil, fmt.Errorf("reset return (%s): %w", name, err)
+	}
+	rd, err := auth.NewResetDone(auth.ResetDoneDeps{Door: door, DoorName: name, ClientID: client, RedirectURI: redirect,
+		Realm: identityRealm, Exchanger: d.client, Verifier: v, Identity: d.identity, Console: d.sessions, Log: d.log})
+	if err != nil {
+		return nil, fmt.Errorf("reset return (%s): %w", name, err)
+	}
+	return rd, nil
 }

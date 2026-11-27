@@ -93,8 +93,14 @@ func OpenStore(ctx context.Context, dbPath string, mac MAC, log *slog.Logger) (*
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
 
-// normal is the form a name or an email is hashed in.
-func normal(v string) []byte { return []byte(strings.ToLower(strings.TrimSpace(v))) }
+// Normal is the one form a sign-in name or an email is compared in: trimmed
+// and lower-cased. The list hashes it, and the in-use email check
+// (accounts.Users.EmailInUse) compares in it, so the two agree on what "the same
+// address" is (F-990-08).
+func Normal(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+
+// normal is Normal as the bytes the list hashes.
+func normal(v string) []byte { return []byte(Normal(v)) }
 
 // Record puts the hashes of name and email on the list. An empty email
 // leaves its hash empty (NULL).

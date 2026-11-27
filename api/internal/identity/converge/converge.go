@@ -34,7 +34,11 @@ const (
 	// attrConsoleURL is the console's origin, which the login theme reads
 	// through realm.getAttribute (geekdojo/geekdojo-brain#988).
 	attrConsoleURL = "rasputin.console-url"
-	webAuthnPrefix = "webAuthnPolicy"
+	// attrResetHomeURL and attrResetAppURL are each door's reset start,
+	// which the login theme links to (geekdojo/geekdojo-brain#992).
+	attrResetHomeURL = "rasputin.reset-home-url"
+	attrResetAppURL  = "rasputin.reset-app-url"
+	webAuthnPrefix   = "webAuthnPolicy"
 	// The two-factor policy's RP ID and entity name, then the passwordless
 	// (second) policy's.
 	rpIDKey            = "webAuthnPolicyRpId"
@@ -257,6 +261,9 @@ func diff(d Desired, o observed) writes {
 	if str(o.realm, "displayNameHtml") != d.DisplayNameHTML {
 		drift("displayNameHtml", d.DisplayNameHTML)
 	}
+	if str(o.realm, "loginTheme") != d.LoginTheme {
+		drift("loginTheme", d.LoginTheme)
+	}
 	if boolean(o.realm, "eventsEnabled") != d.EventsEnabled {
 		drift("eventsEnabled", d.EventsEnabled)
 	}
@@ -298,9 +305,18 @@ func diff(d Desired, o observed) writes {
 	_ = json.Unmarshal(o.realm["attributes"], &attrs)
 	_, hasFrontend := attrs[attrFrontendURL]
 	adminExpiry := str(attrs, attrAdminEvents)
-	_, hasConsole := attrs[attrConsoleURL]
-	consoleDrift := hasConsole != (d.ConsoleURL != "") || str(attrs, attrConsoleURL) != d.ConsoleURL
-	if hasFrontend || adminExpiry != d.AdminEventsExpirySeconds || consoleDrift {
+	// The owned link attributes, in a fixed order: "" holds one absent.
+	links := []struct{ name, want string }{
+		{attrConsoleURL, d.ConsoleURL}, {attrResetHomeURL, d.ResetHomeURL}, {attrResetAppURL, d.ResetAppURL},
+	}
+	var linkDrift []int
+	for i, l := range links {
+		_, has := attrs[l.name]
+		if has != (l.want != "") || str(attrs, l.name) != l.want {
+			linkDrift = append(linkDrift, i)
+		}
+	}
+	if hasFrontend || adminExpiry != d.AdminEventsExpirySeconds || len(linkDrift) > 0 {
 		out := map[string]json.RawMessage{}
 		maps.Copy(out, attrs)
 		if hasFrontend {
@@ -312,13 +328,14 @@ func diff(d Desired, o observed) writes {
 			v, _ := json.Marshal(d.AdminEventsExpirySeconds)
 			out[attrAdminEvents] = v
 		}
-		if consoleDrift {
-			w.fields = append(w.fields, "realm.attributes."+attrConsoleURL)
-			if d.ConsoleURL == "" {
-				delete(out, attrConsoleURL)
+		for _, i := range linkDrift {
+			l := links[i]
+			w.fields = append(w.fields, "realm.attributes."+l.name)
+			if l.want == "" {
+				delete(out, l.name)
 			} else {
-				v, _ := json.Marshal(d.ConsoleURL)
-				out[attrConsoleURL] = v
+				v, _ := json.Marshal(l.want)
+				out[l.name] = v
 			}
 		}
 		realm["attributes"] = out

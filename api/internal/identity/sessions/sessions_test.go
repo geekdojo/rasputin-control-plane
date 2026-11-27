@@ -121,3 +121,32 @@ func TestEndOffline_Errors(t *testing.T) {
 		t.Error("an empty id was accepted")
 	}
 }
+
+// TC-994-29: EndAllExcept lists the account's sessions and deletes every
+// one but keep; an empty list deletes nothing; a list error is returned.
+func TestEndAllExcept_TC994_29(t *testing.T) {
+	list := "GET " + user + "/sessions"
+	del := func(id string) string { return "DELETE /admin/realms/rasputin/sessions/" + id }
+	f := &fakeAdmin{answers: map[string]any{list: ids("s", 3)}, fail: map[string]error{del("s2"): idclient.ErrNotFound}}
+	n, err := (Ender{Admin: f}).EndAllExcept(t.Context(), "u-1", "s1")
+	if err != nil || n != 2 || !slices.Equal(f.calls, []string{list, del("s0"), del("s2")}) {
+		t.Errorf("EndAllExcept = %d, %v; calls %v", n, err, f.calls)
+	}
+	f = &fakeAdmin{answers: map[string]any{list: []map[string]string{}}}
+	if n, err := (Ender{Admin: f}).EndAllExcept(t.Context(), "u-1", "s1"); err != nil || n != 0 || len(f.calls) != 1 {
+		t.Errorf("empty list: %d, %v; calls %v", n, err, f.calls)
+	}
+	f = &fakeAdmin{fail: map[string]error{list: idclient.ErrUnreachable}}
+	if _, err := (Ender{Admin: f}).EndAllExcept(t.Context(), "u-1", "s1"); !errors.Is(err, idclient.ErrUnreachable) || len(f.calls) != 1 {
+		t.Errorf("list error: %v; calls %v", err, f.calls)
+	}
+	f = &fakeAdmin{answers: map[string]any{list: ids("s", 2)}, fail: map[string]error{del("s0"): idclient.ErrUnreachable}}
+	if _, err := (Ender{Admin: f}).EndAllExcept(t.Context(), "u-1", "s1"); !errors.Is(err, idclient.ErrUnreachable) {
+		t.Errorf("delete error: %v", err)
+	}
+	for _, k := range [][2]string{{"", "s1"}, {"u-1", ""}} {
+		if _, err := (Ender{Admin: &fakeAdmin{}}).EndAllExcept(t.Context(), k[0], k[1]); err == nil {
+			t.Errorf("EndAllExcept(%q, %q) was accepted", k[0], k[1])
+		}
+	}
+}

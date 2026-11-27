@@ -41,12 +41,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
@@ -58,6 +60,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/converge"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/sessions"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitytest/signin"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -82,10 +85,13 @@ type consoleRig struct {
 	conv     *converge.Converger
 	settings *memSettings
 	sessions *auth.ConsoleSessions
-	authSvc  *auth.Service
-	session  *idclient.Session
-	dbPath   string
-	apiRec   *logkittest.Recorder
+	// designations is the one accounts.Designations, as main opens it
+	// (geekdojo/geekdojo-brain#990).
+	designations *accounts.Designations
+	authSvc      *auth.Service
+	session      *idclient.Session
+	dbPath       string
+	apiRec       *logkittest.Recorder
 
 	mu sync.Mutex
 	// backchannel is the URL the console client's back-channel names, set
@@ -102,6 +108,172 @@ type consoleRig struct {
 	adminEvents []events.AdminEvent
 	// cookies are every console session cookie value a client was given.
 	cookies []string
+	// resetHome and resetApp are each door's reset start
+	// (geekdojo/geekdojo-brain#992).
+	resetHome, resetApp string
+	// action is the sign-in's accounts.reset_password action, set by the
+	// reset rig once its runner exists.
+	action lateAction
+	// fresh is every fresh-gated account change's action and users a sink
+	// of the drain, set by the accounts rig (geekdojo/geekdojo-brain#994).
+	fresh lateAction
+	users lateUserSink
+	// claim and reg are the first-run claim's and registration's
+	// collaborators (geekdojo/geekdojo-brain#990), set by the first-run rig;
+	// until then first run is off and registration's facts are the door
+	// rig's fixed ones.
+	claim lateClaim
+	reg   lateRegistration
+	// signIn is the console's sign-in, which the home door's policy reads as
+	// its issued actions, as main wires it (geekdojo/geekdojo-brain#1150);
+	// clock is its clock-sync fact, which holds unless a case turns it off.
+	signIn *auth.SignIn
+	clock  *switchClock
+}
+
+// switchClock is the api's clock-sync fact, switchable per case.
+type switchClock struct{ synced atomic.Bool }
+
+func (c *switchClock) Synced(context.Context) bool { return c.synced.Load() }
+
+// lateClaim is the sign-in's first-run predicate, claimer and observer, set
+// after the sign-in is built. Unset, first run is off and the observer is
+// told nothing.
+type lateClaim struct {
+	mu       sync.Mutex
+	first    func(context.Context) (bool, error)
+	claimer  auth.Claimer
+	observer auth.Observer
+}
+
+func (l *lateClaim) set(first func(context.Context) (bool, error), c auth.Claimer, o auth.Observer) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.first, l.claimer, l.observer = first, c, o
+}
+
+func (l *lateClaim) FirstRun(ctx context.Context) (bool, error) {
+	l.mu.Lock()
+	f := l.first
+	l.mu.Unlock()
+	if f == nil {
+		return false, nil
+	}
+	return f(ctx)
+}
+
+func (l *lateClaim) Earliest(ctx context.Context) (string, error) {
+	l.mu.Lock()
+	c := l.claimer
+	l.mu.Unlock()
+	if c == nil {
+		return "", errors.New("no claimer is set in this rig")
+	}
+	return c.Earliest(ctx)
+}
+
+func (l *lateClaim) SignedIn(ctx context.Context, sub string) {
+	l.mu.Lock()
+	o := l.observer
+	l.mu.Unlock()
+	if o != nil {
+		o.SignedIn(ctx, sub)
+	}
+}
+
+// lateRegistration is the door policy's registration collaborators, each
+// replaceable while the doors run. Unset, they are the door rig's fixed
+// ones: loopback is home, nothing waits, and no email or name is taken.
+type lateRegistration struct {
+	mu      sync.Mutex
+	network policy.Network
+	waiting policy.Waiting
+	emails  policy.Emails
+	removed policy.RemovedNames
+}
+
+func (l *lateRegistration) get() (policy.Network, policy.Waiting, policy.Emails, policy.RemovedNames) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n, w, e, r := l.network, l.waiting, l.emails, l.removed
+	if n == nil {
+		n = doorNetwork{}
+	}
+	if w == nil {
+		w = doorWaiting{}
+	}
+	if e == nil {
+		e = noEmails{}
+	}
+	if r == nil {
+		r = noRemovedNames{}
+	}
+	return n, w, e, r
+}
+
+func (l *lateRegistration) Facts(ctx context.Context) (policy.NetworkFacts, error) {
+	n, _, _, _ := l.get()
+	return n.Facts(ctx)
+}
+
+func (l *lateRegistration) Full(ctx context.Context) (bool, error) {
+	_, w, _, _ := l.get()
+	return w.Full(ctx)
+}
+
+func (l *lateRegistration) EmailInUse(ctx context.Context, email string) (bool, error) {
+	_, _, e, _ := l.get()
+	return e.EmailInUse(ctx, email)
+}
+
+func (l *lateRegistration) Removed(ctx context.Context, name, email string) (bool, error) {
+	_, _, _, r := l.get()
+	return r.Removed(ctx, name, email)
+}
+
+// lateAction is a fresh-sign-in action set after the sign-in is built: the
+// reset's runner is built on top of this rig.
+type lateAction struct {
+	mu sync.Mutex
+	a  auth.Action
+}
+
+func (l *lateAction) set(a auth.Action) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.a = a
+}
+
+func (l *lateAction) Run(ctx context.Context, p auth.Principal, payload auth.ActionPayload) (string, error) {
+	l.mu.Lock()
+	a := l.a
+	l.mu.Unlock()
+	if a == nil {
+		return "", errors.New("no action is set in this rig")
+	}
+	return a.Run(ctx, p, payload)
+}
+
+// lateUserSink is a sink of the drain set after the drain is built: the
+// accounts rig's designation observer. Unset, it takes nothing.
+type lateUserSink struct {
+	mu   sync.Mutex
+	sink events.UserSink
+}
+
+func (l *lateUserSink) set(s events.UserSink) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.sink = s
+}
+
+func (l *lateUserSink) UserEvent(ctx context.Context, e events.UserEvent) {
+	l.mu.Lock()
+	s := l.sink
+	l.mu.Unlock()
+	if s != nil {
+		s.UserEvent(ctx, e)
+	}
 }
 
 // recordingExchanger keeps each ID token the console's exchange returns,
@@ -196,18 +368,46 @@ func (r *consoleRig) console() http.Handler {
 	})
 }
 
+// convergeFailure is the fields and key providers named by the api log's
+// last record of a failed converge, for a failure message: a run that fails
+// returns only its sentence.
+func (r *consoleRig) convergeFailure() string {
+	recs := r.apiRec.Records()
+	for i := len(recs) - 1; i >= 0; i-- {
+		fields, ok := logkittest.Attr(recs[i], "fields")
+		keys, kok := logkittest.Attr(recs[i], "key_providers")
+		if ok || kok {
+			return " (" + recs[i].Message + " fields=" + fields + " key_providers=" + keys + ")"
+		}
+	}
+	return " (no converge record names its fields)"
+}
+
 func (r *consoleRig) inputs() converge.Inputs {
+	first, _ := r.claim.FirstRun(context.Background())
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return converge.Inputs{InstallName: consoleInstall, ClockSynced: true,
+	return converge.Inputs{InstallName: consoleInstall, ClockSynced: true, FirstRun: first,
 		AppBindings: map[string]flows.Variant{doorTestApp: flows.AppClients},
 		RedirectURIs: map[string][]string{
 			baselineConsole: {"https://" + ConsoleHost + consoleCallback}, baselineMesh: {callbackOn(ConsoleHost)},
-			"rasputin-reset-home": {callbackOn(ConsoleHost)},
-			"rasputin-account":    {callbackOn(r.sites.Table.App.Host)}, "rasputin-reset-app": {callbackOn(r.sites.Table.App.Host)},
+			"rasputin-reset-home": {"https://" + ConsoleHost + auth.ResetDonePath},
+			"rasputin-account":    {callbackOn(r.sites.Table.App.Host)},
+			"rasputin-reset-app":  {"https://" + r.sites.Table.App.Host + auth.ResetDonePath},
 		},
 		BackchannelLogoutURLs: map[string]string{baselineConsole: r.backchannel},
+		ResetHomeURL:          r.resetHome, ResetAppURL: r.resetApp,
 	}
+}
+
+// signInActions are the sign-in's fresh-sign-in actions: the reset's, and every
+// fresh-gated account change's (geekdojo/geekdojo-brain#994).
+func (r *consoleRig) signInActions() map[string]auth.Action {
+	m := map[string]auth.Action{accounts.ResetKind: &r.action}
+	for _, k := range accounts.FreshKinds {
+		m[k] = &r.fresh
+	}
+	return m
 }
 
 func newConsoleRig(t *testing.T, env *Env) *consoleRig {
@@ -215,7 +415,9 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	r := &consoleRig{
 		doorRig:  &doorRig{env: env, sink: &eventSink{}, passes: newPassWatch(), actions: &doorActions{}, cookiesIn: map[string][]string{}},
 		settings: &memSettings{m: map[string]string{}},
+		clock:    &switchClock{},
 	}
+	r.clock.synced.Store(true)
 	log, rec := logkittest.New()
 	r.apiRec = rec
 	apiLeaf, err := env.CA().MintLeafToDisk(t.TempDir(), tlsca.LeafSpec{Usage: tlsca.UsageClient, CommonName: "rasputin-api"})
@@ -239,7 +441,11 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if r.sessions, err = auth.NewConsoleSessions(store, time.Now, rand.Reader); err != nil {
+	if r.designations, err = accounts.OpenDesignations(t.Context(), r.dbPath, time.Now); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.designations.Close() })
+	if r.sessions, err = auth.NewConsoleSessions(store, time.Now, rand.Reader, r.designations); err != nil {
 		t.Fatal(err)
 	}
 	if r.authSvc, err = auth.NewService(store, auth.Config{RPID: ConsoleHost, RPOrigins: []string{"https://" + ConsoleHost},
@@ -253,12 +459,35 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	si, err := auth.NewSignIn(auth.SignInDeps{
 		Door: table.Home, ConsoleHost: ConsoleHost, ClientID: baselineConsole, Realm: baselineRealm,
 		Exchanger: recordingExchanger{inner: client, r: r}, Verifier: verifier, Ender: adminEnder{s: r.session},
-		Ready: doorReady{}, Sessions: r.sessions, Now: time.Now, Rand: rand.Reader, Log: log,
+		Ready: doorReady{}, Sessions: r.sessions, FirstRun: &r.claim, Claimer: &r.claim, Observer: &r.claim,
+		Actions: r.signInActions(), Clock: r.clock,
+		Now: time.Now, Rand: rand.Reader, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.authSvc.SetSignIn(si)
+	r.signIn = si
+	// The reset returns, as main wires them (#992): each door's own
+	// verifier, #991's ender and the console sessions.
+	ender := sessions.Ender{Admin: r.session}
+	resetDone := func(d doors.Door, name, resetClient, redirect string) *auth.ResetDone {
+		v, err := idtoken.New(t.Context(), d.Issuer, resetClient, client.Forwarding(d.SetForwarded), time.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rd, err := auth.NewResetDone(auth.ResetDoneDeps{Door: d, DoorName: name, ClientID: resetClient, RedirectURI: redirect,
+			Realm: baselineRealm, Exchanger: client, Verifier: v, Identity: ender, Console: r.sessions, Log: log})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rd
+	}
+	homeReturn, appReturn := "https://"+ConsoleHost+auth.ResetDonePath, "https://"+table.App.Host+auth.ResetDonePath
+	r.authSvc.SetResetDone(resetDone(table.Home, "home", "rasputin-reset-home", homeReturn))
+	appReset := resetDone(table.App, "app", "rasputin-reset-app", appReturn)
+	r.resetHome = auth.ResetStartURL(table.Home, "rasputin-reset-home", homeReturn)
+	r.resetApp = auth.ResetStartURL(table.App, "rasputin-reset-app", appReturn)
 	roleSink, err := auth.NewRoleChangeSink(r.sessions, log)
 	if err != nil {
 		t.Fatal(err)
@@ -275,13 +504,13 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		t.Fatal(err)
 	}
 	r.drainer, err = events.New(events.Deps{Admin: r.session, Marks: &doorMarks{m: map[string]string{}}, Signal: events.NewSignal(time.Now),
-		Realm: baselineRealm, UserSinks: []events.UserSink{r.th, r.sink},
+		Realm: baselineRealm, UserSinks: []events.UserSink{r.th, r.sink, &r.users},
 		AdminSinks: []events.AdminSink{r.conv, roleSink, adminEventLog{r: r}}, PassSinks: []events.PassSink{r.th, r.conv, r.passes}, Log: log})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: consoleApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Now: time.Now, Bindings: r.conv})
+		Actions: si, Network: &r.reg, Waiting: &r.reg, Removed: &r.reg, Emails: &r.reg, Now: time.Now, Bindings: r.conv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,10 +533,10 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 	}
 	t.Cleanup(relay.CloseIdleConnections)
 	r.home, r.app, err = door.Build(table, door.Shared{
-		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: relay,
+		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: countingTransport{inner: relay, n: &r.upstream},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return consoleInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, Log: log,
+		IDs: func() string { return fmt.Sprintf("console-%d", r.ids.Add(1)) }, Breach: neverListed{}, ResetDone: appReset, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -349,7 +578,7 @@ func newConsoleRig(t *testing.T, env *Env) *consoleRig {
 		"attributes": map[string]string{"pkce.code.challenge.method": "S256"},
 	})
 	if _, err := r.conv.Run(t.Context()); err != nil {
-		t.Fatalf("converge with the console's inputs: %v", err)
+		t.Fatalf("converge with the console's inputs: %v%s", err, r.convergeFailure())
 	}
 	r.settle(t)
 	return r
@@ -499,6 +728,9 @@ func TestConsole_AgainstPinnedKeycloak(t *testing.T) {
 	t.Run("TC-989-38 T161 the upstream shapes", func(t *testing.T) { r.tc38(t) })
 	t.Run("TC-989-39 the sentinel scan", func(t *testing.T) { r.tc39(t, pw) })
 	t.Run("TC-1000-20 TC-1000-21 IA-F6 TS-20 console tokens and capabilities", func(t *testing.T) { r.tc1000(t, id, pw) })
+	// Identity 4.12's account changes (geekdojo/geekdojo-brain#994), last:
+	// they layer the accounts on this rig.
+	t.Run("Identity 4.12 account changes", func(t *testing.T) { accountsCases(t, r) })
 }
 
 // TC-989-37: converge's own write sets rasputin.console-url to the

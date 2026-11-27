@@ -2,8 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,11 +38,11 @@ type Service struct {
 	// (see OriginAllowlist).
 	origins *OriginAllowlist
 
-	mu      sync.Mutex
-	pending map[string]*pendingAuth // keyed by random pending-token
-
 	hookMu    sync.RWMutex
 	loginHook LoginHook
+	// adminHook runs after a sign-in that minted a session holding admin
+	// (SetAdminSignInHook).
+	adminHook func(ctx context.Context)
 
 	// control is the control lock's gate (controllock.go).
 	control controlGate
@@ -56,6 +54,15 @@ type Service struct {
 	// unavailable.
 	signInMu sync.RWMutex
 	signIn   *SignIn
+	// resetDone is the home door's reset return, installed by SetResetDone
+	// beside the sign-in (geekdojo/geekdojo-brain#992); nil answers
+	// unavailable.
+	resetDone *ResetDone
+	// bridge and preUpdate are the move's bridge and the pre-update
+	// session, installed by InstallBridge under keycloak
+	// (geekdojo/geekdojo-brain#1005); nil until then.
+	bridge    *Bridge
+	preUpdate *preUpdate
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -73,29 +80,17 @@ type Service struct {
 // both subsystems already meet.
 type LoginHook func(ctx context.Context, name string) error
 
-type pendingAuth struct {
-	kind    string // "register"
-	user    *User
-	session *webauthn.SessionData
-	expires time.Time
-}
-
 const (
 	// sessionLifetime bounds a console session (register rows E3 and C72)
 	// and a legacy one.
 	sessionLifetime = 7 * 24 * time.Hour
-	// pendingLifetime bounds an unfinished WebAuthn ceremony. A ceremony is
-	// consumed at finish, but one the browser abandons produces no fact the
-	// api could observe, so this bound is what frees its memory and ends its
-	// authority. It is a safety net, not a state transition (principles.md's
-	// clock rule; exception register row E5).
-	pendingLifetime = 5 * time.Minute
-	// maxPending caps the in-memory ceremony map. login/begin is
-	// unauthenticated, so without a cap the map grows with every request
-	// until the janitor catches up. At the cap, expired entries are pruned
-	// first, then the entry closest to expiry is evicted.
-	maxPending = 1024
 )
+
+// SessionLifetime is sessionLifetime for the sessions other packages bound
+// the same way: the break-glass repair session takes the console session's
+// seven days (register row C72, D22; geekdojo/geekdojo-brain#321). The
+// unexported name stays the one register row E3 and timer-audit L01 cite.
+const SessionLifetime = sessionLifetime
 
 // NewService constructs an auth Service. The store must be opened separately
 // (see OpenStore).
@@ -132,7 +127,6 @@ func NewService(store *Store, cfg Config) (*Service, error) {
 		web:      w,
 		cfg:      cfg,
 		origins:  origins,
-		pending:  make(map[string]*pendingAuth),
 		sessions: cfg.Sessions,
 	}, nil
 }
@@ -145,6 +139,45 @@ func (s *Service) SetSignIn(si *SignIn) {
 	s.signInMu.Lock()
 	defer s.signInMu.Unlock()
 	s.signIn = si
+}
+
+// SetResetDone installs the home door's reset return, under the same lock
+// as the sign-in.
+func (s *Service) SetResetDone(rd *ResetDone) {
+	s.signInMu.Lock()
+	defer s.signInMu.Unlock()
+	s.resetDone = rd
+}
+
+func (s *Service) reset() *ResetDone {
+	s.signInMu.RLock()
+	defer s.signInMu.RUnlock()
+	return s.resetDone
+}
+
+// PrepareAction is SignIn.PrepareAction on the installed sign-in. It takes
+// payload whatever happens; with no sign-in installed it destroys it and
+// refuses with ErrNoAction.
+func (s *Service) PrepareAction(w http.ResponseWriter, r *http.Request, kind string, payload ActionPayload) (string, error) {
+	si := s.signin()
+	if si == nil {
+		if payload != nil {
+			payload.Destroy()
+		}
+		return "", ErrNoAction
+	}
+	return si.PrepareAction(w, r, kind, payload)
+}
+
+// PrepareMethod is SignIn.PrepareMethod on the installed sign-in; with no
+// sign-in installed it refuses with ErrNoAction
+// (geekdojo/geekdojo-brain#1150).
+func (s *Service) PrepareMethod(w http.ResponseWriter, r *http.Request, m Method) (string, error) {
+	si := s.signin()
+	if si == nil {
+		return "", ErrNoAction
+	}
+	return si.PrepareMethod(w, r, m)
 }
 
 // signin is the installed sign-in, or nil.
@@ -166,6 +199,28 @@ func (s *Service) SetLoginHook(h LoginHook) {
 	s.hookMu.Lock()
 	s.loginHook = h
 	s.hookMu.Unlock()
+}
+
+// SetAdminSignInHook installs (or replaces) the hook that runs after a
+// console sign-in mints a session holding the admin role: an administrator's
+// normal sign-in, the fact that ends a break-glass repair session and
+// retires its outstanding code (geekdojo/geekdojo-brain#321). It is called
+// synchronously before the session cookie is written and returns nothing:
+// the hook's own owner logs what it did. Pass nil to uninstall.
+func (s *Service) SetAdminSignInHook(h func(ctx context.Context)) {
+	s.hookMu.Lock()
+	s.adminHook = h
+	s.hookMu.Unlock()
+}
+
+// runAdminSignInHook invokes the installed admin sign-in hook, if any.
+func (s *Service) runAdminSignInHook(ctx context.Context) {
+	s.hookMu.RLock()
+	hook := s.adminHook
+	s.hookMu.RUnlock()
+	if hook != nil {
+		hook(ctx)
+	}
 }
 
 // runLoginHook invokes the installed hook with a request-scoped context.
@@ -216,13 +271,11 @@ func (s *Service) janitor() {
 	}
 }
 
-// sweep is one janitor pass: expired pre-update ceremonies and legacy
-// session rows (so #745's plaintext rows are gone within sessionLifetime,
-// and nothing writes new ones), expired console sessions and expired
-// pending sign-ins. Each is a tidy-up of state its own reader already
+// sweep is one janitor pass: legacy session rows (so #745's plaintext rows are gone within sessionLifetime,
+// and nothing writes new ones), expired console sessions, expired pending
+// sign-ins and the bridge's expired ceremonies and grants. Each is a tidy-up of state its own reader already
 // refuses once expired, so a failed delete changes no decision.
 func (s *Service) sweep(ctx context.Context, now time.Time) {
-	s.cleanupPending(now)
 	_ = s.store.DeleteExpiredSessions(ctx, now.UTC())
 	if s.sessions != nil {
 		_ = s.sessions.DeleteExpired(ctx)
@@ -230,99 +283,24 @@ func (s *Service) sweep(ctx context.Context, now time.Time) {
 	if si := s.signin(); si != nil {
 		si.prune()
 	}
-}
-
-func (s *Service) cleanupPending(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for token, p := range s.pending {
-		if now.After(p.expires) {
-			delete(s.pending, token)
-		}
+	if b := s.bridgeOf(); b != nil {
+		b.prune()
 	}
 }
 
 // ----- first run ------------------------------------------------------------
 
-// FirstRun reports whether the installation is at first run: no operator has
-// registered yet. It is the one predicate every first-run surface reads
-// (register/begin, auth/status, the restore routes, the setup probe), and it
-// fails closed: an error returns (false, err), never "first run".
+// FirstRun reports whether the installation is at first run: no first-run
+// claim and no pre-update operator exist (C03). It is the one predicate
+// every first-run surface reads (auth/status and the launcher, the restore
+// routes, the setup probe, converge's recovery-codes default action and the
+// claim), and it fails closed: an error returns (false, err), never "first
+// run".
 func (s *Service) FirstRun(ctx context.Context) (bool, error) {
 	return s.store.FirstRun(ctx)
 }
 
-// ----- pending-auth state -------------------------------------------------
-
-func randomToken(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
-func (s *Service) storePending(p *pendingAuth) (string, error) {
-	token, err := randomToken(16)
-	if err != nil {
-		return "", err
-	}
-	now := time.Now()
-	p.expires = now.Add(pendingLifetime)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.pending) >= maxPending {
-		s.evictPendingLocked(now)
-	}
-	s.pending[token] = p
-	return token, nil
-}
-
-// evictPendingLocked makes room for one entry: it drops every expired entry,
-// and if none had expired, the one closest to expiry. Caller holds s.mu.
-func (s *Service) evictPendingLocked(now time.Time) {
-	var (
-		oldest    string
-		oldestExp time.Time
-		pruned    bool
-	)
-	for token, p := range s.pending {
-		if now.After(p.expires) {
-			delete(s.pending, token)
-			pruned = true
-			continue
-		}
-		if oldest == "" || p.expires.Before(oldestExp) {
-			oldest, oldestExp = token, p.expires
-		}
-	}
-	if !pruned && oldest != "" {
-		delete(s.pending, oldest)
-	}
-}
-
-func (s *Service) takePending(token string) *pendingAuth {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	p, ok := s.pending[token]
-	if !ok {
-		return nil
-	}
-	delete(s.pending, token)
-	if time.Now().After(p.expires) {
-		return nil
-	}
-	return p
-}
-
 // ----- cookies ------------------------------------------------------------
-
-// setCeremonyCookie names a pre-update passkey ceremony in flight.
-func (s *Service) setCeremonyCookie(w http.ResponseWriter, token string) {
-	setCookie(w, ceremonyCookieName, token, pendingLifetime)
-}
-
-func (s *Service) clearCeremonyCookie(w http.ResponseWriter) { clearCookie(w, ceremonyCookieName) }
 
 // setSessionCookie writes the console session's cookie.
 func setSessionCookie(w http.ResponseWriter, cookie secret.Value) {
@@ -338,17 +316,31 @@ const (
 	sessionNone sessionOutcome = iota
 	sessionFound
 	sessionDuplicate
+	// sessionDuplicateOld is the pre-update cookie sent twice.
+	sessionDuplicateOld
 )
 
-// resolve reads the request's console session cookie and resolves it. A
-// legacy rasputin-session cookie is never read: the legacy sessions table no
-// longer authenticates anything (geekdojo/geekdojo-brain#989).
+// duplicateName is the cookie a duplicate outcome names.
+func (o sessionOutcome) duplicateName() string {
+	if o == sessionDuplicateOld {
+		return legacySessionCookieName
+	}
+	return SessionCookieName
+}
+
+// resolve reads the request's console session cookie and resolves it. Only
+// when the request carries none is the pre-update rasputin-session cookie
+// read (preupdate.go), and only once InstallBridge has installed its
+// resolver (geekdojo/geekdojo-brain#1005); a console cookie that resolves to
+// nothing never falls back to it.
 func (s *Service) resolve(r *http.Request) (Principal, secret.Value, sessionOutcome, error) {
 	c, err := oneCookie(r, SessionCookieName)
 	switch {
 	case errors.Is(err, errDuplicateCookie):
 		return Principal{}, secret.Value{}, sessionDuplicate, nil
-	case err != nil, s.sessions == nil:
+	case err != nil:
+		return s.resolvePreUpdate(r)
+	case s.sessions == nil:
 		return Principal{}, secret.Value{}, sessionNone, nil
 	}
 	cookie := secret.New([]byte(c.Value))
@@ -358,6 +350,30 @@ func (s *Service) resolve(r *http.Request) (Principal, secret.Value, sessionOutc
 		return Principal{}, secret.Value{}, sessionNone, err
 	}
 	return p, cookie, sessionFound, nil
+}
+
+// resolvePreUpdate resolves the request's pre-update session cookie, when
+// the resolver is installed. Its outcome carries no cookie value: a
+// pre-update session is never touched.
+func (s *Service) resolvePreUpdate(r *http.Request) (Principal, secret.Value, sessionOutcome, error) {
+	s.signInMu.RLock()
+	pu := s.preUpdate
+	s.signInMu.RUnlock()
+	if pu == nil {
+		return Principal{}, secret.Value{}, sessionNone, nil
+	}
+	c, err := oneCookie(r, legacySessionCookieName)
+	switch {
+	case errors.Is(err, errDuplicateCookie):
+		return Principal{}, secret.Value{}, sessionDuplicateOld, nil
+	case err != nil:
+		return Principal{}, secret.Value{}, sessionNone, nil
+	}
+	p, ok, err := pu.resolve(r.Context(), c.Value)
+	if err != nil || !ok {
+		return Principal{}, secret.Value{}, sessionNone, err
+	}
+	return p, secret.Value{}, sessionFound, nil
 }
 
 // RequireSession wraps an http.Handler so it answers 403 when the request
@@ -385,8 +401,8 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 		case err != nil:
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
-		case outcome == sessionDuplicate:
-			writeDuplicateCookie(w, SessionCookieName)
+		case outcome == sessionDuplicate, outcome == sessionDuplicateOld:
+			writeDuplicateCookie(w, outcome.duplicateName())
 			return
 		case outcome != sessionFound:
 			w.Header().Set("Content-Type", "application/json")
@@ -398,7 +414,9 @@ func (s *Service) RequireSession(next http.Handler) http.Handler {
 		if s.controlLocked(w, r) {
 			return
 		}
-		_ = s.sessions.Touch(r.Context(), cookie) // last-active is display only; a failed write changes no decision
+		if !p.Session.PreUpdate {
+			_ = s.sessions.Touch(r.Context(), cookie) // last-active is display only; a failed write changes no decision
+		}
 		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), p)))
 	})
 }
@@ -411,50 +429,13 @@ func (s *Service) RequireSessionFunc(next http.HandlerFunc) http.HandlerFunc {
 
 // ----- helpers ------------------------------------------------------------
 
-// makeUser creates a User with a fresh 16-byte WebAuthn handle.
-func makeUser(name, displayName string) (*User, error) {
-	if displayName == "" {
-		displayName = name
-	}
-	if !validUserName(name) {
-		return nil, errors.New("invalid user name")
-	}
-	id := make([]byte, 16)
-	if _, err := rand.Read(id); err != nil {
-		return nil, err
-	}
-	return &User{
-		ID:          id,
-		Name:        name,
-		DisplayName: displayName,
-		CreatedAt:   time.Now().UTC(),
-	}, nil
-}
-
-func validUserName(s string) bool {
-	if len(s) < 1 || len(s) > 32 {
-		return false
-	}
-	for _, r := range s {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_' || r == '-' || r == '.':
-		default:
-			return false
-		}
-	}
-	return !strings.HasPrefix(s, "-") && !strings.HasPrefix(s, ".")
-}
-
 // ownCookiePrefix starts the name of every cookie the api sets, once an
 // optional __Host- or __Secure- prefix is removed (signin-origin.md §5.3).
 const ownCookiePrefix = "rasputin-"
 
 // IsOwnCookie reports whether name is one of the api's own cookies: with an
 // optional __Host- or __Secure- prefix removed, it starts with rasputin-
-// (the session, the pending ceremony, the repair session and any later
+// (the session, the pending sign-in, the repair session and any later
 // one). The sign-in doors strip these both ways, and StripCookies drops
 // them before a request is forwarded (geekdojo/geekdojo-brain#985).
 func IsOwnCookie(name string) bool {

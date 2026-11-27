@@ -11,6 +11,9 @@ import { getStatus, type AuthStatus } from '../../lib/auth';
 import { DIM, FG, HAIR, PANEL } from '../../components/kit';
 import { MONO } from '../../components/ui-theme';
 import { SignInLauncher, signInReturn, type SignInReturn } from '../../components/SignInLauncher';
+import { RepairLink } from '../../components/RepairLink';
+import { BridgeOffer } from '../../components/profile/PreUpdateSignIn';
+import { repairSessionLive } from '../../lib/repair';
 
 async function postAuthDestination(): Promise<string> {
   try {
@@ -38,6 +41,11 @@ export default function LoginPage() {
         if (s.user) router.replace(await postAuthDestination());
       })
       .catch((e) => setErr(String(e)));
+    // A browser holding a live break-glass repair session (#321) belongs on
+    // /repair, which is all that session can use.
+    repairSessionLive().then((live) => {
+      if (live) router.replace('/repair');
+    });
   }, [router]);
 
   return (
@@ -81,7 +89,12 @@ export default function LoginPage() {
             <p style={{ color: DIM, fontSize: 11, letterSpacing: '0.08em', margin: 0 }}>CONNECTING…</p>
           )
         ) : (
-          <SignInLauncher ready={status.ready} firstRun={status.firstRun} returned={returned} />
+          <>
+            <SignInLauncher ready={status.ready} firstRun={status.firstRun} returned={returned} />
+            {/* The move's bridge (#1005): shown only while it is offered. */}
+            <BridgeOffer />
+            <RepairLink ready={status.ready} hostname={window.location.hostname} />
+          </>
         )}
       </div>
     </div>

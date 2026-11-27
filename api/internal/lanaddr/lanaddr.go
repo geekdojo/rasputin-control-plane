@@ -26,6 +26,7 @@ package lanaddr
 import (
 	"bytes"
 	"net"
+	"net/netip"
 	"slices"
 	"strings"
 )
@@ -41,6 +42,10 @@ type Addr struct {
 	Index int
 	// Loopback is the interface's IFF_LOOPBACK flag.
 	Loopback bool
+	// Bits is the address's prefix length on its link, the subnet it is on
+	// (netlink ifaddrmsg's prefixlen; the IPNet mask elsewhere). 0 is
+	// unknown, and an address with it names no subnet ([Snapshot.Subnets]).
+	Bits int
 	// Dynamic is true when the address has a finite lifetime — the kernel's
 	// "dynamic" as `ip addr` prints it (IFA_F_PERMANENT clear). systemd-networkd
 	// installs a DHCPv4 lease's address with the lease lifetime, so a DHCP
@@ -187,8 +192,34 @@ func (s Snapshot) LinkIPs() []net.IP {
 func (s Snapshot) Equal(o Snapshot) bool {
 	return slices.EqualFunc(s.Usable, o.Usable, func(x, y Addr) bool {
 		return x.IP.Equal(y.IP) && x.Link == y.Link && x.Index == y.Index &&
-			x.Loopback == y.Loopback && x.Dynamic == y.Dynamic
+			x.Loopback == y.Loopback && x.Dynamic == y.Dynamic && x.Bits == y.Bits
 	})
+}
+
+// Subnets are the home network's subnets: each [Usable] address's prefix,
+// masked, once each, in the snapshot's order (geekdojo/geekdojo-brain#990,
+// the home door's registration source rule). Only usable addresses count,
+// so a tailnet, Docker, veth, loopback or link-local address never names
+// one. An address whose prefix length is unknown or out of range names
+// none, rather than a wider subnet than it is on. The zero Snapshot has
+// none.
+func (s Snapshot) Subnets() []netip.Prefix {
+	var out []netip.Prefix
+	for _, a := range s.Usable {
+		if !Usable(a) || a.Bits < 1 || a.Bits > 32 {
+			continue
+		}
+		ip, ok := netip.AddrFromSlice(a.IP.To4())
+		if !ok {
+			continue
+		}
+		p, err := ip.Prefix(a.Bits)
+		if err != nil || slices.Contains(out, p) {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // String renders the snapshot for logs: "none", or the primary with its link and
@@ -209,4 +240,19 @@ func (s Snapshot) String() string {
 		return parts[0]
 	}
 	return parts[0] + " + " + strings.Join(parts[1:], ", ")
+}
+
+// maskBits is an IPv4 mask (source_other.go reads one off each IPNet)'s prefix length, whether it came in 4-byte or
+// 16-byte form; 0 for a mask that is not a prefix.
+func maskBits(m net.IPMask) int {
+	ones, bits := m.Size()
+	switch bits {
+	case 32:
+		return ones
+	case 128:
+		if ones >= 96 {
+			return ones - 96
+		}
+	}
+	return 0
 }

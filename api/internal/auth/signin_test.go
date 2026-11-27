@@ -362,7 +362,9 @@ func TestSignIn_CallbackSuccess(t *testing.T) {
 func TestSignIn_Action(t *testing.T) {
 	start := func(t *testing.T, r *signinRig) begun {
 		t.Helper()
+		pending := r.prepare(t, rigSub, "test-action", nil)
 		req := httptestRequest(rigConsole, "/settings/act")
+		req.AddCookie(pending)
 		req = req.WithContext(WithPrincipal(req.Context(), Principal{Sub: rigSub, Name: "alice"}))
 		w := recorder()
 		r.si.StartAction(w, req, "test-action")
@@ -390,7 +392,8 @@ func TestSignIn_Action(t *testing.T) {
 	t.Run("another person", func(t *testing.T) {
 		r := newSigninRig(t)
 		w := run(t, r, start(t, r), func(c map[string]any) { c["sub"] = "someone-else" })
-		assertRefused(t, r, w, "/login?signin=failed")
+		// TC-1150-09: another person's return is the action-failed sentence.
+		assertRefused(t, r, w, "/login?signin=action-failed")
 		if r.action.count() != 0 {
 			t.Error("the action ran for another person")
 		}
@@ -505,7 +508,6 @@ func TestCookies_ShapesAndDuplicates(t *testing.T) {
 	w := recorder()
 	setCookie(w, SessionCookieName, "v", time.Hour)
 	setCookie(w, pendingCookieName, "v", time.Hour)
-	setCookie(w, ceremonyCookieName, "v", time.Hour)
 	clearCookie(w, SessionCookieName)
 	for _, c := range w.Result().Cookies() {
 		if !strings.HasPrefix(c.Name, "__Host-rasputin-") || !c.Secure || !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || c.Path != "/" || c.Domain != "" {
@@ -526,12 +528,12 @@ func TestCookies_ShapesAndDuplicates(t *testing.T) {
 			t.Errorf("%s: %d %s, want 400 duplicate_cookie with a sentence", name, w.Code, w.Body.String())
 		}
 	}
-	h := http.Header{"Cookie": {SessionCookieName + "=a; " + pendingCookieName + "=b; " + ceremonyCookieName + "=c; grafana_session=g"}}
+	h := http.Header{"Cookie": {SessionCookieName + "=a; " + pendingCookieName + "=b; " + "__Host-rasputin-ceremony" + "=c; grafana_session=g"}}
 	StripCookies(h)
 	if got := h.Get("Cookie"); got != "grafana_session=g" {
 		t.Errorf("StripCookies left %q", got)
 	}
-	for _, n := range []string{SessionCookieName, pendingCookieName, ceremonyCookieName} {
+	for _, n := range []string{SessionCookieName, pendingCookieName, "__Host-rasputin-ceremony"} {
 		if !IsOwnCookie(n) {
 			t.Errorf("IsOwnCookie(%s) = false", n)
 		}

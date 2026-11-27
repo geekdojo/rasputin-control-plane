@@ -1,6 +1,6 @@
 //go:build unix
 
-package obs
+package privsock
 
 import (
 	"errors"
@@ -8,8 +8,8 @@ import (
 	"syscall"
 )
 
-// fileUID returns the uid that owns fi.
-func fileUID(fi fs.FileInfo) (int, error) {
+// FileUID returns the uid that owns fi.
+func FileUID(fi fs.FileInfo) (int, error) {
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	if !ok {
 		return 0, errors.New("cannot read owner")

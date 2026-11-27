@@ -26,11 +26,28 @@ import (
 // (EndBySID), a change to the account's roles (EndBySub), and at
 // sessionLifetime after it began, which Resolve enforces and DeleteExpired
 // tidies.
+//
+// The first sign-in of first run also claims the first administrator, in
+// the same transaction as its session (CreateWithClaim,
+// geekdojo/geekdojo-brain#990).
 type ConsoleSessions struct {
-	db   *sql.DB
-	now  func() time.Time
-	rand io.Reader
+	db         *sql.DB
+	now        func() time.Time
+	rand       io.Reader
+	designator Designator
 }
+
+// Designator records the claimed account's designation inside the claim's
+// own transaction (*accounts.Designations): its console role admin and app
+// access admin, reason first_admin, which accounts.grant_designated_role
+// grants once the account holds a second step and recovery codes (C29).
+type Designator interface {
+	DesignateFirstAdmin(ctx context.Context, tx *sql.Tx, sub string) error
+}
+
+// Claim is a first-run claim CreateWithClaim tries to commit: the account
+// the identity service created first.
+type Claim struct{ Sub string }
 
 // consoleSessionsSchema is created by OpenStore with the rest of the schema.
 const consoleSessionsSchema = `
@@ -50,9 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_console_sessions_sid ON console_sessions(sid);
 // sessionCookieBytes is the cookie's length in random bytes.
 const sessionCookieBytes = 32
 
-// NewConsoleSessions is the store over store's database, with the clock and
-// the randomness the cookies are made from.
-func NewConsoleSessions(store *Store, now func() time.Time, rand io.Reader) (*ConsoleSessions, error) {
+// NewConsoleSessions is the store over store's database, with the clock,
+// the randomness the cookies are made from, and the designator a first-run
+// claim records its designation through. It refuses a missing one.
+func NewConsoleSessions(store *Store, now func() time.Time, rand io.Reader, designator Designator) (*ConsoleSessions, error) {
 	switch {
 	case store == nil:
 		return nil, errors.New("auth: NewConsoleSessions: store is nil")
@@ -60,37 +78,95 @@ func NewConsoleSessions(store *Store, now func() time.Time, rand io.Reader) (*Co
 		return nil, errors.New("auth: NewConsoleSessions: now is nil")
 	case rand == nil:
 		return nil, errors.New("auth: NewConsoleSessions: rand is nil")
+	case designator == nil:
+		return nil, errors.New("auth: NewConsoleSessions: designator is nil")
 	}
-	return &ConsoleSessions{db: store.db, now: now, rand: rand}, nil
+	return &ConsoleSessions{db: store.db, now: now, rand: rand, designator: designator}, nil
 }
 
 // Create stores a session for p and returns its cookie value.
 func (c *ConsoleSessions) Create(ctx context.Context, p Principal) (secret.Value, error) {
+	cookie, _, err := c.CreateWithClaim(ctx, p, nil)
+	return cookie, err
+}
+
+// CreateWithClaim stores a session for p and, when claim is set, commits the
+// first-run claim in the same transaction: a first_admin row naming
+// claim.Sub, inserted only while neither first_admin nor users holds a row,
+// checked in the same statement, and on that insert the claimed account's
+// designation (Designator). claimed reports that this call made the claim.
+//
+// Write transactions begin IMMEDIATE on a one-connection pool (dbutil.Open),
+// so two callbacks serialize, and the second sees the first one's row and
+// claims nothing. Any error rolls everything back: no claim, no
+// designation and no session, and a users or first_admin table that can't
+// be read is such an error (C03, ERR-CLOSED).
+func (c *ConsoleSessions) CreateWithClaim(ctx context.Context, p Principal, claim *Claim) (secret.Value, bool, error) {
 	if p.Sub == "" || p.Session.SID == "" {
-		return secret.Value{}, errors.New("auth: a console session needs a subject and a session id")
+		return secret.Value{}, false, errors.New("auth: a console session needs a subject and a session id")
+	}
+	if claim != nil && claim.Sub == "" {
+		return secret.Value{}, false, errors.New("auth: a first-run claim needs a subject")
 	}
 	raw := make([]byte, sessionCookieBytes)
 	if _, err := io.ReadFull(c.rand, raw); err != nil {
-		return secret.Value{}, fmt.Errorf("auth: console session cookie: %w", err)
+		return secret.Value{}, false, fmt.Errorf("auth: console session cookie: %w", err)
 	}
 	text := []byte(hex.EncodeToString(raw))
 	clear(raw)
 	cookie := secret.New(text)
 	clear(text)
-	roles, err := json.Marshal(nonNil(p.Roles))
+	claimed, err := c.store(ctx, p, claim, cookie)
 	if err != nil {
 		cookie.Destroy()
-		return secret.Value{}, fmt.Errorf("auth: console session roles: %w", err)
+		return secret.Value{}, false, err
+	}
+	return cookie, claimed, nil
+}
+
+// store is CreateWithClaim's transaction.
+func (c *ConsoleSessions) store(ctx context.Context, p Principal, claim *Claim, cookie secret.Value) (bool, error) {
+	roles, err := json.Marshal(nonNil(p.Roles))
+	if err != nil {
+		return false, fmt.Errorf("auth: console session roles: %w", err)
 	}
 	now := c.now().UTC()
-	if _, err := c.db.ExecContext(ctx, `
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("auth: store console session: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	claimed := false
+	if claim != nil {
+		res, err := tx.ExecContext(ctx, `
+            INSERT INTO first_admin (id, sub, claimed_at)
+            SELECT 1, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM first_admin) AND NOT EXISTS (SELECT 1 FROM users)`,
+			claim.Sub, ms(now))
+		if err != nil {
+			return false, fmt.Errorf("auth: first-run claim: %w", err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return false, fmt.Errorf("auth: first-run claim: %w", err)
+		}
+		if n == 1 {
+			if err := c.designator.DesignateFirstAdmin(ctx, tx, claim.Sub); err != nil {
+				return false, fmt.Errorf("auth: first-run claim: designate: %w", err)
+			}
+			claimed = true
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
         INSERT INTO console_sessions (token_hash, sub, sid, roles, name, created_at, last_active_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		hashCookie(cookie), p.Sub, p.Session.SID, string(roles), p.Name, ms(now), ms(now)); err != nil {
-		cookie.Destroy()
-		return secret.Value{}, fmt.Errorf("auth: store console session: %w", err)
+		return false, fmt.Errorf("auth: store console session: %w", err)
 	}
-	return cookie, nil
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("auth: store console session: %w", err)
+	}
+	return claimed, nil
 }
 
 // Resolve returns the Principal of the session cookie names, and false when
@@ -163,11 +239,21 @@ func (c *ConsoleSessions) EndBySub(ctx context.Context, sub string) (int64, erro
 	return c.end(ctx, `DELETE FROM console_sessions WHERE sub = ?`, sub)
 }
 
-func (c *ConsoleSessions) end(ctx context.Context, query, key string) (int64, error) {
+// EndBySubExcept ends every session of the account sub but those signed in
+// under the identity session sid, the request's own ("sign out everywhere
+// else", geekdojo/geekdojo-brain#994), and returns how many it ended.
+func (c *ConsoleSessions) EndBySubExcept(ctx context.Context, sub, sid string) (int64, error) {
+	if sid == "" {
+		return 0, errors.New("auth: ending console sessions needs a session to keep")
+	}
+	return c.end(ctx, `DELETE FROM console_sessions WHERE sub = ? AND sid <> ?`, sub, sid)
+}
+
+func (c *ConsoleSessions) end(ctx context.Context, query, key string, more ...any) (int64, error) {
 	if key == "" {
 		return 0, errors.New("auth: ending console sessions needs a key")
 	}
-	res, err := c.db.ExecContext(ctx, query, key)
+	res, err := c.db.ExecContext(ctx, query, append([]any{key}, more...)...)
 	if err != nil {
 		return 0, fmt.Errorf("auth: end console sessions: %w", err)
 	}

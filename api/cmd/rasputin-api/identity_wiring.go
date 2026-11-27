@@ -98,6 +98,8 @@ type identityClient interface {
 	// ExchangeCode and Forwarding are the console sign-in's code exchange
 	// and key fetch (geekdojo/geekdojo-brain#989, consolesignin_wiring.go).
 	ExchangeCode(ctx context.Context, x idclient.CodeExchange) (secret.Value, error)
+	// ExchangeAccessToken is the reset return's (geekdojo/geekdojo-brain#992).
+	ExchangeAccessToken(ctx context.Context, x idclient.CodeExchange) (secret.Value, error)
 	Forwarding(forward func(http.Header)) *http.Client
 }
 

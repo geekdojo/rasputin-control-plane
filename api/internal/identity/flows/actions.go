@@ -47,6 +47,14 @@ func enabledActions(in Inputs) []string {
 	return out
 }
 
+// defaultActions are the actions that are default for in, never nil.
+func defaultActions(in Inputs) []string {
+	if in.FirstRun {
+		return []string{ActionRecoveryCodes}
+	}
+	return []string{}
+}
+
 // OwnedActions are the actions the rules may enable, each registered when
 // the server does not list it.
 var OwnedActions = []string{ActionUpdatePassword, ActionPasskeyRegister, ActionSecurityKey, ActionRecoveryCodes, ActionConfigureTOTP}
@@ -54,7 +62,8 @@ var OwnedActions = []string{ActionUpdatePassword, ActionPasskeyRegister, ActionS
 // RequiredActions is every action's wanted state: the owned ones, and each
 // other action the server lists (listed), which is disabled, so
 // delete_credential is off. Every defaultAction is false except the
-// recovery codes', which Identity 4.8 owns. The result is sorted by alias.
+// recovery codes', which is in.FirstRun (Identity 4.8): a default action
+// during first run only. The result is sorted by alias.
 func RequiredActions(in Inputs, listed []string) []RequiredAction {
 	enabled := enabledActions(in)
 	reentry := map[string]string{maxAuthAge: strconv.Itoa(seconds(CredentialReentryLifetime))}
@@ -64,10 +73,8 @@ func RequiredActions(in Inputs, listed []string) []RequiredAction {
 	out := make([]RequiredAction, 0, len(aliases))
 	for _, a := range aliases {
 		ra := RequiredAction{Alias: a, Enabled: slices.Contains(enabled, a)}
-		if a != ActionRecoveryCodes {
-			f := false
-			ra.DefaultAction = &f
-		}
+		def := slices.Contains(defaultActions(in), a)
+		ra.DefaultAction = &def
 		if slices.Contains(credentialActions, a) {
 			ra.Config = maps.Clone(reentry)
 		}

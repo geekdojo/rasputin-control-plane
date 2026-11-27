@@ -10,9 +10,14 @@ import (
 
 // SessionRef names the console session a request was authenticated by: the
 // identity service's session id it was signed in under, and when it began.
+// A pre-update session (preupdate.go, geekdojo/geekdojo-brain#1005) has no
+// SID: PreUpdate marks it, and NeedsPassword says its moved account has not
+// set its first password yet.
 type SessionRef struct {
-	SID       string
-	CreatedAt time.Time
+	SID           string
+	CreatedAt     time.Time
+	PreUpdate     bool
+	NeedsPassword bool
 }
 
 // Principal is the person a console request acts for, as RequireSession

@@ -194,6 +194,16 @@ func (c *Client) Ready(ctx context.Context) error {
 // level is DEBUG for the outcomes a caller expects (not found, conflict) and
 // for a readiness answer inside WaitReady, which asks until the service is
 // ready; ERROR for a protocol error; WARN for the rest.
+//
+// CodeQL reports go/log-injection at the LogAttrs call below; the register
+// (.github/codeql-register.tsv) records it as a false positive. The request
+// text it traces is an account or credential id from a person's account
+// request, which reaches Error.Path only through url.PathEscape (the
+// callers' userPath and credential paths), so it carries no control
+// character; and the logger is the composition root's logkit.New, whose
+// TextHandler quotes and escapes every value. The verdict holds while every
+// id in an Admin API path is url.PathEscape'd and the client's logger is
+// logkit.New's.
 func (c *Client) failed(ctx context.Context, e *Error) error {
 	level := slog.LevelWarn
 	switch {
@@ -299,6 +309,11 @@ func (c *Client) tokenField(ctx context.Context, path string, form []byte, field
 	return tok, nil
 }
 
+// TextBody is an Admin API request body sent as text/plain, its bytes as
+// they are: a credential's userLabel (register row T271). It is a
+// secret.Value so the label never renders in a log or an error.
+type TextBody secret.Value
+
 func (c *Client) admin(ctx context.Context, token secret.Value, method, path string, in, out any) (Response, *Error) {
 	const op = "admin"
 	if path != serverInfoPath && !strings.HasPrefix(path, adminPrefix) {
@@ -306,7 +321,13 @@ func (c *Client) admin(ctx context.Context, token secret.Value, method, path str
 	}
 	var reqBody []byte
 	contentType := ""
-	if in != nil {
+	switch tb := in.(type) {
+	case nil:
+	case TextBody:
+		// The bytes are copied: the call zeroes its body when it returns,
+		// and the value is its holder's to destroy.
+		reqBody, contentType = append([]byte{}, secret.Value(tb).Reveal()...), "text/plain"
+	default:
 		b, err := json.Marshal(in)
 		if err != nil {
 			return Response{}, &Error{Op: op, Path: path, Kind: ErrInvalidValue, Err: errors.New("the request body does not encode as JSON")}

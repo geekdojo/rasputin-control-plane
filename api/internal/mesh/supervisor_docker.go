@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -990,7 +991,10 @@ func (s *DockerSupervisor) ReconcileAppRecords(fqdnToIP map[string]string) error
 // macOS dev story working out of the box. The CLI (`headscale users ...`)
 // resolves its socket from the same config file, so it finds it there.
 func (s *DockerSupervisor) renderConfig() ([]byte, error) {
+	tailnet := TailnetPrefixes()
 	data := configData{
+		PrefixV4:   tailnet[0].String(),
+		PrefixV6:   tailnet[1].String(),
 		ServerURL:  s.cfg.ServerURL,
 		ListenAddr: "0.0.0.0:8080", // inside the container
 		BaseDomain: baseDomainFor(s.cfg.ClusterID),
@@ -1009,11 +1013,24 @@ func (s *DockerSupervisor) renderConfig() ([]byte, error) {
 }
 
 type configData struct {
-	ServerURL   string
-	ListenAddr  string
-	BaseDomain  string // MagicDNS base domain, "<cluster-id>.internal"
-	TLSCertPath string // empty in HTTP mode
-	TLSKeyPath  string // empty in HTTP mode
+	// PrefixV4 and PrefixV6 are the tailnet's address ranges
+	// (TailnetPrefixes).
+	PrefixV4, PrefixV6 string
+	ServerURL          string
+	ListenAddr         string
+	BaseDomain         string // MagicDNS base domain, "<cluster-id>.internal"
+	TLSCertPath        string // empty in HTTP mode
+	TLSKeyPath         string // empty in HTTP mode
+}
+
+// TailnetPrefixes are the private network's address ranges, IPv4 then
+// IPv6: the prefixes Headscale allocates device addresses from. The rendered
+// Headscale config and the home door's registration source rule
+// (geekdojo/geekdojo-brain#990, which refuses account creation from a
+// tailnet address) both read them here, so the two can't disagree. It
+// returns a fresh slice each call.
+func TailnetPrefixes() []netip.Prefix {
+	return []netip.Prefix{netip.MustParsePrefix("100.64.0.0/10"), netip.MustParsePrefix("fd7a:115c:a1e0::/48")}
 }
 
 // baseDomainFor builds the MagicDNS base domain from the cluster id,
@@ -1034,8 +1051,8 @@ noise:
   private_key_path: /var/lib/headscale/noise_private.key
 
 prefixes:
-  v4: 100.64.0.0/10
-  v6: fd7a:115c:a1e0::/48
+  v4: {{.PrefixV4}}
+  v6: {{.PrefixV6}}
   allocation: sequential
 
 derp:

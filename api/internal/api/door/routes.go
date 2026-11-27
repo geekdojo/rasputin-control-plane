@@ -74,6 +74,7 @@ var routes = []Route{
 	{"/resources/{v}/login/rasputin/{file...}", get, both, policy.RouteTheme, "Rasputin's login theme files the theme build lists, at the resource version learned from the running service only"},
 	{"/resources/{v}/common/keycloak/{file...}", get, both, policy.RouteTheme, "the shared theme files the login theme build lists, at the resource version learned from the running service only"},
 	{signinPrefix + "{file...}", get, both, policy.RouteSignin, "the door's own page styles and images, served from memory and never forwarded"},
+	{"/api/auth/reset-done", get, appOnly, policy.RouteResetDone, "the app door's reset client returns here; it ends the person's sessions and mints none"},
 }
 
 // Routes are the routes door serves.

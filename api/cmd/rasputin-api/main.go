@@ -19,10 +19,12 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	apipkg "github.com/geekdojo/rasputin-control-plane/api/internal/api"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
@@ -78,6 +80,11 @@ import (
 //   in the geekdojo-brain.
 
 func main() {
+	// `rasputin-api repair-code` (#321) runs before anything else: no
+	// settings, logger or listener of the api's own.
+	if isRepairCode(os.Args) {
+		os.Exit(runRepairCode())
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(),
 		os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -917,9 +924,17 @@ func main() {
 	// ceremony gets its secure context without any tunnel.
 	ignored, why := secureCookies()
 	warnSecureCookiesNotHonoured(logger, ignored, why)
+	// The designations (geekdojo/geekdojo-brain#990): opened here, in every
+	// identity mode, because the console sessions record the first-run
+	// claim's designation in the claim's own transaction.
+	designations, err := accounts.OpenDesignations(ctx, dbPath, time.Now)
+	if err != nil {
+		log.Fatalf("rasputin-api: designations: %v", err)
+	}
+	defer designations.Close()
 	// The console's sessions (geekdojo/geekdojo-brain#989): rows in this
 	// same database, minted only by a sign-in through the home door.
-	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, cryptorand.Reader)
+	consoleSessions, err := auth.NewConsoleSessions(authStore, time.Now, cryptorand.Reader, designations)
 	if err != nil {
 		log.Fatalf("rasputin-api: console sessions: %v", err)
 	}
@@ -1009,7 +1024,10 @@ func main() {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: app tier reader", "err", err.Error())
 		os.Exit(1)
 	}
-	kindPolicy, err := authz.NewKindPolicy(tiers)
+	// identity.move's repair re-run reads C9's state through the holder,
+	// filled once the move is wired below (#1004).
+	moveHolder := &moveStateHolder{}
+	kindPolicy, err := authz.NewKindPolicy(tiers, authz.WithMoveState(moveHolder))
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: job kind policy", "err", err.Error())
 		os.Exit(1)
@@ -1284,8 +1302,15 @@ func main() {
 	identityW.register(runner)
 	// identity.revoke, the app-access grant and the removed-name list
 	// (#991), under keycloak only: a System job, so POST /api/jobs refuses it.
+	// The one second-step marker writer: the drain's sink and the
+	// designated-role grant's (#990). The one accounts lock is the marker
+	// writer's and every account change's: each reads the whole account and
+	// writes it back (#994).
+	accountsLock := &sync.Mutex{}
+	markersW := markerWriter(ctx, identityW, doorTable, doorErr, accountsLock, logger)
 	acct, err := wireAccounts(ctx, accountsDeps{mode: identityW.mode, admin: identityW.session, dbPath: dbPath, mac: mac,
-		console: consoleSessions, moved: authStore, log: logger})
+		console: consoleSessions, moved: authStore, kinds: kindPolicy, runner: runner, listDir: identityDenylists,
+		designations: designations, markers: markersW, lock: accountsLock, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: accounts", "err", err.Error())
 		os.Exit(1)
@@ -1306,15 +1331,47 @@ func main() {
 		os.Exit(1)
 	}
 	identityState.register(runner)
+	// identity.restart (#321): the break-glass repair page's RESTART, under
+	// keycloak only, behind identity.recover's guards.
+	identityRestart, err := identityRestartWiring(identityState.monitor, restoreSessions, execrun.CombinedOutput, logger)
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity restart", "err", err.Error())
+		os.Exit(1)
+	}
+	if identityRestart != nil {
+		runner.Register(identityRestart.Workflow())
+	}
+	// The one clock-sync fact: converge's authenticator-app input and the
+	// console sign-in's (#1150) read the same outage state.
+	clockFact := &clockSyncFact{read: readClockSync, log: logger}
 	// identity.converge, identity.migrate and identity.arm (#981), under keycloak only.
 	identityConv, err := identityConvergeWiring(identityConvergeDeps{mode: identityW.mode, session: identityW.session, monitor: identityState.monitor,
 		ledger: jobStore, settings: setupStore, createArmed: atrest.CreateSecretFile, stat: os.Stat,
-		console: consoleConvergeInputs(doorsOn, consoleHost()), now: time.Now, log: logger})
+		console: consoleConvergeInputs(doorsOn, consoleHost(), doorTable), firstRun: authStore.FirstRun, clock: clockFact, now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity converge", "err", err.Error())
 		os.Exit(1)
 	}
 	identityConv.register(runner)
+	// identity.move (#1004), under keycloak only: a System job its trigger
+	// submits, and a repair session's re-run in C9's state.
+	// The move's bridge (#1005) sends its person on to the home door, so it
+	// is installed only with the doors on.
+	bridgeOrigin := ""
+	if doorsOn {
+		bridgeOrigin = "https://" + doorTable.Home.Host
+	}
+	identityMv, err := identityMoveWiring(ctx, identityMoveDeps{mode: identityW.mode, dbPath: dbPath, session: identityW.session,
+		oldUsers: authStore, acct: acct, designations: designations, monitor: identityState.monitor,
+		converger: identityConv.converger, ledger: jobStore, holder: moveHolder,
+		auth: authSvc, runner: runner, signInOrigin: bridgeOrigin, newCorrelationID: cryptorand.Text, rand: cryptorand.Reader,
+		now: time.Now, log: logger})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: identity move", "err", err.Error())
+		os.Exit(1)
+	}
+	defer identityMv.close()
+	identityMv.register(runner)
 	wireControlGate(authSvc, identityConv) // the control lock, under keycloak only (#987)
 	// The console's sign-in through the home door, under keycloak with the
 	// doors on (#989); its role-change sink joins the drain below.
@@ -1324,7 +1381,8 @@ func main() {
 	}
 	consoleSI, err := consoleSignInWiring(ctx, consoleSignInDeps{mode: identityW.mode, doorsOn: doorsOn, table: doorTable,
 		host: consoleHost(), client: identityW.client, session: identityW.session, ready: consoleReady,
-		sessions: consoleSessions, now: time.Now, log: logger})
+		sessions: consoleSessions, identity: acct.sessions, actions: acct.actions(),
+		firstRun: authStore, claimer: acct.claimer(), observer: acct.signInObserver(), clock: clockFact, now: time.Now, log: logger})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: console sign-in", "err", err.Error())
 		os.Exit(1)
@@ -1823,12 +1881,12 @@ func main() {
 			storage.DueFunc(backupStore, setupStore, true),
 		),
 		secWatch.entry,
-	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...)...)...))
+	}...), append(append(append(obsCollectorEntries, storeAud.entries()...), storeRecov.entries()...), append(append(append(identityState.entries(), entriesOf(adminEntry)...), identityConv.entries()...), entriesOf(identityMv.entry)...)...)...))
 	sched.Start(ctx)
 	// The recoveries' readings on the fact of this start (F-874-02).
 	storeRecov.start(ctx)
 	identityState.start(ctx)
-	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, consoleSI.adminSinks(identityConv.eventSinks()), logger) // the sign-in history drain, marked for this start (#985)
+	identityState.startEvents(ctx, identityW, setupStore, doorTable, doorErr, acct.userSinks(consoleSI.adminSinks(identityConv.eventSinks())), markersW, logger) // the sign-in history drain, marked for this start (#985)
 	defer sched.Stop()
 	// firewall.dns_forward runs the moment the primary LAN address changes, and
 	// once at start for the address this boot came up on. Every control-plane
@@ -1883,6 +1941,11 @@ func main() {
 	// nodes" action. The store hands the api the hash on exactly one path,
 	// the push step's dispatch; nothing the server serves can reach it.
 	srv.SetConsole(consoleStore)
+	if acct.resetter != nil { // the administrator's password reset (#992), under keycloak only
+		srv.SetResetter(acct.resetter)
+	}
+	acct.installWaiting(srv)  // how many people wait for access (#990), under keycloak only
+	acct.installRequests(srv) // every account change (#994), under keycloak only
 	srv.SetNodeTrust(nodeTrust)
 	srv.SetComposeStash(composeStash)
 	// The backup-target ledger, for GET/POST /api/backup/targets, and the
@@ -2078,6 +2141,27 @@ func main() {
 	alertsSvc.SetMeshMembership(meshSvc.Membership)
 	alertsSvc.SetAppDoorReachAlerts(meshSvc.AppDoorReachAlerts)
 	srv.SetAlertsService(alertsSvc)
+	// Break-glass (#321): the repair-code socket, the repair session's
+	// routes, an administrator's normal sign-in ending it, and the warning
+	// while nobody could become root here to make a code.
+	breakglassW, err := wireBreakglass(ctx, breakglassDeps{
+		monitor: identityState.monitor, restarter: identityRestart, alerts: alertsSvc, jobs: jobStore,
+		host: consoleHost(), primaryIP: lanWatch.PrimaryIP, dataDir: dataDir, identityCA: identityCA != nil, log: logger,
+		resets: acct.repairResets, move: moveHolder, mode: identityW.mode,
+	})
+	if err != nil {
+		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: break-glass", "err", err.Error())
+		os.Exit(1)
+	}
+	if breakglassW.svc != nil {
+		srv.SetRepair(breakglassW.svc)
+		authSvc.SetAdminSignInHook(breakglassW.svc.AdminSignedIn)
+		breakglassW.socket.Start(ctx)
+	}
+	alertsSvc.SetLastResortAlerts(lastResortAlerts(consoleStore, akPath))
+	if identityW.mode == identityModeKeycloak {
+		alertsSvc.SetLostAccountsAlerts(lostAccountsAlerts(moveHolder))
+	}
 	// The inventory hook installed before Start can raise alerts from here on.
 	nodeKeyAlerts.Store(alertsSvc)
 
@@ -2198,6 +2282,11 @@ func main() {
 		}); err != nil {
 			log.Fatalf("rasputin-api: leaf sweep: %v", err)
 		}
+		// Registration's network facts (#990), read per request.
+		doorNet, err := doorNetwork(lanWatch.Snapshot, invStore)
+		if err != nil {
+			log.Fatalf("rasputin-api: sign-in door network: %v", err)
+		}
 		// The sign-in doors (#986): built here and served beside the console
 		// on this one listener, chosen by SNI (doors_mount.go).
 		homeDoor, appDoorH := mountDoors(ctx, doorMountDeps{
@@ -2208,6 +2297,8 @@ func main() {
 			consoleOrigin: "https://" + consoleHost(),
 			installName:   func(ctx context.Context) (string, error) { return setupStore.Get(ctx, setup.KeyInstallName) },
 			dirty:         identityW.dirty, now: time.Now, ids: cryptorand.Text, log: logger, removed: acct.removed,
+			network: doorNet, waiting: acct.doorWaiting(), emails: acct.doorEmails(),
+			resetDone: consoleSI.appResetDone(), actions: consoleSI.doorActions(),
 		})
 		if doorM != nil {
 			doorM.setDoors(homeDoor, appDoorH, identityState.events.doorThrottle())

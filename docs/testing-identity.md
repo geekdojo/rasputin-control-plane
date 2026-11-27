@@ -487,6 +487,55 @@ What it does not prove:
 The walk runs on `https://localhost:<port>` (`Config.FrontHost`), because WebAuthn refuses an IP
 address as its relying party.
 
+## A realm from the last stable release
+
+Keycloak's import skips a realm that already exists, so a cluster updated from a stable release
+keeps the realm that release's baseline created. Only converge changes it afterwards: an edit to
+`identity/realm-baseline.json` reaches fresh imports alone unless converge owns the field
+(F-1012-18, where the login theme added to the baseline never reached updated clusters).
+`identity/testdata/realm-baseline-v2026.11.3.json` is the oldest baseline a shipped stable
+imported, byte for byte (`git show v2026.11.3:identity/realm-baseline.json`; its sha256 is the one
+in v2026.11.3's `realm-baseline.lock`).
+
+`TestIdentity_UpgradeFromStableTheme`
+(`api/internal/identitytest/upgrade_from_stable_functional_test.go`) runs in the backend job with
+the theme set, like the theme walk. To run it locally, use the theme command in
+[The sign-in theme walk](#the-sign-in-theme-walk) with
+`-run '^TestIdentity_UpgradeFromStableTheme$'`.
+
+What it proves at the pin:
+
+- The fixture, imported with `kc.sh import`, reads no `loginTheme`, and the console client's sign-in
+  page is `login-login` with no `data-rasputin-theme`: the defect, reproduced.
+- One converge run, with the previous release's stored hash, repairs `realm.loginTheme`. The Admin
+  API then reads `loginTheme=rasputin`, and the same running server serves `login-login` with
+  `data-rasputin-theme="rasputin"`, with no restart (capability row T283). No alert is raised.
+- A second run repairs nothing and writes nothing.
+
+What it does not prove: the real OS update path, with Keycloak's `start --import-realm`, the api's
+scheduler and the door (rasputin-os's update smoke, TC-1012-21); every page of the theme, which
+the theme walk proves once `loginTheme` is set; and the `rasputin-app-email` client scope, which an
+updated realm lacks (an accepted gap until geekdojo/geekdojo-brain#1027 binds it).
+
+Two unit tests in `api/internal/identity/converge/baseline_test.go` hold the rule without the
+identity service. `TestBaseline_ChangesSinceShippedConverge` fails on any top-level baseline key
+that differs from the fixture's unless converge writes the tree baseline's value to a realm
+imported from the fixture, or the key is recorded in `notConverged` with a reason and its current
+value's sha256. `TestBaseline_EveryBoundScopeExistsOnAShippedRealm` fails when the desired state,
+with an app client bound to each variant, binds a client scope that a realm imported from the
+fixture does not have and converge does not create.
+
+| Test case | Where |
+|---|---|
+| TC-988-37 | `TestNewDesired_LoginTheme` (unit) |
+| TC-988-38 | `TestRun_RealmFieldsEachDetected`, subtests `loginTheme absent` and `loginTheme keycloak.v2` (unit) |
+| TC-988-39 | `TestRun_LoginThemeFirstRunIsNotDrift` (unit) |
+| TC-988-40 | `TestRun_LoginThemeDriftPutBack` (unit) |
+| TC-988-41 | `TestDiff_DesiredRealmHasNone` (unit) |
+| TC-988-42 | `TestRun_LoginThemeFailurePaths` (unit) |
+| TC-988-43 | `TestBaseline_ChangesSinceShippedConverge` (unit) |
+| TC-988-44 | `TestIdentity_UpgradeFromStableTheme` (CI) |
+
 ## The sign-in doors
 
 `TestDoor_AgainstPinnedKeycloak` (api/internal/identitytest/door_functional_test.go,
@@ -675,6 +724,19 @@ the pinned identity service.
   in the pinned Chrome from `https://ci.local/login`; `/api/auth/me` answers 200 with its
   subject and role, and the signed-in `/` is screenshotted. It refuses to run where
   `/usr/share/rasputin`, `/var/lib/rasputin` or a `keycloak.service` unit exists.
+- **`TestIdentitySystemd_BreakGlass`** (`breakglass_systemd_test.go`, TC-321-27 to
+  TC-321-35, geekdojo/geekdojo-brain#321), in the same step, on its own stack of the same
+  shape with the api's https listener on every address (`:443`), so it answers at
+  `https://ci.local` and at the runner's primary address. With `keycloak.service` stopped,
+  root runs the real `rasputin-api repair-code` in a pty (`script`); `setpriv` as `nobody`
+  and root writing to a file are refused. Codes redeem from the Go client at `ci.local` and
+  in the pinned Chrome at `https://<runner address>/repair`; reuse and both sign-in doors are
+  refused, five wrong codes refuse 127.0.0.1 while the runner's address still redeems, and a
+  repair session gets 403 on console routes. RESTART on `/repair` makes `identity.restart` by
+  `break-glass`, which brings the real Keycloak back to ready. A synthetic administrator,
+  enrolled with an authenticator app, signs in through the launcher and so ends the repair
+  session and retires the outstanding code; so does an api restart. It also needs
+  util-linux's `script` and `setpriv`.
 
 On a Mac, `scripts/identity-on-mac.sh` runs the second test in hold mode
 (`RASPUTIN_CONSOLE_RIG=hold`) in a container with systemd as PID 1, signs the fixture in with
@@ -684,3 +746,115 @@ identity service posts to 443).
 
 What neither proves: the appliance's own exchange and its sandboxed back-channel POST
 (the bench, `rasputin-identity-test`), and Safari, Firefox and Edge on the cross-site return.
+
+## The forgotten-password paths
+
+[geekdojo-brain#992](https://github.com/geekdojo/geekdojo-brain/issues/992) (Identity 4.10)
+resets a forgotten password with no email: one recovery code at each door's own reset client,
+or an administrator's temporary password run as a job at a fresh sign-in.
+
+- **`TestReset_AgainstPinnedKeycloak`** (`reset_functional_test.go`, TC-992-25 to TC-992-37),
+  in the backend job's identity step. It runs on the revoke rig (the console rig with #991's
+  accounts), with both doors' reset returns as main wires them, the converged `rasputin-reset`
+  flow, and `accounts.reset_password` on a runner the kind table decides. It proves:
+  - a codeless account and an unknown name get the same codeless sentence, and a code-only
+    administrator gets the privileged one, with no password changed (TC-992-25);
+  - a code reset at each door ends every online and offline identity session and every console
+    session, refuses the old offline refresh, mints no session, and leaves the new password
+    working, the old one refused and the code spent (TC-992-26, TC-992-27);
+  - a privileged reset asks for the authenticator code, never a second recovery code
+    (TC-992-28);
+  - the deny list applies at the reset's new password, and the page's hint says 15 characters
+    (TC-992-29, TC-992-36);
+  - a source the door's throttle holds still resets (TC-992-33);
+  - the reset code's token answer carries no ID token and its access token carries the door's
+    `iss`, the reset client's `azp` and the account's `sub` (TC-992-37, row T200);
+  - the administrator's reset submits nothing without the fresh sign-in, and after it ends the
+    target's sessions and forces the target to choose a new password (TC-992-30, TC-992-31);
+  - the 500 our Keycloak build answers for a listed or a 14-character password (its
+    `features-disabled=admin` leaves no admin theme for the 400's message) becomes the rule's sentence, with
+    the credential unchanged (TC-992-32, row T202);
+  - both start links are written by converge and each sign-in page's "Forgot your password?"
+    reaches its own door's reset (TC-992-35), and no mail connection is made (TC-992-34).
+
+What it does not prove: the passkey path's change step (Identity 4.10 leaves it to #319), the
+re-designation of a privileged target (#992's second PR), and the appliance itself (the bench,
+`rasputin-identity-test`).
+
+## First run and open sign-up
+
+[geekdojo-brain#990](https://github.com/geekdojo/geekdojo-brain/issues/990) (Identity 4.8)
+opens sign-up at the home door and designates the account created first as the first
+administrator.
+
+- **`TestFirstRun_AgainstPinnedKeycloak`** (`firstrun_functional_test.go`), in the backend
+  job's identity step. It runs on the console rig with the claim's real collaborators (the
+  auth store's first-run predicate, `accounts.FirstAccount`, `accounts.Observer` and
+  `accounts.grant_designated_role` on a job runner) and registration's real waiting count,
+  in-use email check and removed-name list. CI connects from loopback, so the network facts
+  are injected at the policy's `Network`; the real `NetworkSource` is proved by its unit
+  tests (TC-990-15) and on the bench. It proves:
+  - a sign-up from a node or a tailnet address is the door's 403 and Keycloak serves no
+    registration page (TC-990-29);
+  - with a pre-update operator, status says `firstRun:false` and a sign-up claims nothing
+    (TC-990-04);
+  - of two first-run sign-ups, the account created first is the one designee even when it
+    finishes second, and both sessions hold `self` only (TC-990-01);
+  - a role-less account's app and private-network sign-ins are refused (TC-990-05);
+  - the designation is granted only once the account holds an authenticator app as well as
+    recovery codes, after which its sessions are gone, a password alone gets no code, and a
+    second-step sign-in holds the administrator capabilities (TC-990-03);
+  - the recovery codes are a default action during first run only, and converge's
+    defaultAction-only writes keep the action's config, as row T253 records (TC-990-24);
+  - the unfiltered user listing, `prompt=create` and the stored lower-case email behave as
+    rows T250 to T252 record (TC-990-11);
+  - a removed and an in-use email get byte-identical answers (TC-990-19);
+  - a listed password is refused at sign-up (TC-990-20);
+  - the 21st waiting account is refused (TC-990-13).
+
+What it does not prove: the designee's own path to a second step (Identity 6.5's chooser; the
+rig sets the authenticator-app required action through the Admin API), the "N people waiting"
+copy (Identity 6.2), a truly simultaneous pair of callbacks (the unit test TC-990-08 proves
+the claim's transaction under concurrency), and the appliance itself (the bench,
+`rasputin-identity-test`, TC-990-30).
+
+## Account changes
+
+[geekdojo-brain#994](https://github.com/geekdojo/geekdojo-brain/issues/994) (Identity 4.12)
+makes every change to a person's account one job, submitted through
+`POST /api/accounts/jobs`, authorized by the kind table and run under the one accounts lock.
+
+- **`TestConsole_AgainstPinnedKeycloak`**'s last subtest, *Identity 4.12 account changes*
+  (`accounts_functional_test.go`, TC-994-36 to TC-994-41), in the backend job's identity step.
+  It layers the reset rig on the console rig with `accounts.Requests`, the account workflows,
+  the designated-role grant and its observer as main wires them; the observer is told of
+  every console callback and, as a sink of the sign-in history drain, of every sign-in at
+  either door. Requests are decided as the route decides them, then followed through the real
+  fresh sign-in. It proves:
+  - a privileged role given to a password-only account is a designation, and is granted once
+    the account holds an authenticator app and codes and signs in (TC-994-36);
+  - a privileged account can't remove its recovery codes or its only second step, and an
+    unprivileged account's removed authenticator app is gone and no longer asked for at the
+    home door (TC-994-37, row T273);
+  - `set_email` needs `iam`, and only `confirm_email` puts the address in an app's ID token
+    and userinfo through `rasputin-app-email` (TC-994-38, row T274);
+  - privileged changes submit nothing without a fresh sign-in, fail through `POST /api/jobs`,
+    and apply after one (TC-994-39);
+  - signing out everywhere else keeps the request's session, a credential label reads back,
+    an account attack detection holds signs in after `unlock`, and a taken email gets the
+    duplicate sentence (TC-994-40, rows T270 to T275);
+  - an app-only designation completes at an app-door sign-in with no console sign-in
+    (TC-994-41);
+  - a claim `define_claim` writes is admin-only: `set_claims` sets its value, a value
+    outside its allowed ones is refused, a self profile update posting `claim_<name>` leaves
+    it unchanged, its client scope carries a user-attribute mapper and a SAML attribute
+    mapper, and `delete_claim` removes all of it (`definitions_functional_test.go`,
+    TC-994-44, rows T281 and T282);
+  - a second `define_group` of one name reads the same group back, `set_groups` joins and
+    leaves, and `delete_group` removes the group (rows T279 and T280).
+
+What it does not prove: the screens (Identity 6.2, 6.3 and 9.6, and #319), the app relay
+(Identity 7.5) and the RADIUS hook (Identity 9.5), claims reaching chosen apps (Identity 6.3
+and 7.4), and the appliance itself. The unit tests (`api/internal/accounts`, TC-994-01 to
+TC-994-34, TC-994-42 and TC-994-43) prove the guard's decisions, the lock, the designations
+and every kind's steps over a fake Admin API.

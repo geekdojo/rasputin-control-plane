@@ -36,6 +36,13 @@ var AuditEventTypes = []string{
 	"USER_DISABLED_BY_TEMPORARY_LOCKOUT", "USER_DISABLED_BY_PERMANENT_LOCKOUT", "USER_SESSION_DELETED",
 }
 
+// LoginTheme is the realm's login theme: the Rasputin theme, which converge
+// holds on every realm, including one imported from a baseline that set none
+// (F-1012-18). The name is also the door's resource path
+// (door/theme.go) and the directory rasputin-os links as themes/rasputin;
+// all three must say the same.
+const LoginTheme = "rasputin"
+
 // DefaultClients are the clients the identity service creates in every realm.
 // Converge holds them disabled.
 var DefaultClients = []string{"account", "account-console", "admin-cli", "broker", "security-admin-console"}
@@ -70,6 +77,16 @@ type Inputs struct {
 	// URL, by client id (geekdojo/geekdojo-brain#989). A client it does not
 	// name has the attribute held absent.
 	BackchannelLogoutURLs map[string]string
+	// ResetHomeURL and ResetAppURL are each door's reset start
+	// (auth.ResetStartURL), which the sign-in pages link "Forgot your
+	// password?" to (geekdojo/geekdojo-brain#992). "" holds the attribute
+	// absent.
+	ResetHomeURL, ResetAppURL string
+	// FirstRun is the first-run predicate: the recovery-codes action is a
+	// default action only while it holds, so a committed claim changes the
+	// desired hash and converge's next run clears it
+	// (geekdojo/geekdojo-brain#990).
+	FirstRun bool
 }
 
 // The client attributes converge owns: the back-channel logout URL, and,
@@ -85,6 +102,7 @@ const (
 type Desired struct {
 	DisplayName               string              `json:"displayName"`
 	DisplayNameHTML           string              `json:"displayNameHtml"`
+	LoginTheme                string              `json:"loginTheme"`
 	EventsEnabled             bool                `json:"eventsEnabled"`
 	EventsListeners           []string            `json:"eventsListeners"`
 	EnabledEventTypes         []string            `json:"enabledEventTypes"`
@@ -102,6 +120,11 @@ type Desired struct {
 	// origin, which the sign-in pages link to (geekdojo/geekdojo-brain#988).
 	// "" holds the attribute absent.
 	ConsoleURL string `json:"consoleUrl"`
+	// ResetHomeURL and ResetAppURL are the realm attributes
+	// rasputin.reset-home-url and rasputin.reset-app-url. "" holds each
+	// absent.
+	ResetHomeURL string `json:"resetHomeUrl"`
+	ResetAppURL  string `json:"resetAppUrl"`
 	// ClientAttributes are the client attributes converge owns, by client id
 	// and then attribute: "" holds an attribute absent. Every other
 	// attribute a client carries is kept as read.
@@ -120,6 +143,7 @@ func NewDesired(in Inputs) Desired {
 	expiry := int(storedEventsExpiry / time.Second)
 	d := Desired{
 		DisplayName:               in.InstallName,
+		LoginTheme:                LoginTheme,
 		EventsEnabled:             true,
 		EventsListeners:           []string{},
 		EnabledEventTypes:         sorted(AuditEventTypes),
@@ -136,11 +160,12 @@ func NewDesired(in Inputs) Desired {
 		d.RedirectURIs[c] = sorted(in.RedirectURIs[c])
 	}
 	d.ConsoleURL = consoleOrigin(in.RedirectURIs["rasputin-console"])
+	d.ResetHomeURL, d.ResetAppURL = in.ResetHomeURL, in.ResetAppURL
 	d.ClientAttributes = map[string]map[string]string{}
 	for _, c := range RasputinClients {
 		d.ClientAttributes[c] = clientAttributes(in.BackchannelLogoutURLs[c])
 	}
-	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings}
+	d.flowsIn = flows.Inputs{InstallName: in.InstallName, ClockSynced: in.ClockSynced, AppBindings: in.AppBindings, FirstRun: in.FirstRun}
 	d.Rules = flows.Render(d.flowsIn)
 	return d
 }

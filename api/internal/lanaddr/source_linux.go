@@ -208,7 +208,7 @@ func parseAddrDump(msgs []syscall.NetlinkMessage, byIndex map[int]net.Interface)
 		if ip == nil {
 			continue
 		}
-		a := Addr{IP: ip, Index: index, Dynamic: flags&syscall.IFA_F_PERMANENT == 0}
+		a := Addr{IP: ip, Index: index, Bits: int(m.Data[1]), Dynamic: flags&syscall.IFA_F_PERMANENT == 0}
 		if ifc, ok := byIndex[index]; ok {
 			a.Link = ifc.Name
 			a.Loopback = ifc.Flags&net.FlagLoopback != 0

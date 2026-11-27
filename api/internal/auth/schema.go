@@ -38,6 +38,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user_id    ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+-- The first-run claim (geekdojo/geekdojo-brain#990, register row C03): at
+-- most one row, naming the account the api designated as the first
+-- administrator. Its presence ends first run.
+CREATE TABLE IF NOT EXISTS first_admin (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    sub        TEXT NOT NULL,          -- the identity service's subject
+    claimed_at INTEGER NOT NULL        -- unix milliseconds
+);
 `
 
 // migrations applied after schema. Each statement must be idempotent on its

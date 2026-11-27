@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/geekdojo/rasputin-control-plane/api/internal/api/door/policy"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/doors"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/events"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/markers"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
@@ -59,7 +61,14 @@ func TestSignInRulesWiring(t *testing.T) {
 		t.Fatal(err)
 	}
 	idw := identityWiring{mode: identityModeKeycloak, session: convergeDeps(t, identityModeKeycloak, &st).session, dirty: newIdentityDirty()}
-	deps, th := eventsDeps(t.Context(), idw, &memMarks{m: map[string]string{}}, table, nil, sinks, slog.New(slog.DiscardHandler))
+	mw := markerWriter(t.Context(), idw, table, nil, &sync.Mutex{}, slog.New(slog.DiscardHandler))
+	if mw == nil {
+		t.Fatal("no marker writer under keycloak")
+	}
+	if markerWriter(t.Context(), identityWiring{mode: identityModeOff}, table, nil, &sync.Mutex{}, slog.New(slog.DiscardHandler)) != nil {
+		t.Error("a marker writer outside keycloak")
+	}
+	deps, th := eventsDeps(t.Context(), idw, &memMarks{m: map[string]string{}}, table, nil, sinks, mw, slog.New(slog.DiscardHandler))
 	var writer, throttle bool
 	for _, s := range deps.UserSinks {
 		switch s.(type) {
@@ -74,6 +83,14 @@ func TestSignInRulesWiring(t *testing.T) {
 	}
 	if len(deps.PassSinks) != 2 {
 		t.Errorf("pass sinks %v, want the converger and the throttle", deps.PassSinks)
+	}
+	// geekdojo/geekdojo-brain#994 (F-994-01): a user sink the accounts add
+	// reaches the drain beside the throttle and the marker writer.
+	extra := &countingUserSink{}
+	sinks.user = []events.UserSink{extra}
+	deps, _ = eventsDeps(t.Context(), idw, &memMarks{m: map[string]string{}}, table, nil, sinks, mw, slog.New(slog.DiscardHandler))
+	if len(deps.UserSinks) != 3 || deps.UserSinks[0] != any(extra) {
+		t.Errorf("user sinks %v, want the added sink, the throttle and the marker writer", deps.UserSinks)
 	}
 
 	// Every other mode: nothing installed, and a real auth service's control
@@ -210,3 +227,8 @@ func TestDoorPolicy_BindingsAreTheConverger(t *testing.T) {
 		}
 	}
 }
+
+// countingUserSink is a user sink that takes nothing.
+type countingUserSink struct{}
+
+func (*countingUserSink) UserEvent(context.Context, events.UserEvent) {}

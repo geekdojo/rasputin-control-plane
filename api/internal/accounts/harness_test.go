@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/credmac"
 	idclient "github.com/geekdojo/rasputin-control-plane/api/internal/identity/client"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/removednames"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/sessions"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
@@ -81,6 +83,17 @@ type kcUser struct {
 	directAdmin bool
 	realm       []string
 	offline     map[string][]string
+	// roles are the console roles held directly besides admin (each
+	// role's users read lists them); creds are the credential types.
+	roles []string
+	creds []string
+	// credIDs are the credentials' ids, beside creds; labels their
+	// userLabels by id; sessions the online sessions' ids; locked is held
+	// by attack detection.
+	credIDs  []string
+	labels   map[string]string
+	sessions []string
+	locked   bool
 }
 
 // request is one write's method, path (realm-relative) and body.
@@ -100,6 +113,27 @@ type fakeKC struct {
 	adminRows int
 	// fail returns an error for a call, by method and realm-relative path.
 	fail func(method, path string) error
+	// gets are every GET's realm-relative path, query included.
+	gets []string
+	// noID leaves the id out of the user list.
+	noID bool
+	// keepNothing answers a user PUT and keeps no attribute it carried.
+	keepNothing bool
+	// observe, when set, sees every call before it is answered, outside
+	// the fake's lock, so it may block.
+	observe func(method, rel string)
+	// rows models the identity service's attribute rows
+	// (geekdojo/geekdojo-brain#994; Keycloak 26.8.2's UserAdapter): a user
+	// PUT compares each attribute with the rows as they stood when the call
+	// began (before observe), and only where they differ deletes those rows
+	// and inserts the new values, so two overlapping writes of one
+	// attribute store it twice. A PUT carrying an admin-only single-valued
+	// attribute more than once is refused with a 400, counted in rejected.
+	rows     bool
+	rejected int
+	// defs are the realm's groups, memberships, user profile and client
+	// scopes (geekdojo/geekdojo-brain#994 PR 2).
+	defs fakeDefs
 }
 
 func notFound(path string) error {
@@ -116,6 +150,13 @@ func answer(out, v any) {
 
 func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idclient.Response, error) {
 	k.mu.Lock()
+	obs := k.observe
+	snap := k.snapshot(method, path)
+	k.mu.Unlock()
+	if obs != nil {
+		obs(method, strings.TrimPrefix(path, "/admin/realms/"+realm))
+	}
+	k.mu.Lock()
 	defer k.mu.Unlock()
 	rel, ok := strings.CutPrefix(path, "/admin/realms/"+realm)
 	if !ok {
@@ -127,11 +168,15 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		}
 	}
 	var body []byte
-	if in != nil {
+	if tb, ok := in.(idclient.TextBody); ok {
+		body = append([]byte("text/plain:"), secret.Value(tb).Reveal()...)
+	} else if in != nil {
 		body, _ = json.Marshal(in)
 	}
 	if method != http.MethodGet {
 		k.reqs = append(k.reqs, request{method: method, path: rel, body: body})
+	} else {
+		k.gets = append(k.gets, rel)
 	}
 	u, _ := url.Parse(rel)
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
@@ -143,6 +188,9 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			answer(out, []map[string]string{{"id": consoleUUID}, {"id": appUUID}})
 		}
 		return idclient.Response{Status: 200}, nil
+	case parts[0] == "clients" && len(parts) == 4 && parts[2] == "roles":
+		answer(out, map[string]any{"id": "role-" + parts[3], "name": parts[3]})
+		return idclient.Response{Status: 200}, nil
 	case parts[0] == "clients" && len(parts) == 5 && parts[4] == "users":
 		var list []map[string]any
 		if k.fullPage {
@@ -151,8 +199,8 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			}
 		}
 		for _, x := range k.users {
-			if x.directAdmin {
-				list = append(list, map[string]any{"enabled": x.rep["enabled"]})
+			if (parts[3] == "admin" && x.directAdmin) || slices.Contains(x.roles, parts[3]) {
+				list = append(list, map[string]any{"id": x.rep["id"], "username": x.rep["username"], "enabled": x.rep["enabled"]})
 			}
 		}
 		// Honour max= as the identity service does: never more rows than asked.
@@ -165,6 +213,18 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	case parts[0] == "roles":
 		answer(out, map[string]any{"id": "offline-role-id", "name": offlineAccess})
 		return idclient.Response{Status: 200}, nil
+	case parts[0] == "attack-detection" && method == http.MethodDelete:
+		k.log.add("unlock")
+		if x := k.users[parts[len(parts)-1]]; x != nil {
+			x.locked = false
+		}
+		return idclient.Response{Status: 204}, nil
+	case parts[0] == "sessions" && u.Query().Get("isOffline") != "true":
+		k.log.add("session-delete:" + parts[1])
+		for _, x := range k.users {
+			x.sessions = slices.DeleteFunc(x.sessions, func(s string) bool { return s == parts[1] })
+		}
+		return idclient.Response{Status: 204}, nil
 	case parts[0] == "sessions":
 		k.log.add("offline-delete:" + parts[1])
 		for _, x := range k.users {
@@ -173,8 +233,13 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			}
 		}
 		return idclient.Response{Status: 204}, nil
+	case k.isDefinition(parts):
+		return k.definitions(method, path, parts, body, out)
 	case parts[0] != "users":
 		return idclient.Response{}, errors.New("fake: unknown path " + rel)
+	case len(parts) == 1:
+		k.list(u.Query(), out)
+		return idclient.Response{Status: 200}, nil
 	}
 	x := k.users[parts[1]]
 	if x == nil {
@@ -187,9 +252,40 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	case tail == "" && method == http.MethodPut:
 		var b map[string]any
 		_ = json.Unmarshal(body, &b)
+		if snap != nil {
+			attrs, _ := b["attributes"].(map[string]any)
+			for name, multi := range flows.AdminOnlyAttributes {
+				if vs, _ := attrs[name].([]any); !multi && len(vs) > 1 {
+					k.rejected++
+					return idclient.Response{Status: http.StatusBadRequest}, &idclient.Error{Op: "admin", Path: path, Status: http.StatusBadRequest, Kind: idclient.ErrProtocol}
+				}
+			}
+			b["attributes"] = mergeRows(x.rep["attributes"], snap, attrs)
+		}
+		if e, ok := b["email"].(string); ok && e != x.rep["email"] {
+			for id, o := range k.users {
+				if id != parts[1] && strings.EqualFold(o.rep["email"].(string), e) {
+					return idclient.Response{}, &idclient.Error{Op: "admin", Path: path, Status: http.StatusConflict, Kind: idclient.ErrConflict}
+				}
+			}
+			k.log.add("set-email")
+			x.rep["email"] = strings.ToLower(e)
+		}
 		if e, ok := b["enabled"].(bool); ok && !e && x.rep["enabled"] == true {
 			k.log.add("disable")
 			x.rep["enabled"] = false
+		}
+		if e, ok := b["enabled"].(bool); ok && e && x.rep["enabled"] == false {
+			k.log.add("enable")
+			x.rep["enabled"] = true
+		}
+		if ra, ok := b["requiredActions"].([]any); ok {
+			k.log.add("set-actions")
+			x.rep["requiredActions"] = ra
+		}
+		if n, ok := b["firstName"].(string); ok && n != x.rep["firstName"] {
+			k.log.add("set-name")
+			x.rep["firstName"] = n
 		}
 		before, after := roleOf(x.rep["attributes"]), roleOf(b["attributes"])
 		switch {
@@ -198,12 +294,21 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 		case after != before:
 			k.log.add("set-attr:" + after)
 		}
-		x.rep["attributes"] = b["attributes"]
+		for _, a := range []string{AttrNetwork, "rasputin_email"} {
+			if bv, av := attrOf(x.rep["attributes"], a), attrOf(b["attributes"], a); bv != av {
+				k.log.add("set-" + a + ":" + av)
+			}
+		}
+		if !k.keepNothing {
+			x.rep["attributes"] = b["attributes"]
+		}
 	case tail == "" && method == http.MethodDelete:
 		k.log.add("delete-user")
 		delete(k.users, parts[1])
 	case tail == "logout":
 		k.log.add("logout")
+	case tail == "reset-password" && method == http.MethodPut:
+		k.log.add("reset-password")
 	case strings.HasPrefix(tail, "offline-sessions/"):
 		var list []map[string]string
 		for _, s := range x.offline[parts[3]] {
@@ -216,6 +321,63 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 			list = append(list, map[string]string{"name": r})
 		}
 		answer(out, list)
+	case tail == "credentials" && method == http.MethodGet:
+		var list []map[string]string
+		for i, c := range x.creds {
+			list = append(list, map[string]string{"id": x.credIDs[i], "type": c})
+		}
+		answer(out, list)
+	case strings.HasPrefix(tail, "credentials/") && len(parts) == 4 && method == http.MethodDelete:
+		i := slices.Index(x.credIDs, parts[3])
+		if i < 0 {
+			return idclient.Response{}, notFound(path)
+		}
+		k.log.add("delete-credential:" + x.creds[i])
+		x.creds, x.credIDs = slices.Delete(x.creds, i, i+1), slices.Delete(x.credIDs, i, i+1)
+	case strings.HasPrefix(tail, "credentials/") && len(parts) == 5 && parts[4] == "userLabel":
+		if !slices.Contains(x.credIDs, parts[3]) {
+			return idclient.Response{}, notFound(path)
+		}
+		k.log.add("rename-credential")
+		if x.labels == nil {
+			x.labels = map[string]string{}
+		}
+		x.labels[parts[3]] = string(body)
+	case tail == "sessions" && method == http.MethodGet:
+		var list []map[string]string
+		for _, s := range x.sessions {
+			list = append(list, map[string]string{"id": s})
+		}
+		answer(out, list)
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodGet:
+		var list []map[string]string
+		for _, r := range x.console {
+			list = append(list, map[string]string{"name": r})
+		}
+		answer(out, list)
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodDelete:
+		var reps []map[string]any
+		_ = json.Unmarshal(body, &reps)
+		for _, r := range reps {
+			name, _ := r["name"].(string)
+			k.log.add("remove-console:" + name)
+			x.console = slices.DeleteFunc(x.console, func(c string) bool { return c == name })
+			x.roles = slices.DeleteFunc(x.roles, func(c string) bool { return c == name })
+			if name == "admin" {
+				x.directAdmin = false
+			}
+		}
+	case tail == "role-mappings/clients/"+consoleUUID && method == http.MethodPost:
+		var reps []map[string]any
+		_ = json.Unmarshal(body, &reps)
+		for _, r := range reps {
+			name, _ := r["name"].(string)
+			k.log.add("add-console:" + name)
+			x.console = append(x.console, name)
+			// The role's holders list it from now on, as the identity
+			// service's does.
+			x.roles = append(x.roles, name)
+		}
 	case tail == "role-mappings/realm" && method == http.MethodGet:
 		var list []map[string]string
 		for _, r := range x.realm {
@@ -234,6 +396,96 @@ func (k *fakeKC) Admin(_ context.Context, method, path string, in, out any) (idc
 	return idclient.Response{Status: 200}, nil
 }
 
+// snapshot is, under rows, a user PUT's account attributes as they stand
+// when the call begins: the rows its transaction loads. Otherwise nil.
+func (k *fakeKC) snapshot(method, path string) map[string]any {
+	parts := strings.Split(strings.Trim(strings.TrimPrefix(path, "/admin/realms/"+realm), "/"), "/")
+	if !k.rows || method != http.MethodPut || len(parts) != 2 || parts[0] != "users" || k.users[parts[1]] == nil {
+		return nil
+	}
+	return cloneAttrs(k.users[parts[1]].rep["attributes"])
+}
+
+func cloneAttrs(attrs any) map[string]any {
+	m, _ := attrs.(map[string]any)
+	out := map[string]any{}
+	for name, v := range m {
+		vs, _ := v.([]any)
+		out[name] = slices.Clone(vs)
+	}
+	return out
+}
+
+// mergeRows is what a user PUT leaves under rows: for each attribute whose
+// new values differ from snap (the rows the call loaded), the rows snap
+// held are deleted from cur and the new values inserted; an attribute
+// whose values equal snap is left as cur holds it.
+func mergeRows(cur any, snap, body map[string]any) map[string]any {
+	out := cloneAttrs(cur)
+	names := map[string]bool{}
+	for n := range snap {
+		names[n] = true
+	}
+	for n := range body {
+		names[n] = true
+	}
+	for n := range names {
+		old, _ := snap[n].([]any)
+		nw, _ := body[n].([]any)
+		if slices.Equal(old, nw) {
+			continue
+		}
+		vs, _ := out[n].([]any)
+		for _, o := range old {
+			if i := slices.Index(vs, o); i >= 0 {
+				vs = slices.Delete(vs, i, i+1)
+			}
+		}
+		vs = append(vs, nw...)
+		if len(vs) == 0 {
+			delete(out, n)
+			continue
+		}
+		out[n] = vs
+	}
+	return out
+}
+
+// list answers the users listing: by exact email, or every account in
+// creation order with createdTimestamp, as the identity service does.
+func (k *fakeKC) list(q url.Values, out any) {
+	var list []map[string]any
+	for _, x := range k.users {
+		if e := q.Get("email"); q.Has("email") && !strings.EqualFold(e, x.rep["email"].(string)) {
+			continue
+		}
+		rep := map[string]any{}
+		for key, v := range x.rep {
+			rep[key] = v
+		}
+		if k.noID {
+			delete(rep, "id")
+		}
+		list = append(list, rep)
+	}
+	if m, err := strconv.Atoi(q.Get("max")); err == nil && len(list) > m {
+		list = list[:m]
+	}
+	answer(out, list)
+}
+
+// attrOf is an attribute's values, joined by commas.
+func attrOf(attrs any, name string) string {
+	m, _ := attrs.(map[string]any)
+	vs, _ := m[name].([]any)
+	var out []string
+	for _, v := range vs {
+		s, _ := v.(string)
+		out = append(out, s)
+	}
+	return strings.Join(out, ",")
+}
+
 func roleOf(attrs any) string {
 	m, _ := attrs.(map[string]any)
 	vs, _ := m[AttrAppRole].([]any)
@@ -250,9 +502,19 @@ type person struct {
 	enabled          bool
 	console          []string
 	directAdmin      bool
-	appRole          string
-	offlineRole      bool
-	offline          map[string][]string
+	// roles are direct console roles besides admin; creds the credential
+	// types; created the createdTimestamp; actions the required actions
+	// (nil seeds CONFIGURE_TOTP).
+	roles       []string
+	creds       []string
+	created     int64
+	actions     []any
+	appRole     string
+	offlineRole bool
+	offline     map[string][]string
+	// network is the network grants; sessions the online sessions.
+	network  []string
+	sessions []string
 }
 
 func (k *fakeKC) add(p person) {
@@ -262,9 +524,24 @@ func (k *fakeKC) add(p person) {
 	if p.appRole != "" {
 		attrs[AttrAppRole] = []any{p.appRole}
 	}
+	if len(p.network) > 0 {
+		var vs []any
+		for _, g := range p.network {
+			vs = append(vs, g)
+		}
+		attrs[AttrNetwork] = vs
+	}
+	actions := p.actions
+	if actions == nil {
+		actions = []any{"CONFIGURE_TOTP"}
+	}
 	u := &kcUser{rep: map[string]any{"id": p.sub, "username": p.name, "email": p.email, "firstName": "Test",
-		"enabled": p.enabled, "attributes": attrs, "requiredActions": []any{"CONFIGURE_TOTP"}},
-		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}}
+		"enabled": p.enabled, "attributes": attrs, "requiredActions": actions, "createdTimestamp": p.created},
+		console: p.console, directAdmin: p.directAdmin, offline: map[string][]string{}, roles: p.roles, creds: slices.Clone(p.creds),
+		sessions: slices.Clone(p.sessions)}
+	for i, c := range p.creds {
+		u.credIDs = append(u.credIDs, "id-"+c+"-"+strconv.Itoa(i))
+	}
 	if p.offlineRole {
 		u.realm = []string{offlineAccess}
 	}
@@ -287,6 +564,21 @@ func (k *fakeKC) exists(sub string) bool {
 	return k.users[sub] != nil
 }
 
+// countingLock is the one accounts lock, counting the callers waiting for
+// it: the fact a lock test waits on.
+type countingLock struct {
+	mu      sync.Mutex
+	waiting atomic.Int32
+}
+
+func (l *countingLock) Lock() {
+	l.waiting.Add(1)
+	l.mu.Lock()
+	l.waiting.Add(-1)
+}
+
+func (l *countingLock) Unlock() { l.mu.Unlock() }
+
 // ---- the recording collaborators -------------------------------------------
 
 type recGuard struct {
@@ -307,6 +599,11 @@ type recConsole struct {
 func (c recConsole) EndBySub(ctx context.Context, sub string) (int64, error) {
 	c.log.add("console")
 	return c.inner.EndBySub(ctx, sub)
+}
+
+func (c recConsole) EndBySubExcept(ctx context.Context, sub, sid string) (int64, error) {
+	c.log.add("console-except:" + sid)
+	return c.inner.EndBySubExcept(ctx, sub, sid)
 }
 
 type recMoved struct {
@@ -364,22 +661,28 @@ func (h *recHook) Revoke(_ context.Context, _ string, _ RevokeKind) (Outcome, er
 // ---- the harness -----------------------------------------------------------
 
 type harness struct {
-	kc       *fakeKC
-	log      *callLog
-	users    *Users
-	rev      *Revoker
-	access   *Access
-	runner   *jobs.Runner
-	jobs     *jobs.Store
-	auth     *auth.Store
-	console  *auth.ConsoleSessions
-	removed  *removednames.Store
-	list     *recList
-	facts    *recFacts
-	hooks    map[string]*recHook
-	rec      *logkittest.Recorder
-	sessions sessions.Ender
-	mac      *credmac.Key
+	kc           *fakeKC
+	log          *callLog
+	users        *Users
+	rev          *Revoker
+	access       *Access
+	runner       *jobs.Runner
+	jobs         *jobs.Store
+	auth         *auth.Store
+	console      *auth.ConsoleSessions
+	designations *Designations
+	removed      *removednames.Store
+	list         *recList
+	facts        *recFacts
+	hooks        map[string]*recHook
+	rec          *logkittest.Recorder
+	sessions     sessions.Ender
+	mac          *credmac.Key
+	nc           *nats.Conn
+	// lock is the one accounts lock; guard the real guard over it.
+	lock  *countingLock
+	guard *authz.RoleGuard
+	ra    RoleAccounts
 }
 
 func newHarness(t *testing.T) *harness {
@@ -396,7 +699,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.auth.Close() })
-	if h.console, err = auth.NewConsoleSessions(h.auth, time.Now, rand.Reader); err != nil {
+	if h.designations, err = OpenDesignations(t.Context(), filepath.Join(dir, "rasputin.db"), time.Now); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.designations.Close() })
+	if h.console, err = auth.NewConsoleSessions(h.auth, time.Now, rand.Reader, h.designations); err != nil {
 		t.Fatal(err)
 	}
 	if h.mac, err = credmac.New(secret.New([]byte(testKey))); err != nil {
@@ -414,8 +721,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lock := &sync.Mutex{}
-	guard, err := authz.NewRoleGuard(ra, lock)
+	h.ra = ra
+	h.lock = &countingLock{}
+	lock := h.lock
+	h.guard, err = authz.NewRoleGuard(ra, lock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +739,7 @@ func newHarness(t *testing.T) *harness {
 	slogger, log := logkittest.New()
 	h.rec = log
 	if h.rev, err = NewRevoker(RevokerDeps{
-		Sessions: h.sessions, Users: h.users, Guard: recGuard{inner: guard, log: h.log}, Lock: lock,
+		Sessions: h.sessions, Users: h.users, Guard: recGuard{inner: h.guard, log: h.log}, Lock: lock,
 		Console: recConsole{inner: h.console, log: h.log}, Moved: recMoved{inner: h.auth, log: h.log},
 		Removed: h.list, Facts: h.facts, Devices: h.hooks[StepDevices], Apps: h.hooks[StepApps], Network: h.hooks[StepNetwork],
 		Log: slogger, StepTimeout: time.Minute,
@@ -447,6 +756,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatal(err)
 	}
 	t.Cleanup(nc.Close)
+	h.nc = nc
 	h.runner = jobs.NewRunner(h.jobs, nc)
 	h.runner.Register(h.rev.Workflow())
 	return h

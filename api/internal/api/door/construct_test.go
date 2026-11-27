@@ -16,7 +16,7 @@ func TestNew_FailsClosed(t *testing.T) {
 	s := f.shared(t)
 	good := Config{Door: f.table.Home, Kind: Home, ConsoleOrigin: s.ConsoleOrigin, Policy: s.Policy, Throttle: s.Throttle,
 		Transport: s.Transport, Upstream: s.Upstream, Theme: s.Theme, Assets: s.Assets, Version: s.Version, InstallName: s.InstallName,
-		Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, Log: s.Log}
+		Dirty: s.Dirty, IDs: s.IDs, Breach: s.Breach, ResetDone: s.ResetDone, Log: s.Log}
 	if _, err := New(good); err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +41,7 @@ func TestNew_FailsClosed(t *testing.T) {
 		"Dirty":       func(c *Config) { c.Dirty = nil },
 		"IDs":         func(c *Config) { c.IDs = nil },
 		"Breach":      func(c *Config) { c.Breach = nil },
+		"ResetDone":   func(c *Config) { c.ResetDone = nil }, // TC-992-16
 		"Log":         func(c *Config) { c.Log = nil },
 	} {
 		c := good

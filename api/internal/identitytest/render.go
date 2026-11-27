@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"text/template"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/flows"
 	"github.com/geekdojo/rasputin-control-plane/secret"
 )
 
@@ -34,8 +35,8 @@ type kcPorts struct {
 // renderKeycloakConf is the runtime keycloak.conf: TLS 1.3 only with the
 // server leaf, the test CA as the trust store (https-client-auth=required is
 // a build option), no plain HTTP, loopback only, the local cache, the front's
-// URL as hostname, and the database. It is #959's keycloak.conf.tmpl with the
-// harness's values. With hostname "" it is door mode, as rasputin-os's
+// URL as hostname, the deny list's false-positive probability, and the
+// database. It is #959's keycloak.conf.tmpl with the harness's values. With hostname "" it is door mode, as rasputin-os's
 // keycloak.conf runs behind the sign-in doors (geekdojo/geekdojo-brain#985):
 // no hostname, so every address follows the forwarded headers the door
 // writes, trusted only from loopback, and the test CA trusted for the
@@ -66,6 +67,10 @@ func renderKeycloakConf(p kcPaths, ports kcPorts, hostname string, dbPassword se
 			line("truststore-paths", out)
 		}
 	}
+	// The deny list's Bloom filter at flows' false-positive probability:
+	// Keycloak's default refused about 1 in 10,000 passwords not on the list
+	// (finding F-1145-40).
+	line("spi-password-policy--password-blacklist--false-positive-probability", flows.DenylistFalsePositiveProbability)
 	line("cache", "local")
 	line("vault-dir", p.VaultDir)
 	line("db-url", "jdbc:postgresql://127.0.0.1:"+strconv.Itoa(ports.DB)+"/"+dbName)

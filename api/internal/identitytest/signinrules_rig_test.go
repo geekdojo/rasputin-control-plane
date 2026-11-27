@@ -193,7 +193,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		_, ok := rulesAppBindings[c]
 		return flows.DoorApp, ok
 	}
-	if r.marks, err = markers.New(markers.Deps{Admin: session, Realm: baselineRealm, DoorOf: doorOf, Log: log}); err != nil {
+	if r.marks, err = markers.New(markers.Deps{Admin: session, Realm: baselineRealm, DoorOf: doorOf, Lock: &sync.Mutex{}, Log: log}); err != nil {
 		t.Fatal(err)
 	}
 	if r.th, err = policy.NewThrottle(policy.ThrottleDeps{Table: table, Now: time.Now}); err != nil {
@@ -206,7 +206,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		t.Fatal(err)
 	}
 	pol, err := policy.New(policy.Deps{Table: table, Readiness: doorReady{}, Throttle: r.th, AppClients: rulesApps{},
-		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Now: time.Now, Bindings: r.conv})
+		Actions: r.actions, Network: doorNetwork{}, Waiting: doorWaiting{}, Removed: noRemovedNames{}, Emails: noEmails{}, Now: time.Now, Bindings: r.conv})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func newRulesRig(t *testing.T, env *Env) *rulesRig {
 		ConsoleOrigin: "https://" + ConsoleHost, Policy: pol, Throttle: r.th, Transport: recordingTransport{inner: relay, r: r},
 		Upstream: env.KeycloakUpstream(), Theme: allow, Assets: os.DirFS(filepath.Join(theme, "login", "resources")), Version: r.version,
 		InstallName: func(context.Context) (string, error) { return rulesInstall, nil }, Dirty: r.drainer,
-		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Breach: r.breach.checker(t), Log: log,
+		IDs: func() string { return fmt.Sprintf("rules-%d", r.ids.Add(1)) }, Breach: r.breach.checker(t), ResetDone: noResetReturn{}, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -455,21 +455,30 @@ func (r *rulesRig) saveCodes(t *testing.T, g *goClient, a doorAnswer) (doorAnswe
 	return r.post(t, g, a, "kc-recovery-codes-settings-form", nil), codes
 }
 
-// tryAnotherWay asks for the other ways from a second-step page and picks
+// recoveryInstead asks for the other ways from a second-step page and picks
 // the recovery code.
 func (r *rulesRig) recoveryInstead(t *testing.T, g *goClient, a doorAnswer) doorAnswer {
+	t.Helper()
+	return recoveryInstead(t, r.settle, g, a)
+}
+
+// recoveryInstead is the "try another way" walk to the recovery-code page,
+// shared by the rules rig and the move rig (geekdojo/geekdojo-brain#1005).
+// settle drains the source's last credential post before each post.
+func recoveryInstead(t *testing.T, settle func(*testing.T), g *goClient, a doorAnswer) doorAnswer {
 	t.Helper()
 	if a.pageID() == "login-login-recovery-authn-code-input" {
 		return a
 	}
-	sel := r.post(t, g, a, "kc-select-try-another-way-form", nil)
+	settle(t)
+	sel := g.submit(a, "kc-select-try-another-way-form", nil)
 	if sel.pageID() != "login-select-authenticator" {
 		t.Fatalf("try another way opened %q, want the chooser", sel.pageID())
 	}
 	_, action := g.form(sel, "kc-select-credential-form")
 	for _, m := range regexp.MustCompile(`(?s)<button[^>]*name="authenticationExecution"[^>]*value="([^"]+)"[^>]*>(.*?)</button>`).FindAllSubmatch(sel.body, -1) {
 		if strings.Contains(strings.ToLower(string(m[2])), "recovery") {
-			r.settle(t)
+			settle(t)
 			b := g.send(http.MethodPost, action, url.Values{"authenticationExecution": {string(m[1])}}, nil)
 			if b.status >= 300 && b.status < 400 && b.loc != nil {
 				return g.follow(b.at.ResolveReference(b.loc).String())

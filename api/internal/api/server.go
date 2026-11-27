@@ -8,16 +8,19 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/accounts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/alerts"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/apps"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/authz"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/bmc"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/breakglass"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/busauth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalog"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/catalogsync"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/console"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/firewall"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/move"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/inventory"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/jobs"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/mesh"
@@ -85,10 +88,19 @@ type Server struct {
 	// as `backup` (design/storage.md §4.4, #298); nil omits the field.
 	backupStates *storage.BackupStates
 	auth         *auth.Service
-	obs          *obs.Status
-	busTokens    *busauth.Store
-	nc           *nats.Conn
-	uiDir        string
+	// resetter decides an administrator's password reset
+	// (geekdojo/geekdojo-brain#992); nil answers 503 identity_not_ready.
+	resetter resetChecker
+	// accountRequests decides every account change
+	// (geekdojo/geekdojo-brain#994); nil answers 503 identity_not_ready.
+	accountRequests AccountRequester
+	// waiting counts the accounts waiting for access
+	// (geekdojo/geekdojo-brain#990), set under keycloak only.
+	waiting   WaitingCounter
+	obs       *obs.Status
+	busTokens *busauth.Store
+	nc        *nats.Conn
+	uiDir     string
 	// releaseSource discovers the latest releases from the public channel
 	// (Check for Updates). nil when not configured — the endpoints then
 	// return 503. releaseChannel is the default channel ("stable" | "dev").
@@ -134,6 +146,10 @@ type Server struct {
 	// the listener was never wired, and the handlers refuse everything:
 	// fail closed.
 	nodeGate *ingestConns
+	// repair is the break-glass service (SetRepair,
+	// geekdojo/geekdojo-brain#321); nil keeps the repair routes at 401 and
+	// 503.
+	repair repairService
 }
 
 // SetReleaseSource wires the update-channel source used by
@@ -354,6 +370,12 @@ func (s *Server) routes() *routeMux {
 	// the moment an operator exists. See restore_handlers.go.
 	mux.HandleFunc("GET /api/restore/candidates", s.handleListRestoreCandidates)
 	mux.HandleFunc("POST /api/restore", s.handleRestore)
+	// Break-glass (geekdojo/geekdojo-brain#321; repair_handlers.go): the
+	// repair code is the authentication of its redemption, and the ways to
+	// make one carry no secret. Both are open by necessity: sign-in is what
+	// is broken.
+	mux.HandleFunc("POST /api/auth/break-glass", s.handleBreakGlass)
+	mux.HandleFunc("GET /api/repair/ways", s.handleRepairWays)
 
 	// Authenticated. Every session route is registered through gate with its
 	// class (routeclass.go, geekdojo/geekdojo-brain#1002): view, control
@@ -363,7 +385,23 @@ func (s *Server) routes() *routeMux {
 	// against.
 	gate := func(pattern string, rule routeRule, h http.HandlerFunc) { s.gate(mux, pattern, rule, h) }
 
+	// The break-glass repair session's routes (geekdojo/geekdojo-brain#321):
+	// its own session, and what it may do. Every route below them refuses
+	// it.
+	gate("GET /api/repair/state", repairNeeds(), s.handleRepairState)
+	gate("POST /api/repair/end", repairNeeds(), s.handleRepairEnd)
+	gate("POST /api/repair/restart", repairJob(breakglass.RestartKind), s.handleRepairRestart)
+	gate("POST /api/repair/reset", repairJob(accounts.RepairResetKind), s.handleRepairReset)
+	gate("POST /api/repair/move", repairJob(move.Kind), s.handleRepairMove)
+
 	gate("POST /api/jobs", anyJob(), s.handleCreateJob)
+	gate("POST /api/accounts/{id}/reset-password", needs(authz.NeedControl(authz.IAM)), s.handleResetPassword)
+	// A person adds a sign-in method to their own account (#1150).
+	gate("POST /api/me/sign-in-methods", needs(authz.NeedSelf()), s.handleAddSignInMethod)
+	// Every account change (#994): the request names its kind, so the
+	// router checks Self and the runner decides the kind.
+	gate("POST /api/accounts/jobs", anyJob(), s.handleAccountJob)
+	gate("GET /api/accounts/waiting", needs(authz.AccountsRead()), s.handleWaiting)
 	gate("GET /api/jobs", needs(authz.NeedView()), s.handleListJobs)
 	gate("GET /api/jobs/{id}", needs(authz.NeedView()), s.handleGetJob)
 	gate("GET /api/jobs/{id}/steps", needs(authz.NeedView()), s.handleListSteps)

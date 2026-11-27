@@ -1,7 +1,7 @@
 package converge
 
 // The sign-in rules (geekdojo/geekdojo-brain#987, Identity 4.5): converge
-// reads, compares and writes the seven flows, the required actions, the user
+// reads, compares and writes the seven flows and the reset flow, the required actions, the user
 // profile, the console roles, the default roles' composites and the own
 // clients' scopes and bindings, all rendered by package flows.
 
@@ -63,7 +63,7 @@ type role struct {
 type observedRules struct {
 	// flowIDs are the top-level flows' ids, by alias.
 	flowIDs map[string]string
-	// steps are each variant's executions, flattened, by alias; execs the
+	// steps are each owned flow's executions, flattened, by alias; execs the
 	// same as listed.
 	steps map[string][]flows.Step
 	execs map[string][]execution
@@ -88,8 +88,7 @@ func (c *Converger) observeRules(ctx context.Context) (observedRules, error) {
 	for _, f := range top {
 		o.flowIDs[f.Alias] = f.ID
 	}
-	for _, v := range flows.Variants {
-		alias := v.Alias()
+	for _, alias := range flows.Aliases() {
 		var execs []execution
 		if err := c.get(ctx, "/authentication/flows/"+url.PathEscape(alias)+"/executions", &execs); err != nil {
 			return o, err
@@ -191,9 +190,8 @@ type scopeWrite struct {
 // to w, naming each drifted field.
 func diffRules(d Desired, o observed, w *writes) {
 	r := d.Rules
-	// Flows: each variant whose executions differ is rebuilt whole.
-	for _, v := range flows.Variants {
-		alias := v.Alias()
+	// Flows: each owned flow whose executions differ is rebuilt whole.
+	for _, alias := range flows.Aliases() {
 		if _, ok := o.rules.flowIDs[alias]; !ok {
 			w.fields = append(w.fields, "flow."+alias+".missing")
 			continue
@@ -236,20 +234,21 @@ func diffRules(d Desired, o observed, w *writes) {
 			w.fields = append(w.fields, "action."+want.Alias+".defaultAction")
 			put.DefaultAction, changed = *want.DefaultAction, true
 		}
+		// cfg is the config the action ends with: as read, the owned keys
+		// set over it.
+		cfg := map[string]string{}
+		maps.Copy(cfg, got.Config)
+		maps.Copy(cfg, want.Config)
 		if changed || !ok {
-			put.Config = nil
+			// The action PUT replaces the action's whole config with the
+			// body's, and a body with none clears it (register row T253),
+			// so it carries the config the action ends with.
+			put.Config = cfg
 			w.rules.actions[want.Alias] = put
 			w.rules.actionOrder = append(w.rules.actionOrder, want.Alias)
 		}
 		if want.Config != nil && !configHolds(got.Config, want.Config) {
 			w.fields = append(w.fields, "action."+want.Alias+".config")
-			cfg := map[string]string{}
-			for k, v := range got.Config {
-				cfg[k] = v
-			}
-			for k, v := range want.Config {
-				cfg[k] = v
-			}
 			w.rules.configs[want.Alias] = cfg
 			w.rules.configOrder = append(w.rules.configOrder, want.Alias)
 		}

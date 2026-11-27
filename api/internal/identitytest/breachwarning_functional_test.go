@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/geekdojo/rasputin-control-plane/api/internal/auth"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/breachcheck"
 	"github.com/geekdojo/rasputin-control-plane/logkit/logkittest"
 	"github.com/geekdojo/rasputin-control-plane/secret"
@@ -45,6 +46,14 @@ const (
 type neverListed struct{}
 
 func (neverListed) Listed(context.Context, secret.Value) (bool, error) { return false, nil }
+
+// noResetReturn is the app door's reset return in rigs no reset reaches
+// (geekdojo/geekdojo-brain#992): a return there is a failure.
+type noResetReturn struct{}
+
+func (noResetReturn) Finish(context.Context, url.Values) (string, string) {
+	return auth.ResetOutcomeFailed, "Rasputin couldn't confirm the password reset."
+}
 
 // rangeRequest is one request the range stub received.
 type rangeRequest struct {

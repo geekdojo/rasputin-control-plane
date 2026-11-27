@@ -3,6 +3,7 @@ package converge
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -241,9 +242,14 @@ func (f *fakeKC) rules(method, path string, body []byte, out any) (idclient.Resp
 				_ = roundTrip(in["config"], &cfg)
 				r.actions[i].Config = cfg
 			} else {
+				// As Keycloak 26.8.2 does (register row T253): the
+				// action PUT replaces the whole config with the body's,
+				// and a body with none clears it.
 				var a requiredAction
 				_ = json.Unmarshal(body, &a)
 				r.actions[i].Enabled, r.actions[i].DefaultAction = a.Enabled, a.DefaultAction
+				r.actions[i].Config = map[string]string{}
+				maps.Copy(r.actions[i].Config, a.Config)
 			}
 		}
 		return done()

@@ -265,7 +265,8 @@ func TestRealmRules(t *testing.T) {
 
 // TC-987-26: the four actions enabled, CONFIGURE_TOTP with the clock-sync
 // fact, every other listed action (delete_credential included) disabled,
-// and defaultAction false except the recovery codes'.
+// and defaultAction false, the recovery codes' too once first run is over
+// (TC-990-23 below covers first run).
 func TestRequiredActions(t *testing.T) {
 	listed := []string{"TERMS_AND_CONDITIONS", "UPDATE_PROFILE", "VERIFY_EMAIL", "delete_credential", "CONFIGURE_TOTP", "UPDATE_PASSWORD"}
 	for _, synced := range []bool{false, true} {
@@ -277,11 +278,7 @@ func TestRequiredActions(t *testing.T) {
 			if a.Enabled != wantOn {
 				t.Errorf("synced %v: %s enabled %v, want %v", synced, a.Alias, a.Enabled, wantOn)
 			}
-			if a.Alias == ActionRecoveryCodes {
-				if a.DefaultAction != nil {
-					t.Error("the recovery codes' default flag is owned")
-				}
-			} else if a.DefaultAction == nil || *a.DefaultAction {
+			if a.DefaultAction == nil || *a.DefaultAction {
 				t.Errorf("%s defaultAction is not false", a.Alias)
 			}
 		}
@@ -326,14 +323,14 @@ func TestApplyProfile(t *testing.T) {
 		t.Errorf("username validations %v", v)
 	}
 	for name := range AdminOnlyAttributes {
-		if !SameJSON(byName[name]["permissions"], adminOnly()) {
+		if !SameJSON(byName[name]["permissions"], AdminOnlyPermissions()) {
 			t.Errorf("%s permissions %v", name, byName[name]["permissions"])
 		}
 	}
 	if byName["pet"] == nil || p["groups"] == nil {
 		t.Error("an attribute or the groups the rules do not own was dropped")
 	}
-	if !SameJSON(byName["claim_x"]["permissions"], adminOnly()) {
+	if !SameJSON(byName["claim_x"]["permissions"], AdminOnlyPermissions()) {
 		t.Error("claim_x was not made admin-only")
 	}
 	var integrity []string
@@ -425,8 +422,8 @@ func TestVariant(t *testing.T) {
 	if b := Bindings(map[string]Variant{"x": AdminsFirst}); b["x"] != AdminsFirst || b["rasputin-console"] != HomeConsole {
 		t.Errorf("Bindings = %v", b)
 	}
-	if len(Render(Inputs{}).Flows) != 7 {
-		t.Error("Render does not render seven flows")
+	if len(Render(Inputs{}).Flows) != 8 {
+		t.Error("Render does not render the seven sign-in flows and the reset flow")
 	}
 }
 
@@ -449,5 +446,30 @@ func TestSameSteps(t *testing.T) {
 	}
 	if SameSteps(a, c) {
 		t.Error("a changed config compares equal")
+	}
+}
+
+// TC-990-23: registration is allowed, and the recovery-codes action is a
+// default action exactly while first run holds; every other stays false.
+// FirstRun is in the rendered rules, so a claim changes the desired hash.
+func TestRequiredActions_TC990_23_DefaultDuringFirstRunOnly(t *testing.T) {
+	if RealmRules(Inputs{})["registrationAllowed"] != true {
+		t.Error("registrationAllowed is not true")
+	}
+	listed := []string{"UPDATE_PROFILE", "VERIFY_EMAIL"}
+	for _, first := range []bool{true, false} {
+		for _, a := range RequiredActions(Inputs{FirstRun: first}, listed) {
+			want := first && a.Alias == ActionRecoveryCodes
+			if a.DefaultAction == nil || *a.DefaultAction != want {
+				t.Errorf("first run %v: %s defaultAction %v, want %v", first, a.Alias, a.DefaultAction, want)
+			}
+		}
+		want := []string{}
+		if first {
+			want = []string{ActionRecoveryCodes}
+		}
+		if got := Render(Inputs{FirstRun: first}).DefaultActions; !slices.Equal(got, want) {
+			t.Errorf("first run %v: Render's DefaultActions %v, want %v", first, got, want)
+		}
 	}
 }
