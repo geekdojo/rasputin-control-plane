@@ -138,17 +138,34 @@ type Ways struct {
 }
 
 // Ways are the ways that exist on this control plane: its own screen and
-// keyboard, its serial console only while it is not the BMC link's host, and
-// SSH with -t, which gives the command a terminal to print into.
-func (s *Service) Ways() Ways {
+// keyboard, its serial console only while it is not the BMC link's host and
+// a serial login runs on it, and SSH with -t, which gives the command a
+// terminal to print into.
+func (s *Service) Ways(ctx context.Context) Ways {
 	const cmd = "rasputin-api repair-code"
 	w := []Way{{ID: "screen", Text: "On the control plane's own screen and keyboard, sign in as root and run:", Command: cmd}}
-	if !s.d.Facts.BMCHost() {
+	if s.serialLogin(ctx) {
 		w = append(w, Way{ID: "serial", Text: "On the control plane's serial console, sign in as root and run:", Command: cmd})
 	}
 	w = append(w, Way{ID: "ssh", Text: "From a computer that holds the control plane's SSH key, run:",
 		Command: "ssh -t root@" + s.d.Facts.ConsoleHost + " " + cmd})
 	return Ways{SignInAt: "https://" + s.d.Facts.ConsoleHost, Ways: w, URLs: s.RepairURLs()}
+}
+
+// serialLogin is whether the serial console offers a root login now: never
+// on the BMC link's host, which is checked first and reads no unit, and
+// otherwise only while a serial login getty runs. A login state that can't
+// be read offers none (ERR-CLOSED), with a WARN.
+func (s *Service) serialLogin(ctx context.Context) bool {
+	if s.d.Facts.BMCHost() {
+		return false
+	}
+	on, err := s.d.Facts.SerialLogin(ctx)
+	if err != nil {
+		s.log.WarnContext(ctx, "The serial console's login state couldn't be read for the repair page.", "event", "breakglass.serial_unread", "err", err.Error())
+		return false
+	}
+	return on
 }
 
 // resetAction is the reset (C1), listed whenever it is wired: disabled once

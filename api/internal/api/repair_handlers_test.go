@@ -74,6 +74,11 @@ type repairRig struct {
 	svc     *breakglass.Service
 	rec     *logkittest.Recorder
 	bmcHost bool
+	// serialOn and serialErr are the serial login fact's answer, and
+	// serialCtx the context it was last read with.
+	serialOn  bool
+	serialErr error
+	serialCtx context.Context
 	// out collects every body and header the rig's requests were answered
 	// with, for TC-321-25's search.
 	out strings.Builder
@@ -127,7 +132,11 @@ func newRepairService(t *testing.T, r *repairRig, identity breakglass.Identity) 
 		Alerts: r.alertsOrNew(), Jobs: r.f.jobsStore, Identity: identity, Resets: r.resets, Move: r.move,
 		Busy: func(context.Context) (string, bool) { return "", false },
 		Facts: breakglass.Facts{ConsoleHost: repairHost, PrimaryIP: func() net.IP { return net.ParseIP(repairIP) },
-			BMCHost: func() bool { return r.bmcHost }},
+			BMCHost: func() bool { return r.bmcHost },
+			SerialLogin: func(ctx context.Context) (bool, error) {
+				r.serialCtx = ctx
+				return r.serialOn, r.serialErr
+			}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -162,6 +171,8 @@ type req struct {
 	cookies                          []*http.Cookie
 	header                           http.Header
 	bare                             bool // the router alone, without the outer origin layers
+	// ctx, when set, is the request's context.
+	ctx context.Context
 }
 
 func (r *repairRig) do(q req) *httptest.ResponseRecorder {
@@ -170,6 +181,9 @@ func (r *repairRig) do(q req) *httptest.ResponseRecorder {
 	}
 	hr := httptest.NewRequest(q.method, "https://"+q.host+q.path, strings.NewReader(q.body))
 	hr.Host = q.host
+	if q.ctx != nil {
+		hr = hr.WithContext(q.ctx)
+	}
 	if q.remote != "" {
 		hr.RemoteAddr = q.remote
 	}
@@ -543,17 +557,27 @@ func TestRepair_Restart_TC321_19(t *testing.T) {
 	}
 }
 
-// TC-321-21 (the endpoints): GET /api/repair/ways lists only the ways, the
-// serial console only without the BMC-host marker; GET /api/repair/state
-// answers 401 without a session and the state, actions and jobs with one.
+// TC-321-21 (the endpoints) and TC-321-75: GET /api/repair/ways lists only
+// the ways, the serial console exactly when the BMC-host marker is absent
+// and a serial login getty runs, read with the request's context, and
+// answers 200 even when that read fails; GET /api/repair/state answers 401
+// without a session and the state, actions and jobs with one.
 func TestRepair_WaysAndState_TC321_21(t *testing.T) {
 	r := newRepairRig(t, &repairIdentity{st: identitystate.Failed}, false)
-	for _, marker := range []bool{false, true} {
-		r.bmcHost = marker
-		w := r.do(req{method: http.MethodGet, path: "/api/repair/ways"})
+	type reqKey struct{}
+	for _, c := range []struct {
+		marker, on bool
+		err        error
+	}{
+		{false, true, nil}, {false, false, nil}, {true, true, nil}, {true, false, nil},
+		{false, true, errors.New("no bus")},
+	} {
+		r.bmcHost, r.serialOn, r.serialErr, r.serialCtx = c.marker, c.on, c.err, nil
+		name := fmt.Sprintf("marker %v, getty %v, err %v", c.marker, c.on, c.err)
+		w := r.do(req{method: http.MethodGet, path: "/api/repair/ways", ctx: context.WithValue(context.Background(), reqKey{}, name)})
 		var body map[string]json.RawMessage
 		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &body) != nil {
-			t.Fatalf("ways: %d %s", w.Code, w.Body.String())
+			t.Fatalf("%s: ways: %d %s", name, w.Code, w.Body.String())
 		}
 		keys := []string{}
 		for k := range body {
@@ -561,13 +585,20 @@ func TestRepair_WaysAndState_TC321_21(t *testing.T) {
 		}
 		slices.Sort(keys)
 		if !slices.Equal(keys, []string{"signInAt", "urls", "ways"}) {
-			t.Errorf("ways keys %v", keys)
+			t.Errorf("%s: ways keys %v", name, keys)
 		}
-		if serial := strings.Contains(string(body["ways"]), `"serial"`); serial == marker {
-			t.Errorf("marker %v: serial listed %v", marker, serial)
+		want := !c.marker && c.on && c.err == nil
+		if serial := strings.Contains(string(body["ways"]), `"serial"`); serial != want {
+			t.Errorf("%s: serial listed %v, want %v", name, serial, want)
 		}
 		if !strings.Contains(string(body["ways"]), "ssh -t root@ci.local rasputin-api repair-code") {
-			t.Errorf("ways %s", body["ways"])
+			t.Errorf("%s: ways %s", name, body["ways"])
+		}
+		switch {
+		case c.marker && r.serialCtx != nil:
+			t.Errorf("%s: the serial login was read on the BMC link's host", name)
+		case !c.marker && (r.serialCtx == nil || r.serialCtx.Value(reqKey{}) != name):
+			t.Errorf("%s: the serial login was not read with the request's context", name)
 		}
 	}
 	wantCoded(t, "state without a session", r.state(nil, repairHost), http.StatusUnauthorized, codeRepairSessionRequired)

@@ -8,7 +8,8 @@ package identitytest
 // codes with the real `rasputin-api repair-code` in a pty and redeems them
 // from the Go client and in the pinned Chrome; RESTART brings the real
 // Keycloak back; an administrator's normal sign-in and an api restart each
-// end the session and retire the code.
+// end the session and retire the code. It also lists the serial way against
+// the runner's real systemd (TC-321-77).
 //
 // It needs what the console stack needs, plus util-linux's script and
 // setpriv. Without them it skips, and under
@@ -98,6 +99,7 @@ func TestIdentitySystemd_BreakGlass(t *testing.T) {
 	})
 	bg := &breakGlass{t: t, s: s, ctx: ctx, admin: admin, local: s.client(nil)}
 	s.awaitFiles(ctx, "the api serves the repair-code socket", repairSocket)
+	bg.tcSerialWay()
 
 	// Sign-in down.
 	if out, err := s.pair.run(ctx, "systemctl", "stop", s.pair.KCUnit); err != nil {
@@ -767,5 +769,119 @@ func (bg *breakGlass) tc34APIRestart() {
 	}
 	if status, code, _ := bg.redeem(bg.local, origin, outstanding); status != http.StatusUnauthorized || code != "repair_code_none" {
 		t.Errorf("TC-321-34: the code after an api restart: %d %s, want 401 repair_code_none", status, code)
+	}
+}
+
+// serialStandIn is TC-321-77's stand-in serial login getty: a unit file of
+// its own, so it needs no tty, under the name the api lists.
+const (
+	serialStandIn     = "serial-getty@ttyRASPCI.service"
+	serialStandInUnit = `[Unit]
+Description=Stand-in serial getty (geekdojo/geekdojo-brain#321, TC-321-77)
+
+[Service]
+ExecStart=/usr/bin/sleep infinity
+`
+)
+
+// activeSerialGettys is the runner's active serial gettys, read by the test's
+// own list-units call, not the api's parser.
+func (bg *breakGlass) activeSerialGettys(ctx context.Context) []string {
+	bg.t.Helper()
+	out, err := bg.s.pair.run(ctx, "systemctl", "list-units", "--type=service", "--state=active", "--plain", "--no-legend",
+		"serial-getty@*.service")
+	if err != nil {
+		bg.t.Fatalf("TC-321-77: list the serial gettys: %v: %s", err, out)
+	}
+	var units []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if f := strings.Fields(line); len(f) > 0 {
+			units = append(units, f[0])
+		}
+	}
+	return units
+}
+
+// serialListed is whether GET /api/repair/ways lists the serial way.
+func (bg *breakGlass) serialListed(step string) bool {
+	bg.t.Helper()
+	status, b, _ := bg.call(bg.local, http.MethodGet, "https://"+consoleCID+".local/api/repair/ways", "", nil)
+	var body struct {
+		Ways []struct {
+			ID string `json:"id"`
+		} `json:"ways"`
+	}
+	if status != http.StatusOK || json.Unmarshal(b, &body) != nil {
+		bg.t.Fatalf("TC-321-77: %s: ways %d %s", step, status, b)
+	}
+	for _, w := range body.Ways {
+		if w.ID == "serial" {
+			return true
+		}
+	}
+	return false
+}
+
+// TC-321-77 (F-321-42, F-321-44): the real api lists the serial way exactly
+// while a serial getty runs under the runner's real systemd. The runner's
+// own serial gettys are stopped first, so the empty result is real, and
+// restarted at cleanup.
+func (bg *breakGlass) tcSerialWay() {
+	t, ctx := bg.t, bg.ctx
+	run := bg.s.pair.run
+	stopped := bg.activeSerialGettys(ctx)
+	path := filepath.Join(unitDir, serialStandIn)
+	t.Cleanup(func() {
+		ctx := context.Background()                         // t.Context() has ended by now
+		_, _ = run(ctx, "systemctl", "stop", serialStandIn) // stopped already unless a step failed
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("TC-321-77: remove %s: %v", path, err)
+		}
+		if out, err := run(ctx, "systemctl", "daemon-reload"); err != nil {
+			t.Errorf("TC-321-77: systemctl daemon-reload: %v: %s", err, out)
+		}
+		_, _ = run(ctx, "systemctl", "reset-failed", serialStandIn) // a unit that never failed has nothing to reset
+		for _, u := range stopped {
+			if out, err := run(ctx, "systemctl", "start", u); err != nil {
+				t.Errorf("TC-321-77: restart the runner's %s: %v: %s", u, err, out)
+			}
+		}
+	})
+	for _, u := range stopped {
+		if out, err := run(ctx, "systemctl", "stop", u); err != nil {
+			t.Fatalf("TC-321-77: stop the runner's %s: %v: %s", u, err, out)
+		}
+	}
+	if left := bg.activeSerialGettys(ctx); len(left) != 0 {
+		t.Fatalf("TC-321-77: serial gettys still active after stopping %q: %q", stopped, left)
+	}
+	if bg.serialListed("no serial getty") {
+		t.Error("TC-321-77: no serial getty runs, yet the serial way is listed")
+	}
+
+	if err := os.WriteFile(path, []byte(serialStandInUnit), 0o644); err != nil {
+		t.Fatalf("TC-321-77: write %s: %v", path, err)
+	}
+	if out, err := run(ctx, "systemctl", "daemon-reload"); err != nil {
+		t.Fatalf("TC-321-77: systemctl daemon-reload: %v: %s", err, out)
+	}
+	if out, err := run(ctx, "systemctl", "start", serialStandIn); err != nil {
+		t.Fatalf("TC-321-77: start %s: %v: %s", serialStandIn, err, out)
+	}
+	if st, err := unitState(ctx, run, serialStandIn); err != nil || !strings.HasPrefix(st, "active/") {
+		t.Fatalf("TC-321-77: %s is %q (%v), want active", serialStandIn, st, err)
+	}
+	if !bg.serialListed("the stand-in running") {
+		t.Error("TC-321-77: the stand-in serial getty runs, yet the serial way is not listed")
+	}
+
+	if out, err := run(ctx, "systemctl", "stop", serialStandIn); err != nil {
+		t.Fatalf("TC-321-77: stop %s: %v: %s", serialStandIn, err, out)
+	}
+	if st, err := unitState(ctx, run, serialStandIn); err != nil || strings.HasPrefix(st, "active/") {
+		t.Fatalf("TC-321-77: %s is %q (%v) after its stop", serialStandIn, st, err)
+	}
+	if bg.serialListed("the stand-in stopped") {
+		t.Error("TC-321-77: the stand-in serial getty stopped, yet the serial way is listed")
 	}
 }

@@ -139,6 +139,10 @@ type Facts struct {
 	// serial port carries the link and no serial login
 	// (<dataDir>/bmc-host).
 	BMCHost func() bool
+	// SerialLogin reports that a serial login getty runs on this control
+	// plane now, so its serial console offers a root login
+	// (geekdojo/geekdojo-brain#321, F-321-42).
+	SerialLogin func(ctx context.Context) (bool, error)
 }
 
 // Deps are Service's collaborators. New refuses a nil one, except Identity:
@@ -202,7 +206,8 @@ func New(d Deps) (*Service, error) {
 		return nil, errors.New("breakglass: Deps.Jobs is nil")
 	case d.Busy == nil:
 		return nil, errors.New("breakglass: Deps.Busy is nil")
-	case d.Facts.ConsoleHost == "" || d.Facts.PrimaryIP == nil || d.Facts.BMCHost == nil:
+	case d.Facts.ConsoleHost == "" || d.Facts.PrimaryIP == nil || d.Facts.BMCHost == nil ||
+		d.Facts.SerialLogin == nil:
 		return nil, errors.New("breakglass: Deps.Facts is incomplete")
 	}
 	return &Service{

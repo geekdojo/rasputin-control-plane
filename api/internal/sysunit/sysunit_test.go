@@ -80,3 +80,57 @@ func TestShow(t *testing.T) {
 		t.Errorf("err = %v, want the run error wrapped", err)
 	}
 }
+
+// TC-321-72: ActiveUnits runs the one list-units call, returns the active
+// units it printed, and fails closed on any line it can't read (F-321-45)
+// and on a failed run, which it wraps naming the pattern.
+func TestActiveUnits(t *testing.T) {
+	const pattern = "serial-getty@*.service"
+	const ama10 = "serial-getty@ttyAMA10.service loaded active running Serial Getty on ttyAMA10"
+	var calls []string
+	out := func(s string) func(context.Context, string, ...string) ([]byte, error) {
+		return func(_ context.Context, name string, args ...string) ([]byte, error) {
+			calls = append(calls, name+" "+strings.Join(args, " "))
+			return []byte(s), nil
+		}
+	}
+	got, err := ActiveUnits(t.Context(), out(ama10+"\n"), pattern)
+	if err != nil || !reflect.DeepEqual(got, []string{"serial-getty@ttyAMA10.service"}) {
+		t.Fatalf("one line: %q, %v", got, err)
+	}
+	want := "systemctl list-units --type=service --state=active --plain --no-legend serial-getty@*.service"
+	if len(calls) != 1 || calls[0] != want {
+		t.Fatalf("calls = %q, want %q", calls, want)
+	}
+	two := ama10 + "\nserial-getty@ttyS0.service loaded active running Serial Getty on ttyS0\n"
+	if got, err := ActiveUnits(t.Context(), out(two), pattern); err != nil ||
+		!reflect.DeepEqual(got, []string{"serial-getty@ttyAMA10.service", "serial-getty@ttyS0.service"}) {
+		t.Errorf("two lines: %q, %v", got, err)
+	}
+	for name, s := range map[string]string{"empty": "", "blank lines": "\n  \n"} {
+		if got, err := ActiveUnits(t.Context(), out(s), pattern); err != nil || got == nil || len(got) != 0 {
+			t.Errorf("%s: %q, %v; want an empty result and no error", name, got, err)
+		}
+	}
+	for name, s := range map[string]string{
+		"one field":           "serial-getty@ttyAMA10.service\n",
+		"three fields":        "serial-getty@ttyAMA10.service loaded active\n",
+		"not-found":           "serial-getty@ttyAMA10.service not-found active running x\n",
+		"inactive":            "serial-getty@ttyAMA10.service loaded inactive dead x\n",
+		"outside the pattern": "getty@tty1.service loaded active running Getty on tty1\n",
+		"a stray stderr line": ama10 + "\nWarning: The unit file, source configuration file or drop-ins of x changed on disk.\n",
+	} {
+		if got, err := ActiveUnits(t.Context(), out(s), pattern); err == nil || got != nil {
+			t.Errorf("%s: %q, %v; want an error and no names", name, got, err)
+		}
+	}
+	calls = nil
+	if got, err := ActiveUnits(t.Context(), out(ama10), "serial-getty@[.service"); err == nil || got != nil || len(calls) != 0 {
+		t.Errorf("a malformed pattern: %q, %v, %d calls; want an error and no run", got, err, len(calls))
+	}
+	boom := errors.New("no bus")
+	fail := func(context.Context, string, ...string) ([]byte, error) { return []byte("x"), boom }
+	if got, err := ActiveUnits(t.Context(), fail, pattern); !errors.Is(err, boom) || got != nil || !strings.Contains(err.Error(), pattern) {
+		t.Errorf("a failed run: %q, %v; want the run error wrapped, naming the pattern", got, err)
+	}
+}
