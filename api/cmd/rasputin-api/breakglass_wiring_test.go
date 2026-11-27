@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,17 +52,29 @@ func TestIsRepairCode(t *testing.T) {
 	}
 }
 
+// nopRun is a systemctl that lists no unit.
+func nopRun(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+
 // Off keycloak there is no identity.restart, and the break-glass service
-// reports no sign-in service, with RESTART never enabled; the ways follow
-// the BMC-host marker file.
+// reports no sign-in service, with RESTART never enabled. TC-321-74 and
+// TC-321-76: the ways follow the BMC-host marker file and, without it, the
+// serial gettys systemctl lists as active, read with TC-321-72's argv; a
+// nil run is refused.
 func TestWireBreakglass_IdentityOff(t *testing.T) {
 	if r, err := identityRestartWiring(nil, nil, nil, nil); r != nil || err != nil {
 		t.Fatalf("identityRestartWiring off keycloak = %v, %v", r, err)
 	}
 	log, rec := logkittest.New()
 	dir := t.TempDir()
-	w, err := wireBreakglass(context.Background(), breakglassDeps{alerts: nopAlerts{}, jobs: nopJobs{}, host: "ci.local",
-		primaryIP: func() net.IP { return net.IPv4(192, 0, 2, 1) }, dataDir: dir, log: log})
+	var calls []string
+	listed := "serial-getty@ttyAMA10.service loaded active running Serial Getty on ttyAMA10\n"
+	run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		return []byte(listed), nil
+	}
+	deps := breakglassDeps{alerts: nopAlerts{}, jobs: nopJobs{}, host: "ci.local",
+		primaryIP: func() net.IP { return net.IPv4(192, 0, 2, 1) }, dataDir: dir, log: log, run: run}
+	w, err := wireBreakglass(context.Background(), deps)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,14 +82,31 @@ func TestWireBreakglass_IdentityOff(t *testing.T) {
 	if st.Actions[0].Enabled || st.Sentence != "Sign-in isn't installed on this control plane." {
 		t.Errorf("state %+v", st)
 	}
-	if n := len(w.svc.Ways().Ways); n != 3 {
-		t.Errorf("%d ways without the marker", n)
+	if n := len(w.svc.Ways(context.Background()).Ways); n != 3 {
+		t.Errorf("%d ways without the marker and with a getty active, want 3", n)
 	}
+	want := []string{"systemctl list-units --type=service --state=active --plain --no-legend serial-getty@*.service"}
+	if !slices.Equal(calls, want) {
+		t.Errorf("run calls %q, want %q", calls, want)
+	}
+	listed = ""
+	if n := len(w.svc.Ways(context.Background()).Ways); n != 2 {
+		t.Errorf("%d ways without the marker and with no getty active, want 2", n)
+	}
+	listed, calls = "serial-getty@ttyAMA10.service loaded active running Serial Getty on ttyAMA10\n", nil
 	if err := os.WriteFile(filepath.Join(dir, "bmc-host"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if n := len(w.svc.Ways().Ways); n != 2 {
-		t.Errorf("%d ways with the marker", n)
+	if n := len(w.svc.Ways(context.Background()).Ways); n != 2 {
+		t.Errorf("%d ways with the marker, want 2", n)
+	}
+	if len(calls) != 0 {
+		t.Errorf("run called with the marker present: %q", calls)
+	}
+	noRun := deps
+	noRun.run = nil
+	if _, err := wireBreakglass(context.Background(), noRun); err == nil {
+		t.Error("a nil run wired")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -91,7 +122,7 @@ func TestWireBreakglass_IdentityOff(t *testing.T) {
 	// A dev run with no cluster id: no console origin, so break-glass is off
 	// at INFO and the api still starts.
 	off, err := wireBreakglass(context.Background(), breakglassDeps{alerts: nopAlerts{}, jobs: nopJobs{},
-		primaryIP: func() net.IP { return nil }, dataDir: dir, log: log})
+		primaryIP: func() net.IP { return nil }, dataDir: dir, log: log, run: nopRun})
 	if err != nil || off.svc != nil || off.socket != nil {
 		t.Errorf("no cluster id: %+v, %v; want off", off, err)
 	}
@@ -165,7 +196,7 @@ func TestWireBreakglass_TC321_52_ResetAndMove(t *testing.T) {
 		t.Helper()
 		log, rec := logkittest.New()
 		w, err := wireBreakglass(context.Background(), breakglassDeps{alerts: nopAlerts{}, jobs: nopJobs{}, host: "ci.local",
-			primaryIP: func() net.IP { return nil }, dataDir: t.TempDir(), log: log, resets: r, move: m, mode: mode})
+			primaryIP: func() net.IP { return nil }, dataDir: t.TempDir(), log: log, resets: r, move: m, mode: mode, run: nopRun})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -43,7 +43,7 @@ type repairService interface {
 	Resolve(ctx context.Context, cookie secret.Value, origin string) (breakglass.Session, bool)
 	End(ctx context.Context, sess breakglass.Session)
 	State(ctx context.Context, sess breakglass.Session) breakglass.StateView
-	Ways() breakglass.Ways
+	Ways(ctx context.Context) breakglass.Ways
 	RecordJob(sess breakglass.Session, id string)
 	Reset(ctx context.Context, sess breakglass.Session, by authz.Submitter, id, token string, pw secret.Value) (*jobs.Job, error)
 	MoveState(ctx context.Context) (breakglass.MoveRepair, error)
@@ -280,7 +280,7 @@ func (s *Server) handleRepairWays(w http.ResponseWriter, r *http.Request) {
 		s.writeCodedError(w, r, http.StatusServiceUnavailable, codeRepairUnavailable, sentenceRepairUnavailable)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.repair.Ways())
+	writeJSON(w, http.StatusOK, s.repair.Ways(r.Context()))
 }
 
 // handleRepairState is GET /api/repair/state: what the session may see and

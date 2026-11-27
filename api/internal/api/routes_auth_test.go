@@ -85,7 +85,7 @@ var openRoutes = map[string]string{
 
 	// geekdojo/geekdojo-brain#321: break-glass, open because sign-in is what is broken.
 	"POST /api/auth/break-glass": "redeems a one-time repair code from the body; the code is the authentication; two-origin check; five wrong per source refuse it",
-	"GET /api/repair/ways":       "the ways to get a repair code on this control plane (screen, serial only without the BMC-host marker, the ssh command); no secret, no session",
+	"GET /api/repair/ways":       "the ways to get a repair code on this control plane (screen, serial only without the BMC-host marker and while a serial login getty runs, the ssh command); no secret, no session",
 }
 
 // probePathFor overrides the placeholder path for a route whose own parser

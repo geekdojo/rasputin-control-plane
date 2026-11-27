@@ -2147,7 +2147,7 @@ func main() {
 	breakglassW, err := wireBreakglass(ctx, breakglassDeps{
 		monitor: identityState.monitor, restarter: identityRestart, alerts: alertsSvc, jobs: jobStore,
 		host: consoleHost(), primaryIP: lanWatch.PrimaryIP, dataDir: dataDir, identityCA: identityCA != nil, log: logger,
-		resets: acct.repairResets, move: moveHolder, mode: identityW.mode,
+		resets: acct.repairResets, move: moveHolder, mode: identityW.mode, run: execrun.CombinedOutput,
 	})
 	if err != nil {
 		logger.Log(ctx, logkit.LevelFatal, "rasputin-api: break-glass", "err", err.Error())

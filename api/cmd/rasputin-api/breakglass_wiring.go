@@ -18,6 +18,7 @@ import (
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identity/restart"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/identitystate"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/setup"
+	"github.com/geekdojo/rasputin-control-plane/api/internal/sysunit"
 	"github.com/geekdojo/rasputin-control-plane/api/internal/tlsca"
 	"github.com/geekdojo/rasputin-control-plane/proto"
 )
@@ -60,6 +61,8 @@ type breakglassDeps struct {
 	resets *accounts.RepairResets
 	move   *moveStateHolder
 	mode   string
+	// run runs systemctl, to read whether a serial login getty runs.
+	run runFunc
 }
 
 // breakglassWiring is what wireBreakglass built: both nil when break-glass
@@ -74,7 +77,7 @@ type breakglassWiring struct {
 // origin to type a code at, so break-glass is off, at INFO. An error is a
 // programming error, which main treats as fatal.
 func wireBreakglass(ctx context.Context, d breakglassDeps) (breakglassWiring, error) {
-	if d.alerts == nil || d.jobs == nil || d.primaryIP == nil || d.log == nil || d.dataDir == "" {
+	if d.alerts == nil || d.jobs == nil || d.primaryIP == nil || d.log == nil || d.dataDir == "" || d.run == nil {
 		return breakglassWiring{}, errors.New("break-glass: a collaborator is nil")
 	}
 	if d.host == "" {
@@ -85,7 +88,7 @@ func wireBreakglass(ctx context.Context, d breakglassDeps) (breakglassWiring, er
 		Now: time.Now, Rand: rand.Reader, IDs: rand.Text, Log: d.log, Alerts: d.alerts, Jobs: d.jobs,
 		Busy: func(context.Context) (string, bool) { return "", false },
 		Facts: breakglass.Facts{ConsoleHost: d.host, PrimaryIP: d.primaryIP,
-			BMCHost: markerPresent(filepath.Join(d.dataDir, "bmc-host"))},
+			BMCHost: markerPresent(filepath.Join(d.dataDir, "bmc-host")), SerialLogin: serialLogin(d.run)},
 	}
 	// A nil *Monitor in the interface would read as a sign-in service.
 	if d.monitor != nil && d.restarter != nil {
@@ -122,6 +125,18 @@ func markerPresent(path string) func() bool {
 	return func() bool {
 		_, err := os.Stat(path)
 		return err == nil
+	}
+}
+
+// serialGettys are the serial login gettys systemd runs, one per serial
+// console tty.
+const serialGettys = "serial-getty@*.service"
+
+// serialLogin reports whether any serial login getty is active now.
+func serialLogin(run runFunc) func(ctx context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		units, err := sysunit.ActiveUnits(ctx, run, serialGettys)
+		return len(units) > 0, err
 	}
 }
 

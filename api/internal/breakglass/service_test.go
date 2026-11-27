@@ -88,8 +88,13 @@ type rig struct {
 	identity *fakeIdentity
 	busy     string
 	bmcHost  bool
-	clock    *clock
-	rec      *logkittest.Recorder
+	// serialOn and serialErr are the serial login fact's answer, and
+	// serialCalls how many times it was read.
+	serialOn    bool
+	serialErr   error
+	serialCalls int
+	clock       *clock
+	rec         *logkittest.Recorder
 }
 
 func newRig(t *testing.T) *rig {
@@ -103,7 +108,14 @@ func newRig(t *testing.T) *rig {
 		Alerts: r.alerts, Jobs: r.jobs, Identity: r.identity,
 		Busy: func(context.Context) (string, bool) { return r.busy, r.busy != "" },
 		Facts: Facts{ConsoleHost: testHost, PrimaryIP: func() net.IP { return testIP },
-			BMCHost: func() bool { return r.bmcHost }},
+			BMCHost: func() bool { return r.bmcHost },
+			SerialLogin: func(ctx context.Context) (bool, error) {
+				r.serialCalls++
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+				return r.serialOn, r.serialErr
+			}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -155,7 +167,8 @@ func TestNew_RefusesAMissingCollaborator(t *testing.T) {
 	good := func() Deps {
 		return Deps{Now: time.Now, Rand: rand.Reader, IDs: func() string { return "x" }, Log: slog.New(slog.DiscardHandler),
 			Alerts: &fakeAlerts{}, Jobs: fakeJobs{}, Busy: func(context.Context) (string, bool) { return "", false },
-			Facts: Facts{ConsoleHost: "h", PrimaryIP: func() net.IP { return nil }, BMCHost: func() bool { return false }}}
+			Facts: Facts{ConsoleHost: "h", PrimaryIP: func() net.IP { return nil }, BMCHost: func() bool { return false },
+				SerialLogin: func(context.Context) (bool, error) { return false, nil }}}
 	}
 	if _, err := New(good()); err != nil {
 		t.Fatalf("a complete Deps with no Identity: %v", err)
@@ -165,6 +178,8 @@ func TestNew_RefusesAMissingCollaborator(t *testing.T) {
 		"Log": func(d *Deps) { d.Log = nil }, "Alerts": func(d *Deps) { d.Alerts = nil }, "Jobs": func(d *Deps) { d.Jobs = nil },
 		"Busy": func(d *Deps) { d.Busy = nil }, "ConsoleHost": func(d *Deps) { d.Facts.ConsoleHost = "" },
 		"PrimaryIP": func(d *Deps) { d.Facts.PrimaryIP = nil }, "BMCHost": func(d *Deps) { d.Facts.BMCHost = nil },
+		// TC-321-74: the serial login fact is a collaborator too.
+		"SerialLogin": func(d *Deps) { d.Facts.SerialLogin = nil },
 	} {
 		d := good()
 		edit(&d)
@@ -278,11 +293,11 @@ func TestAlerts_TC321_22(t *testing.T) {
 	}
 }
 
-// TC-321-21 (the service's half): the ways list the screen, the serial
-// console only while the BMC-host marker is absent, and the ssh command; the
-// state carries the sentence, RESTART with enabled and a reason, and the
-// session's jobs; a failed state read keeps RESTART enabled; nothing else is
-// ever listed.
+// TC-321-21 (the service's half) and TC-321-73: the ways list the screen,
+// the serial console only while the BMC-host marker is absent and a serial
+// login getty runs, and the ssh command; the state carries the sentence,
+// RESTART with enabled and a reason, and the session's jobs; a failed state
+// read keeps RESTART enabled; nothing else is ever listed.
 func TestStateAndWays_TC321_21(t *testing.T) {
 	r := newRig(t)
 	ids := func(w Ways) []string {
@@ -292,20 +307,51 @@ func TestStateAndWays_TC321_21(t *testing.T) {
 		}
 		return out
 	}
-	w := r.svc.Ways()
-	if got := strings.Join(ids(w), ","); got != "screen,serial,ssh" {
-		t.Errorf("ways without the marker: %s", got)
-	}
-	if w.Ways[2].Command != "ssh -t root@ci.local rasputin-api repair-code" {
-		t.Errorf("ssh command %q", w.Ways[2].Command)
-	}
-	if strings.Join(w.URLs, " ") != "https://ci.local/repair https://192.0.2.1/repair" {
-		t.Errorf("urls %v", w.URLs)
+	unread := func() []slog.Record { return r.events("breakglass.serial_unread", "") }
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, c := range []struct {
+		name      string
+		marker    bool
+		on        bool
+		err       error
+		ctx       context.Context
+		want      string
+		calls, wn int
+	}{
+		{name: "marker absent, a getty running", on: true, ctx: context.Background(), want: "screen,serial,ssh", calls: 1},
+		{name: "marker absent, no getty", ctx: context.Background(), want: "screen,ssh", calls: 1},
+		{name: "marker present", marker: true, on: true, ctx: context.Background(), want: "screen,ssh"},
+		{name: "a failed read", on: true, err: errors.New("no bus"), ctx: context.Background(), want: "screen,ssh", calls: 1, wn: 1},
+		{name: "a cancelled context", on: true, ctx: cancelled, want: "screen,ssh", calls: 1, wn: 1},
+	} {
+		r.bmcHost, r.serialOn, r.serialErr, r.serialCalls = c.marker, c.on, c.err, 0
+		before := len(unread())
+		w := r.svc.Ways(c.ctx)
+		if got := strings.Join(ids(w), ","); got != c.want {
+			t.Errorf("%s: ways %s, want %s", c.name, got, c.want)
+		}
+		if r.serialCalls != c.calls {
+			t.Errorf("%s: the serial login was read %d times, want %d", c.name, r.serialCalls, c.calls)
+		}
+		recs := unread()[before:]
+		if len(recs) != c.wn {
+			t.Errorf("%s: %d breakglass.serial_unread records, want %d", c.name, len(recs), c.wn)
+		}
+		for _, rec := range recs {
+			e, _ := logkittest.Attr(rec, "err")
+			if rec.Level != slog.LevelWarn || rec.Message != "The serial console's login state couldn't be read for the repair page." || e == "" {
+				t.Errorf("%s: record %v %q err %q", c.name, rec.Level, rec.Message, e)
+			}
+		}
+		if ssh := w.Ways[len(w.Ways)-1]; ssh.ID != "ssh" || ssh.Command != "ssh -t root@ci.local rasputin-api repair-code" {
+			t.Errorf("%s: ssh way %+v", c.name, ssh)
+		}
+		if strings.Join(w.URLs, " ") != "https://ci.local/repair https://192.0.2.1/repair" {
+			t.Errorf("%s: urls %v", c.name, w.URLs)
+		}
 	}
 	r.bmcHost = true
-	if got := strings.Join(ids(r.svc.Ways()), ","); got != "screen,ssh" {
-		t.Errorf("ways with the marker: %s", got)
-	}
 
 	cookie, err := r.redeem(r.issue(t), consoleOrigin, src)
 	if err != nil {
