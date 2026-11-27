@@ -11,6 +11,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -258,9 +259,16 @@ func TestSplitCSV(t *testing.T) {
 
 // testBus starts an in-process NATS server so the real publish path can
 // be exercised.
+//
+// The server binds 127.0.0.1, not the wildcard. With Port -1 alone it listens
+// on [::]:P, and on macOS the kernel hands out a P that another process
+// already holds on 127.0.0.1:P; the client dials 127.0.0.1, the more specific
+// listener takes the connection and never sends INFO, and Connect fails with
+// "read tcp ...: i/o timeout" after its 2s deadline. Bound to 127.0.0.1, the
+// kernel never gives out a port held there and no later bind can shadow it.
 func testBus(t *testing.T) *nats.Conn {
 	t.Helper()
-	s, err := server.NewServer(&server.Options{Port: -1})
+	s, err := server.NewServer(&server.Options{Host: "127.0.0.1", Port: -1})
 	if err != nil {
 		t.Fatalf("nats server: %v", err)
 	}
@@ -275,6 +283,23 @@ func testBus(t *testing.T) *nats.Conn {
 	}
 	t.Cleanup(nc.Close)
 	return nc
+}
+
+// testBus's server cannot be shadowed: nothing else can take 127.0.0.1 on
+// its port. A wildcard listener could be (macOS lets another socket bind
+// 127.0.0.1:P beside [::]:P and gives it every loopback connection), which
+// is how the bus connect timed out under load.
+func TestTestBus_LoopbackPortCannotBeShadowed(t *testing.T) {
+	nc := testBus(t)
+	_, port, err := net.SplitHostPort(nc.ConnectedAddr())
+	if err != nil {
+		t.Fatalf("connected addr %q: %v", nc.ConnectedAddr(), err)
+	}
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", port))
+	if err == nil {
+		_ = l.Close()
+		t.Fatalf("bound 127.0.0.1:%s beside the test bus; a client dialing it would reach this listener, not NATS", port)
+	}
 }
 
 func registeredEvt(t *testing.T, nc *nats.Conn, nodeID string, adv *bmc.Advertisement) proto.NodeRegisteredEvt {
